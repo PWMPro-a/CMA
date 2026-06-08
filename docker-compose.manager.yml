@@ -7,6 +7,8 @@ services:
     restart: unless-stopped
     ports:
       - "18317:18317"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       HTTP_ADDR: "0.0.0.0:18317"
       USAGE_DB_PATH: "/data/usage.sqlite"
