@@ -19,7 +19,7 @@ import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer'
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
-import { IconFilterAll, IconSearch } from '@/components/ui/icons';
+import { IconFilterAll, IconSearch, IconSlidersHorizontal } from '@/components/ui/icons';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { copyToClipboard } from '@/utils/clipboard';
@@ -43,6 +43,10 @@ import { AuthFileCard } from '@/features/authFiles/components/AuthFileCard';
 import { AuthJsonPasteModal } from '@/features/authFiles/components/AuthJsonPasteModal';
 import { AuthFileModelsModal } from '@/features/authFiles/components/AuthFileModelsModal';
 import { AuthFilesPrefixProxyEditorModal } from '@/features/authFiles/components/AuthFilesPrefixProxyEditorModal';
+import {
+  readAuthFileImportDefaults,
+  writeAuthFileImportDefaults,
+} from '@/features/authFiles/importDefaults';
 import { OAuthExcludedCard } from '@/features/authFiles/components/OAuthExcludedCard';
 import { OAuthModelAliasCard } from '@/features/authFiles/components/OAuthModelAliasCard';
 import { useAuthFilesData } from '@/features/authFiles/hooks/useAuthFilesData';
@@ -126,6 +130,7 @@ export function AuthFilesPage() {
   const [batchActionBarVisible, setBatchActionBarVisible] = useState(false);
   const [uiStateHydrated, setUiStateHydrated] = useState(false);
   const [authJsonPasteOpen, setAuthJsonPasteOpen] = useState(false);
+  const [importDefaults, setImportDefaults] = useState(readAuthFileImportDefaults);
   const [lastCodexInspectionResults, setLastCodexInspectionResults] = useState<
     AuthFileCodexInspectionSnapshot[]
   >([]);
@@ -162,7 +167,15 @@ export function AuthFilesPage() {
     batchDownload,
     batchSetStatus,
     batchDelete,
-  } = useAuthFilesData();
+  } = useAuthFilesData({ importDefaults });
+
+  const handleDefaultWebsocketsChange = useCallback((websockets: boolean) => {
+    setImportDefaults((current) => {
+      const next = { ...current, websockets };
+      writeAuthFileImportDefaults(next);
+      return next;
+    });
+  }, []);
 
   const statusBarCache = useAuthFilesStatusBarCache(files);
 
@@ -862,6 +875,26 @@ export function AuthFilesPage() {
                   onChange={handleFileChange}
                 />
               </div>
+            </div>
+            <div className={styles.importDefaultsBar}>
+              <span className={styles.importDefaultsIcon} aria-hidden="true">
+                <IconSlidersHorizontal size={17} />
+              </span>
+              <div className={styles.importDefaultsCopy}>
+                <div className={styles.importDefaultsTitleRow}>
+                  <strong>{t('auth_files.import_defaults_title')}</strong>
+                  <span className={styles.importDefaultsScope}>Codex</span>
+                </div>
+                <span>{t('auth_files.import_defaults_hint')}</span>
+              </div>
+              <ToggleSwitch
+                checked={importDefaults.websockets}
+                onChange={handleDefaultWebsocketsChange}
+                disabled={disableControls || uploading || authJsonPasteSaving}
+                ariaLabel={t('auth_files.import_default_websockets_label')}
+                label={t('auth_files.import_default_websockets_label')}
+                labelPosition="left"
+              />
             </div>
             <div className={styles.filterControlsPanel}>
               <div className={styles.filterControls}>

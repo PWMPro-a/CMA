@@ -19,6 +19,9 @@ export type AuthFileFieldsPatch = {
   priority?: number;
   note?: string;
 };
+export type AuthFileImportDefaults = {
+  websockets?: boolean;
+};
 type AuthFileBatchFailure = { name: string; error: string };
 type AuthFileBatchUploadResponse = {
   status?: string;
@@ -310,9 +313,13 @@ const parseAuthFileJsonObject = (rawText: string): Record<string, unknown> => {
   return { ...(parsed as Record<string, unknown>) };
 };
 
-const saveAuthFileText = async (name: string, text: string) => {
+const saveAuthFileText = async (
+  name: string,
+  text: string,
+  importDefaults?: AuthFileImportDefaults
+) => {
   const file = new File([text], name, { type: 'application/json' });
-  const result = await authFilesApi.upload(file);
+  const result = await authFilesApi.upload(file, importDefaults);
   const normalizedStatus = result.status.trim().toLowerCase();
   const hasExplicitFailureStatus =
     normalizedStatus === 'error' || normalizedStatus === 'failed' || normalizedStatus === 'partial';
@@ -429,7 +436,10 @@ export const authFilesApi = {
   patchFields: (name: string, fields: AuthFileFieldsPatch) =>
     apiClient.patch('/auth-files/fields', { name, ...fields }),
 
-  uploadFiles: async (files: File[]): Promise<AuthFileBatchUploadResult> => {
+  uploadFiles: async (
+    files: File[],
+    importDefaults?: AuthFileImportDefaults
+  ): Promise<AuthFileBatchUploadResult> => {
     const requestedNames = files.map((file) => file.name);
     if (requestedNames.length === 0) {
       return { status: 'ok', uploaded: 0, files: [], failed: [] };
@@ -439,11 +449,15 @@ export const authFilesApi = {
     files.forEach((file) => {
       formData.append('file', file, file.name);
     });
+    if (typeof importDefaults?.websockets === 'boolean') {
+      formData.append('default_websockets', String(importDefaults.websockets));
+    }
     const payload = await apiClient.postForm<AuthFileBatchUploadResponse>('/auth-files', formData);
     return normalizeBatchUploadResponse(payload, requestedNames);
   },
 
-  upload: (file: File) => authFilesApi.uploadFiles([file]),
+  upload: (file: File, importDefaults?: AuthFileImportDefaults) =>
+    authFilesApi.uploadFiles([file], importDefaults),
 
   deleteFiles: async (names: string[]): Promise<AuthFileBatchDeleteResult> => {
     const requestedNames = normalizeRequestedAuthFileNames(names);
@@ -489,10 +503,14 @@ export const authFilesApi = {
     return parseAuthFileJsonObject(rawText);
   },
 
-  saveText: (name: string, text: string) => saveAuthFileText(name, text),
+  saveText: (name: string, text: string, importDefaults?: AuthFileImportDefaults) =>
+    saveAuthFileText(name, text, importDefaults),
 
-  saveJsonObject: (name: string, json: Record<string, unknown>) =>
-    saveAuthFileText(name, JSON.stringify(json)),
+  saveJsonObject: (
+    name: string,
+    json: Record<string, unknown>,
+    importDefaults?: AuthFileImportDefaults
+  ) => saveAuthFileText(name, JSON.stringify(json), importDefaults),
 
   // OAuth 排除模型
   async getOauthExcludedModels(): Promise<Record<string, string[]>> {

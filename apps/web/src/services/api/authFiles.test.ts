@@ -27,6 +27,23 @@ describe('authFilesApi save auth file upload contracts', () => {
     return file as File;
   };
 
+  it('sends Codex import defaults with multipart uploads', async () => {
+    mocks.postForm.mockResolvedValue({
+      status: 'ok',
+      uploaded: 1,
+      files: ['default-ws.json'],
+      failed: [],
+    });
+
+    await authFilesApi.uploadFiles(
+      [new File(['{"type":"codex"}'], 'default-ws.json', { type: 'application/json' })],
+      { websockets: true }
+    );
+
+    const formData = mocks.postForm.mock.calls[0]?.[1] as FormData;
+    expect(formData.get('default_websockets')).toBe('true');
+  });
+
   it('saveText resolves when upload reports one uploaded file', async () => {
     // Arrange
     mocks.postForm.mockResolvedValue({

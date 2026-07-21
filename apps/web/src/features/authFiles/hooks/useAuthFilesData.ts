@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
-import { authFilesApi } from '@/services/api';
+import { authFilesApi, type AuthFileImportDefaults } from '@/services/api';
 import { apiClient } from '@/services/api/client';
 import { useNotificationStore } from '@/stores';
 import type { AuthFileItem } from '@/types';
@@ -88,7 +88,11 @@ export const buildPastedAuthJsonPayload = (
   };
 };
 
-export function useAuthFilesData(): UseAuthFilesDataResult {
+type UseAuthFilesDataOptions = {
+  importDefaults?: AuthFileImportDefaults;
+};
+
+export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuthFilesDataResult {
   const { t } = useTranslation();
   const { showNotification, showConfirmation } = useNotificationStore();
 
@@ -255,7 +259,9 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
 
       setUploading(true);
       try {
-        const result = await authFilesApi.uploadFiles(validFiles);
+        const result = options.importDefaults
+          ? await authFilesApi.uploadFiles(validFiles, options.importDefaults)
+          : await authFilesApi.uploadFiles(validFiles);
         const successCount = result.uploaded;
 
         if (successCount > 0) {
@@ -279,7 +285,7 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
         event.target.value = '';
       }
     },
-    [loadFiles, showNotification, t]
+    [loadFiles, options.importDefaults, showNotification, t]
   );
 
   const savePastedAuthJson = useCallback(
@@ -292,7 +298,11 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
       try {
         const { authJson, resolvedFileName } = buildPastedAuthJsonPayload(type, fileName, jsonText);
         try {
-          await authFilesApi.saveJsonObject(resolvedFileName, authJson);
+          if (options.importDefaults) {
+            await authFilesApi.saveJsonObject(resolvedFileName, authJson, options.importDefaults);
+          } else {
+            await authFilesApi.saveJsonObject(resolvedFileName, authJson);
+          }
         } catch {
           throw new Error(t('notification.save_failed'));
         }
@@ -314,7 +324,7 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
         setAuthJsonPasteSaving(false);
       }
     },
-    [loadFiles, showNotification, t]
+    [loadFiles, options.importDefaults, showNotification, t]
   );
 
   const handleDelete = useCallback(

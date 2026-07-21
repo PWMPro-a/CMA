@@ -359,7 +359,8 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
           email: 'Session.User+tag@example.com',
           account_id: 'session-account',
           access_token: 'plain-access-token',
-        })
+        }),
+        { websockets: true }
       );
     });
     await vi.waitFor(() => {

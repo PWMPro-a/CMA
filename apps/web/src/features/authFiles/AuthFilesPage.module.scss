@@ -97,6 +97,73 @@
   }
 }
 
+.importDefaultsBar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 22%, var(--border-color));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
+
+  @include mobile {
+    grid-template-columns: auto minmax(0, 1fr);
+
+    :global(label) {
+      grid-column: 1 / -1;
+      justify-content: space-between;
+    }
+  }
+}
+
+.importDefaultsIcon {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--primary-color);
+  color: #fff;
+}
+
+.importDefaultsCopy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.importDefaultsTitleRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+
+  strong {
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 700;
+  }
+}
+
+.importDefaultsScope {
+  display: inline-flex;
+  align-items: center;
+  min-height: 19px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--primary-color) 14%, var(--bg-primary));
+  color: var(--primary-color);
+  font-size: 10px;
+  font-weight: 700;
+}
+
 .filterPanelTags {
   flex: 1 1 auto;
   min-width: 0;
