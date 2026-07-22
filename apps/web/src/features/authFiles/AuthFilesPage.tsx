@@ -221,6 +221,7 @@ export function AuthFilesPage() {
     batchDownload,
     batchSetStatus,
     retryAgentIdentityRegistration,
+    rebuildAgentIdentityRegistration,
     batchRetryAgentIdentityRegistration,
     batchDelete,
   } = useAuthFilesData({ importDefaults });
@@ -689,8 +690,7 @@ export function AuthFilesPage() {
       files
         .filter((file) => {
           if (!selectedFiles.has(file.name)) return false;
-          const registration =
-            file.agent_identity_registration ?? file.agentIdentityRegistration;
+          const registration = file.agent_identity_registration ?? file.agentIdentityRegistration;
           return registration?.can_retry === true;
         })
         .map((file) => file.name),
@@ -964,6 +964,14 @@ export function AuthFilesPage() {
             <div className={styles.filterPanelHeader}>
               <div className={styles.filterPanelTags}>{renderFilterTags()}</div>
               <div className={styles.headerActions}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => navigate('/auth-files/agent-identity-recovery')}
+                >
+                  <IconRefreshCw size={15} />
+                  {t('agent_recovery.entry_button')}
+                </Button>
                 <Button
                   variant="secondary"
                   size="sm"
@@ -1253,6 +1261,7 @@ export function AuthFilesPage() {
                       onDelete={handleDelete}
                       onToggleStatus={handleStatusToggle}
                       onRetryAgentIdentityRegistration={retryAgentIdentityRegistration}
+                      onRebuildAgentIdentityRegistration={rebuildAgentIdentityRegistration}
                       onToggleSelect={toggleSelect}
                     />
                   );

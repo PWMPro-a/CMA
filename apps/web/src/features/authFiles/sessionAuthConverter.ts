@@ -1,3 +1,5 @@
+import { MAX_AUTH_FILE_SIZE } from '@/utils/constants';
+
 export type AuthJsonInputType = 'cpa' | 'session';
 
 type JsonRecord = Record<string, unknown>;
@@ -125,27 +127,16 @@ const WINDOWS_RESERVED_BASE_NAMES = new Set([
 ]);
 
 const FORBIDDEN_INVISIBLE_CODE_POINTS = new Set([
-  0x200b,
-  0x200c,
-  0x200d,
-  0x200e,
-  0x200f,
-  0x202a,
-  0x202b,
-  0x202c,
-  0x202d,
-  0x202e,
-  0x2060,
-  0x2066,
-  0x2067,
-  0x2068,
-  0x2069,
-  0xfeff,
+  0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2060, 0x2066,
+  0x2067, 0x2068, 0x2069, 0xfeff,
 ]);
 
 const CREDENTIAL_CONTAINER_KEYS = ['credentials', 'auth', 'cookies'] as const;
 
-const MAX_AUTH_JSON_INPUT_CHARS = 1_000_000;
+// Keep pasted JSON aligned with the auth-file upload limit. Agent Identity
+// bundles can contain hundreds of independent runtimes and legitimately reach
+// several MiB.
+const MAX_AUTH_JSON_INPUT_CHARS = MAX_AUTH_FILE_SIZE;
 const MAX_JSON_TRAVERSAL_DEPTH = 64;
 const MAX_JSON_RECORDS = 5_000;
 const MAX_JWT_SEGMENT_CHARS = 16_384;
@@ -365,14 +356,12 @@ const buildAggregatedSessionObject = (record: JsonRecord): JsonRecord | undefine
     hasAccessTokenFields(record) ? record : undefined,
     isRecord(record.token) && hasAccessTokenFields(record.token) ? record.token : undefined,
     isRecord(record.tokens) && hasAccessTokenFields(record.tokens) ? record.tokens : undefined,
-      isRecord(record.credentials) && hasAccessTokenFields(record.credentials)
-        ? record.credentials
-        : undefined,
-      session && hasAccessTokenFields(session) ? session : undefined,
-      isRecord(session?.token) && hasAccessTokenFields(session.token) ? session.token : undefined,
-      isRecord(session?.tokens) && hasAccessTokenFields(session.tokens)
-        ? session.tokens
-        : undefined,
+    isRecord(record.credentials) && hasAccessTokenFields(record.credentials)
+      ? record.credentials
+      : undefined,
+    session && hasAccessTokenFields(session) ? session : undefined,
+    isRecord(session?.token) && hasAccessTokenFields(session.token) ? session.token : undefined,
+    isRecord(session?.tokens) && hasAccessTokenFields(session.tokens) ? session.tokens : undefined,
     ...records.filter(hasAccessTokenFields),
   ].filter((candidate): candidate is JsonRecord => Boolean(candidate));
   const uniqueTokenCandidates = tokenCandidates.filter(
@@ -408,21 +397,21 @@ const buildAggregatedSessionObject = (record: JsonRecord): JsonRecord | undefine
   const hasIdentity = Boolean(userLike || accountLike || firstNonEmpty(record.email, record.name));
   if (!accessToken || !hasIdentity) return undefined;
 
-    return stripUnavailable({
-      ...record,
-      accessToken,
-      access_token: tokenLike?.access_token,
-      expires: firstNonEmpty(session?.expires, record.expires, tokenLike?.expires),
-      expired: firstNonEmpty(session?.expired, record.expired, tokenLike?.expired),
-      expires_at: firstNonEmpty(session?.expires_at, record.expires_at, tokenLike?.expires_at),
-      sessionToken: firstNonEmptyString(
-        tokenLike?.sessionToken,
-        tokenLike?.session_token,
-        record.sessionToken,
-        record.session_token,
-        session?.sessionToken,
-        session?.session_token
-      ),
+  return stripUnavailable({
+    ...record,
+    accessToken,
+    access_token: tokenLike?.access_token,
+    expires: firstNonEmpty(session?.expires, record.expires, tokenLike?.expires),
+    expired: firstNonEmpty(session?.expired, record.expired, tokenLike?.expired),
+    expires_at: firstNonEmpty(session?.expires_at, record.expires_at, tokenLike?.expires_at),
+    sessionToken: firstNonEmptyString(
+      tokenLike?.sessionToken,
+      tokenLike?.session_token,
+      record.sessionToken,
+      record.session_token,
+      session?.sessionToken,
+      session?.session_token
+    ),
     refreshToken: firstNonEmptyString(tokenLike?.refreshToken, tokenLike?.refresh_token),
     idToken: firstNonEmptyString(tokenLike?.idToken, tokenLike?.id_token),
     user: userLike,
@@ -586,6 +575,26 @@ const hasCpaAuthFileShape = (record: JsonRecord) => {
   );
 };
 
+const isSub2AgentIdentityBundle = (record: JsonRecord): boolean => {
+  const dataType = firstNonEmptyString(record.type);
+  if (dataType !== 'sub2api-data' && dataType !== 'sub2api-bundle') return false;
+  const version = record.version;
+  if (version !== undefined && version !== 0 && version !== 1) return false;
+  if (!Array.isArray(record.accounts) || !Array.isArray(record.proxies)) return false;
+  if (record.accounts.length === 0) return false;
+
+  return record.accounts.every((account) => {
+    if (!isRecord(account) || !isRecord(account.credentials)) return false;
+    const credentials = account.credentials;
+    const authMode = firstNonEmptyString(credentials.auth_mode, credentials.authMode);
+    return (
+      authMode?.toLowerCase() === 'agentidentity' ||
+      Boolean(firstNonEmptyString(credentials.agent_runtime_id, credentials.agentRuntimeId)) ||
+      Boolean(firstNonEmptyString(credentials.agent_private_key, credentials.agentPrivateKey))
+    );
+  });
+};
+
 const hasForbiddenInvisibleCharacter = (
   value: unknown,
   depth = 0,
@@ -606,9 +615,10 @@ const hasForbiddenInvisibleCharacter = (
   if (!isRecord(value)) return false;
   if (!markTraversalRecord(value, state)) return false;
 
-  return Object.entries(value).some(([key, item]) =>
-    hasForbiddenInvisibleCharacter(key, depth + 1, state) ||
-    hasForbiddenInvisibleCharacter(item, depth + 1, state)
+  return Object.entries(value).some(
+    ([key, item]) =>
+      hasForbiddenInvisibleCharacter(key, depth + 1, state) ||
+      hasForbiddenInvisibleCharacter(item, depth + 1, state)
   );
 };
 
@@ -633,6 +643,36 @@ const hasUnsafeCpaIdToken = (
     }
     return hasUnsafeCpaIdToken(item, depth + 1, state);
   });
+};
+
+const sanitizeUnsafeIdTokens = (value: unknown, depth = 0): unknown => {
+  assertTraversalDepth(depth);
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeUnsafeIdTokens(item, depth + 1));
+  }
+  if (!isRecord(value)) return value;
+
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([key, item]) => {
+      const normalizedKey = key.toLowerCase();
+      if ((normalizedKey === 'id_token' || normalizedKey === 'idtoken') && isUnsafeIdToken(item)) {
+        return [];
+      }
+      return [[key, sanitizeUnsafeIdTokens(item, depth + 1)]];
+    })
+  );
+};
+
+const sanitizeSub2AgentIdentityBundle = (record: JsonRecord): JsonRecord => {
+  const accounts = (record.accounts as unknown[]).map((account) => {
+    const accountRecord = account as JsonRecord;
+    return {
+      ...accountRecord,
+      credentials: sanitizeUnsafeIdTokens(accountRecord.credentials),
+    };
+  });
+  return { ...record, accounts };
 };
 
 const convertSessionToCpaAuthJson = (record: JsonRecord, now: Date): JsonRecord => {
@@ -684,11 +724,7 @@ const convertSessionToCpaAuthJson = (record: JsonRecord, now: Date): JsonRecord 
     normalizeTimestamp(record.expires_at),
     normalizeTimestamp(accessTokenPayload?.exp)
   );
-  const email = firstNonEmpty(
-    user?.email,
-    record.email,
-    credentials?.email
-  );
+  const email = firstNonEmpty(user?.email, record.email, credentials?.email);
   const accountId = firstNonEmpty(
     account?.id,
     account?.account_id,
@@ -712,8 +748,7 @@ const convertSessionToCpaAuthJson = (record: JsonRecord, now: Date): JsonRecord 
     credentials?.plan_type,
     credentials?.chatgpt_plan_type
   );
-  const idToken =
-    isUnsafeIdToken(inputIdToken) ? undefined : firstNonEmptyString(inputIdToken);
+  const idToken = isUnsafeIdToken(inputIdToken) ? undefined : firstNonEmptyString(inputIdToken);
   const name = firstNonEmpty(email, record.name, 'ChatGPT Account');
 
   return stripUnavailable({
@@ -743,6 +778,15 @@ export const convertAuthJsonInput = (
   if (hasForbiddenInvisibleCharacter(parsed)) {
     throw new AuthJsonConversionError('Auth JSON contains unsupported invisible characters');
   }
+
+  if (isRecord(parsed) && isSub2AgentIdentityBundle(parsed)) {
+    const sanitized = sanitizeSub2AgentIdentityBundle(parsed);
+    if (hasUnsafeCpaIdToken(sanitized)) {
+      throw new AuthJsonConversionError('Sub2API data contains unsupported id_token');
+    }
+    return sanitized;
+  }
+
   if (type === 'cpa') {
     if (hasUnsafeCpaIdToken(parsed)) {
       throw new AuthJsonConversionError('CPA auth JSON contains unsupported id_token');

@@ -22,6 +22,7 @@ export type AuthFileType =
 
 export type AgentIdentityRegistrationState =
   | 'ready'
+  | 'credentials_pending'
   | 'queued'
   | 'registering'
   | 'retry_wait'
@@ -37,10 +38,50 @@ export interface AgentIdentityRegistrationStatus {
   next_retry_at?: string;
   error_code?: string;
   error?: string;
+  trigger?: string;
   active: boolean;
   can_retry: boolean;
 }
 
+export interface AgentIdentityRecoveryHistoryEntry {
+  id: number;
+  name?: string;
+  state: AgentIdentityRegistrationState;
+  trigger?: string;
+  attempt: number;
+  started_at?: string;
+  finished_at: string;
+  duration_ms: number;
+  error_code?: string;
+  error?: string;
+  success: boolean;
+}
+
+export interface AgentIdentityRecoveryCoordinator {
+  concurrency: number;
+  active: number;
+  queued: number;
+  queue_capacity: number;
+  history_count: number;
+  history_limit: number;
+}
+
+export interface AgentIdentityRecoverySummary {
+  total: number;
+  active: number;
+  ready: number;
+  credentials_pending: number;
+  queued: number;
+  registering: number;
+  retry_wait: number;
+  runtime_deleted: number;
+  failed: number;
+}
+
+export interface AgentIdentityRecoveryConfig {
+  concurrency: number;
+  history_limit: number;
+}
 export interface AuthFileItem {
   name: string;
   type?: AuthFileType | string;

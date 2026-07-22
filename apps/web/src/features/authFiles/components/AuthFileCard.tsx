@@ -58,6 +58,7 @@ export type AuthFileCardProps = {
   onDelete: (name: string) => void;
   onToggleStatus: (file: AuthFileItem, enabled: boolean) => void;
   onRetryAgentIdentityRegistration: (name: string) => void;
+  onRebuildAgentIdentityRegistration: (name: string) => void;
   onToggleSelect: (name: string) => void;
 };
 
@@ -115,6 +116,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
     onDelete,
     onToggleStatus,
     onRetryAgentIdentityRegistration,
+    onRebuildAgentIdentityRegistration,
     onToggleSelect,
   } = props;
 
@@ -201,7 +203,8 @@ export function AuthFileCard(props: AuthFileCardProps) {
       ? styles.agentRegistrationReady
       : agentRegistrationState === 'runtime_deleted' || agentRegistrationState === 'failed'
         ? styles.agentRegistrationFailed
-        : agentRegistrationState === 'retry_wait'
+        : agentRegistrationState === 'credentials_pending' ||
+            agentRegistrationState === 'retry_wait'
           ? styles.agentRegistrationWaiting
           : styles.agentRegistrationActive;
   const agentRegistrationNextRetry = formatRegistrationTime(agentRegistration?.next_retry_at);
@@ -384,7 +387,6 @@ export function AuthFileCard(props: AuthFileCardProps) {
               )}
             </div>
           )}
-
           {agentRegistration && (
             <div className={`${styles.agentRegistrationPanel} ${agentRegistrationToneClass}`}>
               <div className={styles.agentRegistrationHeader}>
@@ -408,6 +410,11 @@ export function AuthFileCard(props: AuthFileCardProps) {
                   })}
                 </div>
               )}
+              {agentRegistrationState === 'credentials_pending' && (
+                <div className={styles.agentRegistrationDetail}>
+                  {t('auth_files.agent_registration_credentials_pending_hint')}
+                </div>
+              )}
               {agentRegistration.error && (
                 <div className={styles.agentRegistrationError} title={agentRegistration.error}>
                   {agentRegistration.error}
@@ -424,6 +431,19 @@ export function AuthFileCard(props: AuthFileCardProps) {
                 >
                   {!registrationRetrying && <IconRefreshCw size={14} />}
                   {t('auth_files.agent_registration_retry_button')}
+                </Button>
+              )}
+              {(agentRegistrationState === 'runtime_deleted' ||
+                agentRegistrationState === 'failed') && (
+                <Button
+                  size="sm"
+                  onClick={() => onRebuildAgentIdentityRegistration(file.name)}
+                  disabled={disableControls || registrationRetrying || agentRegistration.active}
+                  loading={registrationRetrying}
+                  className={styles.agentRegistrationRetryButton}
+                >
+                  {!registrationRetrying && <IconRefreshCw size={14} />}
+                  {t('agent_recovery.rebuild')}
                 </Button>
               )}
             </div>

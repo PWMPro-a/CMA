@@ -29,6 +29,12 @@
     border-radius: 12px;
   }
 
+  :global(.btn > span) {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
   @include mobile {
     width: 100%;
     justify-content: flex-start;
@@ -1157,7 +1163,6 @@
   line-height: 1.3;
   word-break: break-word;
 }
-
 .agentRegistrationPanel {
   display: flex;
   flex-direction: column;
