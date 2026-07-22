@@ -121,7 +121,8 @@ export function AgentIdentityRecoveryPage() {
       .filter((item) => stateFilter === 'all' || item.registration.state === stateFilter)
       .filter((item) => !query || item.name.toLowerCase().includes(query))
       .sort((left, right) => {
-        const stateDiff = STATE_ORDER[left.registration.state] - STATE_ORDER[right.registration.state];
+        const stateDiff =
+          STATE_ORDER[left.registration.state] - STATE_ORDER[right.registration.state];
         return stateDiff || left.name.localeCompare(right.name);
       });
   }, [data?.registrations, search, stateFilter]);
@@ -150,7 +151,8 @@ export function AgentIdentityRecoveryPage() {
         );
         await loadRecovery(true);
       } catch (actionError) {
-        const message = actionError instanceof Error ? actionError.message : t('common.unknown_error');
+        const message =
+          actionError instanceof Error ? actionError.message : t('common.unknown_error');
         showNotification(message, 'error');
       } finally {
         setActionNames((current) => {
@@ -182,7 +184,8 @@ export function AgentIdentityRecoveryPage() {
         setSelected(new Set());
         await loadRecovery(true);
       } catch (actionError) {
-        const message = actionError instanceof Error ? actionError.message : t('common.unknown_error');
+        const message =
+          actionError instanceof Error ? actionError.message : t('common.unknown_error');
         showNotification(message, 'error');
       } finally {
         setBatchAction(false);
@@ -212,19 +215,29 @@ export function AgentIdentityRecoveryPage() {
     }
   }, [concurrency, loadRecovery, showNotification, t]);
 
-  const selectedNames = Array.from(selected);
+  const registrationByName = new Map(
+    registrations.map((item) => [item.name, item.registration] as const)
+  );
+  const selectedNames = Array.from(selected).filter(
+    (name) => registrationByName.get(name)?.state !== 'credentials_pending'
+  );
   const retryableNames = registrations
     .filter((item) => item.registration.can_retry && !item.registration.active)
     .map((item) => item.name);
   const rebuildableNames = registrations
     .filter(
-      (item) =>
-        !item.registration.active && item.registration.state !== 'credentials_pending'
+      (item) => !item.registration.active && item.registration.state !== 'credentials_pending'
     )
     .map((item) => item.name);
   const visibleCurrentRows = pageRows as AgentIdentityRegistrationResult[];
-  const visibleNames = viewMode === 'current' ? visibleCurrentRows.map((item) => item.name) : [];
-  const allVisibleSelected = visibleNames.length > 0 && visibleNames.every((name) => selected.has(name));
+  const visibleNames =
+    viewMode === 'current'
+      ? visibleCurrentRows
+          .filter((item) => item.registration.state !== 'credentials_pending')
+          .map((item) => item.name)
+      : [];
+  const allVisibleSelected =
+    visibleNames.length > 0 && visibleNames.every((name) => selected.has(name));
 
   if (loading && !data) return <LoadingSpinner />;
 
@@ -252,7 +265,9 @@ export function AgentIdentityRecoveryPage() {
           <div>
             <h1>{t('agent_recovery.title')}</h1>
             <div className={styles.headerMeta}>
-              <span>{t('agent_recovery.pool_concurrency', { count: coordinator?.concurrency ?? 6 })}</span>
+              <span>
+                {t('agent_recovery.pool_concurrency', { count: coordinator?.concurrency ?? 6 })}
+              </span>
               <span>{t('agent_recovery.queue_depth', { count: coordinator?.queued ?? 0 })}</span>
             </div>
           </div>
@@ -297,14 +312,24 @@ export function AgentIdentityRecoveryPage() {
         <div className={`${styles.metric} ${styles.metricDanger}`}>
           <span>{t('agent_recovery.metric_failed')}</span>
           <strong>{(summary?.failed ?? 0) + (summary?.runtime_deleted ?? 0)}</strong>
-          <small>{t('agent_recovery.metric_deleted', { count: summary?.runtime_deleted ?? 0 })}</small>
+          <small>
+            {t('agent_recovery.metric_deleted', { count: summary?.runtime_deleted ?? 0 })}
+          </small>
         </div>
         <div className={`${styles.metric} ${styles.metricPending}`}>
           <span>{t('agent_recovery.metric_credentials')}</span>
           <strong>{summary?.credentials_pending ?? 0}</strong>
-          <small>{t('agent_recovery.metric_history', { count: coordinator?.history_count ?? 0 })}</small>
+          <small>
+            {t('agent_recovery.metric_history', { count: coordinator?.history_count ?? 0 })}
+          </small>
         </div>
       </section>
+
+      {(summary?.credentials_pending ?? 0) > 0 && (
+        <div className={styles.credentialsNotice}>
+          {t('auth_files.agent_registration_credentials_pending_hint')}
+        </div>
+      )}
 
       <section className={styles.controlBand}>
         <div className={styles.viewTabs}>
@@ -452,6 +477,7 @@ export function AgentIdentityRecoveryPage() {
                       <td className={styles.checkCell}>
                         <SelectionCheckbox
                           checked={selected.has(item.name)}
+                          disabled={registration.state === 'credentials_pending'}
                           onChange={() =>
                             setSelected((current) => {
                               const next = new Set(current);
@@ -461,27 +487,57 @@ export function AgentIdentityRecoveryPage() {
                             })
                           }
                           aria-label={item.name}
+                          title={
+                            registration.state === 'credentials_pending'
+                              ? t('auth_files.agent_registration_credentials_pending_hint')
+                              : undefined
+                          }
                         />
                       </td>
-                      <td><span className={styles.accountName} title={item.name}>{item.name}</span></td>
                       <td>
-                        <span className={`${styles.stateBadge} ${styles[`state_${registration.state}`]}`}>
-                          {registration.active && <IconRefreshCw size={13} className={styles.spin} />}
+                        <span className={styles.accountName} title={item.name}>
+                          {item.name}
+                        </span>
+                      </td>
+                      <td>
+                        <span
+                          className={`${styles.stateBadge} ${styles[`state_${registration.state}`]}`}
+                        >
+                          {registration.active && (
+                            <IconRefreshCw size={13} className={styles.spin} />
+                          )}
                           {t(`auth_files.agent_registration_state_${registration.state}`)}
                         </span>
                       </td>
-                      <td>{registration.trigger ? t(`agent_recovery.trigger_${registration.trigger}`) : '-'}</td>
+                      <td>
+                        {registration.trigger
+                          ? t(`agent_recovery.trigger_${registration.trigger}`)
+                          : '-'}
+                      </td>
                       <td>{registration.attempts ?? 0}</td>
                       <td>
                         <div className={styles.timeline}>
                           <span>{formatTime(registration.queued_at)}</span>
-                          <small>{formatTime(registration.next_retry_at ?? registration.finished_at)}</small>
+                          <small>
+                            {formatTime(registration.next_retry_at ?? registration.finished_at)}
+                          </small>
                         </div>
                       </td>
-                      <td>{registration.started_at && registration.finished_at
-                        ? formatDuration(new Date(registration.finished_at).getTime() - new Date(registration.started_at).getTime())
-                        : '-'}</td>
-                      <td><span className={styles.errorText} title={registration.error}>{registration.error_code || registration.error || '-'}</span></td>
+                      <td>
+                        {registration.started_at && registration.finished_at
+                          ? formatDuration(
+                              new Date(registration.finished_at).getTime() -
+                                new Date(registration.started_at).getTime()
+                            )
+                          : '-'}
+                      </td>
+                      <td>
+                        <span className={styles.errorText} title={registration.error}>
+                          {registration.state === 'credentials_pending'
+                            ? t('auth_files.agent_registration_credentials_pending_hint')
+                            : registration.error_code || registration.error || '-'}
+                        </span>
+                      </td>
                       <td>
                         <div className={styles.rowActions}>
                           {registration.can_retry && (
@@ -511,7 +567,11 @@ export function AgentIdentityRecoveryPage() {
               {viewMode === 'history' &&
                 (pageRows as AgentIdentityRecoveryHistoryEntry[]).map((item) => (
                   <tr key={item.id}>
-                    <td><span className={styles.accountName} title={item.name}>{item.name || '-'}</span></td>
+                    <td>
+                      <span className={styles.accountName} title={item.name}>
+                        {item.name || '-'}
+                      </span>
+                    </td>
                     <td>
                       <span className={`${styles.stateBadge} ${styles[`state_${item.state}`]}`}>
                         {t(`auth_files.agent_registration_state_${item.state}`)}
@@ -526,7 +586,11 @@ export function AgentIdentityRecoveryPage() {
                       </div>
                     </td>
                     <td>{formatDuration(item.duration_ms)}</td>
-                    <td><span className={styles.errorText} title={item.error}>{item.error_code || item.error || '-'}</span></td>
+                    <td>
+                      <span className={styles.errorText} title={item.error}>
+                        {item.error_code || item.error || '-'}
+                      </span>
+                    </td>
                   </tr>
                 ))}
               {pageRows.length === 0 && (
@@ -541,7 +605,13 @@ export function AgentIdentityRecoveryPage() {
           </table>
         </div>
         <footer className={styles.pagination}>
-          <span>{t('agent_recovery.page_summary', { page: currentPage, total: totalPages, count: activeRows.length })}</span>
+          <span>
+            {t('agent_recovery.page_summary', {
+              page: currentPage,
+              total: totalPages,
+              count: activeRows.length,
+            })}
+          </span>
           <div>
             <Button
               variant="secondary"

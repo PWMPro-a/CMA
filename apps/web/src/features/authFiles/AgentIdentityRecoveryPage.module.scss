@@ -85,6 +85,16 @@
   font-size: 13px;
 }
 
+.credentialsNotice {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning-color, #d97706) 34%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--warning-color, #d97706) 8%, transparent);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .metrics {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
