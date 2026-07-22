@@ -11,9 +11,11 @@ import {
   shouldClampAccountOverviewPage,
   shouldResetAccountOverviewPage,
   normalizeAccountOverviewPageSize,
+  normalizeAccountDisplayMode,
   normalizeAccountOverviewMode,
   normalizeAccountOverviewUiState,
   normalizeAccountSortState,
+  resolveAccountDisplayText,
   sortAccountRows,
 } from './accountOverviewState';
 import type { AuthFileItem } from '@/types';
@@ -25,6 +27,7 @@ const createAccountRow = (overrides: Partial<MonitoringAccountRow> = {}): Monito
   accountMasked: overrides.accountMasked ?? 'acc***@example.com',
   authLabels: overrides.authLabels ?? [],
   authIndices: overrides.authIndices ?? [],
+  sourceKeys: overrides.sourceKeys ?? [],
   channels: overrides.channels ?? [],
   totalCalls: overrides.totalCalls ?? 0,
   successCalls: overrides.successCalls ?? 0,
@@ -94,15 +97,23 @@ describe('accountOverviewState', () => {
     expect(normalizeAccountOverviewMode('card')).toBe('card');
   });
 
+  it('defaults invalid account display modes to masked', () => {
+    expect(normalizeAccountDisplayMode(undefined)).toBe('masked');
+    expect(normalizeAccountDisplayMode('visible')).toBe('masked');
+    expect(normalizeAccountDisplayMode('full')).toBe('full');
+  });
+
   it('normalizes persisted overview ui state', () => {
     expect(
       normalizeAccountOverviewUiState({
         mode: 'card',
+        accountDisplayMode: 'full',
         sort: { key: 'totalCost', direction: 'asc' },
         cardPagination: { page: 3, pageSize: 18 },
       })
     ).toEqual({
       mode: 'card',
+      accountDisplayMode: 'full',
       sort: { key: 'totalCost', direction: 'asc' },
       cardPagination: { page: 3, pageSize: 18 },
     });
@@ -115,8 +126,65 @@ describe('accountOverviewState', () => {
       })
     ).toEqual({
       mode: 'table',
+      accountDisplayMode: 'masked',
       sort: DEFAULT_ACCOUNT_SORT,
       cardPagination: { page: 1, pageSize: 12 },
+    });
+  });
+
+  it('resolves masked and full account labels with full account tooltip text', () => {
+    const row = createAccountRow({
+      account: 'very-long-account-name@example.com',
+      displayAccount: 'very-long-account-name@example.com',
+      accountMasked: 'ver***@example.com',
+    });
+
+    expect(resolveAccountDisplayText(row, 'masked')).toMatchObject({
+      primary: 'ver***@example.com',
+      fullAccount: 'very-long-account-name@example.com',
+    });
+    expect(resolveAccountDisplayText(row, 'masked').title).toContain(
+      'very-long-account-name@example.com'
+    );
+    expect(resolveAccountDisplayText(row, 'full')).toMatchObject({
+      primary: 'very-long-account-name@example.com',
+      fullAccount: 'very-long-account-name@example.com',
+    });
+  });
+
+  it('keeps channel labels primary while switching account secondary text', () => {
+    const row = createAccountRow({
+      account: 'account@example.com',
+      displayAccount: 'Primary Channel',
+      accountMasked: 'acc***@example.com',
+    });
+
+    expect(resolveAccountDisplayText(row, 'masked')).toMatchObject({
+      primary: 'Primary Channel',
+      secondary: 'acc***@example.com',
+    });
+    expect(resolveAccountDisplayText(row, 'full')).toMatchObject({
+      primary: 'Primary Channel',
+      secondary: 'account@example.com',
+    });
+  });
+
+  it('does not show a bare provider name under its multi-key disambiguated primary label', () => {
+    const row = createAccountRow({
+      account: 'kuaileshifu',
+      displayAccount: 'kuaileshifu #1',
+      accountMasked: 'kuaileshifu',
+      authLabels: ['kuaileshifu'],
+      channels: ['kuaileshifu'],
+    });
+
+    expect(resolveAccountDisplayText(row, 'masked')).toMatchObject({
+      primary: 'kuaileshifu #1',
+      secondary: '',
+    });
+    expect(resolveAccountDisplayText(row, 'full')).toMatchObject({
+      primary: 'kuaileshifu #1',
+      secondary: '',
     });
   });
 
@@ -190,6 +258,7 @@ describe('accountOverviewState', () => {
       selectedAccount: 'all',
       selectedApiKeyHash: 'all',
       selectedChannel: 'all',
+      selectedHeaderTraceId: 'all',
       selectedModel: 'all',
       selectedProvider: 'all',
       selectedStatus: 'all',
@@ -212,6 +281,7 @@ describe('accountOverviewState', () => {
       selectedAccount: 'all',
       selectedApiKeyHash: 'all',
       selectedChannel: 'all',
+      selectedHeaderTraceId: 'all',
       selectedModel: 'all',
       selectedProvider: 'all',
       selectedStatus: 'all',
@@ -270,10 +340,94 @@ describe('accountOverviewState', () => {
 
     expect(result.enabledState).toBe('mixed');
     expect(result.files.map((file) => file.name)).toEqual(['alpha.json', 'beta.json']);
-    expect(result.toggleableFileNames).toEqual(['alpha.json', 'beta.json']);
   });
 
-  it('builds account auth state from all auth files that belong to the same account', () => {
+  it('uses normalized auth file disabled state when building account auth state', () => {
+    const authFilesByIndex = new Map<string, AuthFileItem>([
+      [
+        '1',
+        {
+          name: 'alpha.json',
+          authIndex: '1',
+          status: 'inactive',
+        },
+      ],
+    ]);
+
+    const result = buildMonitoringAccountAuthState(['1'], authFilesByIndex);
+
+    expect(result.enabledState).toBe('disabled');
+  });
+
+  it('uses enabled OpenAI provider state for provider-only account rows', () => {
+    const result = buildMonitoringAccountAuthState(
+      [],
+      new Map(),
+      ['openai:0'],
+      new Map([['openai:0', 'enabled']])
+    );
+
+    expect(result.files).toHaveLength(0);
+    expect(result.enabledState).toBe('enabled');
+  });
+
+  it('uses disabled OpenAI provider state for provider-only account rows', () => {
+    const result = buildMonitoringAccountAuthState(
+      [],
+      new Map(),
+      ['openai:0'],
+      new Map([['openai:0', 'disabled']])
+    );
+
+    expect(result.enabledState).toBe('disabled');
+  });
+
+  it('uses disabled non-OpenAI provider state for provider-only account rows', () => {
+    const result = buildMonitoringAccountAuthState(
+      [],
+      new Map(),
+      ['codex:0'],
+      new Map([['codex:0', 'disabled']])
+    );
+
+    expect(result.enabledState).toBe('disabled');
+  });
+
+  it('merges auth-file and provider states as mixed when they differ', () => {
+    const authFilesByIndex = new Map<string, AuthFileItem>([
+      [
+        '1',
+        {
+          name: 'alpha.json',
+          authIndex: '1',
+          disabled: false,
+        },
+      ],
+    ]);
+
+    const result = buildMonitoringAccountAuthState(
+      ['1'],
+      authFilesByIndex,
+      ['openai:0'],
+      new Map([['openai:0', 'disabled']])
+    );
+
+    expect(result.files.map((file) => file.name)).toEqual(['alpha.json']);
+    expect(result.enabledState).toBe('mixed');
+  });
+
+  it('keeps account auth state unavailable when no source can be toggled', () => {
+    const result = buildMonitoringAccountAuthState(
+      [],
+      new Map(),
+      ['source:unknown'],
+      new Map([['openai:0', 'enabled']])
+    );
+
+    expect(result.enabledState).toBe('unavailable');
+  });
+
+  it('only includes auth files matching the row auth indices', () => {
     const authFilesByIndex = new Map<string, AuthFileItem>([
       [
         '1',
@@ -312,7 +466,7 @@ describe('accountOverviewState', () => {
         id: 'account@example.com',
         account: 'account@example.com',
         authLabels: ['Alpha'],
-        authIndices: ['1'],
+        authIndices: ['1', '2'],
       }),
     ];
 
@@ -320,8 +474,37 @@ describe('accountOverviewState', () => {
     const accountState = result.get('account@example.com');
 
     expect(accountState?.files.map((file) => file.name)).toEqual(['alpha.json', 'beta.json']);
-    expect(accountState?.toggleableFileNames).toEqual(['alpha.json', 'beta.json']);
     expect(accountState?.enabledState).toBe('mixed');
+  });
+
+  it('does not include auth files via identity matching when row auth indices differ', () => {
+    const authFilesByIndex = new Map<string, AuthFileItem>([
+      [
+        'auth-file-1',
+        {
+          name: 'alpha.json',
+          authIndex: 'auth-file-1',
+          account: 'account@example.com',
+          label: 'Alpha',
+          disabled: false,
+        },
+      ],
+    ]);
+
+    const rows = [
+      createAccountRow({
+        id: 'account@example.com',
+        account: 'account@example.com',
+        authLabels: ['Alpha'],
+        authIndices: ['provider-auth'],
+      }),
+    ];
+
+    const result = buildMonitoringAccountAuthStateMap(rows, authFilesByIndex);
+    const accountState = result.get('account@example.com');
+
+    expect(accountState?.files).toHaveLength(0);
+    expect(accountState?.enabledState).toBe('unavailable');
   });
 
   it('does not merge auth files from a different account just because labels match', () => {
@@ -361,7 +544,6 @@ describe('accountOverviewState', () => {
     const accountState = result.get('primary@example.com');
 
     expect(accountState?.files.map((file) => file.name)).toEqual(['alpha.json']);
-    expect(accountState?.toggleableFileNames).toEqual(['alpha.json']);
     expect(accountState?.enabledState).toBe('enabled');
   });
 

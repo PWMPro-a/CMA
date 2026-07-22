@@ -115,6 +115,10 @@ func (s *Service) List(ctx context.Context) (map[string]store.ModelPrice, error)
 	return s.store.LoadModelPrices(ctx)
 }
 
+func (s *Service) UsageSummary(ctx context.Context, limit int) (store.ModelUsageSummary, error) {
+	return s.store.ModelUsageSummary(ctx, limit)
+}
+
 func (s *Service) Replace(ctx context.Context, prices map[string]store.ModelPrice) (map[string]store.ModelPrice, error) {
 	if prices == nil {
 		return nil, errors.New("prices are required")
@@ -299,16 +303,20 @@ func fetchLiteLLMModelPrices(ctx context.Context, syncURL string, client *http.C
 		}
 		rawEntry, _ := json.Marshal(entry)
 		prices[modelID] = store.ModelPrice{
-			Prompt:        promptCost * 1_000_000,
-			Completion:    completionCost * 1_000_000,
-			Cache:         cacheReadCost * 1_000_000,
-			CacheRead:     cacheReadCost * 1_000_000,
-			CacheCreation: cacheCreationCost * 1_000_000,
-			Source:        SyncSourceLiteLLM,
-			SourceModelID: modelID,
-			RawJSON:       string(rawEntry),
-			UpdatedAtMS:   now,
-			SyncedAtMS:    &now,
+			Prompt:                  promptCost * 1_000_000,
+			Completion:              completionCost * 1_000_000,
+			Cache:                   cacheReadCost * 1_000_000,
+			CacheRead:               cacheReadCost * 1_000_000,
+			CacheCreation:           cacheCreationCost * 1_000_000,
+			PromptConfigured:        hasPrompt,
+			CompletionConfigured:    hasCompletion,
+			CacheReadConfigured:     hasCacheRead,
+			CacheCreationConfigured: hasCacheCreation,
+			Source:                  SyncSourceLiteLLM,
+			SourceModelID:           modelID,
+			RawJSON:                 string(rawEntry),
+			UpdatedAtMS:             now,
+			SyncedAtMS:              &now,
 		}
 	}
 	return prices, skipped, nil
@@ -358,16 +366,20 @@ func fetchOpenRouterModelPrices(ctx context.Context, syncURL string, client *htt
 		}
 		rawEntry, _ := json.Marshal(entry)
 		prices[modelID] = store.ModelPrice{
-			Prompt:        promptCost * 1_000_000,
-			Completion:    completionCost * 1_000_000,
-			Cache:         cacheReadCost * 1_000_000,
-			CacheRead:     cacheReadCost * 1_000_000,
-			CacheCreation: cacheCreationCost * 1_000_000,
-			Source:        SyncSourceOpenRouter,
-			SourceModelID: modelID,
-			RawJSON:       string(rawEntry),
-			UpdatedAtMS:   now,
-			SyncedAtMS:    &now,
+			Prompt:                  promptCost * 1_000_000,
+			Completion:              completionCost * 1_000_000,
+			Cache:                   cacheReadCost * 1_000_000,
+			CacheRead:               cacheReadCost * 1_000_000,
+			CacheCreation:           cacheCreationCost * 1_000_000,
+			PromptConfigured:        hasPrompt,
+			CompletionConfigured:    hasCompletion,
+			CacheReadConfigured:     hasCacheRead,
+			CacheCreationConfigured: hasCacheCreation,
+			Source:                  SyncSourceOpenRouter,
+			SourceModelID:           modelID,
+			RawJSON:                 string(rawEntry),
+			UpdatedAtMS:             now,
+			SyncedAtMS:              &now,
 		}
 	}
 	return prices, skipped, nil

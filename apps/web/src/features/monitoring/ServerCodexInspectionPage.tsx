@@ -1,43 +1,60 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
-import {
-  IconChartLine,
-  IconCheck,
-  IconInbox,
-  IconRefreshCw,
-  IconShield,
-  IconTrash2,
-} from '@/components/ui/icons';
+import { IconRefreshCw, IconShield, IconTrash2 } from '@/components/ui/icons';
 import { Input } from '@/components/ui/Input';
 import { Select, type SelectOption } from '@/components/ui/Select';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { CodexInspectionConfigOverview } from '@/features/monitoring/components/CodexInspectionConfigOverview';
 import { CodexInspectionModeTabs } from '@/features/monitoring/components/CodexInspectionModeTabs';
 import { Panel } from '@/features/monitoring/components/CodexInspectionPanels';
+import { CodexInspectionResultsPanel } from '@/features/monitoring/components/CodexInspectionResultsPanel';
 import { InspectionConfigDrawer } from '@/features/monitoring/components/InspectionConfigDrawer';
 import { InspectionConfigFields } from '@/features/monitoring/components/InspectionConfigFields';
+import {
+  SummaryCard as MonitoringSummaryCard,
+  type SummaryCardProps as MonitoringSummaryCardProps,
+} from '@/features/monitoring/components/MonitoringShared';
+import { CodexReauthDialog } from '@/features/oauth/CodexReauthDialog';
+import type { CodexReauthTarget } from '@/features/oauth/codexReauthModel';
+import {
+  type CodexInspectionAction,
+  type CodexInspectionResultItem,
+  type CodexInspectionRunResult,
+} from '@/features/monitoring/codexInspection';
 import {
   CODEX_INSPECTION_RESULT_PAGE_SIZE_OPTIONS,
   buildCodexInspectionPaginationState,
   buildConfigOverviewItems,
-  type CodexInspectionPaginationState,
-  type CodexInspectionSummaryAccent,
+  countHandlingStates,
+  filterInspectionResults,
   formatActionLabel,
   formatPercent,
+  formatServerCodexInspectionLogDetail,
   formatTimestamp,
+  getActionFilterCounts,
   getCanonicalServerCodexInspectionActionIds,
   getMixedServerCodexInspectionActionIds,
   isActionableServerCodexInspectionResult,
+  isPendingServerReauthResult,
   normalizeServerCodexInspectionActionStatus,
+  type ActionFilter,
+  type HandlingFilter,
   type StatusTone,
   validateInspectionConfigDraft,
   validateInspectionConfigFields,
 } from '@/features/monitoring/model/codexInspectionPresentation';
+import {
+  DEFAULT_CODEX_INSPECTION_SETTINGS,
+  codexInspectionTargetTypesToSelection,
+  normalizeCodexInspectionTargetTypes,
+} from '@/features/monitoring/model/codexInspectionSettings';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import {
   getUsageServiceErrorCode,
+  monitoringAnalyticsApi,
   usageServiceApi,
   type CodexInspectionLog,
   type CodexInspectionResult,
@@ -46,8 +63,19 @@ import {
   type ManagerCodexInspectionConfig,
   type ManagerCodexInspectionScheduleMode,
   type ManagerConfig,
+  type UsageHeaderSnapshot,
 } from '@/services/api/usageService';
 import { useAuthStore, useNotificationStore } from '@/stores';
+import {
+  buildUsageHeaderSnapshotLookup,
+  getHeaderSnapshotErrorCode,
+  getHeaderSnapshotErrorKind,
+  getHeaderSnapshotPlanType,
+  getHeaderSnapshotRecoverAtMs,
+  getHeaderSnapshotTraceId,
+  getHeaderSnapshotUsedPercent,
+  getUsageHeaderSnapshotMatchForIdentity,
+} from '@/utils/usageHeaderSnapshots';
 import styles from './CodexInspectionPage.module.scss';
 
 type ServerCodexInspectionDraft = {
@@ -56,15 +84,20 @@ type ServerCodexInspectionDraft = {
   intervalMinutes: string;
   timePoints: string;
   timeZone: string;
-  targetType: string;
+  targetTypes: string;
   workers: string;
   deleteWorkers: string;
   timeout: string;
   retries: string;
   userAgent: string;
+  xaiInferenceUserAgent: string;
+  xaiInferenceEnabled: boolean;
+  xaiInferenceModel: string;
+  xaiInferencePrompt: string;
   usedPercentThreshold: string;
   sampleSize: string;
   autoActionMode: string;
+  autoRecoverEnabled: boolean;
 };
 
 type NormalizedServerCodexInspectionConfig = {
@@ -75,15 +108,21 @@ type NormalizedServerCodexInspectionConfig = {
     timePoints: string[];
     timeZone: string;
   };
+  targetTypes: string[];
   targetType: string;
   workers: number;
   deleteWorkers: number;
   timeout: number;
   retries: number;
   userAgent: string;
+  xaiInferenceUserAgent: string;
+  xaiInferenceEnabled: boolean;
+  xaiInferenceModel: string;
+  xaiInferencePrompt: string;
   usedPercentThreshold: number;
   sampleSize: number;
   autoActionMode: string;
+  autoRecoverEnabled: boolean;
 };
 
 const DEFAULT_SERVER_CODEX_CONFIG: NormalizedServerCodexInspectionConfig = {
@@ -94,36 +133,24 @@ const DEFAULT_SERVER_CODEX_CONFIG: NormalizedServerCodexInspectionConfig = {
     timePoints: [],
     timeZone: '',
   },
+  targetTypes: ['codex'],
   targetType: 'codex',
   workers: 4,
   deleteWorkers: 4,
   timeout: 15000,
   retries: 0,
   userAgent: 'codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal',
+  xaiInferenceUserAgent: DEFAULT_CODEX_INSPECTION_SETTINGS.xaiInferenceUserAgent,
+  xaiInferenceEnabled: false,
+  xaiInferenceModel: DEFAULT_CODEX_INSPECTION_SETTINGS.xaiInferenceModel,
+  xaiInferencePrompt: DEFAULT_CODEX_INSPECTION_SETTINGS.xaiInferencePrompt,
   usedPercentThreshold: 100,
   sampleSize: 0,
   autoActionMode: 'none',
+  autoRecoverEnabled: false,
 };
 
 const RUNS_LIMIT = 30;
-
-type ServerCodexInspectionResultFilter =
-  | 'all'
-  | 'delete'
-  | 'disable'
-  | 'enable'
-  | 'reauth'
-  | 'http_401'
-  | 'keep';
-
-const filterServerCodexInspectionResults = (
-  results: CodexInspectionResult[],
-  filter: ServerCodexInspectionResultFilter
-) => {
-  if (filter === 'all') return results;
-  if (filter === 'http_401') return results.filter((item) => item.statusCode === 401);
-  return results.filter((item) => item.action === filter);
-};
 
 const COMMON_TIME_ZONES: ReadonlyArray<string> = [
   'UTC',
@@ -171,20 +198,45 @@ const resolveServerCodexConfig = (
           ? schedule.intervalMinutes
           : DEFAULT_SERVER_CODEX_CONFIG.schedule.intervalMinutes,
       timePoints: schedule.timePoints ?? DEFAULT_SERVER_CODEX_CONFIG.schedule.timePoints,
-      timeZone: typeof schedule.timeZone === 'string' ? schedule.timeZone : DEFAULT_SERVER_CODEX_CONFIG.schedule.timeZone,
+      timeZone:
+        typeof schedule.timeZone === 'string'
+          ? schedule.timeZone
+          : DEFAULT_SERVER_CODEX_CONFIG.schedule.timeZone,
     },
-    targetType: config?.targetType || DEFAULT_SERVER_CODEX_CONFIG.targetType,
-    workers: config?.workers && config.workers > 0 ? config.workers : DEFAULT_SERVER_CODEX_CONFIG.workers,
+    targetTypes: (() => {
+      const targetTypes = normalizeCodexInspectionTargetTypes(
+        config?.targetTypes,
+        config?.targetType
+      );
+      return targetTypes.length > 0 ? targetTypes : DEFAULT_SERVER_CODEX_CONFIG.targetTypes;
+    })(),
+    targetType: (() => {
+      const targetTypes = normalizeCodexInspectionTargetTypes(
+        config?.targetTypes,
+        config?.targetType
+      );
+      return targetTypes[0] ?? DEFAULT_SERVER_CODEX_CONFIG.targetType;
+    })(),
+    workers:
+      config?.workers && config.workers > 0 ? config.workers : DEFAULT_SERVER_CODEX_CONFIG.workers,
     deleteWorkers:
       config?.deleteWorkers && config.deleteWorkers > 0
         ? config.deleteWorkers
         : DEFAULT_SERVER_CODEX_CONFIG.deleteWorkers,
-    timeout: config?.timeout && config.timeout > 0 ? config.timeout : DEFAULT_SERVER_CODEX_CONFIG.timeout,
+    timeout:
+      config?.timeout && config.timeout > 0 ? config.timeout : DEFAULT_SERVER_CODEX_CONFIG.timeout,
     retries:
       config?.retries !== undefined && config.retries >= 0
         ? config.retries
         : DEFAULT_SERVER_CODEX_CONFIG.retries,
     userAgent: config?.userAgent || DEFAULT_SERVER_CODEX_CONFIG.userAgent,
+    xaiInferenceUserAgent:
+      config?.xaiInferenceUserAgent || DEFAULT_SERVER_CODEX_CONFIG.xaiInferenceUserAgent,
+    xaiInferenceEnabled:
+      config?.xaiInferenceEnabled ?? DEFAULT_SERVER_CODEX_CONFIG.xaiInferenceEnabled,
+    xaiInferenceModel: config?.xaiInferenceModel || DEFAULT_SERVER_CODEX_CONFIG.xaiInferenceModel,
+    xaiInferencePrompt:
+      config?.xaiInferencePrompt || DEFAULT_SERVER_CODEX_CONFIG.xaiInferencePrompt,
     usedPercentThreshold:
       config?.usedPercentThreshold !== undefined
         ? config.usedPercentThreshold
@@ -194,6 +246,8 @@ const resolveServerCodexConfig = (
         ? config.sampleSize
         : DEFAULT_SERVER_CODEX_CONFIG.sampleSize,
     autoActionMode: config?.autoActionMode || DEFAULT_SERVER_CODEX_CONFIG.autoActionMode,
+    autoRecoverEnabled:
+      config?.autoRecoverEnabled ?? DEFAULT_SERVER_CODEX_CONFIG.autoRecoverEnabled,
   };
 };
 
@@ -205,15 +259,20 @@ const toDraft = (config?: ManagerCodexInspectionConfig | null): ServerCodexInspe
     intervalMinutes: String(resolved.schedule.intervalMinutes),
     timePoints: resolved.schedule.timePoints.join(', '),
     timeZone: resolved.schedule.timeZone,
-    targetType: resolved.targetType,
+    targetTypes: codexInspectionTargetTypesToSelection(resolved.targetTypes, resolved.targetType),
     workers: String(resolved.workers),
     deleteWorkers: String(resolved.deleteWorkers),
     timeout: String(resolved.timeout),
     retries: String(resolved.retries),
     userAgent: resolved.userAgent,
+    xaiInferenceUserAgent: resolved.xaiInferenceUserAgent,
+    xaiInferenceEnabled: resolved.xaiInferenceEnabled,
+    xaiInferenceModel: resolved.xaiInferenceModel,
+    xaiInferencePrompt: resolved.xaiInferencePrompt,
     usedPercentThreshold: String(resolved.usedPercentThreshold),
     sampleSize: String(resolved.sampleSize),
     autoActionMode: resolved.autoActionMode,
+    autoRecoverEnabled: resolved.autoRecoverEnabled,
   };
 };
 
@@ -244,11 +303,7 @@ const parseTimePoints = (raw: string): string[] =>
 
 const normalizeTimePointList = (values: string[]): string[] =>
   Array.from(
-    new Set(
-      values
-        .map(normalizeTimePoint)
-        .filter((value): value is string => Boolean(value))
-    )
+    new Set(values.map(normalizeTimePoint).filter((value): value is string => Boolean(value)))
   ).sort();
 
 const readScheduleInteger = (raw: string, min: number): number | null => {
@@ -274,9 +329,7 @@ const createConfigFromDraft = (
     splitTimePointTokens(draft.timePoints).some((value) => normalizeTimePoint(value) === null);
   const timePoints = parseTimePoints(draft.timePoints);
 
-  if (
-    draft.scheduleMode === 'interval' && parsedIntervalMinutes === null
-  ) {
+  if (draft.scheduleMode === 'interval' && parsedIntervalMinutes === null) {
     return null;
   }
 
@@ -300,15 +353,21 @@ const createConfigFromDraft = (
             timePoints,
             timeZone: draft.timeZone.trim(),
           },
-    targetType: validation.values.targetType,
+    targetTypes: validation.values.targetTypes,
+    targetType: validation.values.targetTypes[0],
     workers: validation.values.workers,
     deleteWorkers: validation.values.deleteWorkers,
     timeout: validation.values.timeout,
     retries: validation.values.retries,
     userAgent: validation.values.userAgent,
+    xaiInferenceUserAgent: validation.values.xaiInferenceUserAgent,
+    xaiInferenceEnabled: validation.values.xaiInferenceEnabled,
+    xaiInferenceModel: validation.values.xaiInferenceModel,
+    xaiInferencePrompt: validation.values.xaiInferencePrompt,
     usedPercentThreshold: validation.values.usedPercentThreshold,
     sampleSize: validation.values.sampleSize,
     autoActionMode: validation.values.autoActionMode,
+    autoRecoverEnabled: validation.values.autoRecoverEnabled,
   };
 };
 
@@ -318,23 +377,6 @@ const statusToneClass: Record<StatusTone, string> = {
   good: styles['tone-good'],
   warn: styles['tone-warn'],
   bad: styles['tone-bad'],
-};
-
-const actionToneClass: Record<string, string> = {
-  keep: styles.actionKeep,
-  delete: styles.actionDelete,
-  disable: styles.actionDisable,
-  enable: styles.actionEnable,
-  reauth: styles.actionReauth,
-};
-
-const summaryAccentClassMap: Record<CodexInspectionSummaryAccent, string> = {
-  blue: styles.summaryAccentBlue,
-  cyan: styles.summaryAccentCyan,
-  red: styles.summaryAccentRed,
-  amber: styles.summaryAccentAmber,
-  green: styles.summaryAccentGreen,
-  violet: styles.summaryAccentViolet,
 };
 
 const logLevelClass: Record<string, string> = {
@@ -357,7 +399,10 @@ function getRunTone(run?: CodexInspectionRun | null): StatusTone {
   }
 }
 
-function getRunStatusLabel(run: CodexInspectionRun | null | undefined, t: ReturnType<typeof useTranslation>['t']) {
+function getRunStatusLabel(
+  run: CodexInspectionRun | null | undefined,
+  t: ReturnType<typeof useTranslation>['t']
+) {
   switch (run?.status) {
     case 'completed':
       return t('monitoring.codex_inspection_status_success');
@@ -370,47 +415,29 @@ function getRunStatusLabel(run: CodexInspectionRun | null | undefined, t: Return
   }
 }
 
-function formatDuration(run: CodexInspectionRun | null | undefined, t: ReturnType<typeof useTranslation>['t']) {
+function formatDuration(
+  run: CodexInspectionRun | null | undefined,
+  t: ReturnType<typeof useTranslation>['t']
+) {
   if (!run?.startedAtMs || !run.finishedAtMs) return t('common.not_set');
   const seconds = Math.max(0, Math.round((run.finishedAtMs - run.startedAtMs) / 1000));
   return t('monitoring.server_codex_inspection_duration_value', { seconds });
 }
 
-function formatTrigger(run: CodexInspectionRun | null | undefined, t: ReturnType<typeof useTranslation>['t']) {
+function formatTrigger(
+  run: CodexInspectionRun | null | undefined,
+  t: ReturnType<typeof useTranslation>['t']
+) {
   if (!run) return t('common.not_set');
-  if (run.triggerType === 'scheduled') return t('monitoring.server_codex_inspection_trigger_scheduled');
+  if (run.triggerType === 'scheduled')
+    return t('monitoring.server_codex_inspection_trigger_scheduled');
   return t('monitoring.server_codex_inspection_trigger_manual');
 }
 
-function formatResultStateHeader(
-  run: CodexInspectionRun | null | undefined,
+function formatSchedule(
+  config: NormalizedServerCodexInspectionConfig,
   t: ReturnType<typeof useTranslation>['t']
 ) {
-  if (run?.triggerType === 'scheduled') {
-    return t('monitoring.server_codex_inspection_result_state_scheduled');
-  }
-  if (run?.triggerType === 'manual') {
-    return t('monitoring.server_codex_inspection_result_state_manual');
-  }
-  return t('monitoring.server_codex_inspection_result_state_snapshot');
-}
-
-function formatResultsDescription(
-  run: CodexInspectionRun | null | undefined,
-  locale: string,
-  t: ReturnType<typeof useTranslation>['t']
-) {
-  const time = run?.finishedAtMs ? formatTimestamp(run.finishedAtMs, locale) : t('common.not_set');
-  if (run?.triggerType === 'manual') {
-    return t('monitoring.server_codex_inspection_results_desc_manual', { time });
-  }
-  if (run?.triggerType === 'scheduled') {
-    return t('monitoring.server_codex_inspection_results_desc_scheduled', { time });
-  }
-  return t('monitoring.server_codex_inspection_results_desc');
-}
-
-function formatSchedule(config: NormalizedServerCodexInspectionConfig, t: ReturnType<typeof useTranslation>['t']) {
   if (config.schedule.mode === 'time_points') {
     const base = t('monitoring.server_codex_inspection_schedule_time_points_value', {
       points: config.schedule.timePoints.join(', '),
@@ -430,15 +457,20 @@ function getComparableConfig(config: NormalizedServerCodexInspectionConfig) {
     intervalMinutes: config.schedule.intervalMinutes,
     timePoints: normalizeTimePointList(config.schedule.timePoints),
     timeZone: (config.schedule.timeZone || '').trim(),
-    targetType: config.targetType.trim(),
+    targetTypes: normalizeCodexInspectionTargetTypes(config.targetTypes, config.targetType),
     workers: config.workers,
     deleteWorkers: config.deleteWorkers,
     timeout: config.timeout,
     retries: config.retries,
     userAgent: config.userAgent.trim(),
+    xaiInferenceUserAgent: config.xaiInferenceUserAgent.trim(),
+    xaiInferenceEnabled: config.xaiInferenceEnabled,
+    xaiInferenceModel: config.xaiInferenceModel.trim(),
+    xaiInferencePrompt: config.xaiInferencePrompt.trim(),
     usedPercentThreshold: config.usedPercentThreshold,
     sampleSize: config.sampleSize,
     autoActionMode: config.autoActionMode,
+    autoRecoverEnabled: config.autoRecoverEnabled,
   };
 }
 
@@ -462,7 +494,7 @@ function resolveActionLabel(action: string, t: ReturnType<typeof useTranslation>
   return action || t('common.not_set');
 }
 
-function formatServerActionStatusLabel(
+function formatServerTerminalActionStatusLabel(
   item: CodexInspectionResult,
   t: ReturnType<typeof useTranslation>['t']
 ) {
@@ -478,13 +510,127 @@ function formatServerActionStatusLabel(
   if (status === 'skipped') {
     return t('monitoring.server_codex_inspection_action_status_skipped');
   }
-  if (status === 'needs_review') {
-    return t('monitoring.server_codex_inspection_action_status_needs_review');
-  }
-  if (status === 'pending') {
-    return t('monitoring.server_codex_inspection_action_status_pending');
-  }
   return '';
+}
+
+function normalizeServerResultAction(action: string): CodexInspectionAction {
+  if (
+    action === 'delete' ||
+    action === 'disable' ||
+    action === 'enable' ||
+    action === 'reauth' ||
+    action === 'keep'
+  ) {
+    return action;
+  }
+  return 'keep';
+}
+
+function formatObservedHeaderRecoverAt(value: number | null, locale: string) {
+  if (!value || !Number.isFinite(value)) return '';
+  return new Date(value).toLocaleString(locale, {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function buildObservedHeaderEvidence(
+  snapshot: UsageHeaderSnapshot | undefined,
+  locale: string,
+  t: ReturnType<typeof useTranslation>['t']
+) {
+  if (!snapshot) return [];
+  const evidence: string[] = [];
+  const observedAt = formatObservedHeaderRecoverAt(snapshot.timestamp_ms, locale);
+  if (observedAt) {
+    evidence.push(
+      t('monitoring.codex_inspection_observed_header_at', {
+        time: observedAt,
+      })
+    );
+  }
+  const quotaParts = [
+    getHeaderSnapshotPlanType(snapshot),
+    (() => {
+      const usedPercent = getHeaderSnapshotUsedPercent(snapshot);
+      return typeof usedPercent === 'number' && Number.isFinite(usedPercent)
+        ? formatPercent(usedPercent)
+        : '';
+    })(),
+    (() => {
+      const recoverAt = formatObservedHeaderRecoverAt(
+        getHeaderSnapshotRecoverAtMs(snapshot),
+        locale
+      );
+      return recoverAt ? `${t('monitoring.header_recover_at')} ${recoverAt}` : '';
+    })(),
+  ].filter(Boolean);
+  if (quotaParts.length > 0) {
+    evidence.push(`${t('monitoring.header_quota')}: ${quotaParts.join(' / ')}`);
+  }
+
+  const errorParts = [
+    getHeaderSnapshotErrorKind(snapshot),
+    getHeaderSnapshotErrorCode(snapshot),
+  ].filter(Boolean);
+  if (errorParts.length > 0) {
+    evidence.push(`${t('monitoring.header_error')}: ${errorParts.join(' / ')}`);
+  }
+
+  const traceId = getHeaderSnapshotTraceId(snapshot);
+  if (traceId) {
+    evidence.push(`${t('monitoring.header_trace')}: ${traceId}`);
+  }
+  return evidence;
+}
+
+function toServerResultItem(
+  item: CodexInspectionResult,
+  t: ReturnType<typeof useTranslation>['t'],
+  snapshot: UsageHeaderSnapshot | undefined,
+  locale: string
+): CodexInspectionResultItem {
+  const actionReason = item.actionReason?.startsWith('monitoring.')
+    ? t(item.actionReason)
+    : item.actionReason;
+  const observedHeaderEvidence = buildObservedHeaderEvidence(snapshot, locale, t);
+  return {
+    key: `server-${item.id || item.accountKey}`,
+    fileName: item.fileName,
+    displayAccount: item.displayAccount,
+    authIndex: item.authIndex ?? null,
+    accountId: item.accountId ?? null,
+    provider: item.provider,
+    disabled: item.disabled,
+    autoRecoverOwned: item.autoRecoverEligible === true,
+    status: item.status ?? '',
+    state: item.state ?? '',
+    raw: item as unknown as CodexInspectionResultItem['raw'],
+    action: normalizeServerResultAction(item.action),
+    actionReason,
+    statusCode: item.statusCode ?? null,
+    usedPercent: item.usedPercent ?? null,
+    isQuota: item.isQuota,
+    autoRecoverEligible: item.autoRecoverEligible === true,
+    error: item.error ?? '',
+    planType: item.planType ?? null,
+    quotaWindows: item.quotaWindows?.map((window) => ({
+      id: window.id,
+      labelKey: window.labelKey,
+      labelParams: window.labelParams,
+      usedPercent: window.usedPercent ?? null,
+      resetLabel: window.resetLabel ?? '',
+      limitWindowSeconds: window.limitWindowSeconds ?? null,
+    })),
+    errorKind: item.errorKind,
+    errorDetail: item.actionError || item.errorDetail || '',
+    actionHandled: item.action === 'reauth' && !isPendingServerReauthResult(item),
+    observedHeaderEvidence,
+    observedHeaderAtMs: snapshot?.timestamp_ms ?? null,
+  };
 }
 
 function countServerResultActions(items: CodexInspectionResult[]) {
@@ -530,6 +676,7 @@ function formatServiceHost(base: string): string {
 
 export function ServerCodexInspectionPage() {
   const { t, i18n } = useTranslation();
+  const navigate = useNavigate();
   const managementKey = useAuthStore((state) => state.managementKey);
   const featureAvailability = usePanelFeatureAvailability();
   const showNotification = useNotificationStore((state) => state.showNotification);
@@ -540,22 +687,27 @@ export function ServerCodexInspectionPage() {
   const [draft, setDraft] = useState<ServerCodexInspectionDraft>(() => toDraft(null));
   const [runs, setRuns] = useState<CodexInspectionRun[]>([]);
   const [detail, setDetail] = useState<CodexInspectionRunDetail | null>(null);
+  const [headerSnapshots, setHeaderSnapshots] = useState<UsageHeaderSnapshot[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState('');
   const [logsCollapsed, setLogsCollapsed] = useState(false);
-  const [resultFilter, setResultFilter] = useState<ServerCodexInspectionResultFilter>('all');
+  const [actionFilter, setActionFilter] = useState<ActionFilter>('all');
+  const [handlingFilter, setHandlingFilter] = useState<HandlingFilter>('all');
   const [resultPage, setResultPage] = useState(1);
   const [resultPageSize, setResultPageSize] = useState<number>(
     CODEX_INSPECTION_RESULT_PAGE_SIZE_OPTIONS[0]
   );
-  const [logLevelFilter, setLogLevelFilter] = useState<'all' | 'info' | 'success' | 'warning' | 'error'>('all');
+  const [logLevelFilter, setLogLevelFilter] = useState<
+    'all' | 'info' | 'success' | 'warning' | 'error'
+  >('all');
   const [executingResultIds, setExecutingResultIds] = useState<Set<number>>(() => new Set());
   const [executingAllActions, setExecutingAllActions] = useState(false);
   const [configDrawerOpen, setConfigDrawerOpen] = useState(false);
   const [configFocusField, setConfigFocusField] = useState<string | null>(null);
+  const [codexReauthTarget, setCodexReauthTarget] = useState<CodexReauthTarget | null>(null);
   const refreshInFlightRef = useRef(false);
   const actionInFlightRef = useRef(false);
 
@@ -589,6 +741,10 @@ export function ServerCodexInspectionPage() {
         managementKey,
         RUNS_LIMIT
       );
+      const snapshotsResponse = await monitoringAnalyticsApi
+        .getHeaderSnapshots(resolvedBase, managementKey, { days: 30, limit: 1000 })
+        .catch(() => ({ items: [] as UsageHeaderSnapshot[] }));
+      setHeaderSnapshots(snapshotsResponse.items ?? []);
       setRuns(runsResponse.items);
       const nextSelectedId = runsResponse.items[0]?.id;
       if (nextSelectedId) {
@@ -601,6 +757,7 @@ export function ServerCodexInspectionPage() {
       setError(getUsageServiceDisplayError(error, t));
       setRuns([]);
       setDetail(null);
+      setHeaderSnapshots([]);
       setSelectedRunId(null);
     } finally {
       setLoading(false);
@@ -646,24 +803,53 @@ export function ServerCodexInspectionPage() {
     [draftConfig]
   );
   const hasUnsavedChanges = Boolean(
-    managerConfig && (!normalizedDraftConfig || !configsEquivalent(selectedConfig, normalizedDraftConfig))
+    managerConfig &&
+    (!normalizedDraftConfig || !configsEquivalent(selectedConfig, normalizedDraftConfig))
   );
   const savedScheduleLabel = formatSchedule(selectedConfig, t);
-  const hasRunningRun = runs.some((run) => run.status === 'running') || detail?.run.status === 'running';
+  const hasRunningRun =
+    runs.some((run) => run.status === 'running') || detail?.run.status === 'running';
   const latestRun = runs[0] ?? null;
   const activeRun = detail?.run ?? latestRun;
   const activeTone = getRunTone(activeRun);
-  const actionCounts = activeRun
-    ? activeRun.deleteCount +
-      activeRun.disableCount +
-      activeRun.enableCount +
-      (activeRun.reauthCount ?? 0)
-    : 0;
 
   const resultRows = useMemo(() => detail?.results ?? [], [detail?.results]);
+  const headerSnapshotCutoffMs =
+    detail?.run.finishedAtMs ?? detail?.run.updatedAtMs ?? Number.POSITIVE_INFINITY;
+  const headerSnapshotLookup = useMemo(
+    () =>
+      buildUsageHeaderSnapshotLookup(
+        headerSnapshots.filter((snapshot) => snapshot.timestamp_ms <= headerSnapshotCutoffMs)
+      ),
+    [headerSnapshotCutoffMs, headerSnapshots]
+  );
+  const resultItems = useMemo(
+    () =>
+      resultRows.map((item) => {
+        const snapshotMatch = getUsageHeaderSnapshotMatchForIdentity(headerSnapshotLookup, {
+          fileName: item.fileName,
+          authIndex: item.authIndex,
+          account: item.accountId || item.displayAccount,
+        });
+        return toServerResultItem(
+          item,
+          t,
+          snapshotMatch.confidence === 'high' ? snapshotMatch.snapshot : undefined,
+          i18n.language
+        );
+      }),
+    [headerSnapshotLookup, i18n.language, resultRows, t]
+  );
+  const resultByKey = useMemo(() => {
+    const map = new Map<string, CodexInspectionResult>();
+    resultRows.forEach((item) => {
+      map.set(`server-${item.id || item.accountKey}`, item);
+    });
+    return map;
+  }, [resultRows]);
   const filteredResultRows = useMemo(
-    () => filterServerCodexInspectionResults(resultRows, resultFilter),
-    [resultRows, resultFilter]
+    () => filterInspectionResults(resultItems, handlingFilter, actionFilter),
+    [actionFilter, handlingFilter, resultItems]
   );
   const resultPagination = useMemo(
     () => buildCodexInspectionPaginationState(filteredResultRows, resultPage, resultPageSize),
@@ -672,7 +858,7 @@ export function ServerCodexInspectionPage() {
 
   useEffect(() => {
     setResultPage(1);
-  }, [resultFilter, detail?.run.id]);
+  }, [actionFilter, handlingFilter, detail?.run.id]);
 
   useEffect(() => {
     if (resultPage === resultPagination.currentPage) return;
@@ -723,54 +909,57 @@ export function ServerCodexInspectionPage() {
     setDraft((previous) => ({ ...previous, [key]: value }));
   };
 
-  const refreshRuns = useCallback(async (options?: { silent?: boolean }) => {
-    if (refreshInFlightRef.current) return;
-    refreshInFlightRef.current = true;
-    const silent = options?.silent ?? false;
-    if (!serviceBase) {
+  const refreshRuns = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (refreshInFlightRef.current) return;
+      refreshInFlightRef.current = true;
+      const silent = options?.silent ?? false;
+      if (!serviceBase) {
+        try {
+          await loadPageData();
+        } finally {
+          refreshInFlightRef.current = false;
+        }
+        return;
+      }
+      if (!silent) {
+        setLoading(true);
+        setError('');
+      }
       try {
-        await loadPageData();
+        const response = await usageServiceApi.listCodexInspectionRuns(
+          serviceBase,
+          managementKey,
+          RUNS_LIMIT
+        );
+        setRuns(response.items);
+        const selectionStillValid =
+          selectedRunId != null && response.items.some((run) => run.id === selectedRunId);
+        if (selectionStillValid) {
+          // 静默轮询时保留用户正在查看的历史详情,避免每 30s 重建详情导致结果表/日志
+          // 重渲染、打断操作;但正在运行的巡检或尚无详情时仍需刷新以获取最新进度。
+          const watchingRunning = detail?.run.status === 'running';
+          if (!silent || !detail || watchingRunning) {
+            await loadRunDetail(serviceBase, selectedRunId);
+          }
+        } else {
+          const fallbackId = response.items[0]?.id;
+          if (fallbackId) {
+            await loadRunDetail(serviceBase, fallbackId);
+          } else {
+            setDetail(null);
+            setSelectedRunId(null);
+          }
+        }
+      } catch (error: unknown) {
+        if (!silent) setError(getUsageServiceDisplayError(error, t));
       } finally {
+        if (!silent) setLoading(false);
         refreshInFlightRef.current = false;
       }
-      return;
-    }
-    if (!silent) {
-      setLoading(true);
-      setError('');
-    }
-    try {
-      const response = await usageServiceApi.listCodexInspectionRuns(
-        serviceBase,
-        managementKey,
-        RUNS_LIMIT
-      );
-      setRuns(response.items);
-      const selectionStillValid =
-        selectedRunId != null && response.items.some((run) => run.id === selectedRunId);
-      if (selectionStillValid) {
-        // 静默轮询时保留用户正在查看的历史详情,避免每 30s 重建详情导致结果表/日志
-        // 重渲染、打断操作;但正在运行的巡检或尚无详情时仍需刷新以获取最新进度。
-        const watchingRunning = detail?.run.status === 'running';
-        if (!silent || !detail || watchingRunning) {
-          await loadRunDetail(serviceBase, selectedRunId);
-        }
-      } else {
-        const fallbackId = response.items[0]?.id;
-        if (fallbackId) {
-          await loadRunDetail(serviceBase, fallbackId);
-        } else {
-          setDetail(null);
-          setSelectedRunId(null);
-        }
-      }
-    } catch (error: unknown) {
-      if (!silent) setError(getUsageServiceDisplayError(error, t));
-    } finally {
-      if (!silent) setLoading(false);
-      refreshInFlightRef.current = false;
-    }
-  }, [detail, loadPageData, loadRunDetail, managementKey, selectedRunId, serviceBase, t]);
+    },
+    [detail, loadPageData, loadRunDetail, managementKey, selectedRunId, serviceBase, t]
+  );
 
   useEffect(() => {
     if (!serviceBase || (!selectedConfig.enabled && !hasRunningRun)) return;
@@ -859,7 +1048,10 @@ export function ServerCodexInspectionPage() {
       showNotification(t('monitoring.server_codex_inspection_run_success'), 'success');
     } catch (error: unknown) {
       const message = getUsageServiceDisplayError(error, t);
-      showNotification(`${t('monitoring.server_codex_inspection_run_failed')}: ${message}`, 'error');
+      showNotification(
+        `${t('monitoring.server_codex_inspection_run_failed')}: ${message}`,
+        'error'
+      );
       await refreshRuns();
     } finally {
       setRunning(false);
@@ -878,13 +1070,25 @@ export function ServerCodexInspectionPage() {
   };
 
   const executeServerActions = useCallback(
-    async (targets: CodexInspectionResult[], scope: 'single' | 'bulk') => {
+    async (
+      targets: CodexInspectionResult[],
+      scope: 'single' | 'bulk',
+      overrideAction?: 'delete'
+    ) => {
       if (!serviceBase || !detail) {
         showNotification(t('monitoring.server_codex_inspection_service_unavailable'), 'warning');
         return;
       }
       const resultIds = Array.from(
-        new Set(targets.filter(isActionableServerCodexInspectionResult).map((item) => item.id))
+        new Set(
+          targets
+            .filter((item) =>
+              overrideAction === 'delete'
+                ? item.action === 'reauth' && item.id > 0
+                : isActionableServerCodexInspectionResult(item)
+            )
+            .map((item) => item.id)
+        )
       );
       if (resultIds.length === 0) {
         showNotification(t('monitoring.server_codex_inspection_no_actions'), 'warning');
@@ -898,7 +1102,10 @@ export function ServerCodexInspectionPage() {
           serviceBase,
           managementKey,
           detail.run.id,
-          resultIds
+          resultIds,
+          overrideAction === 'delete'
+            ? resultIds.map((resultId) => ({ resultId, action: 'delete' as const }))
+            : []
         );
         setDetail(response.detail);
         setSelectedRunId(response.detail.run.id);
@@ -971,6 +1178,54 @@ export function ServerCodexInspectionPage() {
     [executeServerActions, showConfirmation, t]
   );
 
+  const handleOpenCodexReauth = useCallback(
+    (item: CodexInspectionResult) => {
+      if (item.provider === 'xai') {
+        navigate('/oauth#oauth-provider-xai');
+        return;
+      }
+      setCodexReauthTarget({
+        account: item.displayAccount || item.accountId || item.fileName,
+        fileName: item.fileName,
+        authIndex: item.authIndex ?? null,
+        accountId: item.accountId ?? null,
+      });
+    },
+    [navigate]
+  );
+
+  const handleDeleteServerReauth = useCallback(
+    (targets: CodexInspectionResult[], scope: 'single' | 'bulk') => {
+      if (targets.length === 0) return;
+      const first = targets[0];
+      showConfirmation({
+        title:
+          scope === 'bulk'
+            ? t('monitoring.codex_inspection_delete_reauth_confirm_title')
+            : t('monitoring.codex_inspection_delete_reauth_single_title'),
+        message:
+          scope === 'bulk'
+            ? t('monitoring.codex_inspection_delete_reauth_confirm_body', {
+                count: targets.length,
+              })
+            : t('monitoring.codex_inspection_delete_reauth_single_body', {
+                account: first.displayAccount,
+                file: first.fileName,
+              }),
+        confirmText: t('monitoring.codex_inspection_action_delete'),
+        cancelText: t('common.cancel'),
+        variant: 'danger',
+        onConfirm: () => executeServerActions(targets, scope, 'delete'),
+      });
+    },
+    [executeServerActions, showConfirmation, t]
+  );
+
+  const handleCodexReauthSuccess = useCallback(async () => {
+    await refreshRuns({ silent: true });
+    showNotification(t('codex_reauth.rerun_hint'), 'success');
+  }, [refreshRuns, showNotification, t]);
+
   const handleSelectRun = async (runID: number) => {
     if (!serviceBase || runID === selectedRunId) return;
     setSelectedRunId(runID);
@@ -996,9 +1251,7 @@ export function ServerCodexInspectionPage() {
     });
 
     return (
-      <Panel
-        className={styles.statusPanel}
-      >
+      <Panel className={styles.statusPanel}>
         <div className={styles.statusBar}>
           <div className={styles.statusInfo}>
             <span className={`${styles.statusBadge} ${statusToneClass[activeTone]}`}>
@@ -1028,39 +1281,52 @@ export function ServerCodexInspectionPage() {
             </div>
           </div>
           <div className={styles.statusActions}>
-            <Button variant="secondary" size="sm" onClick={() => void refreshRuns()} loading={loading}>
+            <details className={`${styles.infoNote} ${styles.infoNoteCompact}`}>
+              <summary>{t('monitoring.server_codex_inspection_info_summary')}</summary>
+              <ul className={styles.infoNoteList}>
+                <li>
+                  <strong>{t('monitoring.server_codex_inspection_worker_poll')}:</strong>{' '}
+                  {t('monitoring.server_codex_inspection_effect_hint')}
+                </li>
+                <li>
+                  <strong>{t('monitoring.server_codex_inspection_time_basis')}:</strong>{' '}
+                  {t('monitoring.server_codex_inspection_server_time_hint')}
+                </li>
+                <li>
+                  <strong>{t('monitoring.server_codex_inspection_history_refresh')}:</strong>{' '}
+                  {t('monitoring.server_codex_inspection_auto_refresh_hint')}
+                </li>
+              </ul>
+            </details>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void refreshRuns()}
+              loading={loading}
+            >
               {t('common.refresh')}
             </Button>
-            <Button size="sm" onClick={handleRunNow} loading={running} disabled={!serviceBase || running}>
+            <Button
+              size="sm"
+              onClick={handleRunNow}
+              loading={running}
+              disabled={!serviceBase || running}
+            >
               {t('monitoring.server_codex_inspection_run_now')}
             </Button>
           </div>
         </div>
 
-        <details className={styles.infoNote}>
-          <summary>{t('monitoring.server_codex_inspection_info_summary')}</summary>
-          <ul className={styles.infoNoteList}>
-            <li>
-              <strong>{t('monitoring.server_codex_inspection_worker_poll')}:</strong>{' '}
-              {t('monitoring.server_codex_inspection_effect_hint')}
-            </li>
-            <li>
-              <strong>{t('monitoring.server_codex_inspection_time_basis')}:</strong>{' '}
-              {t('monitoring.server_codex_inspection_server_time_hint')}
-            </li>
-            <li>
-              <strong>{t('monitoring.server_codex_inspection_history_refresh')}:</strong>{' '}
-              {t('monitoring.server_codex_inspection_auto_refresh_hint')}
-            </li>
-          </ul>
-        </details>
-
         <CodexInspectionConfigOverview
           title={t('monitoring.codex_inspection_config_overview_title')}
           editLabel={t('monitoring.codex_inspection_config_overview_edit')}
+          copyLabel={t('monitoring.codex_inspection_settings_copy_prompt')}
+          copiedLabel={t('common.copied')}
           ariaLabel={t('monitoring.server_codex_inspection_config_summary_title')}
           items={configOverviewItems}
           onEdit={openConfigDrawer}
+          compact
+          embedded
         />
 
         <div className={styles.summaryGrid}>
@@ -1072,83 +1338,64 @@ export function ServerCodexInspectionPage() {
               meta: t('monitoring.server_codex_inspection_total_files', {
                 count: activeRun?.totalFiles ?? 0,
               }),
-              Icon: IconInbox,
+              icon: 'probe' as const,
               accent: 'blue' as const,
             },
             {
               key: 'sampled',
               label: t('monitoring.codex_inspection_sampled_accounts'),
               value: activeRun ? String(activeRun.sampledCount) : summaryBlankValue,
-              meta: formatTrigger(activeRun, t),
-              Icon: IconChartLine,
+              meta: getRunStatusLabel(activeRun, t),
+              icon: 'sampled' as const,
               accent: 'cyan' as const,
             },
             {
               key: 'delete',
               label: t('monitoring.codex_inspection_delete_count'),
               value: activeRun ? String(activeRun.deleteCount) : summaryBlankValue,
-              meta: t('monitoring.server_codex_inspection_action_total_value', { count: actionCounts }),
-              tone: 'bad',
-              Icon: IconTrash2,
+              meta: t('monitoring.codex_inspection_delete_meta'),
+              tone: 'bad' as const,
+              icon: 'delete' as const,
               accent: 'red' as const,
             },
             {
               key: 'disable',
               label: t('monitoring.codex_inspection_disable_count'),
               value: activeRun ? String(activeRun.disableCount) : summaryBlankValue,
-              meta: `${t('monitoring.codex_inspection_threshold')}: ${selectedConfig.usedPercentThreshold}%`,
-              tone: 'warn',
-              Icon: IconShield,
+              meta: `${t('monitoring.codex_inspection_threshold')} ${selectedConfig.usedPercentThreshold}%`,
+              tone: 'warn' as const,
+              icon: 'disable' as const,
               accent: 'amber' as const,
             },
             {
               key: 'enable',
               label: t('monitoring.codex_inspection_enable_count'),
               value: activeRun ? String(activeRun.enableCount) : summaryBlankValue,
-              meta: t('monitoring.server_codex_inspection_keep_count', {
-                count: activeRun?.keepCount ?? 0,
-              }),
-              tone: 'good',
-              Icon: IconCheck,
+              meta: t('monitoring.codex_inspection_enable_meta'),
+              tone: 'good' as const,
+              icon: 'enable' as const,
               accent: 'green' as const,
             },
             {
               key: 'reauth',
               label: t('monitoring.codex_inspection_reauth_count'),
               value: activeRun ? String(activeRun.reauthCount) : summaryBlankValue,
-              meta: t('monitoring.codex_inspection_action_reauth'),
-              tone: 'info',
-              Icon: IconRefreshCw,
+              meta: t('monitoring.codex_inspection_reauth_meta'),
+              icon: 'reauth' as const,
               accent: 'violet' as const,
             },
           ].map((card) => {
-            const SummaryIcon = card.Icon;
+            const tone: MonitoringSummaryCardProps['tone'] = card.tone;
             return (
-              <div
+              <MonitoringSummaryCard
                 key={card.key}
-                className={[
-                  styles.summaryCard,
-                  summaryAccentClassMap[card.accent],
-                  card.tone ? styles[`tone-${card.tone}`] : '',
-                ]
-                  .filter(Boolean)
-                  .join(' ')}
-              >
-                <div className={styles.summaryHeader}>
-                  <span className={styles.summaryIcon}>
-                    <SummaryIcon size={18} />
-                  </span>
-                  <span className={styles.summaryLabel} title={card.label}>
-                    {card.label}
-                  </span>
-                </div>
-                <div className={styles.summaryBody}>
-                  <strong className={styles.summaryValue}>{card.value}</strong>
-                  <span className={styles.summaryMeta} title={card.meta}>
-                    {card.meta}
-                  </span>
-                </div>
-              </div>
+                label={card.label}
+                value={card.value}
+                meta={card.meta}
+                icon={card.icon}
+                accent={card.accent}
+                tone={tone}
+              />
             );
           })}
         </div>
@@ -1221,7 +1468,11 @@ export function ServerCodexInspectionPage() {
               <span className={styles.serverFieldLabel}>
                 {t('monitoring.server_codex_inspection_schedule_mode')}
               </span>
-              <div className={styles.scheduleSegmented} role="tablist" aria-label={t('monitoring.server_codex_inspection_schedule_mode')}>
+              <div
+                className={styles.scheduleSegmented}
+                role="tablist"
+                aria-label={t('monitoring.server_codex_inspection_schedule_mode')}
+              >
                 {scheduleOptions.map((opt) => {
                   const active = draft.scheduleMode === opt.value;
                   return (
@@ -1259,18 +1510,18 @@ export function ServerCodexInspectionPage() {
                 />
               </div>
             ) : (
-              <>
-                <div className={`${styles.serverField} ${styles.serverFieldHalf}`}>
+              <div className={styles.scheduleTimePointFields}>
+                <div className={styles.scheduleTimePointField}>
                   <Input
                     id="timePoints"
                     label={t('monitoring.server_codex_inspection_time_points')}
                     value={draft.timePoints}
                     onChange={(event) => updateDraft('timePoints', event.target.value)}
                     placeholder="09:00, 13:30, 22:00"
-                    hint={t('monitoring.server_codex_inspection_time_points_hint')}
+                    aria-describedby="timePoints-hint"
                   />
                 </div>
-                <div className={`${styles.serverField} ${styles.serverFieldHalf}`}>
+                <div className={styles.scheduleTimePointField}>
                   <span className={styles.serverFieldLabel}>
                     {t('monitoring.server_codex_inspection_time_zone')}
                   </span>
@@ -1279,9 +1530,14 @@ export function ServerCodexInspectionPage() {
                     options={timeZoneOptions}
                     onChange={(value) => updateDraft('timeZone', value)}
                     ariaLabel={t('monitoring.server_codex_inspection_time_zone')}
+                    triggerClassName={styles.configSelectTrigger}
+                    dropdownClassName={styles.configSelectDropdown}
                   />
                 </div>
-              </>
+                <div id="timePoints-hint" className={styles.scheduleTimePointHint}>
+                  {t('monitoring.server_codex_inspection_time_points_hint')}
+                </div>
+              </div>
             )}
           </div>
         </section>
@@ -1291,19 +1547,22 @@ export function ServerCodexInspectionPage() {
           errors={fieldErrors}
           t={t}
           onFieldChange={(field, value) => updateDraft(field, value)}
+          onXaiInferenceEnabledChange={(value) => updateDraft('xaiInferenceEnabled', value)}
           onAutoActionModeChange={(value) => updateDraft('autoActionMode', value)}
+          onAutoRecoverEnabledChange={(value) => updateDraft('autoRecoverEnabled', value)}
         />
       </InspectionConfigDrawer>
     );
   };
 
   const renderRunsPanel = () => (
-    <Panel
-      title={t('monitoring.server_codex_inspection_history_title')}
-      subtitle={t('monitoring.server_codex_inspection_history_desc')}
-    >
+    <Panel title={t('monitoring.server_codex_inspection_history_title')}>
       {runs.length > 0 ? (
-        <div className={styles.runHistoryList} role="tablist" aria-label={t('monitoring.server_codex_inspection_history_title')}>
+        <div
+          className={styles.runHistoryList}
+          role="tablist"
+          aria-label={t('monitoring.server_codex_inspection_history_title')}
+        >
           {runs.map((run) => {
             const tone = getRunTone(run);
             const selected = run.id === selectedRunId;
@@ -1327,31 +1586,44 @@ export function ServerCodexInspectionPage() {
                 </div>
                 <div className={styles.runHistoryCardMeta}>
                   <span>{formatTimestamp(run.startedAtMs, i18n.language)}</span>
-                  <span>{formatTrigger(run, t)} · {t('monitoring.codex_inspection_sampled_accounts')}: {run.sampledCount}</span>
+                  <span>
+                    {formatTrigger(run, t)} · {t('monitoring.codex_inspection_sampled_accounts')}:{' '}
+                    {run.sampledCount}
+                  </span>
                 </div>
                 <div className={styles.runHistoryCardActionPills}>
                   {run.deleteCount > 0 ? (
-                    <span className={`${styles.runHistoryCardPill} ${styles.runHistoryCardPillDelete}`}>
+                    <span
+                      className={`${styles.runHistoryCardPill} ${styles.runHistoryCardPillDelete}`}
+                    >
                       {t('monitoring.codex_inspection_action_delete')} {run.deleteCount}
                     </span>
                   ) : null}
                   {run.disableCount > 0 ? (
-                    <span className={`${styles.runHistoryCardPill} ${styles.runHistoryCardPillDisable}`}>
+                    <span
+                      className={`${styles.runHistoryCardPill} ${styles.runHistoryCardPillDisable}`}
+                    >
                       {t('monitoring.codex_inspection_action_disable')} {run.disableCount}
                     </span>
                   ) : null}
                   {run.enableCount > 0 ? (
-                    <span className={`${styles.runHistoryCardPill} ${styles.runHistoryCardPillEnable}`}>
+                    <span
+                      className={`${styles.runHistoryCardPill} ${styles.runHistoryCardPillEnable}`}
+                    >
                       {t('monitoring.codex_inspection_action_enable')} {run.enableCount}
                     </span>
                   ) : null}
                   {run.reauthCount > 0 ? (
-                    <span className={`${styles.runHistoryCardPill} ${styles.runHistoryCardPillReauth}`}>
+                    <span
+                      className={`${styles.runHistoryCardPill} ${styles.runHistoryCardPillReauth}`}
+                    >
                       {t('monitoring.codex_inspection_action_reauth')} {run.reauthCount}
                     </span>
                   ) : null}
                   {run.keepCount > 0 ? (
-                    <span className={`${styles.runHistoryCardPill} ${styles.runHistoryCardPillKeep}`}>
+                    <span
+                      className={`${styles.runHistoryCardPill} ${styles.runHistoryCardPillKeep}`}
+                    >
                       {t('monitoring.codex_inspection_action_keep')} {run.keepCount}
                     </span>
                   ) : null}
@@ -1361,274 +1633,211 @@ export function ServerCodexInspectionPage() {
           })}
         </div>
       ) : (
-        <div className={styles.emptyBlock}>{t('monitoring.server_codex_inspection_history_empty')}</div>
+        <div className={styles.emptyBlock}>
+          {t('monitoring.server_codex_inspection_history_empty')}
+        </div>
       )}
     </Panel>
   );
 
-  const renderResultsPanel = (
-    results: CodexInspectionResult[],
-    filtered: CodexInspectionResult[],
-    pagination: CodexInspectionPaginationState<CodexInspectionResult>
-  ) => {
-    const canonicalExecutableIds = getCanonicalServerCodexInspectionActionIds(results);
-    const mixedActionIds = getMixedServerCodexInspectionActionIds(results);
-    const executableResults = results.filter((item) => canonicalExecutableIds.has(item.id));
+  const renderResultsPanel = () => {
+    const canonicalExecutableIds = getCanonicalServerCodexInspectionActionIds(resultRows);
+    const mixedActionIds = getMixedServerCodexInspectionActionIds(resultRows);
+    const executableResults = resultRows.filter((item) => canonicalExecutableIds.has(item.id));
+    const reauthResults = resultRows.filter(isPendingServerReauthResult);
     const canExecuteActions = detail?.run.status === 'completed';
     const resultsRun = detail?.run ?? null;
-    const counts: Record<ServerCodexInspectionResultFilter, number> = {
-      all: results.length,
-      delete: 0,
-      disable: 0,
-      enable: 0,
-      reauth: 0,
-      http_401: 0,
-      keep: 0,
-    };
-    for (const item of results) {
-      if (
-        item.action === 'delete' ||
-        item.action === 'disable' ||
-        item.action === 'enable' ||
-        item.action === 'reauth' ||
-        item.action === 'keep'
-      ) {
-        counts[item.action] += 1;
-      }
-      if (item.statusCode === 401) counts.http_401 += 1;
-    }
-    const filterOptions: ReadonlyArray<{ value: ServerCodexInspectionResultFilter; label: string }> = [
-      { value: 'all', label: t('monitoring.server_codex_inspection_filter_all') },
-      { value: 'delete', label: t('monitoring.codex_inspection_action_delete') },
-      { value: 'disable', label: t('monitoring.codex_inspection_action_disable') },
-      { value: 'enable', label: t('monitoring.codex_inspection_action_enable') },
-      { value: 'reauth', label: t('monitoring.codex_inspection_filter_reauth') },
-      { value: 'http_401', label: t('monitoring.codex_inspection_filter_401') },
-      { value: 'keep', label: t('monitoring.codex_inspection_action_keep') },
-    ];
-    return (
-      <Panel
-        title={t('monitoring.codex_inspection_results_title')}
-        subtitle={formatResultsDescription(resultsRun, i18n.language, t)}
-        extra={
-          results.length > 0 ? (
-            <div className={styles.resultsHeaderActions}>
-              <div className={styles.segmentedControl} role="tablist" aria-label={t('monitoring.codex_inspection_results_title')}>
-                {filterOptions.map((opt) => {
-                  const active = resultFilter === opt.value;
-                  return (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      role="tab"
-                      aria-selected={active}
-                      className={`${styles.segmentButton} ${active ? styles.segmentButtonActive : ''}`}
-                      onClick={() => setResultFilter(opt.value)}
-                    >
-                      {opt.label}
-                      <span className={styles.segmentCount}>{counts[opt.value]}</span>
-                    </button>
-                  );
-                })}
-              </div>
-              <Button
-                size="sm"
-                variant={executableResults.some((item) => item.action === 'delete') ? 'danger' : 'primary'}
-                loading={executingAllActions}
-                disabled={
-                  !canExecuteActions ||
-                  executableResults.length === 0 ||
-                  executingResultIds.size > 0
-                }
-                onClick={() => handleExecuteServerActions(executableResults, 'bulk')}
-              >
-                <IconCheck size={14} />
-                {t('monitoring.server_codex_inspection_execute_all')}
-              </Button>
-            </div>
-          ) : undefined
+    const resultsConfig = resolveServerCodexConfig(
+      resultsRun?.settings ?? managerConfig?.codexInspection
+    );
+    const actionFilterCounts = getActionFilterCounts(resultItems);
+    const handlingFilterCounts = countHandlingStates(resultItems);
+    const panelResult: CodexInspectionRunResult | null = resultsRun
+      ? {
+          settings: {
+            baseUrl: serviceBase,
+            token: '',
+            targetTypes: resultsConfig.targetTypes,
+            targetType: resultsConfig.targetType,
+            workers: resultsConfig.workers,
+            deleteWorkers: resultsConfig.deleteWorkers,
+            timeout: resultsConfig.timeout,
+            retries: resultsConfig.retries,
+            userAgent: resultsConfig.userAgent,
+            xaiInferenceUserAgent: resultsConfig.xaiInferenceUserAgent,
+            xaiInferenceEnabled: resultsConfig.xaiInferenceEnabled,
+            xaiInferenceModel: resultsConfig.xaiInferenceModel,
+            xaiInferencePrompt: resultsConfig.xaiInferencePrompt,
+            usedPercentThreshold: resultsConfig.usedPercentThreshold,
+            sampleSize: resultsConfig.sampleSize,
+          },
+          files: [],
+          results: resultItems,
+          summary: {
+            totalFiles: resultsRun.totalFiles,
+            probeSetCount: resultsRun.probeSetCount,
+            sampledCount: resultsRun.sampledCount,
+            disabledCount: resultsRun.disabledCount,
+            enabledCount: resultsRun.enabledCount,
+            deleteCount: resultsRun.deleteCount,
+            disableCount: resultsRun.disableCount,
+            enableCount: resultsRun.enableCount,
+            reauthCount: resultsRun.reauthCount,
+            keepCount: resultsRun.keepCount,
+            usedPercentThreshold: resultsConfig.usedPercentThreshold,
+            sampled: resultsConfig.sampleSize > 0,
+            plannedActionPreview: [],
+          },
+          startedAt: resultsRun.startedAtMs,
+          finishedAt: resultsRun.finishedAtMs ?? resultsRun.updatedAtMs,
         }
-      >
-        {filtered.length > 0 ? (
-          <>
-            <div className={styles.tableWrap}>
-              <table className={styles.table}>
-                <colgroup>
-                  <col className={styles.accountColumn} />
-                  <col className={styles.stateColumn} />
-                  <col className={styles.httpColumn} />
-                  <col className={styles.usageColumn} />
-                  <col className={styles.actionColumn} />
-                  <col className={styles.operationColumn} />
-                </colgroup>
-                <thead>
-                  <tr>
-                    <th>{t('monitoring.account_label')}</th>
-                    <th>{formatResultStateHeader(resultsRun, t)}</th>
-                    <th>{t('monitoring.codex_inspection_http_status')}</th>
-                    <th>{t('monitoring.codex_inspection_used_percent')}</th>
-                    <th>{t('monitoring.codex_inspection_next_action')}</th>
-                    <th>{t('monitoring.server_codex_inspection_results_state_detail')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pagination.pageItems.map((item) => {
-                    const actionStatus = normalizeServerCodexInspectionActionStatus(item);
-                    return (
-                    <tr key={item.id || item.accountKey}>
-                      <td>
-                        <div className={styles.primaryCell}>
-                          <span className={styles.primaryAccount}>{item.displayAccount}</span>
-                          <small className={styles.primaryFile}>
-                            {item.fileName}
-                            {item.authIndex ? (
-                              <span className={styles.primaryIndex}>{` · #${item.authIndex}`}</span>
-                            ) : null}
-                          </small>
-                          {item.actionReason ? (
-                            <small className={styles.primaryReason}>{item.actionReason}</small>
-                          ) : null}
-                        </div>
-                      </td>
-                      <td>
-                        <span
-                          className={`${styles.stateChip} ${
-                            item.disabled ? styles.stateDisabled : styles.stateEnabled
-                          }`}
-                        >
-                          {item.disabled
-                            ? t('monitoring.codex_inspection_state_disabled')
-                            : t('monitoring.codex_inspection_state_enabled')}
-                        </span>
-                      </td>
-                      <td className={styles.monoCell}>{item.statusCode ?? '--'}</td>
-                      <td className={styles.monoCell}>{formatPercent(item.usedPercent ?? null)}</td>
-                      <td>
-                        <span className={`${styles.actionBadge} ${actionToneClass[item.action] ?? styles.actionKeep}`}>
-                          {resolveActionLabel(item.action, t)}
-                        </span>
-                      </td>
-                      <td>
-                        <div className={styles.serverResultOperation}>
-                          {(() => {
-                            const statusLabel = formatServerActionStatusLabel(item, t);
-                            const detailText =
-                              item.actionError || item.error || item.status || item.state || '--';
-                            return (
-                              <span
-                                className={
-                                  actionStatus === 'failed' || item.actionError || item.error
-                                    ? styles.primaryError
-                                    : styles.primaryReason
-                                }
-                              >
-                                {statusLabel ? `${statusLabel} · ${detailText}` : detailText}
-                              </span>
-                            );
-                          })()}
-                          {canonicalExecutableIds.has(item.id) ? (
-                            <Button
-                              size="xs"
-                              variant={item.action === 'delete' ? 'danger' : 'secondary'}
-                              loading={executingResultIds.has(item.id)}
-                              disabled={!canExecuteActions || executingResultIds.size > 0}
-                              className={styles.serverResultActionButton}
-                              onClick={() => handleExecuteServerActions([item], 'single')}
-                            >
-                              {(() => {
-                                const ActionIcon = getServerActionIcon(item.action);
-                                return <ActionIcon size={13} />;
-                              })()}
-                              {resolveActionLabel(item.action, t)}
-                            </Button>
-                          ) : actionStatus === 'needs_review' || mixedActionIds.has(item.id) ? (
-                            <span className={styles.primaryReason}>
-                              {t('monitoring.server_codex_inspection_action_needs_review_hint')}
-                            </span>
-                          ) : isActionableServerCodexInspectionResult(item) ? (
-                            <span className={styles.primaryReason}>
-                              {t('monitoring.server_codex_inspection_file_level_action_hint')}
-                            </span>
-                          ) : item.action === 'reauth' ? (
-                            <span className={styles.primaryReason}>
-                              {t('monitoring.codex_inspection_manual_required')}
-                            </span>
-                          ) : null}
-                        </div>
-                      </td>
-                    </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-            {pagination.totalPages > 1 ? (
-              <div className={styles.resultPaginationBar}>
-                <div className={styles.resultPaginationInfo}>
-                  {t('monitoring.pagination_info', {
-                    current: pagination.currentPage,
-                    total: pagination.totalPages,
-                    start: pagination.startItem,
-                    end: pagination.endItem,
-                    count: pagination.count,
-                  })}
-                </div>
-                <div className={styles.resultPaginationControls}>
-                  <div className={styles.resultPageSizeField}>
-                    <span>{t('monitoring.page_size_label')}</span>
-                    <Select
-                      className={styles.resultPageSizeSelect}
-                      triggerClassName={styles.resultPageSizeSelectTrigger}
-                      value={String(resultPageSize)}
-                      options={CODEX_INSPECTION_RESULT_PAGE_SIZE_OPTIONS.map((size) => ({
-                        value: String(size),
-                        label: t('monitoring.page_size_option', { count: size }),
-                      }))}
-                      onChange={(value) => {
-                        const parsed = Number.parseInt(value, 10);
-                        handleResultPageSizeChange(
-                          Number.isFinite(parsed) && parsed > 0 ? parsed : resultPageSize
-                        );
-                      }}
-                      ariaLabel={t('monitoring.page_size_label')}
-                      fullWidth={false}
-                    />
-                  </div>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => setResultPage(Math.max(1, pagination.currentPage - 1))}
-                    disabled={pagination.currentPage <= 1}
-                  >
-                    {t('monitoring.pagination_prev')}
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() =>
-                      setResultPage(Math.min(pagination.totalPages, pagination.currentPage + 1))
-                    }
-                    disabled={pagination.currentPage >= pagination.totalPages}
-                  >
-                    {t('monitoring.pagination_next')}
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-          </>
-        ) : results.length === 0 ? (
-          <div className={styles.emptyAction}>
-            <span>{t('monitoring.codex_inspection_empty')}</span>
-            {serviceBase ? (
-              <Button size="sm" onClick={handleRunNow} loading={running} disabled={running}>
-                {t('monitoring.server_codex_inspection_run_now')}
+      : null;
+
+    const filterLabel = (filter: ActionFilter) => {
+      switch (filter) {
+        case 'delete':
+          return t('monitoring.codex_inspection_filter_delete');
+        case 'disable':
+          return t('monitoring.codex_inspection_filter_disable');
+        case 'enable':
+          return t('monitoring.codex_inspection_filter_enable');
+        case 'reauth':
+          return t('monitoring.codex_inspection_filter_reauth');
+        case 'keep':
+          return t('monitoring.codex_inspection_action_keep');
+        case 'all':
+        default:
+          return t('monitoring.codex_inspection_filter_all');
+      }
+    };
+
+    const handlingFilterLabel = (filter: HandlingFilter) => {
+      switch (filter) {
+        case 'pending':
+          return t('monitoring.codex_inspection_handling_filter_pending');
+        case 'no_action':
+          return t('monitoring.codex_inspection_handling_filter_no_action');
+        case 'all':
+        default:
+          return t('monitoring.codex_inspection_handling_filter_all');
+      }
+    };
+
+    const renderOperation = (item: CodexInspectionResultItem) => {
+      const source = resultByKey.get(item.key);
+      if (!source) {
+        return null;
+      }
+
+      const actionStatus = normalizeServerCodexInspectionActionStatus(source);
+      const terminalStatusLabel = formatServerTerminalActionStatusLabel(source, t);
+      const needsReview = actionStatus === 'needs_review' || mixedActionIds.has(source.id);
+      const hasFileLevelAction = isActionableServerCodexInspectionResult(source);
+      const pendingReauth = isPendingServerReauthResult(source);
+      const hasOperation =
+        Boolean(terminalStatusLabel) ||
+        canonicalExecutableIds.has(source.id) ||
+        needsReview ||
+        hasFileLevelAction ||
+        pendingReauth;
+
+      if (!hasOperation) return null;
+
+      return (
+        <div className={styles.serverResultOperation}>
+          {terminalStatusLabel ? (
+            <span className={styles.primaryReason}>{terminalStatusLabel}</span>
+          ) : null}
+          {canonicalExecutableIds.has(source.id) ? (
+            <Button
+              size="xs"
+              variant={source.action === 'delete' ? 'danger' : 'secondary'}
+              loading={executingResultIds.has(source.id)}
+              disabled={!canExecuteActions || executingResultIds.size > 0}
+              className={styles.serverResultActionButton}
+              onClick={() => handleExecuteServerActions([source], 'single')}
+            >
+              {(() => {
+                const ActionIcon = getServerActionIcon(source.action);
+                return <ActionIcon size={13} />;
+              })()}
+              {resolveActionLabel(source.action, t)}
+            </Button>
+          ) : needsReview ? (
+            <span className={styles.primaryReason}>
+              {t('monitoring.server_codex_inspection_action_needs_review_hint')}
+            </span>
+          ) : hasFileLevelAction ? (
+            <span className={styles.primaryReason}>
+              {t('monitoring.server_codex_inspection_file_level_action_hint')}
+            </span>
+          ) : pendingReauth ? (
+            <div className={styles.resultsHeaderActions}>
+              <Button
+                size="xs"
+                variant="secondary"
+                className={styles.serverResultActionButton}
+                onClick={() => handleOpenCodexReauth(source)}
+              >
+                <IconRefreshCw size={13} />
+                {t(
+                  source.provider === 'xai' ? 'auth_login.xai_oauth_button' : 'codex_reauth.button'
+                )}
               </Button>
-            ) : null}
-          </div>
-        ) : (
-          <div className={styles.emptyBlock}>{t('monitoring.server_codex_inspection_filter_no_match')}</div>
-        )}
-      </Panel>
+              <Button
+                size="xs"
+                variant="danger"
+                className={styles.serverResultActionButton}
+                onClick={() => handleDeleteServerReauth([source], 'single')}
+                disabled={!canExecuteActions || executingResultIds.size > 0}
+              >
+                <IconTrash2 size={13} />
+                {t('monitoring.codex_inspection_action_delete')}
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      );
+    };
+
+    return (
+      <CodexInspectionResultsPanel
+        result={panelResult}
+        filteredResults={resultPagination.pageItems}
+        pendingActionCount={executableResults.length}
+        manualActionCount={reauthResults.length}
+        reauthActionCount={reauthResults.length}
+        handlingFilterCounts={handlingFilterCounts}
+        filterCounts={actionFilterCounts}
+        handlingFilter={handlingFilter}
+        actionFilter={actionFilter}
+        pagination={resultPagination}
+        pageSize={resultPageSize}
+        pageSizeOptions={CODEX_INSPECTION_RESULT_PAGE_SIZE_OPTIONS}
+        executing={executingAllActions}
+        isInspectionInFlight={Boolean(hasRunningRun)}
+        t={t}
+        title={t('monitoring.codex_inspection_results_title')}
+        xaiInferenceEnabled={resultsConfig.xaiInferenceEnabled}
+        onActionFilterChange={setActionFilter}
+        onHandlingFilterChange={setHandlingFilter}
+        onPageChange={setResultPage}
+        onPageSizeChange={handleResultPageSizeChange}
+        onExecutePlanned={() => handleExecuteServerActions(executableResults, 'bulk')}
+        onExecuteSingle={() => undefined}
+        onReauthAccount={(item) => {
+          const source = resultByKey.get(item.key);
+          if (source) handleOpenCodexReauth(source);
+        }}
+        onDeleteReauthPlanned={
+          reauthResults.length > 0
+            ? () => handleDeleteServerReauth(reauthResults, 'bulk')
+            : undefined
+        }
+        filterLabel={filterLabel}
+        handlingFilterLabel={handlingFilterLabel}
+        renderOperation={renderOperation}
+      />
     );
   };
 
@@ -1638,9 +1847,10 @@ export function ServerCodexInspectionPage() {
       const lines = logs.map((entry) => {
         const ts = new Date(entry.createdAtMs).toISOString();
         const detail = entry.detail
-          ? ` ${typeof entry.detail === 'string' ? entry.detail : JSON.stringify(entry.detail)}`
+          ? ` ${formatServerCodexInspectionLogDetail(entry.detail, t)}`
           : '';
-        return `[${ts}] [${entry.level}] ${entry.message}${detail}`;
+        const message = entry.message.startsWith('monitoring.') ? t(entry.message) : entry.message;
+        return `[${ts}] [${entry.level}] ${message}${detail}`;
       });
       try {
         await navigator.clipboard.writeText(lines.join('\n'));
@@ -1661,7 +1871,12 @@ export function ServerCodexInspectionPage() {
       error: 0,
     };
     for (const entry of logs) {
-      if (entry.level === 'info' || entry.level === 'success' || entry.level === 'warning' || entry.level === 'error') {
+      if (
+        entry.level === 'info' ||
+        entry.level === 'success' ||
+        entry.level === 'warning' ||
+        entry.level === 'error'
+      ) {
         counts[entry.level] += 1;
       }
     }
@@ -1672,15 +1887,19 @@ export function ServerCodexInspectionPage() {
       { value: 'warning', label: t('monitoring.server_codex_inspection_log_level_warning') },
       { value: 'error', label: t('monitoring.server_codex_inspection_log_level_error') },
     ];
-    const filtered = logLevelFilter === 'all' ? logs : logs.filter((entry) => entry.level === logLevelFilter);
+    const filtered =
+      logLevelFilter === 'all' ? logs : logs.filter((entry) => entry.level === logLevelFilter);
     return (
       <Panel
         title={t('monitoring.codex_inspection_logs_title')}
-        subtitle={t('monitoring.server_codex_inspection_logs_desc')}
         extra={
           <div className={styles.logToolbar}>
             {logs.length > 0 ? (
-              <div className={styles.logFilterGroup} role="tablist" aria-label={t('monitoring.codex_inspection_logs_title')}>
+              <div
+                className={styles.logFilterGroup}
+                role="tablist"
+                aria-label={t('monitoring.codex_inspection_logs_title')}
+              >
                 <div className={styles.segmentedControl}>
                   {filterOptions.map((opt) => {
                     const active = logLevelFilter === opt.value;
@@ -1700,7 +1919,9 @@ export function ServerCodexInspectionPage() {
                   })}
                 </div>
               </div>
-            ) : <span />}
+            ) : (
+              <span />
+            )}
             <div className={styles.logToolbarRight}>
               <Button
                 variant="secondary"
@@ -1733,21 +1954,23 @@ export function ServerCodexInspectionPage() {
                   key={entry.id}
                   className={`${styles.logRow} ${logLevelClass[entry.level] ?? styles.logInfo}`}
                 >
-                  <span className={styles.logTime}>{formatTimestamp(entry.createdAtMs, i18n.language)}</span>
+                  <span className={styles.logTime}>
+                    {formatTimestamp(entry.createdAtMs, i18n.language)}
+                  </span>
                   <span className={styles.logMessage}>
-                    {entry.message}
+                    {entry.message.startsWith('monitoring.') ? t(entry.message) : entry.message}
                     {entry.detail ? (
                       <small className={styles.serverLogDetail}>
-                        {typeof entry.detail === 'string'
-                          ? entry.detail
-                          : JSON.stringify(entry.detail)}
+                        {formatServerCodexInspectionLogDetail(entry.detail, t)}
                       </small>
                     ) : null}
                   </span>
                 </div>
               ))
             ) : (
-              <div className={styles.emptyBlockSmall}>{t('monitoring.codex_inspection_logs_empty')}</div>
+              <div className={styles.emptyBlockSmall}>
+                {t('monitoring.codex_inspection_logs_empty')}
+              </div>
             )}
           </div>
         ) : (
@@ -1767,7 +1990,12 @@ export function ServerCodexInspectionPage() {
         <div className={styles.topErrorBar} role="alert" aria-live="polite">
           <span>{error}</span>
           <div className={styles.topErrorActions}>
-            <Button variant="secondary" size="sm" onClick={() => void refreshRuns()} loading={loading}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void refreshRuns()}
+              loading={loading}
+            >
               {t('common.retry')}
             </Button>
           </div>
@@ -1777,12 +2005,22 @@ export function ServerCodexInspectionPage() {
       <div className={styles.serverDetailGrid}>
         {renderRunsPanel()}
         <div className={styles.serverDetailPanels}>
-          {detail?.run.error ? <div className={styles.serverError} role="alert">{detail.run.error}</div> : null}
-          {renderResultsPanel(resultRows, filteredResultRows, resultPagination)}
+          {detail?.run.error ? (
+            <div className={styles.serverError} role="alert">
+              {detail.run.error}
+            </div>
+          ) : null}
+          {renderResultsPanel()}
           {renderLogsPanel(detail?.logs ?? [])}
         </div>
       </div>
       {renderConfigDrawer()}
+      <CodexReauthDialog
+        open={Boolean(codexReauthTarget)}
+        target={codexReauthTarget}
+        onClose={() => setCodexReauthTarget(null)}
+        onSuccess={handleCodexReauthSuccess}
+      />
     </div>
   );
 }

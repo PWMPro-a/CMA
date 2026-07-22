@@ -1,5 +1,14 @@
-import { useState, type CSSProperties } from 'react';
+import { useMemo, useState, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { BarSeriesOption, LineSeriesOption } from 'echarts/charts';
+import type {
+  DataZoomComponentOption,
+  GridComponentOption,
+  LegendComponentOption,
+  TooltipComponentOption,
+} from 'echarts/components';
+import type { ComposeOption } from 'echarts/core';
+import { EChartsView } from '@/components/charts/EChartsView';
 import type {
   DashboardTodayRequestHealthTimeline,
   DashboardTodayRequestHealthTimelinePoint,
@@ -7,13 +16,7 @@ import type {
   DashboardTrafficPoint,
 } from '@/services/api/usageService';
 import { formatCompactNumber } from '@/utils/usage';
-import {
-  buildCallsLinePath,
-  buildTrafficAxisTickIndexes,
-  buildVisibleTrafficTimeline,
-  getTrafficMetricShare,
-  isCurrentTrafficBucket,
-} from './trafficOverviewChartModel';
+import { buildVisibleTrafficTimeline, isCurrentTrafficBucket } from './trafficOverviewChartModel';
 import styles from './TrafficOverviewCard.module.scss';
 
 interface TrafficOverviewCardProps {
@@ -21,12 +24,18 @@ interface TrafficOverviewCardProps {
   trafficNowMs?: number | null;
   todayRequestHealthTimeline: DashboardTodayRequestHealthTimeline | null;
   tokenMix: DashboardTokenMixSegment[];
-  totalTokens?: number;
   loading: boolean;
 }
 
-type TrafficGridStyle = CSSProperties & Record<'--bucket-count', number>;
-type TrafficBarStyle = CSSProperties & Record<'--metric-share' | '--metric-min-height', number | string>;
+type TrafficTrendChartOption = ComposeOption<
+  | BarSeriesOption
+  | DataZoomComponentOption
+  | GridComponentOption
+  | LegendComponentOption
+  | LineSeriesOption
+  | TooltipComponentOption
+>;
+
 type TokenRankStyle = CSSProperties & Record<'--rank-share' | '--rank-color', number | string>;
 type HealthCellStyle = CSSProperties & Record<'--cell-intensity', number>;
 
@@ -40,19 +49,19 @@ const formatHour = (bucketMs: number, locale: string) =>
 
 const tokenLabelMap: Record<string, string> = {
   input: 'dashboard.token_mix_input',
+  cached: 'dashboard.token_mix_cached',
   output: 'dashboard.token_mix_output',
   reasoning: 'dashboard.token_mix_reasoning',
-  cached: 'dashboard.token_mix_cached',
 };
 
 const tokenColorMap: Record<string, string> = {
   input: '#3b82f6',
+  cached: '#f59e0b',
   output: '#10b981',
   reasoning: '#8b5cf6',
-  cached: '#f59e0b',
 };
 
-const visibleTokenMixKeys = new Set(['input', 'output', 'reasoning', 'cached']);
+const visibleTokenMixKeys = new Set(['input', 'cached', 'output', 'reasoning']);
 
 const healthToneClassMap: Record<string, string> = {
   future: 'healthFuture',
@@ -83,12 +92,162 @@ const buildHealthTitle = (
   return `${time} · ${t('dashboard.traffic_calls')}: ${formatCompactNumber(point.calls)} · ${t('dashboard.request_health_success')}: ${formatCompactNumber(point.success)} · ${t('dashboard.request_health_failure')}: ${formatCompactNumber(point.failure)} · ${t('dashboard.success_rate')}: ${formatPercent(point.success_rate)}`;
 };
 
+const buildTrafficTrendOption = ({
+  locale,
+  nowMs,
+  t,
+  timeline,
+}: {
+  locale: string;
+  nowMs?: number | null;
+  t: (key: string) => string;
+  timeline: DashboardTrafficPoint[];
+}): TrafficTrendChartOption => ({
+  animationDuration: 260,
+  backgroundColor: 'transparent',
+  color: ['#3b82f6', '#10b981'],
+  dataZoom:
+    timeline.length > 12
+      ? [
+          {
+            type: 'inside',
+            xAxisIndex: 0,
+            filterMode: 'none',
+            minSpan: Math.min(100, Math.max(12, (6 / timeline.length) * 100)),
+            moveOnMouseMove: true,
+            moveOnMouseWheel: false,
+            zoomOnMouseWheel: true,
+          },
+        ]
+      : [],
+  grid: {
+    bottom: 24,
+    containLabel: true,
+    left: 4,
+    right: 10,
+    top: 18,
+  },
+  legend: { show: false },
+  tooltip: {
+    appendToBody: true,
+    axisPointer: {
+      lineStyle: { color: '#94a3b8', type: 'dashed', width: 1 },
+      snap: true,
+      type: 'line',
+    },
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    borderColor: '#dbe3ef',
+    borderRadius: 10,
+    borderWidth: 1,
+    className: styles.echartsTooltipWrapper,
+    confine: true,
+    extraCssText: 'box-shadow: 0 16px 36px rgba(15,23,42,0.14);',
+    formatter: (params: unknown) => {
+      const items = Array.isArray(params) ? params : [params];
+      const first = items[0] as { dataIndex?: number } | undefined;
+      const point =
+        typeof first?.dataIndex === 'number' ? timeline[first.dataIndex] : undefined;
+      const rows = [
+        [t('dashboard.traffic_calls'), point?.calls ?? 0],
+        [t('dashboard.traffic_tokens'), point?.tokens ?? 0],
+      ]
+        .map(
+          ([label, value]) =>
+            `<div class="${styles.echartsTooltipRow}"><span>${label}</span><strong>${formatCompactNumber(Number(value))}</strong></div>`
+        )
+        .join('');
+      return `<div class="${styles.echartsTooltip}"><b>${
+        point ? formatHour(point.bucket_ms, locale) : ''
+      }</b>${rows}</div>`;
+    },
+    padding: 0,
+    trigger: 'axis',
+  },
+  xAxis: {
+    axisLabel: {
+      color: '#64748b',
+      fontSize: 10,
+      hideOverlap: true,
+      margin: 10,
+    },
+    axisLine: { lineStyle: { color: '#e2e8f0' } },
+    axisTick: { show: false },
+    data: timeline.map((point) => formatHour(point.bucket_ms, locale)),
+    type: 'category',
+  },
+  yAxis: [
+    {
+      axisLabel: {
+        color: '#64748b',
+        formatter: (value: number) => formatCompactNumber(value),
+        fontSize: 10,
+      },
+      nameTextStyle: { color: '#64748b' },
+      scale: true,
+      splitLine: { lineStyle: { color: '#e8edf5', type: 'dashed' } },
+      type: 'value',
+    },
+    {
+      axisLabel: {
+        color: '#3b82f6',
+        formatter: (value: number) => formatCompactNumber(value),
+        fontSize: 10,
+      },
+      position: 'right',
+      scale: true,
+      splitLine: { show: false },
+      type: 'value',
+    },
+  ],
+  series: [
+    {
+      barMaxWidth: 20,
+      data: timeline.map((point) => ({
+        itemStyle: {
+          opacity: isCurrentTrafficBucket(point, nowMs) ? 0.58 : 1,
+        },
+        value: point.tokens,
+      })),
+      itemStyle: {
+        borderRadius: [4, 4, 0, 0],
+        color: '#10b981',
+      },
+      name: t('dashboard.traffic_tokens'),
+      type: 'bar',
+      yAxisIndex: 0,
+    },
+    {
+      areaStyle: {
+        color: {
+          colorStops: [
+            { color: 'rgba(59,130,246,0.18)', offset: 0 },
+            { color: 'rgba(59,130,246,0)', offset: 1 },
+          ],
+          x: 0,
+          x2: 0,
+          y: 0,
+          y2: 1,
+          type: 'linear',
+        },
+      },
+      data: timeline.map((point) => point.calls),
+      lineStyle: { color: '#3b82f6', width: 2.4 },
+      name: t('dashboard.traffic_calls'),
+      showSymbol: timeline.length <= 24,
+      smooth: 0.22,
+      symbol: 'circle',
+      symbolSize: 5,
+      type: 'line',
+      yAxisIndex: 1,
+    },
+  ],
+});
+
 export function TrafficOverviewCard({
   timeline,
   trafficNowMs,
   todayRequestHealthTimeline,
   tokenMix,
-  totalTokens: todayTotalTokens,
   loading,
 }: TrafficOverviewCardProps) {
   const { t, i18n } = useTranslation();
@@ -97,13 +256,10 @@ export function TrafficOverviewCard({
   const hasData = visibleTimeline.some((point) => point.calls > 0 || point.tokens > 0);
   const visibleTokenMix = tokenMix.filter((segment) => visibleTokenMixKeys.has(segment.key));
   const tokenMixTotal = visibleTokenMix.reduce((acc, s) => acc + s.tokens, 0);
-  const displayTotalTokens = todayTotalTokens ?? tokenMixTotal;
+  const displayTotalTokens = tokenMixTotal;
   const hasTokenMixData = visibleTokenMix.some((segment) => segment.tokens > 0);
   const rankedTokenMix = [...visibleTokenMix].sort((left, right) => right.tokens - left.tokens);
   const maxTokenMixTokens = rankedTokenMix.reduce((max, segment) => Math.max(max, segment.tokens), 0);
-  const trafficAxisTickIndexes = buildTrafficAxisTickIndexes(visibleTimeline.length);
-  const trafficGridStyle = { '--bucket-count': Math.max(visibleTimeline.length, 1) } as TrafficGridStyle;
-  const callsLinePath = buildCallsLinePath(visibleTimeline);
   const healthPoints = todayRequestHealthTimeline?.points ?? [];
   const healthBucketMs = todayRequestHealthTimeline?.bucket_ms || fallbackHealthBucketMs;
   const healthRowsPerHour = Math.max(1, Math.round((60 * 60 * 1000) / healthBucketMs));
@@ -113,6 +269,16 @@ export function TrafficOverviewCard({
       )
     : [];
   const hourLabelIndexes = [0, 6, 12, 18, 23];
+  const trafficTrendOption = useMemo(
+    () =>
+      buildTrafficTrendOption({
+        locale: i18n.language,
+        nowMs: trafficNowMs,
+        t,
+        timeline: visibleTimeline,
+      }),
+    [i18n.language, t, trafficNowMs, visibleTimeline]
+  );
 
   return (
     <div className={styles.chartsGrid}>
@@ -132,57 +298,18 @@ export function TrafficOverviewCard({
           </div>
         </div>
         <div className={styles.trafficChart}>
-          <div className={styles.trafficPlot}>
-            <div className={styles.trafficGridLines} aria-hidden="true">
-              {Array.from({ length: 5 }, (_, index) => <span key={index} />)}
-            </div>
-            <div className={styles.trafficBars} style={trafficGridStyle}>
-              {visibleTimeline.map((point) => {
-                const share = getTrafficMetricShare(point, 'tokens');
-                return (
-                  <div
-                    key={point.bucket_ms}
-                    className={`${styles.trafficBucket} ${
-                      isCurrentTrafficBucket(point, trafficNowMs) ? styles.trafficBucketPartial : ''
-                    }`}
-                    title={`${formatHour(point.bucket_ms, i18n.language)} · ${t('dashboard.traffic_calls')}: ${formatCompactNumber(point.calls)} · ${t('dashboard.traffic_tokens')}: ${formatCompactNumber(point.tokens)}`}
-                  >
-                    <div
-                      className={`${styles.trafficBar} ${styles.tokensBar}`}
-                      style={
-                        {
-                          '--metric-share': share,
-                          '--metric-min-height': share > 0 ? '2px' : '0px',
-                        } as TrafficBarStyle
-                      }
-                    />
-                  </div>
-                );
-              })}
-            </div>
+          <div className={styles.chartViewport}>
             {hasData ? (
-              <svg className={styles.callsLineLayer} viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                <path d={callsLinePath} />
-              </svg>
+              <EChartsView
+                option={trafficTrendOption}
+                className={styles.echartsCanvas}
+                ariaLabel={t('dashboard.traffic_trend_today')}
+              />
             ) : null}
-            <div className={styles.trafficYAxis} aria-hidden="true">
-              <span>{t('dashboard.traffic_tokens')}</span>
-              <span>{t('dashboard.traffic_calls')}</span>
-            </div>
             {!hasData && !loading && (
               <div className={styles.empty}>{t('dashboard.no_traffic_data')}</div>
             )}
             {loading && !hasData && <div className={styles.empty}>...</div>}
-          </div>
-          <div className={styles.trafficAxis} style={trafficGridStyle}>
-            {trafficAxisTickIndexes.map((index) => {
-              const point = visibleTimeline[index];
-              return point ? (
-                <span key={point.bucket_ms} style={{ gridColumn: index + 1 }}>
-                  {formatHour(point.bucket_ms, i18n.language)}
-                </span>
-              ) : null;
-            })}
           </div>
         </div>
       </section>

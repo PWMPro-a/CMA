@@ -213,6 +213,28 @@ describe('buildAnalyticsFilters', () => {
       providers: ['legacy-provider'],
     });
   });
+
+  it('maps usage analytics drilldown dimensions into backend filters', () => {
+    const filters = buildAnalyticsFilters(
+      {
+        authFile: 'codex-auth.json',
+        projectId: 'project-1',
+        requestType: 'codex',
+        minLatencyMs: 10_000,
+        cacheStatus: 'hit',
+      },
+      new Map(),
+      []
+    );
+
+    expect(filters).toEqual({
+      auth_files: ['codex-auth.json'],
+      project_ids: ['project-1'],
+      request_types: ['codex'],
+      min_latency_ms: 10_000,
+      cache_status: 'hit',
+    });
+  });
 });
 
 describe('buildFilterOptionsFromAnalytics', () => {
@@ -476,6 +498,7 @@ describe('buildFilterOptionsFromAnalytics', () => {
       'auth:openai-auth',
       'source:source-b',
     ]);
+    expect(options.accountRows[0].sourceKeys).toContain('openai:0:0');
   });
 });
 

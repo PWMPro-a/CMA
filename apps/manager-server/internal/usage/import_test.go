@@ -2,6 +2,8 @@ package usage
 
 import (
 	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -85,7 +87,7 @@ func TestParseImportPayloadLegacyUsageExport(t *testing.T) {
 	}
 
 	second := result.Events[1]
-	if second.TotalTokens != 26 || !second.Failed || second.AuthIndex != "auth-2" {
+	if second.TotalTokens != 18 || !second.Failed || second.AuthIndex != "auth-2" {
 		t.Fatalf("second event = %#v", second)
 	}
 
@@ -95,6 +97,64 @@ func TestParseImportPayloadLegacyUsageExport(t *testing.T) {
 	}
 	if again.Events[0].EventHash != first.EventHash || again.Events[1].EventHash != second.EventHash {
 		t.Fatalf("legacy event hashes are not stable")
+	}
+}
+
+func TestImportCacheAccountingUsesStructuredSemantics(t *testing.T) {
+	tests := []struct {
+		name        string
+		payload     string
+		wantMode    string
+		wantInput   int64
+		wantTotal   int64
+		wantUncache int64
+	}{
+		{
+			name:     "openai compat executor beats claude alias",
+			payload:  `{"event_hash":"openai-compat","timestamp_ms":1,"timestamp":"2026-07-15T00:00:00Z","executor_type":"OpenAICompatExecutor","model":"claude-sonnet","tokens":{"input_tokens":100,"cache_read_tokens":20,"cache_creation_tokens":10}}`,
+			wantMode: CacheInputModeIncluded, wantInput: 100, wantTotal: 100, wantUncache: 70,
+		},
+		{
+			name:     "claude executor beats grok alias",
+			payload:  `{"eventHash":"claude-grok","timestampMs":1,"timestamp":"2026-07-15T00:00:00Z","executorType":"ClaudeExecutor","model":"grok-4","tokens":{"inputTokens":100,"cacheReadTokens":20,"cacheCreationTokens":10}}`,
+			wantMode: CacheInputModeSeparate, wantInput: 130, wantTotal: 130, wantUncache: 100,
+		},
+		{
+			name:     "usage object and moonshot provider are included",
+			payload:  `{"event_hash":"moonshot","timestamp_ms":1,"timestamp":"2026-07-15T00:00:00Z","provider":"moonshot","model":"claude-alias","usage":{"input_tokens":100,"cache_read_tokens":20,"cache_creation_tokens":10}}`,
+			wantMode: CacheInputModeIncluded, wantInput: 100, wantTotal: 100, wantUncache: 70,
+		},
+		{
+			name:     "nested explicit mode and total are preserved",
+			payload:  `{"event_hash":"explicit","timestamp_ms":1,"timestamp":"2026-07-15T00:00:00Z","executor_type":"XAIExecutor","model":"grok-4","tokens":{"input_tokens":100,"cache_read_tokens":20,"cache_creation_tokens":10,"cache_input_mode":"separate_from_input","total_tokens":777}}`,
+			wantMode: CacheInputModeSeparate, wantInput: 130, wantTotal: 777, wantUncache: 100,
+		},
+		{
+			name:     "explicit total from preserved raw json is retained",
+			payload:  `{"event_hash":"raw-explicit","timestamp_ms":1,"timestamp":"2026-07-15T00:00:00Z","executor_type":"XAIExecutor","model":"grok-4","tokens":{"input_tokens":100,"cache_read_tokens":20},"raw_json":"{\"tokens\":{\"total_tokens\":888}}"}`,
+			wantMode: CacheInputModeIncluded, wantInput: 100, wantTotal: 888, wantUncache: 80,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ParseImportPayload([]byte(tt.payload))
+			if err != nil {
+				t.Fatalf("parse import: %v", err)
+			}
+			if len(result.Events) != 1 {
+				t.Fatalf("events = %#v", result.Events)
+			}
+			event := result.Events[0]
+			if event.CacheInputMode != tt.wantMode || event.NormalizedTotalInputTokens != tt.wantInput || event.NormalizedUncachedInputTokens != tt.wantUncache || event.TotalTokens != tt.wantTotal {
+				t.Fatalf("event = %#v", event)
+			}
+			if tt.wantTotal == 777 {
+				hints := RawCacheAccountingHintsFromJSON(event.RawJSON)
+				if hints.ExplicitMode != CacheInputModeSeparate || !hints.HasExplicitTotal || hints.ExplicitTotal != 777 {
+					t.Fatalf("preserved hints = %#v raw=%s", hints, event.RawJSON)
+				}
+			}
+		})
 	}
 }
 
@@ -160,6 +220,75 @@ not-json`
 	}
 	if result.Format != ImportFormatJSONL || len(result.Events) != 1 || result.Failed != 1 {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestStreamImportPayloadBatchesJSONLAndCountsBadLines(t *testing.T) {
+	var payload strings.Builder
+	for index := 0; index < 600; index++ {
+		_, _ = fmt.Fprintf(&payload, `{"event_hash":"stream-%d","timestamp_ms":%d,"timestamp":"2026-01-02T03:04:05Z","model":"gpt-4o","endpoint":"GET /v1/models"}`+"\n", index, index+1)
+		if index == 300 {
+			payload.WriteString("not-json\n")
+		}
+	}
+
+	var batchSizes []int
+	result, err := StreamImportPayload(strings.NewReader(payload.String()), 256, func(events []Event) error {
+		batchSizes = append(batchSizes, len(events))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("stream import: %v", err)
+	}
+	if result.Format != ImportFormatJSONL || result.Total != 600 || result.Failed != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	if !reflect.DeepEqual(batchSizes, []int{256, 256, 88}) {
+		t.Fatalf("batch sizes = %#v", batchSizes)
+	}
+}
+
+func TestStreamImportPayloadStreamsTopLevelArray(t *testing.T) {
+	var payload strings.Builder
+	payload.WriteByte('[')
+	for index := 0; index < 300; index++ {
+		if index > 0 {
+			payload.WriteByte(',')
+		}
+		_, _ = fmt.Fprintf(&payload, `{"event_hash":"array-%d","timestamp_ms":%d,"timestamp":"2026-01-02T03:04:05Z","model":"gpt-4o","endpoint":"GET /v1/models"}`, index, index+1)
+	}
+	payload.WriteByte(']')
+
+	var batchSizes []int
+	result, err := StreamImportPayload(strings.NewReader(payload.String()), 256, func(events []Event) error {
+		batchSizes = append(batchSizes, len(events))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("stream import array: %v", err)
+	}
+	if result.Total != 300 || result.Failed != 0 || !reflect.DeepEqual(batchSizes, []int{256, 44}) {
+		t.Fatalf("result = %#v batches = %#v", result, batchSizes)
+	}
+}
+
+func TestStreamImportPayloadKeepsCompletedBatchesOnLaterConsumerError(t *testing.T) {
+	payload := strings.Repeat(`{"timestamp":"2026-01-02T03:04:05Z","model":"gpt-4o","endpoint":"GET /v1/models"}`+"\n", 600)
+	completed := 0
+	batchCalls := 0
+	result, err := StreamImportPayload(strings.NewReader(payload), 256, func(events []Event) error {
+		batchCalls++
+		if batchCalls == 2 {
+			return errors.New("insert failed")
+		}
+		completed += len(events)
+		return nil
+	})
+	if err == nil || err.Error() != "insert failed" {
+		t.Fatalf("error = %v", err)
+	}
+	if completed != 256 || result.Total != 512 {
+		t.Fatalf("completed = %d result = %#v", completed, result)
 	}
 }
 
@@ -252,10 +381,12 @@ func TestNormalizeRawReadsCPA7118UsageFields(t *testing.T) {
 		event.TotalTokens != 33 {
 		t.Fatalf("event tokens = %#v", event)
 	}
-	if !event.Failed || event.FailStatusCode != 429 || event.FailBody != "rate limit exceeded" {
+	if !event.Failed || event.FailStatusCode != 429 ||
+		!strings.Contains(event.FailBody, "rate limit exceeded") ||
+		!strings.Contains(event.FailBody, "Retry-After") {
 		t.Fatalf("event failure = %#v", event)
 	}
-	if event.FailSummary != "rate limit exceeded" {
+	if !strings.Contains(event.FailSummary, "rate limit exceeded") || !strings.Contains(event.FailSummary, "Retry-After") {
 		t.Fatalf("fail summary = %q", event.FailSummary)
 	}
 	if event.LatencyMS == nil || *event.LatencyMS != 1500 {
@@ -279,9 +410,155 @@ func TestNormalizeRawReadsCPA7118UsageFields(t *testing.T) {
 		detail.ExecutorType != "codex" || detail.Tokens.CacheReadTokens != 4 ||
 		detail.Tokens.CacheCreationTokens != 1 || detail.FailStatusCode != 429 ||
 		detail.Tokens.CachedTokens != 0 || detail.Tokens.CacheTokens != 0 ||
-		detail.FailSummary != "rate limit exceeded" || detail.TTFTMS == nil ||
+		!strings.Contains(detail.FailSummary, "rate limit exceeded") ||
+		!strings.Contains(detail.FailSummary, "Retry-After") || detail.TTFTMS == nil ||
 		*detail.TTFTMS != 450 {
 		t.Fatalf("detail = %#v", detail)
+	}
+}
+
+func TestNormalizeRawReadsAnthropicCacheUsageFields(t *testing.T) {
+	payload := `{
+	  "timestamp": "2026-04-25T00:00:00Z",
+	  "provider": "anthropic",
+	  "model": "claude-sonnet-4-5",
+	  "endpoint": "POST /v1/messages",
+	  "usage": {
+	    "input_tokens": 100,
+	    "output_tokens": 20,
+	    "cached_tokens": 34,
+	    "cache_creation_input_tokens": 11,
+	    "cache_read_input_tokens": 23
+	  }
+	}`
+	event, err := NormalizeRaw([]byte(payload))
+	if err != nil {
+		t.Fatalf("normalize anthropic payload: %v", err)
+	}
+	if event.InputTokens != 100 || event.OutputTokens != 20 ||
+		event.CachedTokens != 34 || event.CacheReadTokens != 23 ||
+		event.CacheCreationTokens != 11 || event.TotalTokens != 154 ||
+		event.CacheInputMode != CacheInputModeSeparate ||
+		event.NormalizedUncachedInputTokens != 100 || event.NormalizedTotalInputTokens != 134 {
+		t.Fatalf("event tokens = %#v", event)
+	}
+
+	legacyPayload := BuildPayload([]Event{event})
+	detail := legacyPayload.APIs["POST /v1/messages"].Models["claude-sonnet-4-5"].Details[0]
+	if detail.Tokens.CachedTokens != 0 || detail.Tokens.CacheReadTokens != 23 ||
+		detail.Tokens.CacheCreationTokens != 11 || detail.Tokens.TotalTokens != 154 {
+		t.Fatalf("detail tokens = %#v", detail.Tokens)
+	}
+}
+
+func TestNormalizeRawReadsAnthropicCacheUsageFieldsAtTopLevel(t *testing.T) {
+	payload := `{
+	  "timestamp": "2026-04-25T00:00:00Z",
+	  "provider": "anthropic",
+	  "model": "claude-opus-4-1",
+	  "endpoint": "POST /v1/messages",
+	  "input_tokens": 10,
+	  "output_tokens": 5,
+	  "cacheReadInputTokens": 7,
+	  "cacheCreationInputTokens": 3
+	}`
+	event, err := NormalizeRaw([]byte(payload))
+	if err != nil {
+		t.Fatalf("normalize anthropic top-level payload: %v", err)
+	}
+	if event.CacheReadTokens != 7 || event.CacheCreationTokens != 3 || event.TotalTokens != 25 {
+		t.Fatalf("event tokens = %#v", event)
+	}
+}
+
+func TestNormalizeRawReadsCacheWriteTokenAliases(t *testing.T) {
+	payload := `{
+	  "timestamp": "2026-07-10T00:00:00Z",
+	  "model": "gpt-5.6-sol",
+	  "tokens": {
+	    "input_tokens": 100,
+	    "cache_write_tokens": 17
+	  }
+	}`
+
+	event, err := NormalizeRaw([]byte(payload))
+	if err != nil {
+		t.Fatalf("normalize raw: %v", err)
+	}
+	if event.CacheCreationTokens != 17 {
+		t.Fatalf("cache creation tokens = %d, want 17", event.CacheCreationTokens)
+	}
+}
+
+func TestNormalizeRawHandlesCurrentCPAGPT56QueuePayloadWithoutCacheMode(t *testing.T) {
+	payload := `{
+	  "timestamp": "2026-07-10T00:00:00Z",
+	  "provider": "openai",
+	  "executor_type": "codex",
+	  "model": "gpt-5.6-sol",
+	  "service_tier": "priority",
+	  "request_service_tier": "priority",
+	  "response_service_tier": "default",
+	  "tokens": {
+	    "input_tokens": 100,
+	    "output_tokens": 20,
+	    "cached_tokens": 30,
+	    "cache_read_tokens": 30,
+	    "cache_creation_tokens": 17,
+	    "total_tokens": 120
+	  }
+	}`
+
+	event, err := NormalizeRaw([]byte(payload))
+	if err != nil {
+		t.Fatalf("normalize current CPA payload: %v", err)
+	}
+	if event.CacheInputMode != CacheInputModeIncluded ||
+		event.NormalizedUncachedInputTokens != 53 || event.NormalizedTotalInputTokens != 100 ||
+		event.NormalizedCacheReadTokens != 30 || event.NormalizedCacheCreationTokens != 17 {
+		t.Fatalf("normalized cache accounting = %#v", event)
+	}
+	if event.RequestServiceTier != "priority" || event.ResponseServiceTier != "default" || event.ServiceTier != "priority" {
+		t.Fatalf("service tiers = %q/%q/%q", event.RequestServiceTier, event.ResponseServiceTier, event.ServiceTier)
+	}
+}
+
+func TestNormalizeRawPrefersRequestServiceTierForCodex(t *testing.T) {
+	payload := `{
+	  "timestamp": "2026-07-10T00:00:00Z",
+	  "executor_type": "codex",
+	  "model": "gpt-5.6-sol",
+	  "service_tier": "priority",
+	  "request_service_tier": "priority",
+	  "response_service_tier": "default",
+	  "tokens": {"input_tokens": 1, "total_tokens": 1}
+	}`
+
+	event, err := NormalizeRaw([]byte(payload))
+	if err != nil {
+		t.Fatalf("normalize raw: %v", err)
+	}
+	if event.RequestServiceTier != "priority" || event.ResponseServiceTier != "default" || event.ServiceTier != "priority" {
+		t.Fatalf("service tiers = %q/%q/%q", event.RequestServiceTier, event.ResponseServiceTier, event.ServiceTier)
+	}
+}
+
+func TestNormalizeRawPrefersResponseServiceTierForNonCodex(t *testing.T) {
+	payload := `{
+	  "timestamp": "2026-07-10T00:00:00Z",
+	  "provider": "openai-compatible",
+	  "model": "gpt-5.4",
+	  "request_service_tier": "priority",
+	  "response_service_tier": "default",
+	  "tokens": {"input_tokens": 1, "total_tokens": 1}
+	}`
+
+	event, err := NormalizeRaw([]byte(payload))
+	if err != nil {
+		t.Fatalf("normalize raw: %v", err)
+	}
+	if event.RequestServiceTier != "priority" || event.ResponseServiceTier != "default" || event.ServiceTier != "default" {
+		t.Fatalf("service tiers = %q/%q/%q", event.RequestServiceTier, event.ResponseServiceTier, event.ServiceTier)
 	}
 }
 
@@ -297,7 +574,7 @@ func TestCompatibleCachedTokensDoesNotDoubleCountFineGrainedCache(t *testing.T) 
 	}
 }
 
-func TestNormalizeRawFallbackTotalIncludesFineGrainedCache(t *testing.T) {
+func TestNormalizeRawFallbackTotalAvoidsIncludedCacheDuplication(t *testing.T) {
 	payload := `{
 	  "timestamp": "2026-04-25T00:00:00Z",
 	  "source": "user@example.com",
@@ -316,8 +593,8 @@ func TestNormalizeRawFallbackTotalIncludesFineGrainedCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalize fallback total: %v", err)
 	}
-	if event.TotalTokens != 43 {
-		t.Fatalf("total tokens = %d, want 43", event.TotalTokens)
+	if event.TotalTokens != 33 {
+		t.Fatalf("total tokens = %d, want 33", event.TotalTokens)
 	}
 }
 

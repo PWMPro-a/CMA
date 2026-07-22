@@ -8,7 +8,7 @@ The reset command edits the local SQLite database. Stop Manager Server first so 
 
 `cpa-manager-plus reset-admin-key` replaces `settings.admin_credential_v1` in the Manager Server SQLite database with a new salted HMAC credential.
 
-- If no key is provided, it generates a long random `cmp_admin_...` key using the same generator as first startup.
+- If no key is provided, it generates a long random `cpamp_...` key using the same generator as first startup.
 - If a key is provided, the command stores only its digest and does not print the key back.
 - The command does not start the HTTP server, collector, or background workers.
 - The command does not need the CPA Management Key or `data.key`.
@@ -38,7 +38,7 @@ The command prints a generated key once:
 
 ```text
 CPA Manager Plus admin key reset.
-New admin key: cmp_admin_...
+New admin key: cpamp_...
 Save this value now. It will not be shown again.
 ```
 
@@ -136,6 +136,6 @@ Then restart the native process and log in with the new admin key.
 
 ## Security Notes
 
-- Treat the generated `cmp_admin_...` value as a secret.
+- Treat the generated `cpamp_...` value as a secret.
 - Rotate any stored deployment secret if the old admin key may have leaked.
 - This reset only changes Manager Server authentication. CPA credentials and encrypted CPA Manager Plus configuration are unchanged.

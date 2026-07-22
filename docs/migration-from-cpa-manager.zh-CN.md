@@ -7,7 +7,7 @@
 - 镜像名从 `seakee/cpa-manager` 变为 `seakee/cpa-manager-plus`。
 - 原生包和二进制从 `cpa-manager` 变为 `cpa-manager-plus`。
 - 后端目录从旧项目的 `usage-service` 变为 `apps/manager-server`，但 HTTP 兼容端点仍保留 `/usage-service/*`。
-- 完整 Docker 方案的登录凭证从 CPA Management Key 变为 Manager Server 管理员密钥 `cmp_admin_...`。
+- 完整 Docker 方案的登录凭证从 CPA Management Key 变为 Manager Server 管理员密钥 `cpamp_...`。
 - CPA Management Key 会使用 `/data/data.key` 加密后保存到 SQLite。
 - 旧 `settings.setup` 会迁移到 `settings.manager_config_v1`，并继续保留为兼容数据。
 
@@ -106,12 +106,12 @@ docker run -d \
 CPA_MANAGER_ADMIN_KEY='replace-with-a-long-random-admin-key' ./cpa-manager-plus
 ```
 
-如果未设置，服务会生成 `cmp_admin_...` 并只在首次启动日志输出一次。
+如果未设置，服务会生成 `cpamp_...` 并只在首次启动日志输出一次。
 
 ## 首次启动后验证
 
 1. 查看启动日志：
-   - 如果没有设置 `CPA_MANAGER_ADMIN_KEY`，保存 `CPA Manager Plus admin key generated: cmp_admin_...`。
+   - 如果没有设置 `CPA_MANAGER_ADMIN_KEY`，保存 `CPA Manager Plus admin key generated: cpamp_...`。
    - 确认没有 `decrypt secret`、`open sqlite`、`bootstrap manager server` 错误。
 2. 打开面板并进入「配置面板 -> CPA Manager Plus 配置」。
 3. 检查已绑定 CPA 地址、请求监控开关、采集模式、轮询间隔。

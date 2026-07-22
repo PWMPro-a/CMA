@@ -1,7 +1,13 @@
 import type { ChangeEvent, ReactNode, RefObject } from 'react';
 import { Link } from 'react-router-dom';
 import type { TFunction } from 'i18next';
-import { IconDownload, IconExternalLink, IconFileText, IconSettings } from '@/components/ui/icons';
+import {
+  IconDownload,
+  IconExternalLink,
+  IconFileText,
+  IconInbox,
+  IconSettings,
+} from '@/components/ui/icons';
 import styles from '../MonitoringCenterPage.module.scss';
 
 type MonitoringActionBarProps = {
@@ -18,6 +24,12 @@ type MonitoringActionBarProps = {
   statusSummary: ReactNode;
 };
 
+const shortLabel = (t: TFunction, shortKey: string, fallbackKey: string) => {
+  const fallback = t(fallbackKey);
+  const label = t(shortKey, { defaultValue: fallback });
+  return label === shortKey ? fallback : label;
+};
+
 export function MonitoringActionBar({
   usageTransferAvailable,
   usageExporting,
@@ -31,6 +43,13 @@ export function MonitoringActionBar({
   onUsageImportChange,
   statusSummary,
 }: MonitoringActionBarProps) {
+  const modelPriceSettingsLabel = shortLabel(
+    t,
+    'usage_stats.model_price_settings_short',
+    'usage_stats.model_price_settings'
+  );
+  const accountActionsLabel = shortLabel(t, 'nav.account_actions_short', 'nav.account_actions');
+
   return (
     <section className={styles.actionBar} aria-label={t('common.action')}>
       <div className={styles.actionGroup}>
@@ -63,11 +82,23 @@ export function MonitoringActionBar({
           <span>{usageImporting ? t('common.loading') : t('usage_stats.import')}</span>
         </button>
         {modelPricesAvailable ? (
-          <Link to="/model-prices" className={styles.actionButton}>
+          <Link
+            to="/model-prices"
+            className={styles.actionButton}
+            title={t('usage_stats.model_price_settings')}
+          >
             <IconSettings size={16} />
-            <span>{t('usage_stats.model_price_settings')}</span>
+            <span>{modelPriceSettingsLabel}</span>
           </Link>
         ) : null}
+        <Link
+          to="/monitoring/account-actions"
+          className={styles.actionButton}
+          title={t('nav.account_actions')}
+        >
+          <IconInbox size={16} />
+          <span>{accountActionsLabel}</span>
+        </Link>
         <input
           ref={usageImportInputRef}
           type="file"

@@ -19,25 +19,32 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/credentialpolicy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
 const (
-	codexUsageURL       = "https://chatgpt.com/backend-api/wham/usage"
-	codexFiveHourWindow = 18_000
-	codexWeekWindow     = 604_800
-	codexMonthWindow    = 2_592_000
-	maxStoredBodyText   = 2048
+	codexUsageURL             = "https://chatgpt.com/backend-api/wham/usage"
+	codexFiveHourWindow       = 18_000
+	codexWeekWindow           = 604_800
+	codexMonthWindow          = 2_592_000
+	codexMinMonthWindow       = 28 * 24 * 60 * 60
+	codexMaxMonthWindow       = 31 * 24 * 60 * 60
+	maxStoredBodyText         = 2048
+	maxCPAAPICallResponseSize = 16 * 1024 * 1024
 )
 
 var (
-	ErrRunAlreadyActive    = errors.New("codex inspection is already running")
-	ErrNotConfigured       = errors.New("usage service is not configured")
-	ErrRunNotFound         = errors.New("codex inspection run not found")
-	ErrRunNotCompleted     = errors.New("codex inspection run is not completed")
-	ErrActionIDsRequired   = errors.New("codex inspection action result ids are required")
-	ErrNoActionableResults = errors.New("codex inspection has no actionable results")
+	ErrRunAlreadyActive           = errors.New("codex inspection is already running")
+	ErrNotConfigured              = errors.New("usage service is not configured")
+	ErrRunNotFound                = errors.New("codex inspection run not found")
+	ErrRunNotCompleted            = errors.New("codex inspection run is not completed")
+	ErrActionIDsRequired          = errors.New("codex inspection action result ids are required")
+	ErrNoActionableResults        = errors.New("codex inspection has no actionable results")
+	ErrInvalidActionOverride      = errors.New("codex inspection action override is invalid")
+	errCPAAPICallResponseTooLarge = errors.New("CPA api-call response too large")
 )
 
 type Service struct {
@@ -61,7 +68,13 @@ type RunDetail struct {
 }
 
 type ExecuteActionsRequest struct {
-	ResultIDs []int64 `json:"resultIds"`
+	ResultIDs       []int64                `json:"resultIds"`
+	ActionOverrides []ManualActionOverride `json:"actionOverrides,omitempty"`
+}
+
+type ManualActionOverride struct {
+	ResultID int64  `json:"resultId"`
+	Action   string `json:"action"`
 }
 
 type ActionOutcome struct {
@@ -83,16 +96,17 @@ type ExecuteActionsResult struct {
 type authFile map[string]any
 
 type account struct {
-	Key            string
-	FileName       string
-	DisplayAccount string
-	AuthIndex      string
-	AccountID      string
-	Provider       string
-	Disabled       bool
-	Status         string
-	State          string
-	File           authFile
+	Key              string
+	FileName         string
+	DisplayAccount   string
+	AuthIndex        string
+	AccountID        string
+	Provider         string
+	Disabled         bool
+	AutoRecoverOwned bool
+	Status           string
+	State            string
+	File             authFile
 }
 
 type apiCallResponse struct {
@@ -116,19 +130,6 @@ type fileActionGroup struct {
 	Mixed    bool
 }
 
-type actionEndpointError struct {
-	Endpoint string
-	Err      error
-}
-
-type unauthorizedReason string
-
-const (
-	unauthorizedReasonUnknown     unauthorizedReason = "unknown"
-	unauthorizedReasonExpired     unauthorizedReason = "expired"
-	unauthorizedReasonInvalidated unauthorizedReason = "invalidated"
-)
-
 const (
 	fileActionDuplicateReason = "CPA 认证文件动作按文件执行，该文件已由另一条结果处理"
 	fileActionMixedReason     = "同一认证文件下存在多个不同建议动作，文件级处理已阻止，请到认证文件管理中手动处理"
@@ -144,6 +145,8 @@ type codexRateLimit struct {
 type codexWindow struct {
 	UsedPercent        *float64
 	LimitWindowSeconds *float64
+	ResetAfterSeconds  *float64
+	ResetAt            *float64
 }
 
 type codexClassifiedWindows struct {
@@ -151,6 +154,11 @@ type codexClassifiedWindows struct {
 	Weekly      *codexWindow
 	Monthly     *codexWindow
 	GenericLong *codexWindow
+}
+
+type codexWindowMeta struct {
+	ID       string
+	LabelKey string
 }
 
 func (w codexClassifiedWindows) longWindow() *codexWindow {
@@ -218,10 +226,10 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (RunDetail, error) {
 	persistCtx := context.WithoutCancel(ctx)
 
 	logger := runLogger{service: s, runID: run.ID}
-	logger.info(ctx, "Codex 巡检开始", map[string]any{
+	logger.info(ctx, "凭证健康巡检开始", map[string]any{
 		"triggerType": triggerType,
 		"triggerKey":  strings.TrimSpace(req.TriggerKey),
-		"targetType":  settings.TargetType,
+		"targetTypes": settings.TargetProviders(),
 	})
 
 	files, err := s.fetchAuthFiles(ctx, setup)
@@ -230,15 +238,20 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (RunDetail, error) {
 		return s.failRun(persistCtx, run, err)
 	}
 
-	accounts := make([]account, 0, len(files))
+	allAccounts := make([]account, 0, len(files))
 	for _, file := range files {
-		next := toAccount(file)
-		if next.Provider == settings.TargetType {
+		allAccounts = append(allAccounts, toAccount(file))
+	}
+	s.applyDisableOwnership(ctx, allAccounts, logger)
+
+	accounts := make([]account, 0, len(allAccounts))
+	for _, next := range allAccounts {
+		if settings.HasTargetProvider(next.Provider) {
 			accounts = append(accounts, next)
 		}
 	}
 	probeSetCount := len(accounts)
-	sampled := pickSample(accounts, settings.SampleSize)
+	sampled := pickSamplePerProvider(accounts, settings.SampleSize)
 
 	run.TotalFiles = len(files)
 	run.ProbeSetCount = probeSetCount
@@ -247,10 +260,11 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (RunDetail, error) {
 	run.EnabledCount = len(sampled) - run.DisabledCount
 	_ = s.store.UpdateCodexInspectionRun(persistCtx, run)
 
-	logger.info(ctx, "Codex 巡检集合已准备", map[string]any{
+	logger.info(ctx, "凭证健康巡检集合已准备", map[string]any{
 		"totalFiles":    len(files),
 		"probeSetCount": probeSetCount,
 		"sampledCount":  len(sampled),
+		"targetTypes":   settings.TargetProviders(),
 	})
 
 	results := s.inspectAccounts(ctx, setup, settings, run.ID, sampled, logger)
@@ -266,7 +280,7 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (RunDetail, error) {
 		if err := s.store.UpdateCodexInspectionRun(persistCtx, run); err != nil {
 			return RunDetail{}, err
 		}
-		logger.warning(persistCtx, "Codex 巡检已取消", map[string]any{"error": run.Error})
+		logger.warning(persistCtx, "凭证健康巡检已取消", map[string]any{"error": run.Error})
 		return s.GetRun(persistCtx, run.ID)
 	}
 
@@ -286,7 +300,7 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (RunDetail, error) {
 	if err := s.store.UpdateCodexInspectionRun(persistCtx, run); err != nil {
 		return RunDetail{}, err
 	}
-	logger.success(persistCtx, "Codex 巡检完成", map[string]any{
+	logger.success(persistCtx, "凭证健康巡检完成", map[string]any{
 		"deleteCount":  run.DeleteCount,
 		"disableCount": run.DisableCount,
 		"enableCount":  run.EnableCount,
@@ -340,7 +354,7 @@ func (s *Service) ExecuteManualActions(ctx context.Context, runID int64, req Exe
 	if detail.Run.Status != model.CodexInspectionStatusCompleted {
 		return ExecuteActionsResult{}, ErrRunNotCompleted
 	}
-	if detail.Run.Settings.TargetType != "" {
+	if len(detail.Run.Settings.TargetProviders()) > 0 {
 		settings = detail.Run.Settings
 	}
 
@@ -354,7 +368,11 @@ func (s *Service) ExecuteManualActions(ctx context.Context, runID int64, req Exe
 		return ExecuteActionsResult{}, ErrActionIDsRequired
 	}
 
-	items, preflightOutcomes := selectManualActionItems(detail.Results, selected)
+	manualResults, err := applyManualActionOverrides(detail.Results, selected, req.ActionOverrides)
+	if err != nil {
+		return ExecuteActionsResult{}, err
+	}
+	items, preflightOutcomes := selectManualActionItems(manualResults, selected)
 	if len(items) == 0 && len(preflightOutcomes) == 0 {
 		return ExecuteActionsResult{}, ErrNoActionableResults
 	}
@@ -381,7 +399,7 @@ func (s *Service) ExecuteManualActions(ctx context.Context, runID int64, req Exe
 	outcomes := make([]ActionOutcome, 0, len(preflightOutcomes)+len(validationOutcomes)+len(validItems))
 	outcomes = append(outcomes, preflightOutcomes...)
 	outcomes = append(outcomes, validationOutcomes...)
-	outcomes = append(outcomes, s.executeActionItems(ctx, setup, settings, validItems, logger, "手动处理", func(item model.CodexInspectionResult) string {
+	outcomes = append(outcomes, s.executeActionItems(ctx, setup, settings, validItems, logger, "手动处理", false, func(item model.CodexInspectionResult) string {
 		return item.Action
 	})...)
 	if len(outcomes) == 0 {
@@ -412,6 +430,49 @@ func (s *Service) ExecuteManualActions(ctx context.Context, runID int64, req Exe
 		return ExecuteActionsResult{}, err
 	}
 	return ExecuteActionsResult{Outcomes: outcomes, Detail: nextDetail}, nil
+}
+
+func applyManualActionOverrides(
+	results []model.CodexInspectionResult,
+	selected map[int64]struct{},
+	overrides []ManualActionOverride,
+) ([]model.CodexInspectionResult, error) {
+	if len(overrides) == 0 {
+		return results, nil
+	}
+	overrideByID := make(map[int64]string, len(overrides))
+	for _, override := range overrides {
+		action := strings.ToLower(strings.TrimSpace(override.Action))
+		if override.ResultID <= 0 || action != "delete" {
+			return nil, ErrInvalidActionOverride
+		}
+		if _, ok := selected[override.ResultID]; !ok {
+			return nil, ErrInvalidActionOverride
+		}
+		if existing, ok := overrideByID[override.ResultID]; ok && existing != action {
+			return nil, ErrInvalidActionOverride
+		}
+		overrideByID[override.ResultID] = action
+	}
+
+	out := make([]model.CodexInspectionResult, len(results))
+	copy(out, results)
+	matched := make(map[int64]struct{}, len(overrideByID))
+	for index := range out {
+		action, ok := overrideByID[out[index].ID]
+		if !ok {
+			continue
+		}
+		if out[index].Action != "reauth" || action != "delete" {
+			return nil, ErrInvalidActionOverride
+		}
+		out[index].Action = "delete"
+		matched[out[index].ID] = struct{}{}
+	}
+	if len(matched) != len(overrideByID) {
+		return nil, ErrInvalidActionOverride
+	}
+	return out, nil
 }
 
 func (s *Service) ResolveConfig(ctx context.Context) (model.ManagerCodexInspectionConfig, bool, error) {
@@ -474,44 +535,15 @@ func (s *Service) failRun(ctx context.Context, run model.CodexInspectionRun, cau
 }
 
 func (s *Service) fetchAuthFiles(ctx context.Context, setup store.Setup) ([]authFile, error) {
-	files, status, err := s.fetchAuthFilesAt(ctx, setup, "/auth-files")
-	if err == nil {
-		return files, nil
-	}
-	if status == http.StatusNotFound || status == http.StatusMethodNotAllowed {
-		files, _, err := s.fetchAuthFilesAt(ctx, setup, "/v0/management/auth-files")
-		return files, err
-	}
-	return nil, err
-}
-
-func (s *Service) fetchAuthFilesAt(ctx context.Context, setup store.Setup, path string) ([]authFile, int, error) {
-	req, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodGet,
-		cpa.NormalizeBaseURL(setup.CPAUpstreamURL)+path,
-		nil,
-	)
+	files, err := cpaauthfiles.New(s.client).Fetch(ctx, setup.CPAUpstreamURL, setup.ManagementKey)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+setup.ManagementKey)
-	res, err := s.client.Do(req)
-	if err != nil {
-		return nil, 0, err
+	result := make([]authFile, 0, len(files))
+	for _, file := range files {
+		result = append(result, authFile(file.Raw))
 	}
-	defer res.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 8*1024*1024))
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, res.StatusCode, fmt.Errorf("auth files request failed: %s %s", res.Status, truncate(string(body), maxStoredBodyText))
-	}
-	var payload struct {
-		Files []authFile `json:"files"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, res.StatusCode, err
-	}
-	return payload.Files, res.StatusCode, nil
+	return result, nil
 }
 
 func (s *Service) inspectAccounts(
@@ -585,11 +617,16 @@ func (s *Service) inspectSingleAccount(
 	item account,
 	logger runLogger,
 ) model.CodexInspectionResult {
+	if item.Provider == "xai" {
+		return s.inspectSingleXAIAccount(ctx, setup, settings, item, logger)
+	}
 	base := resultFromAccount(item)
 	if item.AuthIndex == "" {
 		base.Action = "keep"
 		base.ActionReason = "缺少 auth_index，保留账号"
 		base.Error = "缺少 auth_index"
+		base.ErrorKind = "missing_auth_index"
+		base.ErrorDetail = "缺少 auth_index"
 		logger.warning(ctx, "账号缺少 auth_index，跳过探测", map[string]any{
 			"fileName":       item.FileName,
 			"displayAccount": item.DisplayAccount,
@@ -608,7 +645,9 @@ func (s *Service) inspectSingleAccount(
 	if err != nil {
 		base.Action = "keep"
 		base.ActionReason = "探测异常，保留账号"
-		base.Error = err.Error()
+		base.Error = truncate(err.Error(), maxStoredBodyText)
+		base.ErrorKind = "request_error"
+		base.ErrorDetail = truncate(err.Error(), maxStoredBodyText)
 		logger.warning(ctx, "账号探测异常，保留账号", map[string]any{
 			"fileName":       item.FileName,
 			"displayAccount": item.DisplayAccount,
@@ -620,6 +659,8 @@ func (s *Service) inspectSingleAccount(
 		base.Action = "keep"
 		base.ActionReason = "探测响应缺少 status_code，保留账号"
 		base.Error = "响应缺少 status_code"
+		base.ErrorKind = "missing_status"
+		base.ErrorDetail = firstNonEmpty(truncate(response.BodyText, maxStoredBodyText), "响应缺少 status_code")
 		logger.warning(ctx, "账号探测未返回 status_code，保留账号", map[string]any{
 			"fileName":       item.FileName,
 			"displayAccount": item.DisplayAccount,
@@ -634,6 +675,10 @@ func (s *Service) inspectSingleAccount(
 	if payload == nil {
 		payload = parseRecord(response.BodyText)
 	}
+	planType := normalizeCodexPlanType(readString(payload, "plan_type", "planType"))
+	if planType == "" {
+		planType = resolveCodexPlanType(item.File)
+	}
 	rateLimit := parseRateLimit(readMap(payload, "rate_limit", "rateLimit"))
 	usedPercent := deriveRateLimitUsedPercent(rateLimit)
 	bodyLower := strings.ToLower(response.BodyText)
@@ -643,13 +688,23 @@ func (s *Service) inspectSingleAccount(
 		strings.Contains(bodyLower, "payment_required") ||
 		isRateLimitReached(rateLimit) ||
 		(usedPercent != nil && *usedPercent >= settings.UsedPercentThreshold)
-	decision := resolveProbeAction(item, statusCode, response.BodyText, rateLimit, usedPercent, isQuota, settings.UsedPercentThreshold)
+	decision := resolveProbeAction(item, statusCode, response.BodyText, rateLimit, usedPercent, isQuota, settings.UsedPercentThreshold, planType)
 
 	base.Action = decision.Action
 	base.ActionReason = decision.ActionReason
 	base.UsedPercent = decision.UsedPercent
 	base.IsQuota = decision.IsQuota
+	base.AutoRecoverEligible = decision.Action == "enable" && item.AutoRecoverOwned
+	if decision.Action == "enable" && !base.AutoRecoverEligible {
+		base.ActionReason += "；禁用来源不受巡检管理，仅允许手动启用"
+	}
+	base.PlanType = planType
+	base.QuotaWindows = buildCodexInspectionQuotaWindows(payload, planType)
 	base.Error = ""
+	if statusCode < 200 || statusCode >= 300 {
+		base.ErrorKind = "http_status"
+		base.ErrorDetail = firstNonEmpty(truncate(response.BodyText, maxStoredBodyText), fmt.Sprintf("HTTP %d", statusCode))
+	}
 
 	level := "info"
 	switch decision.Action {
@@ -677,15 +732,8 @@ func (s *Service) requestCodexUsage(
 	settings model.ManagerCodexInspectionConfig,
 	item account,
 ) (apiCallResponse, error) {
-	result, status, err := s.requestCodexUsageAt(ctx, setup, settings, item, "/api-call")
-	if err == nil {
-		return result, nil
-	}
-	if status == http.StatusNotFound || status == http.StatusMethodNotAllowed {
-		result, _, err := s.requestCodexUsageAt(ctx, setup, settings, item, "/v0/management/api-call")
-		return result, err
-	}
-	return apiCallResponse{}, err
+	result, _, err := s.requestCodexUsageAt(ctx, setup, settings, item, "/v0/management/api-call")
+	return result, err
 }
 
 func (s *Service) requestCodexUsageAt(
@@ -736,13 +784,13 @@ func (s *Service) requestCodexUsageAt(
 		return apiCallResponse{}, 0, err
 	}
 	defer res.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 8*1024*1024))
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, maxStoredBodyText))
 		return apiCallResponse{}, res.StatusCode, fmt.Errorf("api-call failed: %s %s", res.Status, truncate(string(body), maxStoredBodyText))
 	}
 
 	var raw map[string]any
-	if err := json.Unmarshal(body, &raw); err != nil {
+	if err := decodeCPAAPICallResponse(res.Body, maxCPAAPICallResponseSize, &raw); err != nil {
 		return apiCallResponse{}, res.StatusCode, err
 	}
 	statusRaw, hasStatus := firstValue(raw, "status_code", "statusCode")
@@ -757,6 +805,38 @@ func (s *Service) requestCodexUsageAt(
 	}, res.StatusCode, nil
 }
 
+func decodeCPAAPICallResponse(body io.Reader, maxBytes int64, target any) error {
+	if body == nil {
+		return io.EOF
+	}
+	if maxBytes <= 0 {
+		return errors.New("CPA api-call response size limit must be positive")
+	}
+	limited := &io.LimitedReader{R: body, N: maxBytes + 1}
+	decoder := json.NewDecoder(limited)
+	if err := decoder.Decode(target); err != nil {
+		if limited.N == 0 {
+			return fmt.Errorf("%w: exceeds %d bytes", errCPAAPICallResponseTooLarge, maxBytes)
+		}
+		return err
+	}
+	if limited.N == 0 {
+		return fmt.Errorf("%w: exceeds %d bytes", errCPAAPICallResponseTooLarge, maxBytes)
+	}
+	var trailing any
+	trailingErr := decoder.Decode(&trailing)
+	if limited.N == 0 {
+		return fmt.Errorf("%w: exceeds %d bytes", errCPAAPICallResponseTooLarge, maxBytes)
+	}
+	if errors.Is(trailingErr, io.EOF) {
+		return nil
+	}
+	if trailingErr == nil {
+		return errors.New("api-call response contains multiple JSON values")
+	}
+	return fmt.Errorf("decode api-call response trailing data: %w", trailingErr)
+}
+
 func (s *Service) executeAutoActions(
 	ctx context.Context,
 	setup store.Setup,
@@ -765,13 +845,13 @@ func (s *Service) executeAutoActions(
 	logger runLogger,
 ) []ActionOutcome {
 	mode := model.NormalizeCodexInspectionAutoActionMode(settings.AutoActionMode, model.CodexInspectionAutoActionNone)
-	items, preflightOutcomes := selectAutoActionItems(mode, results)
+	items, preflightOutcomes := selectAutoActionItems(mode, settings.AutoRecoverEnabled, results)
 	if len(items) == 0 {
 		return preflightOutcomes
 	}
 	outcomes := make([]ActionOutcome, 0, len(preflightOutcomes)+len(items))
 	outcomes = append(outcomes, preflightOutcomes...)
-	outcomes = append(outcomes, s.executeActionItems(ctx, setup, settings, items, logger, "自动处理", func(item model.CodexInspectionResult) string {
+	outcomes = append(outcomes, s.executeActionItems(ctx, setup, settings, items, logger, "自动处理", true, func(item model.CodexInspectionResult) string {
 		return resolveExecutableAction(mode, item.Action)
 	})...)
 	return outcomes
@@ -784,6 +864,7 @@ func (s *Service) executeActionItems(
 	items []model.CodexInspectionResult,
 	logger runLogger,
 	logPrefix string,
+	automatic bool,
 	actionFor func(model.CodexInspectionResult) string,
 ) []ActionOutcome {
 	workers := settings.DeleteWorkers
@@ -821,7 +902,7 @@ func (s *Service) executeActionItems(
 						DisplayAccount: item.DisplayAccount,
 						Action:         action,
 					}
-					if err := s.executeAction(ctx, setup, actionItem); err != nil {
+					if err := s.executeAction(ctx, setup, actionItem, automatic); err != nil {
 						outcome.Success = false
 						outcome.Status = model.CodexInspectionActionStatusFailed
 						outcome.Error = err.Error()
@@ -877,50 +958,61 @@ func collectActionOutcomes(outcomes <-chan ActionOutcome, capacity int) []Action
 	return result
 }
 
-func (s *Service) executeAction(ctx context.Context, setup store.Setup, item model.CodexInspectionResult) error {
+func (s *Service) executeAction(ctx context.Context, setup store.Setup, item model.CodexInspectionResult, automatic bool) error {
+	var revokedOwnership []store.CodexInspectionDisableOwnership
+	shouldRevokeOwnership := item.Action == "enable" || item.Action == "delete" || (item.Action == "disable" && !automatic)
+	if shouldRevokeOwnership {
+		var err error
+		revokedOwnership, err = s.store.RevokeCodexInspectionDisableOwnership(ctx, []string{item.FileName}, false)
+		if err != nil {
+			return fmt.Errorf("revoke inspection disable ownership: %w", err)
+		}
+	}
+
+	var actionErr error
 	switch item.Action {
 	case "delete":
-		if err, status := s.deleteAuthFile(ctx, setup, "/auth-files", item.FileName); err != nil {
-			if shouldFallbackManagement(status) {
-				return s.deleteAuthFileOnly(ctx, setup, "/v0/management/auth-files", item.FileName)
-			}
-			return err
-		}
-		return nil
+		actionErr = s.deleteAuthFileOnly(ctx, setup, "/v0/management/auth-files", item.FileName)
 	case "disable", "enable":
 		disabled := item.Action == "disable"
 		payload := map[string]any{"name": item.FileName, "disabled": disabled}
-		primaryErr, primaryStatus := s.patchAuthFile(ctx, setup, "/auth-files", payload)
-		if primaryErr == nil {
-			return nil
-		}
-		statusErr, statusCode := s.patchAuthFile(ctx, setup, "/auth-files/status", payload)
-		if statusErr == nil {
-			return nil
-		}
-		if shouldFallbackManagement(primaryStatus) && shouldFallbackManagement(statusCode) {
-			managementErr, _ := s.patchAuthFile(ctx, setup, "/v0/management/auth-files", payload)
-			if managementErr == nil {
-				return nil
-			}
-			managementStatusErr, _ := s.patchAuthFile(ctx, setup, "/v0/management/auth-files/status", payload)
-			if managementStatusErr == nil {
-				return nil
-			}
-			return combineActionEndpointErrors(
-				actionEndpointError{Endpoint: "/auth-files", Err: primaryErr},
-				actionEndpointError{Endpoint: "/auth-files/status", Err: statusErr},
-				actionEndpointError{Endpoint: "/v0/management/auth-files", Err: managementErr},
-				actionEndpointError{Endpoint: "/v0/management/auth-files/status", Err: managementStatusErr},
-			)
-		}
-		return combineActionEndpointErrors(
-			actionEndpointError{Endpoint: "/auth-files", Err: primaryErr},
-			actionEndpointError{Endpoint: "/auth-files/status", Err: statusErr},
-		)
+		actionErr, _ = s.patchAuthFile(ctx, setup, "/v0/management/auth-files/status", payload)
 	default:
 		return nil
 	}
+	if actionErr != nil {
+		if restoreErr := s.store.RestoreCodexInspectionDisableOwnership(context.WithoutCancel(ctx), revokedOwnership); restoreErr != nil {
+			return fmt.Errorf("%w; restore inspection disable ownership: %v", actionErr, restoreErr)
+		}
+		return actionErr
+	}
+
+	switch item.Action {
+	case "disable":
+		if !automatic {
+			return nil
+		}
+		if item.Disabled {
+			return nil
+		}
+		if err := s.store.UpsertCodexInspectionDisableOwnership(ctx, model.CodexInspectionDisableOwnership{
+			FileName:     item.FileName,
+			Provider:     item.Provider,
+			AuthIndex:    item.AuthIndex,
+			AccountID:    item.AccountID,
+			DisabledAtMS: time.Now().UnixMilli(),
+		}); err != nil {
+			rollbackErr, _ := s.patchAuthFile(ctx, setup, "/v0/management/auth-files/status", map[string]any{
+				"name":     item.FileName,
+				"disabled": false,
+			})
+			if rollbackErr != nil {
+				return fmt.Errorf("persist inspection disable ownership: %w; rollback enable failed: %v", err, rollbackErr)
+			}
+			return fmt.Errorf("persist inspection disable ownership: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) deleteAuthFileOnly(ctx context.Context, setup store.Setup, path string, fileName string) error {
@@ -935,25 +1027,6 @@ func (s *Service) deleteAuthFile(ctx context.Context, setup store.Setup, path st
 		return err, 0
 	}
 	return s.doCPAAction(req, setup.ManagementKey)
-}
-
-func (s *Service) patchAuthFileOnly(ctx context.Context, setup store.Setup, path string, payload map[string]any) error {
-	err, _ := s.patchAuthFile(ctx, setup, path, payload)
-	return err
-}
-
-func combineActionEndpointErrors(items ...actionEndpointError) error {
-	parts := make([]string, 0, len(items))
-	for _, item := range items {
-		if item.Err == nil {
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("%s: %v", item.Endpoint, item.Err))
-	}
-	if len(parts) == 0 {
-		return nil
-	}
-	return errors.New(strings.Join(parts, "; "))
 }
 
 func (s *Service) patchAuthFile(ctx context.Context, setup store.Setup, path string, payload map[string]any) (error, int) {
@@ -981,21 +1054,14 @@ func (s *Service) doCPAAction(req *http.Request, managementKey string) (error, i
 		return err, 0
 	}
 	defer res.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 1024*1024))
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, maxStoredBodyText))
 		return fmt.Errorf("%s %s", res.Status, truncate(string(body), maxStoredBodyText)), res.StatusCode
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err == nil {
-		if failed, ok := payload["failed"].([]any); ok && len(failed) > 0 {
-			return fmt.Errorf("CPA action failed: %s", truncate(fmt.Sprint(failed[0]), maxStoredBodyText)), res.StatusCode
-		}
+	if err := cpaauthfiles.ValidateActionResponse(res.Body); err != nil {
+		return err, res.StatusCode
 	}
 	return nil, res.StatusCode
-}
-
-func shouldFallbackManagement(status int) bool {
-	return status == http.StatusNotFound || status == http.StatusMethodNotAllowed
 }
 
 type runLogger struct {
@@ -1031,21 +1097,48 @@ func (l runLogger) log(ctx context.Context, level string, message string, detail
 	})
 }
 
-func resolveProbeAction(item account, statusCode int, bodyText string, rateLimit *codexRateLimit, usedPercent *float64, isQuota bool, threshold float64) inspectionDecision {
-	if decision := resolveWindowAwareProbeAction(item, statusCode, bodyText, rateLimit, threshold); decision != nil {
+func resolveProbeAction(item account, statusCode int, bodyText string, rateLimit *codexRateLimit, usedPercent *float64, isQuota bool, threshold float64, planTypes ...string) inspectionDecision {
+	if isDeactivatedWorkspaceResponse(statusCode, bodyText) {
+		return resolveDeactivatedWorkspaceProbeAction(usedPercent)
+	}
+	planType := ""
+	if len(planTypes) > 0 {
+		planType = planTypes[0]
+	}
+	if decision := resolveWindowAwareProbeAction(item, statusCode, bodyText, rateLimit, threshold, planType); decision != nil {
 		return *decision
 	}
 	return resolveLegacyProbeAction(item, statusCode, bodyText, usedPercent, isQuota, threshold)
 }
 
-func resolveWindowAwareProbeAction(item account, statusCode int, bodyText string, rateLimit *codexRateLimit, threshold float64) *inspectionDecision {
+func isDeactivatedWorkspaceResponse(statusCode int, bodyText string) bool {
+	return statusCode == http.StatusPaymentRequired &&
+		strings.Contains(strings.ToLower(bodyText), "deactivated_workspace")
+}
+
+func resolveDeactivatedWorkspaceProbeAction(usedPercent *float64) inspectionDecision {
+	return inspectionDecision{
+		Action:       "delete",
+		ActionReason: "接口返回 402，工作区已停用，建议删除账号",
+		UsedPercent:  usedPercent,
+		IsQuota:      false,
+	}
+}
+
+func resolveWindowAwareProbeAction(item account, statusCode int, bodyText string, rateLimit *codexRateLimit, threshold float64, planType string) *inspectionDecision {
 	if rateLimit == nil {
 		return nil
 	}
-	classified := classifyWindows(rateLimit)
+	classified := classifyWindows(rateLimit, planType)
 	longWindow := classified.longWindow()
 	if longWindow == nil || longWindow.UsedPercent == nil {
-		return nil
+		decision := inspectionDecision{
+			Action:       "keep",
+			ActionReason: "额度信息不完整，保留账号",
+			UsedPercent:  deriveRateLimitUsedPercent(rateLimit),
+			IsQuota:      false,
+		}
+		return &decision
 	}
 	longWindowUsedPercent := *longWindow.UsedPercent
 	longWindowLabel := classified.longWindowLabel(longWindow)
@@ -1073,10 +1166,15 @@ func resolveWindowAwareProbeAction(item account, statusCode int, bodyText string
 		}
 	}
 	if item.Disabled {
-		reason := fmt.Sprintf("%s仍可用，建议立即启用账号", longWindowLabel)
 		if fiveHourOverThreshold {
-			reason = fmt.Sprintf("5 小时额度达到阈值，但%s仍可用，建议立即启用账号", longWindowLabel)
+			return &inspectionDecision{
+				Action:       "keep",
+				ActionReason: fmt.Sprintf("5 小时额度仍达到阈值，%s可用但继续保持禁用", longWindowLabel),
+				UsedPercent:  ptrFloat(longWindowUsedPercent),
+				IsQuota:      true,
+			}
 		}
+		reason := fmt.Sprintf("%s仍可用，建议立即启用账号", longWindowLabel)
 		return &inspectionDecision{
 			Action:       "enable",
 			ActionReason: reason,
@@ -1119,10 +1217,18 @@ func resolveLegacyProbeAction(item account, statusCode int, bodyText string, use
 		}
 		return inspectionDecision{Action: "disable", ActionReason: reason, UsedPercent: usedPercent, IsQuota: isQuota}
 	}
-	if statusCode == http.StatusOK && item.Disabled {
+	if statusCode == http.StatusOK && item.Disabled && usedPercent != nil {
 		return inspectionDecision{
 			Action:       "enable",
 			ActionReason: "账号恢复健康，建议重新启用",
+			UsedPercent:  usedPercent,
+			IsQuota:      false,
+		}
+	}
+	if statusCode == http.StatusOK && item.Disabled {
+		return inspectionDecision{
+			Action:       "keep",
+			ActionReason: "额度信息不完整，无法确认恢复，保留账号",
 			UsedPercent:  usedPercent,
 			IsQuota:      false,
 		}
@@ -1131,44 +1237,41 @@ func resolveLegacyProbeAction(item account, statusCode int, bodyText string, use
 }
 
 func resolveUnauthorizedProbeAction(bodyText string, usedPercent *float64) inspectionDecision {
-	switch classifyUnauthorizedReason(bodyText) {
-	case unauthorizedReasonExpired:
+	decision, ok := credentialpolicy.EvaluateFailure(credentialpolicy.FailureSignal{
+		Provider:   "codex",
+		StatusCode: http.StatusUnauthorized,
+		Summary:    bodyText,
+	})
+	if !ok {
+		return inspectionDecision{
+			Action:       "reauth",
+			ActionReason: "接口返回 401，认证失败，建议重新登录账号",
+			UsedPercent:  usedPercent,
+			IsQuota:      false,
+		}
+	}
+	switch decision.ReasonCode {
+	case credentialpolicy.ReasonInvalidCredentials:
 		return inspectionDecision{
 			Action:       "reauth",
 			ActionReason: "接口返回 401，登录已过期，建议重新登录账号",
 			UsedPercent:  usedPercent,
 			IsQuota:      false,
 		}
-	case unauthorizedReasonInvalidated:
+	case credentialpolicy.ReasonTokenRevoked:
 		return inspectionDecision{
-			Action:       "delete",
-			ActionReason: "接口返回 401，认证令牌已失效，建议删除账号",
+			Action:       "reauth",
+			ActionReason: "接口返回 401，认证令牌已失效，建议重新登录账号",
 			UsedPercent:  usedPercent,
 			IsQuota:      false,
 		}
 	default:
 		return inspectionDecision{
-			Action:       "delete",
-			ActionReason: "接口返回 401，建议删除失效账号",
+			Action:       "reauth",
+			ActionReason: "接口返回 401，认证失败，建议重新登录账号",
 			UsedPercent:  usedPercent,
 			IsQuota:      false,
 		}
-	}
-}
-
-func classifyUnauthorizedReason(bodyText string) unauthorizedReason {
-	normalized := strings.ToLower(strings.TrimSpace(bodyText))
-	switch {
-	case strings.Contains(normalized, "provided authentication token is expired") ||
-		strings.Contains(normalized, "authentication token is expired") ||
-		strings.Contains(normalized, "token is expired"):
-		return unauthorizedReasonExpired
-	case strings.Contains(normalized, "authentication token has been invalidated") ||
-		strings.Contains(normalized, "token has been invalidated") ||
-		strings.Contains(normalized, "token is invalidated"):
-		return unauthorizedReasonInvalidated
-	default:
-		return unauthorizedReasonUnknown
 	}
 }
 
@@ -1189,9 +1292,9 @@ func resolveExecutableAction(mode string, action string) string {
 	return action
 }
 
-func selectAutoActionItems(mode string, results []model.CodexInspectionResult) ([]model.CodexInspectionResult, []ActionOutcome) {
+func selectAutoActionItems(mode string, autoRecoverEnabled bool, results []model.CodexInspectionResult) ([]model.CodexInspectionResult, []ActionOutcome) {
 	mode = model.NormalizeCodexInspectionAutoActionMode(mode, model.CodexInspectionAutoActionNone)
-	if mode == model.CodexInspectionAutoActionNone {
+	if mode == model.CodexInspectionAutoActionNone && !autoRecoverEnabled {
 		return nil, nil
 	}
 
@@ -1204,7 +1307,7 @@ func selectAutoActionItems(mode string, results []model.CodexInspectionResult) (
 			}
 			continue
 		}
-		if len(group.Items) == 0 || !allowAutoAction(mode, group.Items[0]) {
+		if len(group.Items) == 0 || !allowAutoAction(mode, autoRecoverEnabled, group.Items[0]) {
 			continue
 		}
 		items = append(items, group.Items[0])
@@ -1244,16 +1347,60 @@ func buildExecutableFileActionGroups(results []model.CodexInspectionResult) []fi
 	return groups
 }
 
-func allowAutoAction(mode string, result model.CodexInspectionResult) bool {
+func allowAutoAction(mode string, autoRecoverEnabled bool, result model.CodexInspectionResult) bool {
+	if result.Action == "enable" {
+		return autoRecoverEnabled && result.AutoRecoverEligible
+	}
 	switch mode {
 	case model.CodexInspectionAutoActionEnable:
-		return result.Action == "enable"
+		return false
 	case model.CodexInspectionAutoActionDisable:
-		return result.Action == "enable" || result.Action == "disable" || result.Action == "delete"
+		return result.Action == "disable" || result.Action == "delete"
 	case model.CodexInspectionAutoActionDelete:
-		return result.Action == "enable" || result.Action == "disable" || result.Action == "delete"
+		return result.Action == "disable" || result.Action == "delete"
 	default:
 		return false
+	}
+}
+
+func (s *Service) applyDisableOwnership(ctx context.Context, accounts []account, logger runLogger) {
+	items, err := s.store.ListCodexInspectionDisableOwnership(ctx)
+	if err != nil {
+		logger.warning(ctx, "加载巡检禁用所有权失败，自动恢复将保持关闭", map[string]any{"error": err.Error()})
+		return
+	}
+	for _, item := range items {
+		provider := normalizeInspectionProvider(item.Provider)
+		if provider == "" {
+			provider = "codex"
+		}
+		matched := false
+		disabled := false
+		for _, candidate := range accounts {
+			if candidate.FileName != item.FileName {
+				continue
+			}
+			if normalizeInspectionProvider(candidate.Provider) != provider {
+				continue
+			}
+			if item.AuthIndex != "" && candidate.AuthIndex != item.AuthIndex {
+				continue
+			}
+			if item.AccountID != "" && candidate.AccountID != item.AccountID {
+				continue
+			}
+			matched = true
+			disabled = disabled || candidate.Disabled
+		}
+		if !matched || !disabled {
+			_ = s.store.DeleteCodexInspectionDisableOwnership(ctx, item.FileName)
+			continue
+		}
+		for index := range accounts {
+			if accounts[index].FileName == item.FileName && normalizeInspectionProvider(accounts[index].Provider) == provider {
+				accounts[index].AutoRecoverOwned = true
+			}
+		}
 	}
 }
 
@@ -1384,10 +1531,22 @@ func matchCurrentAccount(candidates []account, result model.CodexInspectionResul
 	}
 	authIndex := strings.TrimSpace(result.AuthIndex)
 	accountID := strings.TrimSpace(result.AccountID)
+	provider := normalizeInspectionProvider(result.Provider)
+	if provider == "" {
+		provider = "codex"
+	}
 	if authIndex == "" && accountID == "" {
-		return candidates[0], true
+		for _, candidate := range candidates {
+			if normalizeInspectionProvider(candidate.Provider) == provider {
+				return candidate, true
+			}
+		}
+		return account{}, false
 	}
 	for _, candidate := range candidates {
+		if normalizeInspectionProvider(candidate.Provider) != provider {
+			continue
+		}
 		if authIndex != "" && candidate.AuthIndex != authIndex {
 			continue
 		}
@@ -1445,6 +1604,10 @@ func applyActionOutcomes(results []model.CodexInspectionResult, outcomes []Actio
 			continue
 		}
 		status := model.NormalizeCodexInspectionActionStatus(outcome.Status, out[i].Action)
+		currentStatus := model.NormalizeCodexInspectionActionStatus(out[i].ActionStatus, out[i].Action)
+		if currentStatus == model.CodexInspectionActionStatusSuccess && status == model.CodexInspectionActionStatusSkipped {
+			continue
+		}
 		if status == model.CodexInspectionActionStatusPending {
 			if outcome.Success {
 				status = model.CodexInspectionActionStatusSuccess
@@ -1545,6 +1708,7 @@ func resultFromAccount(item account) model.CodexInspectionResult {
 		Disabled:       item.Disabled,
 		Status:         item.Status,
 		State:          item.State,
+		PlanType:       resolveCodexPlanType(item.File),
 		Action:         "keep",
 		ActionReason:   "无需处理",
 		IsQuota:        false,
@@ -1565,6 +1729,32 @@ func pickSample(items []account, sampleSize int) []account {
 	return out[:sampleSize]
 }
 
+// pickSamplePerProvider applies the configured sample size independently to
+// each selected provider. This prevents a combined Codex+xAI run from randomly
+// sampling only one provider and leaving the other without health evidence.
+func pickSamplePerProvider(items []account, sampleSize int) []account {
+	if sampleSize <= 0 {
+		out := make([]account, len(items))
+		copy(out, items)
+		return out
+	}
+
+	groups := make(map[string][]account)
+	providerOrder := make([]string, 0)
+	for _, item := range items {
+		if _, ok := groups[item.Provider]; !ok {
+			providerOrder = append(providerOrder, item.Provider)
+		}
+		groups[item.Provider] = append(groups[item.Provider], item)
+	}
+
+	result := make([]account, 0, len(items))
+	for _, provider := range providerOrder {
+		result = append(result, pickSample(groups[provider], sampleSize)...)
+	}
+	return result
+}
+
 func countAccounts(items []account, disabled bool) int {
 	count := 0
 	for _, item := range items {
@@ -1578,7 +1768,7 @@ func countAccounts(items []account, disabled bool) int {
 func toAccount(file authFile) account {
 	fileName := firstNonEmpty(readString(file, "name"), readString(file, "id"), normalizeAuthIndex(file["auth_index"]), normalizeAuthIndex(file["authIndex"]), "unknown-auth-file")
 	authIndex := firstNonEmpty(normalizeAuthIndex(file["auth_index"]), normalizeAuthIndex(file["authIndex"]), normalizeAuthIndex(file["auth-index"]))
-	provider := strings.ToLower(firstNonEmpty(readString(file, "provider"), readString(file, "type")))
+	provider := normalizeInspectionProvider(firstNonEmpty(readString(file, "provider"), readString(file, "type")))
 	displayAccount := firstNonEmpty(
 		readString(file, "account"),
 		readString(file, "email"),
@@ -1600,6 +1790,17 @@ func toAccount(file authFile) account {
 		Status:         readString(file, "status"),
 		State:          readString(file, "state"),
 		File:           file,
+	}
+}
+
+func normalizeInspectionProvider(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.ReplaceAll(normalized, "_", "-")
+	switch normalized {
+	case "x-ai", "grok":
+		return "xai"
+	default:
+		return normalized
 	}
 }
 
@@ -1654,6 +1855,52 @@ func extractCodexAccountIDFromToken(value any) string {
 		return ""
 	}
 	return readAccountIDCandidate(payload)
+}
+
+func resolveCodexPlanType(file authFile) string {
+	metadata := readMap(file, "metadata")
+	attributes := readMap(file, "attributes")
+	candidates := []any{
+		file["plan_type"],
+		file["planType"],
+		extractCodexPlanTypeFromToken(file["id_token"]),
+		readMap(file, "id_token"),
+		metadata["plan_type"],
+		metadata["planType"],
+		extractCodexPlanTypeFromToken(metadata["id_token"]),
+		readMap(metadata, "id_token"),
+		attributes["plan_type"],
+		attributes["planType"],
+		extractCodexPlanTypeFromToken(attributes["id_token"]),
+	}
+	for _, candidate := range candidates {
+		if planType := readCodexPlanTypeCandidate(candidate); planType != "" {
+			return planType
+		}
+	}
+	return ""
+}
+
+func extractCodexPlanTypeFromToken(value any) string {
+	payload := parseIDTokenPayload(value)
+	if payload == nil {
+		return ""
+	}
+	return readCodexPlanTypeCandidate(payload)
+}
+
+func readCodexPlanTypeCandidate(value any) string {
+	if value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return normalizeCodexPlanType(typed)
+	case map[string]any:
+		return normalizeCodexPlanType(readString(typed, "plan_type", "planType"))
+	default:
+		return normalizeCodexPlanType(fmt.Sprint(value))
+	}
 }
 
 func readPlainString(value any) string {
@@ -1734,13 +1981,20 @@ func parseWindow(raw map[string]any) *codexWindow {
 	if value, ok := readNumberPtr(raw, "limit_window_seconds", "limitWindowSeconds"); ok {
 		window.LimitWindowSeconds = value
 	}
+	if value, ok := readNumberPtr(raw, "reset_after_seconds", "resetAfterSeconds"); ok {
+		window.ResetAfterSeconds = value
+	}
+	if value, ok := readNumberPtr(raw, "reset_at", "resetAt"); ok {
+		window.ResetAt = value
+	}
 	return window
 }
 
-func classifyWindows(limit *codexRateLimit) codexClassifiedWindows {
+func classifyWindows(limit *codexRateLimit, planType string) codexClassifiedWindows {
 	if limit == nil {
 		return codexClassifiedWindows{}
 	}
+	teamPlan := normalizeCodexPlanType(planType) == "team"
 	raw := []*codexWindow{limit.PrimaryWindow, limit.SecondaryWindow}
 	var fiveHour *codexWindow
 	var weekly *codexWindow
@@ -1755,7 +2009,7 @@ func classifyWindows(limit *codexRateLimit) codexClassifiedWindows {
 			fiveHour = window
 		} else if seconds == codexWeekWindow && weekly == nil {
 			weekly = window
-		} else if seconds == codexMonthWindow && monthly == nil {
+		} else if (seconds == codexMonthWindow || isCodexMonthlyWindowSeconds(seconds)) && monthly == nil {
 			monthly = window
 		} else if seconds > codexFiveHourWindow && genericLong == nil {
 			genericLong = window
@@ -1764,10 +2018,276 @@ func classifyWindows(limit *codexRateLimit) codexClassifiedWindows {
 	if fiveHour == nil && limit.PrimaryWindow != weekly && limit.PrimaryWindow != monthly && limit.PrimaryWindow != genericLong && !hasExplicitWindowSeconds(limit.PrimaryWindow) {
 		fiveHour = limit.PrimaryWindow
 	}
-	if weekly == nil && limit.SecondaryWindow != fiveHour && !hasExplicitWindowSeconds(limit.SecondaryWindow) {
+	if teamPlan {
+		if monthly == nil && limit.SecondaryWindow != fiveHour && !hasExplicitWindowSeconds(limit.SecondaryWindow) {
+			monthly = limit.SecondaryWindow
+		}
+	} else if weekly == nil && limit.SecondaryWindow != fiveHour && !hasExplicitWindowSeconds(limit.SecondaryWindow) {
 		weekly = limit.SecondaryWindow
 	}
 	return codexClassifiedWindows{FiveHour: fiveHour, Weekly: weekly, Monthly: monthly, GenericLong: genericLong}
+}
+
+func isCodexMonthlyWindowSeconds(seconds int) bool {
+	return seconds >= codexMinMonthWindow && seconds <= codexMaxMonthWindow
+}
+
+func buildCodexInspectionQuotaWindows(payload map[string]any, planType string) []model.CodexInspectionQuotaWindow {
+	if payload == nil {
+		return nil
+	}
+	teamPlan := normalizeCodexPlanType(firstNonEmpty(planType, readString(payload, "plan_type", "planType"))) == "team"
+	windows := make([]model.CodexInspectionQuotaWindow, 0)
+	addCodexRateLimitWindows(
+		&windows,
+		parseRateLimit(readMap(payload, "rate_limit", "rateLimit")),
+		codexWindowMeta{ID: "five-hour", LabelKey: "codex_quota.primary_window"},
+		codexWindowMeta{ID: "weekly", LabelKey: "codex_quota.secondary_window"},
+		codexWindowMeta{ID: "monthly", LabelKey: "codex_quota.monthly_window"},
+		"codex_quota.generic_window",
+		nil,
+		teamPlan,
+	)
+	addCodexRateLimitWindows(
+		&windows,
+		parseRateLimit(readMap(payload, "code_review_rate_limit", "codeReviewRateLimit")),
+		codexWindowMeta{ID: "code-review-five-hour", LabelKey: "codex_quota.code_review_primary_window"},
+		codexWindowMeta{ID: "code-review-weekly", LabelKey: "codex_quota.code_review_secondary_window"},
+		codexWindowMeta{ID: "code-review-monthly", LabelKey: "codex_quota.code_review_monthly_window"},
+		"codex_quota.code_review_generic_window",
+		nil,
+		teamPlan,
+	)
+	addAdditionalRateLimitWindows(&windows, readMapSlice(payload, "additional_rate_limits", "additionalRateLimits"), teamPlan)
+	return windows
+}
+
+func addCodexRateLimitWindows(
+	windows *[]model.CodexInspectionQuotaWindow,
+	limit *codexRateLimit,
+	fiveHourMeta codexWindowMeta,
+	weeklyMeta codexWindowMeta,
+	monthlyMeta codexWindowMeta,
+	genericLabelKey string,
+	genericLabelParams map[string]any,
+	teamPlan bool,
+) {
+	if limit == nil {
+		return
+	}
+	classified := classifyWindows(limit, codexPlanTypeForTeam(teamPlan))
+	added := make(map[*codexWindow]bool)
+	addCodexWindowInfo(windows, fiveHourMeta.ID, fiveHourMeta.LabelKey, genericLabelParams, classified.FiveHour, limit.LimitReached, limit.Allowed)
+	if classified.FiveHour != nil {
+		added[classified.FiveHour] = true
+	}
+	addCodexWindowInfo(windows, weeklyMeta.ID, weeklyMeta.LabelKey, genericLabelParams, classified.Weekly, limit.LimitReached, limit.Allowed)
+	if classified.Weekly != nil {
+		added[classified.Weekly] = true
+	}
+	addCodexWindowInfo(windows, monthlyMeta.ID, monthlyMeta.LabelKey, genericLabelParams, classified.Monthly, limit.LimitReached, limit.Allowed)
+	if classified.Monthly != nil {
+		added[classified.Monthly] = true
+	}
+	for index, window := range codexRateLimitWindows(limit) {
+		if window == nil || added[window] {
+			continue
+		}
+		duration := formatCodexWindowDuration(window.LimitWindowSeconds)
+		prefix := ""
+		if name, ok := genericLabelParams["name"]; ok {
+			if normalizedName := normalizeCodexWindowID(fmt.Sprint(name)); normalizedName != "" {
+				prefix = normalizedName + "-"
+			}
+		}
+		addCodexWindowInfo(
+			windows,
+			fmt.Sprintf("%swindow-%s-%d", prefix, duration, index),
+			genericLabelKey,
+			withCodexWindowDurationParam(genericLabelParams, duration),
+			window,
+			limit.LimitReached,
+			limit.Allowed,
+		)
+	}
+}
+
+func codexPlanTypeForTeam(teamPlan bool) string {
+	if teamPlan {
+		return "team"
+	}
+	return ""
+}
+
+func codexRateLimitWindows(limit *codexRateLimit) []*codexWindow {
+	if limit == nil {
+		return nil
+	}
+	return []*codexWindow{limit.PrimaryWindow, limit.SecondaryWindow}
+}
+
+func addCodexWindowInfo(
+	windows *[]model.CodexInspectionQuotaWindow,
+	id string,
+	labelKey string,
+	labelParams map[string]any,
+	window *codexWindow,
+	limitReached bool,
+	allowed *bool,
+) {
+	if window == nil {
+		return
+	}
+	resetLabel := formatCodexResetLabel(window)
+	usedPercent := window.UsedPercent
+	if usedPercent == nil && (limitReached || (allowed != nil && !*allowed)) && resetLabel != "-" {
+		usedPercent = ptrFloat(100)
+	}
+	*windows = append(*windows, model.CodexInspectionQuotaWindow{
+		ID:                 id,
+		LabelKey:           labelKey,
+		LabelParams:        copyCodexLabelParams(labelParams),
+		UsedPercent:        usedPercent,
+		ResetLabel:         resetLabel,
+		LimitWindowSeconds: window.LimitWindowSeconds,
+	})
+}
+
+func addAdditionalRateLimitWindows(windows *[]model.CodexInspectionQuotaWindow, additionalRateLimits []map[string]any, teamPlan bool) {
+	for index, limitItem := range additionalRateLimits {
+		rateInfo := parseRateLimit(readMap(limitItem, "rate_limit", "rateLimit"))
+		if rateInfo == nil {
+			continue
+		}
+		limitName := firstNonEmpty(
+			readString(limitItem, "limit_name", "limitName"),
+			readString(limitItem, "metered_feature", "meteredFeature"),
+			fmt.Sprintf("additional-%d", index+1),
+		)
+		idPrefix := normalizeCodexWindowID(limitName)
+		if idPrefix == "" {
+			idPrefix = fmt.Sprintf("additional-%d", index+1)
+		}
+		addCodexRateLimitWindows(
+			windows,
+			rateInfo,
+			codexWindowMeta{ID: fmt.Sprintf("%s-five-hour-%d", idPrefix, index), LabelKey: "codex_quota.additional_primary_window"},
+			codexWindowMeta{ID: fmt.Sprintf("%s-weekly-%d", idPrefix, index), LabelKey: "codex_quota.additional_secondary_window"},
+			codexWindowMeta{ID: fmt.Sprintf("%s-monthly-%d", idPrefix, index), LabelKey: "codex_quota.additional_monthly_window"},
+			"codex_quota.additional_generic_window",
+			map[string]any{"name": limitName},
+			teamPlan,
+		)
+	}
+}
+
+func readMapSlice(record map[string]any, keys ...string) []map[string]any {
+	value, ok := firstValue(record, keys...)
+	if !ok || value == nil {
+		return nil
+	}
+	switch typed := value.(type) {
+	case []map[string]any:
+		return typed
+	case []any:
+		items := make([]map[string]any, 0, len(typed))
+		for _, item := range typed {
+			if record, ok := item.(map[string]any); ok {
+				items = append(items, record)
+			}
+		}
+		return items
+	}
+	return nil
+}
+
+func formatCodexResetLabel(window *codexWindow) string {
+	if window == nil {
+		return "-"
+	}
+	if window.ResetAt != nil && *window.ResetAt > 0 {
+		return formatUnixSeconds(*window.ResetAt)
+	}
+	if window.ResetAfterSeconds != nil && *window.ResetAfterSeconds > 0 {
+		targetSeconds := float64(time.Now().Unix()) + math.Floor(*window.ResetAfterSeconds)
+		return formatUnixSeconds(targetSeconds)
+	}
+	return "-"
+}
+
+func formatUnixSeconds(seconds float64) string {
+	if seconds <= 0 {
+		return "-"
+	}
+	unixSeconds := int64(math.Floor(seconds))
+	if unixSeconds <= 0 {
+		return "-"
+	}
+	return time.Unix(unixSeconds, 0).Local().Format("01/02 15:04")
+}
+
+func formatCodexWindowDuration(seconds *float64) string {
+	if seconds == nil || *seconds <= 0 {
+		return "unknown"
+	}
+	rounded := int(math.Round(*seconds))
+	const daySeconds = 86_400
+	const hourSeconds = 3_600
+	if rounded%daySeconds == 0 {
+		return fmt.Sprintf("%dd", rounded/daySeconds)
+	}
+	if rounded%hourSeconds == 0 {
+		return fmt.Sprintf("%dh", rounded/hourSeconds)
+	}
+	return fmt.Sprintf("%ds", rounded)
+}
+
+func normalizeCodexWindowID(raw string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	if trimmed == "" {
+		return ""
+	}
+	var builder strings.Builder
+	lastDash := false
+	for _, char := range trimmed {
+		isAlphaNumeric := (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9')
+		if isAlphaNumeric {
+			builder.WriteRune(char)
+			lastDash = false
+			continue
+		}
+		if !lastDash && builder.Len() > 0 {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(builder.String(), "-")
+}
+
+func copyCodexLabelParams(params map[string]any) map[string]any {
+	if len(params) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(params))
+	for key, value := range params {
+		out[key] = value
+	}
+	return out
+}
+
+func withCodexWindowDurationParam(params map[string]any, duration string) map[string]any {
+	out := copyCodexLabelParams(params)
+	if out == nil {
+		out = map[string]any{}
+	}
+	out["duration"] = duration
+	return out
+}
+
+func normalizeCodexPlanType(value string) string {
+	normalized := strings.TrimSpace(strings.ToLower(value))
+	normalized = strings.ReplaceAll(normalized, "_", "-")
+	return normalized
 }
 
 func hasExplicitWindowSeconds(window *codexWindow) bool {

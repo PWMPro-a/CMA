@@ -1,4 +1,6 @@
 import type { AuthFileItem } from '@/types';
+import type { SourceProviderEnabledState } from '@/types/sourceInfo';
+import { isDisabledAuthFile } from '@/utils/quota';
 import { normalizeRecentRequestAuthIndex, type StatusBarData } from '@/utils/recentRequests';
 import type {
   MonitoringAccountRow,
@@ -7,6 +9,7 @@ import type {
 } from './hooks/useMonitoringData';
 
 export type MonitoringAccountOverviewMode = 'table' | 'card';
+export type AccountDisplayMode = 'masked' | 'full';
 
 export type AccountSortKey =
   | 'totalCalls'
@@ -60,6 +63,7 @@ export type AccountOverviewPageResetState = {
   selectedAccount: string;
   selectedApiKeyHash: string;
   selectedChannel: string;
+  selectedHeaderTraceId: string;
   selectedModel: string;
   selectedProvider: string;
   selectedStatus: string;
@@ -67,13 +71,13 @@ export type AccountOverviewPageResetState = {
 };
 export type MonitoringAccountOverviewUiState = {
   mode: MonitoringAccountOverviewMode;
+  accountDisplayMode: AccountDisplayMode;
   sort: AccountSortState;
   cardPagination: MonitoringAccountOverviewCardPaginationState;
 };
 
 export type MonitoringAccountAuthState = {
   files: AuthFileItem[];
-  toggleableFileNames: string[];
   enabledState: MonitoringAccountEnabledState;
 };
 
@@ -96,9 +100,15 @@ const ACCOUNT_SORT_KEYS = [
 ] as const;
 const ACCOUNT_SORT_KEY_SET = new Set<AccountSortKey>(ACCOUNT_SORT_KEYS);
 const ACCOUNT_SORT_DIRECTION_SET = new Set<AccountSortDirection>(['asc', 'desc']);
+const ACCOUNT_DISPLAY_MODE_SET = new Set<AccountDisplayMode>(['masked', 'full']);
 
 export const normalizeAccountOverviewMode = (value: unknown): MonitoringAccountOverviewMode =>
   value === 'card' ? 'card' : 'table';
+
+export const normalizeAccountDisplayMode = (value: unknown): AccountDisplayMode =>
+  typeof value === 'string' && ACCOUNT_DISPLAY_MODE_SET.has(value as AccountDisplayMode)
+    ? (value as AccountDisplayMode)
+    : 'masked';
 
 export const normalizeAccountSortKey = (value: unknown): AccountSortKey | null =>
   typeof value === 'string' && ACCOUNT_SORT_KEY_SET.has(value as AccountSortKey)
@@ -175,6 +185,7 @@ export const normalizeAccountOverviewUiState = (
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {
       mode: 'table',
+      accountDisplayMode: 'masked',
       sort: DEFAULT_ACCOUNT_SORT,
       cardPagination: { ...DEFAULT_ACCOUNT_OVERVIEW_CARD_PAGINATION },
     };
@@ -183,8 +194,78 @@ export const normalizeAccountOverviewUiState = (
   const record = value as Record<string, unknown>;
   return {
     mode: normalizeAccountOverviewMode(record.mode),
+    accountDisplayMode: normalizeAccountDisplayMode(record.accountDisplayMode),
     sort: normalizeAccountSortState(record.sort),
     cardPagination: normalizeAccountOverviewCardPaginationState(record.cardPagination),
+  };
+};
+
+const hasReadableAccountValue = (value: string | null | undefined) => {
+  const trimmed = String(value || '').trim();
+  return Boolean(trimmed) && trimmed !== '-';
+};
+
+const firstReadableAccountValue = (...values: Array<string | null | undefined>) =>
+  values.find(hasReadableAccountValue)?.trim() || '';
+
+const isRedundantAccountLabel = (
+  candidate: string | null | undefined,
+  primary: string | null | undefined
+) => {
+  const candidateValue = String(candidate || '').trim();
+  const primaryValue = String(primary || '').trim();
+  if (!candidateValue || !primaryValue) return false;
+  if (candidateValue === primaryValue) return true;
+  const lowerCandidate = candidateValue.toLowerCase();
+  const lowerPrimary = primaryValue.toLowerCase();
+  return (
+    lowerPrimary.startsWith(`${lowerCandidate} #`) || lowerCandidate.startsWith(`${lowerPrimary} #`)
+  );
+};
+
+export const resolveAccountDisplayText = (
+  row: Pick<
+    MonitoringAccountRow,
+    'account' | 'accountMasked' | 'displayAccount' | 'authLabels' | 'channels'
+  >,
+  displayMode: AccountDisplayMode
+) => {
+  const fullAccount = firstReadableAccountValue(row.account, row.displayAccount);
+  const maskedAccount =
+    displayMode === 'masked'
+      ? firstReadableAccountValue(row.accountMasked, row.account, row.displayAccount)
+      : fullAccount;
+  const configuredPrimary = firstReadableAccountValue(row.displayAccount, row.account);
+  const primaryIsAccount =
+    !configuredPrimary ||
+    configuredPrimary === row.account ||
+    configuredPrimary === row.accountMasked ||
+    configuredPrimary === fullAccount;
+  const primary = primaryIsAccount
+    ? firstReadableAccountValue(maskedAccount, fullAccount, configuredPrimary, '-')
+    : configuredPrimary;
+  const secondaryCandidates = primaryIsAccount
+    ? [
+        ...row.authLabels.filter((label) => label && label !== primary && label !== fullAccount),
+        ...row.channels.filter((label) => label && label !== '-' && label !== primary),
+      ]
+    : [maskedAccount, fullAccount];
+  const secondary =
+    secondaryCandidates.find(
+      (value) =>
+        hasReadableAccountValue(value) &&
+        value !== primary &&
+        !isRedundantAccountLabel(value, primary)
+    ) || '';
+  const titleParts = Array.from(
+    new Set([primary, fullAccount, maskedAccount, secondary].filter(hasReadableAccountValue))
+  );
+
+  return {
+    primary,
+    secondary,
+    fullAccount: fullAccount || primary,
+    title: titleParts.join(' / ') || primary,
   };
 };
 
@@ -203,6 +284,7 @@ export const shouldResetAccountOverviewPage = (
     previous.selectedAccount !== next.selectedAccount ||
     previous.selectedApiKeyHash !== next.selectedApiKeyHash ||
     previous.selectedChannel !== next.selectedChannel ||
+    previous.selectedHeaderTraceId !== next.selectedHeaderTraceId ||
     previous.selectedModel !== next.selectedModel ||
     previous.selectedProvider !== next.selectedProvider ||
     previous.selectedStatus !== next.selectedStatus ||
@@ -294,6 +376,7 @@ export const readAccountOverviewUiState = (): MonitoringAccountOverviewUiState =
   if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') {
     return {
       mode: 'table',
+      accountDisplayMode: 'masked',
       sort: DEFAULT_ACCOUNT_SORT,
       cardPagination: { ...DEFAULT_ACCOUNT_OVERVIEW_CARD_PAGINATION },
     };
@@ -310,6 +393,7 @@ export const readAccountOverviewUiState = (): MonitoringAccountOverviewUiState =
 
   return {
     mode: readAccountOverviewMode(),
+    accountDisplayMode: 'masked',
     sort: DEFAULT_ACCOUNT_SORT,
     cardPagination: { ...DEFAULT_ACCOUNT_OVERVIEW_CARD_PAGINATION },
   };
@@ -491,72 +575,31 @@ export const buildMonitoringAccountStatusDataMap = (
   );
 };
 
-const normalizeAccountIdentityValue = (value: unknown) =>
-  (typeof value === 'string' ? value : value === null || value === undefined ? '' : String(value))
-    .trim()
-    .toLowerCase();
-
-const collectAccountIdentityCandidates = (values: unknown[]) =>
-  Array.from(new Set(values.map((value) => normalizeAccountIdentityValue(value)).filter(Boolean)));
-
-const resolveMonitoringAccountIdentityFromAuthFile = (file: AuthFileItem) => {
-  const normalizedAuthIndex = normalizeRecentRequestAuthIndex(file.authIndex ?? file['auth_index']);
-  if (!normalizedAuthIndex) return null;
-
-  const identity = [file.account, file.email, file.label, file.name, normalizedAuthIndex]
-    .map((value) => normalizeAccountIdentityValue(value))
-    .find(Boolean);
-
-  return identity || null;
-};
-
-const buildAccountAuthIndicesByIdentity = (authFilesByAuthIndex: Map<string, AuthFileItem>) => {
-  const indicesByIdentity = new Map<string, Set<string>>();
-
-  authFilesByAuthIndex.forEach((file) => {
-    const normalizedAuthIndex = normalizeRecentRequestAuthIndex(
-      file.authIndex ?? file['auth_index']
-    );
-    if (!normalizedAuthIndex) return;
-
-    const identity = resolveMonitoringAccountIdentityFromAuthFile(file);
-    if (!identity) return;
-
-    const existing = indicesByIdentity.get(identity) ?? new Set<string>();
-    existing.add(normalizedAuthIndex);
-    indicesByIdentity.set(identity, existing);
-  });
-
-  return indicesByIdentity;
-};
-
 export const buildMonitoringAccountAuthStateMap = (
   rows: MonitoringAccountRow[],
-  authFilesByAuthIndex: Map<string, AuthFileItem>
-) => {
-  const authIndicesByIdentity = buildAccountAuthIndicesByIdentity(authFilesByAuthIndex);
-
-  return new Map(
-    rows.map((row) => {
-      const resolvedAuthIndices = collectAccountIdentityCandidates([row.account, row.id]).reduce<
-        Set<string>
-      >((set, candidate) => {
-        const authIndices = authIndicesByIdentity.get(candidate);
-        authIndices?.forEach((authIndex) => set.add(authIndex));
-        return set;
-      }, new Set<string>());
-
-      const authIndices =
-        resolvedAuthIndices.size > 0 ? Array.from(resolvedAuthIndices).sort() : row.authIndices;
-
-      return [row.id, buildMonitoringAccountAuthState(authIndices, authFilesByAuthIndex)] as const;
-    })
+  authFilesByAuthIndex: Map<string, AuthFileItem>,
+  sourceProviderStateBySourceKey: Map<string, SourceProviderEnabledState> = new Map()
+) =>
+  new Map(
+    rows.map(
+      (row) =>
+        [
+          row.id,
+          buildMonitoringAccountAuthState(
+            row.authIndices,
+            authFilesByAuthIndex,
+            row.sourceKeys ?? [],
+            sourceProviderStateBySourceKey
+          ),
+        ] as const
+    )
   );
-};
 
 export const buildMonitoringAccountAuthState = (
   authIndices: string[],
-  authFilesByAuthIndex: Map<string, AuthFileItem>
+  authFilesByAuthIndex: Map<string, AuthFileItem>,
+  sourceKeys: string[] = [],
+  sourceProviderStateBySourceKey: Map<string, SourceProviderEnabledState> = new Map()
 ): MonitoringAccountAuthState => {
   const files = Array.from(
     authIndices.reduce<Map<string, AuthFileItem>>((map, authIndex) => {
@@ -574,19 +617,24 @@ export const buildMonitoringAccountAuthState = (
     .sort((left, right) => left.name.localeCompare(right.name));
 
   const toggleableFiles = files.filter((file) => !isRuntimeOnlyAuthFile(file));
-  const disabledCount = toggleableFiles.filter((file) => file.disabled === true).length;
+  const enabledStates: SourceProviderEnabledState[] = [
+    ...toggleableFiles.map((file) => (isDisabledAuthFile(file) ? 'disabled' : 'enabled')),
+    ...sourceKeys.flatMap((sourceKey) => {
+      const providerState = sourceProviderStateBySourceKey.get(sourceKey);
+      return providerState ? [providerState] : [];
+    }),
+  ];
   const enabledState: MonitoringAccountEnabledState =
-    toggleableFiles.length === 0
+    enabledStates.length === 0
       ? 'unavailable'
-      : disabledCount === toggleableFiles.length
-        ? 'disabled'
-        : disabledCount === 0
-          ? 'enabled'
+      : enabledStates.every((state) => state === 'enabled')
+        ? 'enabled'
+        : enabledStates.every((state) => state === 'disabled')
+          ? 'disabled'
           : 'mixed';
 
   return {
     files,
-    toggleableFileNames: toggleableFiles.map((file) => file.name),
     enabledState,
   };
 };

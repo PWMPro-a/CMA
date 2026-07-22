@@ -64,6 +64,21 @@ body:
       required: true
 
   - type: textarea
+    id: connectivity
+    attributes:
+      label: Connectivity Check Results
+      description: Paste connectivity checks you have run. Browser access does not always mean containers can reach each other.
+      render: shell
+      placeholder: |
+        curl <CPA URL>/status
+        curl <Manager Server URL>/status
+        docker network ls
+        docker compose ps
+        Reverse proxy path / base path:
+    validations:
+      required: false
+
+  - type: textarea
     id: tried
     attributes:
       label: Troubleshooting Already Tried

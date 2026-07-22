@@ -10,6 +10,25 @@ body:
         Thanks for reporting a bug. Please fill in the details below as completely as possible so we can determine whether the issue is caused by CPA, CPA Manager Plus, networking, Docker, or configuration.
 
   - type: dropdown
+    id: problem-type
+    attributes:
+      label: Problem Type
+      description: Choose the closest issue type to help triage.
+      options:
+        - Empty or delayed request monitoring
+        - Incorrect usage / cost statistics
+        - AI provider unavailable or health check failure
+        - Auth file / quota / inspection issue
+        - Auto-disable / auto-recovery issue
+        - Login / permission / Management Key
+        - Configuration save or load issue
+        - Frontend display or interaction issue
+        - Deployment / networking / reverse proxy issue
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
     id: deploy-mode
     attributes:
       label: Deployment Mode

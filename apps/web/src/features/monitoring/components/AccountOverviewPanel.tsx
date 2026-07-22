@@ -1,12 +1,14 @@
 import { Fragment, type ReactNode } from 'react';
 import type { TFunction } from 'i18next';
-import { DropdownMenu, type DropdownMenuItem } from '@/components/ui/DropdownMenu';
+import { DropdownMenu } from '@/components/ui/DropdownMenu';
 import { Input } from '@/components/ui/Input';
 import { Select, type SelectOption } from '@/components/ui/Select';
 import {
   IconChevronDown,
   IconChevronUp,
   IconCrosshair,
+  IconEye,
+  IconEyeOff,
   IconInfo,
   IconMoreVertical,
   IconRefreshCw,
@@ -28,6 +30,7 @@ import {
 } from '@/features/monitoring/components/accountOverviewPresentation';
 import { MonitoringPanel } from '@/features/monitoring/components/MonitoringPanel';
 import {
+  type AccountDisplayMode,
   type AccountSortKey,
   type AccountSortState,
   type MonitoringAccountAuthState,
@@ -40,6 +43,7 @@ import styles from '../MonitoringCenterPage.module.scss';
 type AccountOverviewColumn = {
   key: string;
   label: string;
+  fullLabel?: string;
   sortKey?: AccountSortKey;
 };
 
@@ -54,6 +58,7 @@ type PaginationState<T> = {
 type AccountOverviewPanelProps = {
   embedded?: boolean;
   mode: MonitoringAccountOverviewMode;
+  accountDisplayMode: AccountDisplayMode;
   searchInput: string;
   columns: AccountOverviewColumn[];
   rows: MonitoringAccountRow[];
@@ -66,7 +71,6 @@ type AccountOverviewPanelProps = {
   accountStatusDataByRowId: ReadonlyMap<string, StatusBarData>;
   emptyAccountStatusData: StatusBarData;
   accountQuotaStates: Record<string, AccountQuotaState>;
-  accountStatusUpdating: Record<string, boolean>;
   accountPageSize: number;
   accountPageSizeOptions: readonly number[];
   accountOverviewScopeText: string;
@@ -79,8 +83,8 @@ type AccountOverviewPanelProps = {
   onRefreshAll: () => void | Promise<void>;
   onAccountSortKeyChange: (key: AccountSortKey) => void;
   onModeChange: (mode: MonitoringAccountOverviewMode) => void;
+  onAccountDisplayModeChange: (mode: AccountDisplayMode) => void;
   onAccountSort: (sortKey: AccountSortKey) => void;
-  onAccountStatusToggle: (row: MonitoringAccountRow, enabled: boolean) => void | Promise<void>;
   onLoadAccountQuota: (account: string, force: boolean) => void | Promise<void>;
   onToggleExpanded: (rowId: string, account: string) => void;
   onFocusAccount: (row: MonitoringAccountRow) => void;
@@ -91,6 +95,7 @@ type AccountOverviewPanelProps = {
 export type AccountOverviewPanelActionsProps = Pick<
   AccountOverviewPanelProps,
   | 'mode'
+  | 'accountDisplayMode'
   | 'searchInput'
   | 'accountSort'
   | 'accountSortOptions'
@@ -100,11 +105,11 @@ export type AccountOverviewPanelActionsProps = Pick<
   | 'onRefreshAll'
   | 'onAccountSortKeyChange'
   | 'onModeChange'
+  | 'onAccountDisplayModeChange'
 >;
 
 const EMPTY_ACCOUNT_AUTH_STATE: MonitoringAccountAuthState = {
   files: [],
-  toggleableFileNames: [],
   enabledState: 'unavailable',
 };
 
@@ -126,10 +131,11 @@ function AccountColumnLabel({
   t: TFunction;
 }) {
   const info = getAccountColumnInfo(column.key, t);
+  const labelTitle = column.fullLabel ?? column.label;
 
   return (
     <span className={styles.tableHeaderWithInfo}>
-      <span>{column.label}</span>
+      <span title={labelTitle}>{column.label}</span>
       {info ? (
         <span title={info}>
           <IconInfo size={13} className={styles.tableHeaderInfoIcon} aria-label={info} />
@@ -141,6 +147,7 @@ function AccountColumnLabel({
 
 export function AccountOverviewPanelActions({
   mode,
+  accountDisplayMode,
   searchInput,
   accountSort,
   accountSortOptions,
@@ -150,7 +157,17 @@ export function AccountOverviewPanelActions({
   onRefreshAll,
   onAccountSortKeyChange,
   onModeChange,
+  onAccountDisplayModeChange,
 }: AccountOverviewPanelActionsProps) {
+  const nextAccountDisplayMode: AccountDisplayMode =
+    accountDisplayMode === 'masked' ? 'full' : 'masked';
+  const AccountDisplayIcon = accountDisplayMode === 'masked' ? IconEyeOff : IconEye;
+  const accountDisplayHint = t(
+    accountDisplayMode === 'masked'
+      ? 'monitoring.account_overview_show_full_accounts_hint'
+      : 'monitoring.account_overview_show_masked_accounts_hint'
+  );
+
   return (
     <div className={styles.accountOverviewHeaderActions}>
       <div className={styles.accountOverviewToolbarRow}>
@@ -175,6 +192,27 @@ export function AccountOverviewPanelActions({
             className={overallLoading ? styles.refreshIconSpinning : styles.refreshIcon}
           />
           <span>{t('common.refresh')}</span>
+        </button>
+        <button
+          type="button"
+          className={[
+            styles.accountOverviewToolButton,
+            accountDisplayMode === 'full' ? styles.accountDisplayModeButtonActive : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+          onClick={() => onAccountDisplayModeChange(nextAccountDisplayMode)}
+          title={accountDisplayHint}
+          aria-label={accountDisplayHint}
+        >
+          <AccountDisplayIcon size={15} aria-hidden="true" />
+          <span>
+            {t(
+              accountDisplayMode === 'masked'
+                ? 'monitoring.account_overview_account_display_masked'
+                : 'monitoring.account_overview_account_display_full'
+            )}
+          </span>
         </button>
         <div className={styles.accountOverviewSortBar}>
           <Select
@@ -212,6 +250,7 @@ export function AccountOverviewPanelActions({
 export function AccountOverviewPanel({
   embedded = false,
   mode,
+  accountDisplayMode,
   searchInput,
   columns,
   rows,
@@ -224,7 +263,6 @@ export function AccountOverviewPanel({
   accountStatusDataByRowId,
   emptyAccountStatusData,
   accountQuotaStates,
-  accountStatusUpdating,
   accountPageSize,
   accountPageSizeOptions,
   accountOverviewScopeText,
@@ -237,8 +275,8 @@ export function AccountOverviewPanel({
   onRefreshAll,
   onAccountSortKeyChange,
   onModeChange,
+  onAccountDisplayModeChange,
   onAccountSort,
-  onAccountStatusToggle,
   onLoadAccountQuota,
   onToggleExpanded,
   onFocusAccount,
@@ -248,6 +286,7 @@ export function AccountOverviewPanel({
   const actions = (
     <AccountOverviewPanelActions
       mode={mode}
+      accountDisplayMode={accountDisplayMode}
       searchInput={searchInput}
       accountSort={accountSort}
       accountSortOptions={accountSortOptions}
@@ -257,6 +296,7 @@ export function AccountOverviewPanel({
       onRefreshAll={onRefreshAll}
       onAccountSortKeyChange={onAccountSortKeyChange}
       onModeChange={onModeChange}
+      onAccountDisplayModeChange={onAccountDisplayModeChange}
     />
   );
 
@@ -337,44 +377,13 @@ export function AccountOverviewPanel({
                 ]
                   .filter(Boolean)
                   .join(' ');
-                const accountMenuItems: DropdownMenuItem[] = [];
-                if (authState.enabledState === 'enabled') {
-                  accountMenuItems.push({
-                    key: 'disable',
-                    label: t('monitoring.account_overview_row_menu_disable'),
-                    onClick: () => void onAccountStatusToggle(row, false),
-                    disabled: accountStatusUpdating[row.id] === true,
-                    tone: 'danger',
-                  });
-                } else if (authState.enabledState === 'disabled') {
-                  accountMenuItems.push({
-                    key: 'enable',
-                    label: t('monitoring.account_overview_row_menu_enable'),
-                    onClick: () => void onAccountStatusToggle(row, true),
-                    disabled: accountStatusUpdating[row.id] === true,
-                  });
-                } else if (authState.enabledState === 'mixed') {
-                  accountMenuItems.push(
-                    {
-                      key: 'enable-all',
-                      label: t('monitoring.account_overview_row_menu_enable_all'),
-                      onClick: () => void onAccountStatusToggle(row, true),
-                      disabled: accountStatusUpdating[row.id] === true,
-                    },
-                    {
-                      key: 'disable-all',
-                      label: t('monitoring.account_overview_row_menu_disable_all'),
-                      onClick: () => void onAccountStatusToggle(row, false),
-                      disabled: accountStatusUpdating[row.id] === true,
-                      tone: 'danger',
-                    }
-                  );
-                }
-                accountMenuItems.push({
-                  key: 'refresh-quota',
-                  label: t('monitoring.account_overview_row_menu_refresh_quota'),
-                  onClick: () => void onLoadAccountQuota(row.account, true),
-                });
+                const accountMenuItems = [
+                  {
+                    key: 'refresh-quota',
+                    label: t('monitoring.account_overview_row_menu_refresh_quota'),
+                    onClick: () => void onLoadAccountQuota(row.account, true),
+                  },
+                ];
 
                 return (
                   <Fragment key={row.id}>
@@ -384,6 +393,7 @@ export function AccountOverviewPanel({
                           row={row}
                           expanded={isExpanded}
                           onToggle={() => onToggleExpanded(row.id, row.account)}
+                          accountDisplayMode={accountDisplayMode}
                           statusTone={statusTone}
                         />
                       </td>
@@ -466,15 +476,14 @@ export function AccountOverviewPanel({
                 hasPrices={hasPrices}
                 locale={locale}
                 t={t}
+                accountDisplayMode={accountDisplayMode}
                 isExpanded={Boolean(expandedAccounts[row.id])}
                 isFocused={focusedAccount === row.account}
                 statusData={accountStatusDataByRowId.get(row.id) ?? emptyAccountStatusData}
                 scopeText={accountOverviewScopeText}
                 quotaState={accountQuotaStates[row.account]}
-                statusUpdating={accountStatusUpdating[row.id] === true}
                 onToggle={() => onToggleExpanded(row.id, row.account)}
                 onFocus={() => onFocusAccount(row)}
-                onToggleEnabled={(enabled) => void onAccountStatusToggle(row, enabled)}
                 onRefreshQuota={() => void onLoadAccountQuota(row.account, true)}
               />
             );

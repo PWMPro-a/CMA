@@ -7,14 +7,20 @@ import { HeaderInputList } from '@/components/ui/HeaderInputList';
 import { Input } from '@/components/ui/Input';
 import { ModelInputList } from '@/components/ui/ModelInputList';
 import { Select } from '@/components/ui/Select';
+import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { SecondaryScreenShell } from '@/components/common/SecondaryScreenShell';
+import { OpenAIKeyTestStatusIndicator } from '@/components/providers';
 import { useEdgeSwipeBack } from '@/hooks/useEdgeSwipeBack';
 import { useNotificationStore } from '@/stores';
-import { apiCallApi, getApiCallErrorMessage } from '@/services/api';
+import { apiCallApi, getApiCallErrorDetails } from '@/services/api';
 import type { ApiKeyEntry } from '@/types';
 import { normalizeAuthIndex } from '@/utils/authIndex';
 import { buildHeaderObject, hasHeader } from '@/utils/headers';
 import { buildApiKeyEntry, buildOpenAIChatCompletionsEndpoint } from '@/components/providers/utils';
+import {
+  appendIdleKeyTestStatus,
+  removeKeyTestStatusAtIndex,
+} from '@/features/aiProviders/model/keyTestStatuses';
 import type { OpenAIEditOutletContext } from './AiProvidersOpenAIEditLayout';
 import type { KeyTestStatus } from '@/stores/useOpenAIEditDraftStore';
 import styles from './AiProvidersPage.module.scss';
@@ -27,72 +33,6 @@ const getErrorMessage = (err: unknown) => {
   if (typeof err === 'string') return err;
   return '';
 };
-
-// Status icon components
-function StatusLoadingIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className={styles.statusIconSpin}>
-      <circle cx="8" cy="8" r="7" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2" />
-      <path
-        d="M8 1A7 7 0 0 1 8 15"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-function StatusSuccessIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-      <circle cx="8" cy="8" r="8" fill="var(--success-color, #22c55e)" />
-      <path
-        d="M4.5 8L7 10.5L11.5 6"
-        stroke="white"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function StatusErrorIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-      <circle cx="8" cy="8" r="8" fill="var(--danger-color, #f56c6c)" />
-      <path
-        d="M5 5L11 11M11 5L5 11"
-        stroke="white"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function StatusIdleIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-      <circle cx="8" cy="8" r="7" stroke="var(--text-tertiary, #9ca3af)" strokeWidth="2" />
-    </svg>
-  );
-}
-
-function StatusIcon({ status }: { status: KeyTestStatus['status'] }) {
-  switch (status) {
-    case 'loading':
-      return <StatusLoadingIcon />;
-    case 'success':
-      return <StatusSuccessIcon />;
-    case 'error':
-      return <StatusErrorIcon />;
-    default:
-      return <StatusIdleIcon />;
-  }
-}
 
 export function AiProvidersOpenAIEditPage() {
   const { t } = useTranslation();
@@ -115,6 +55,7 @@ export function AiProvidersOpenAIEditPage() {
     setTestMessage,
     keyTestStatuses,
     setDraftKeyTestStatus,
+    setDraftKeyTestStatuses,
     resetDraftKeyTestStatuses,
     availableModels,
     handleBack,
@@ -242,7 +183,7 @@ export function AiProvidersOpenAIEditPage() {
         );
 
         if (result.statusCode < 200 || result.statusCode >= 300) {
-          throw new Error(getApiCallErrorMessage(result));
+          throw new Error(getApiCallErrorDetails(result));
         }
 
         setDraftKeyTestStatus(keyIndex, { status: 'success', message: '' });
@@ -385,19 +326,18 @@ export function AiProvidersOpenAIEditPage() {
 
     const removeEntry = (idx: number) => {
       const next = list.filter((_, i) => i !== idx);
-      const nextLength = next.length ? next.length : 1;
       setForm((prev) => ({
         ...prev,
         apiKeyEntries: next.length ? next : [buildApiKeyEntry()],
       }));
-      resetDraftKeyTestStatuses(nextLength);
+      setDraftKeyTestStatuses(removeKeyTestStatusAtIndex(keyTestStatuses, idx, list.length));
       setTestStatus('idle');
       setTestMessage('');
     };
 
     const addEntry = () => {
       setForm((prev) => ({ ...prev, apiKeyEntries: [...list, buildApiKeyEntry()] }));
-      resetDraftKeyTestStatuses(list.length + 1);
+      setDraftKeyTestStatuses(appendIdleKeyTestStatus(keyTestStatuses, list.length));
       setTestStatus('idle');
       setTestMessage('');
     };
@@ -441,11 +381,11 @@ export function AiProvidersOpenAIEditPage() {
                 <div className={styles.keyTableColIndex}>{index + 1}</div>
 
                 {/* 状态指示灯 */}
-                <div
-                  className={styles.keyTableColStatus}
-                  title={keyTestStatuses[index]?.message || ''}
-                >
-                  <StatusIcon status={keyStatus} />
+                <div className={styles.keyTableColStatus}>
+                  <OpenAIKeyTestStatusIndicator
+                    status={keyStatus as KeyTestStatus['status']}
+                    message={keyTestStatuses[index]?.message || ''}
+                  />
                 </div>
 
                 {/* Key 输入框 */}
@@ -586,6 +526,16 @@ export function AiProvidersOpenAIEditPage() {
               removeButtonAriaLabel={t('common.delete')}
               disabled={saving || disableControls || isTestingKeys}
             />
+            <div className="form-group">
+              <label>{t('ai_providers.disable_cooling_label')}</label>
+              <ToggleSwitch
+                checked={Boolean(form.disableCooling)}
+                onChange={(value) => setForm((prev) => ({ ...prev, disableCooling: value }))}
+                disabled={saving || disableControls || isTestingKeys}
+                ariaLabel={t('ai_providers.disable_cooling_label')}
+              />
+              <div className="hint">{t('ai_providers.disable_cooling_hint')}</div>
+            </div>
 
             {/* 模型配置区域 - 统一布局 */}
             <div className={styles.modelConfigSection}>
@@ -636,6 +586,11 @@ export function AiProvidersOpenAIEditPage() {
                 removeButtonClassName={styles.modelRowRemoveButton}
                 removeButtonTitle={t('common.delete')}
                 removeButtonAriaLabel={t('common.delete')}
+                showForceMapping
+                showModalities
+                forceMappingLabel={t('ai_providers.force_mapping_label')}
+                inputModalitiesPlaceholder={t('ai_providers.input_modalities_placeholder')}
+                outputModalitiesPlaceholder={t('ai_providers.output_modalities_placeholder')}
               />
 
               {/* 测试区域 */}

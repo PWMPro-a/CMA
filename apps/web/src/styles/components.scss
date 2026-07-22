@@ -262,8 +262,8 @@ textarea {
   border: 1px solid var(--glass-border);
   border-radius: var(--app-radius-lg);
   box-shadow: var(--glass-shadow);
-  backdrop-filter: blur(var(--app-blur));
-  -webkit-backdrop-filter: blur(var(--app-blur));
+  backdrop-filter: var(--glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   padding: var(--app-card-padding);
 }
 
@@ -366,8 +366,8 @@ textarea {
   border: 1px solid var(--glass-border);
   background: var(--glass-bg);
   color: var(--text-primary);
-  backdrop-filter: blur(var(--app-blur));
-  -webkit-backdrop-filter: blur(var(--app-blur));
+  backdrop-filter: var(--glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   display: flex;
   justify-content: space-between;
   align-items: center;

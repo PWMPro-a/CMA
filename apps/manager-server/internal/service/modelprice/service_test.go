@@ -7,7 +7,31 @@ import (
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
+
+func TestUsageSummaryUsesConfiguredRecentLimit(t *testing.T) {
+	cfg := testutil.NewConfig(t)
+	st := testutil.NewStore(t, cfg)
+	if _, err := st.UsageEvents.InsertBatch(context.Background(), []usage.Event{
+		{EventHash: "older", TimestampMS: 100, Timestamp: "2026-01-01T00:00:00Z", Model: "gpt-old", CreatedAtMS: 100},
+		{EventHash: "newer", TimestampMS: 200, Timestamp: "2026-01-01T00:00:01Z", Model: "gpt-new", ResolvedModel: "gpt-resolved", CreatedAtMS: 200},
+	}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	summary, err := New(st, nil).UsageSummary(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("usage summary: %v", err)
+	}
+	if summary.SampledEvents != 1 || summary.TotalEvents != 2 || !summary.Truncated {
+		t.Fatalf("summary metadata = %#v", summary)
+	}
+	if len(summary.Models) != 2 || summary.Models[0].Model != "gpt-new" || summary.Models[1].Model != "gpt-resolved" {
+		t.Fatalf("models = %#v", summary.Models)
+	}
+}
 
 func TestSelectModelPricesIncludesResolvedAndProviderVariants(t *testing.T) {
 	remote := map[string]store.ModelPrice{
@@ -72,7 +96,8 @@ func TestFetchOpenRouterModelPrices(t *testing.T) {
 	if price.Source != SyncSourceOpenRouter || price.SourceModelID != "openai/gpt-test" {
 		t.Fatalf("source metadata = %#v", price)
 	}
-	if !closePrice(price.Prompt, 1) || !closePrice(price.Completion, 2) || !closePrice(price.Cache, 0.25) {
+	if !closePrice(price.Prompt, 1) || !closePrice(price.Completion, 2) || !closePrice(price.Cache, 0.25) ||
+		!price.PromptConfigured || !price.CompletionConfigured || !price.CacheReadConfigured || price.CacheCreationConfigured {
 		t.Fatalf("price = %#v", price)
 	}
 }

@@ -2,10 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
+	httppprof "net/http/pprof"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 	_ "time/tzdata"
@@ -76,9 +81,43 @@ func runServer() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	serverApp := httpapi.New(cfg, db, manager)
+	automationSettingsService := serverApp.AppContext().AccountProcessingPolicyService
+	runtimeSettings := automationSettingsService.RuntimeSettings(ctx)
+	rateLimitAutoDisableWorker := worker.NewRateLimitAutoDisableWorker(db, collector.RuntimeConfig{
+		CPAUpstreamURL: cfg.CPAUpstreamURL,
+		ManagementKey:  cfg.ManagementKey,
+	})
+	accountActionWorker := worker.NewAccountActionCandidateWorker(db, runtimeSettings.AccountActionsAutoDisable)
+	accountHistoryRollupWorker := worker.NewAccountHistoryRollupWorker(db)
+	accountHistoryRollupWorker.Start(ctx)
+	var dashboardHourlyRollupWorker *worker.DashboardHourlyRollupWorker
+	if cfg.DashboardHourlyRollupEnabled {
+		dashboardHourlyRollupWorker = worker.NewDashboardHourlyRollupWorker(db)
+		dashboardHourlyRollupWorker.Start(ctx)
+	}
+	serverApp.AppContext().UsageService.SetEventsInsertedNotifier(func() {
+		accountHistoryRollupWorker.Wake()
+		if dashboardHourlyRollupWorker != nil {
+			dashboardHourlyRollupWorker.Wake()
+		}
+	})
+	automationRuntime := worker.NewAutomationRuntime(
+		automationSettingsService,
+		manager,
+		rateLimitAutoDisableWorker,
+		accountActionWorker,
+	)
+	serverApp.AppContext().AutomationRuntimeService = automationRuntime
+	automationRuntime.Start(ctx)
+	manager.SetUsageEventHandler(worker.NewUsageEventFanout(
+		automationRuntime.UsageEventHandler(),
+		accountHistoryRollupWorker,
+		dashboardHourlyRollupWorker,
+	))
+
 	collectorWorker.Start(ctx)
 
-	serverApp := httpapi.New(cfg, db, manager)
 	codexInspectionWorker := worker.NewCodexInspectionWorker(serverApp.AppContext().Store, serverApp.AppContext().CodexInspectionService)
 	codexInspectionWorker.Start(ctx)
 
@@ -87,19 +126,104 @@ func runServer() {
 		Handler:           serverApp.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	pprofServer, err := newPprofServer(cfg.PprofAddr)
+	if err != nil {
+		log.Fatalf("configure pprof: %v", err)
+	}
+	if pprofServer != nil {
+		go func() {
+			log.Printf("cpa-manager-plus pprof listening on %s", pprofServer.Addr)
+			if err := pprofServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("pprof server: %v", err)
+			}
+		}()
+	}
 
+	listener, err := net.Listen("tcp", cfg.HTTPAddr)
+	if err != nil {
+		log.Fatalf("http listen: %v", err)
+	}
 	go func() {
-		log.Printf("cpa-manager-plus listening on %s", cfg.HTTPAddr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("cpa-manager-plus listening on %s", listener.Addr())
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("http server: %v", err)
 		}
 	}()
+
+	usageCacheAccountingMigrationWorker := worker.NewUsageCacheAccountingMigrationWorker(db, func() {
+		go runUsageResponseMetadataBackfill(ctx, db)
+		accountHistoryRollupWorker.Wake()
+		if dashboardHourlyRollupWorker != nil {
+			dashboardHourlyRollupWorker.Wake()
+		}
+	})
+	usageCacheAccountingMigrationWorker.Start(ctx)
 
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	collectorWorker.Stop(context.Background())
+	if pprofServer != nil {
+		if err := pprofServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown pprof: %v", err)
+		}
+	}
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
+	}
+}
+
+func newPprofServer(addr string) (*http.Server, error) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return nil, nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid address %q: %w", addr, err)
+	}
+	if !strings.EqualFold(host, "localhost") {
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return nil, fmt.Errorf("pprof address must use a loopback host: %q", addr)
+		}
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", httppprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", httppprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", httppprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", httppprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", httppprof.Trace)
+	return &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}, nil
+}
+
+func runUsageResponseMetadataBackfill(ctx context.Context, db *store.Store) {
+	const batchLimit = 1000
+	total := 0
+	for {
+		updated, err := db.BackfillUsageResponseMetadata(ctx, batchLimit)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("usage response metadata backfill: %v", err)
+			}
+			return
+		}
+		if updated == 0 {
+			if total > 0 {
+				log.Printf("usage response metadata backfill completed: updated=%d", total)
+			}
+			return
+		}
+		total += updated
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 }

@@ -37,7 +37,8 @@ func SetupErrorStatus(err error) int {
 func ManagerConfigErrorStatus(err error) int {
 	message := err.Error()
 	switch {
-	case strings.Contains(message, "connection setup is managed by environment variables"):
+	case strings.Contains(message, "connection setup is managed by environment variables"),
+		strings.Contains(message, "locked by environment variable"):
 		return http.StatusConflict
 	case strings.Contains(message, "CPA connection is already bound"):
 		return http.StatusConflict
@@ -67,6 +68,8 @@ func UsageServiceErrorCode(err error) string {
 	switch {
 	case strings.Contains(message, "connection setup is managed by environment variables"):
 		return "connection_env_managed"
+	case strings.Contains(message, "locked by environment variable"):
+		return "account_processing_policy_env_locked"
 	case strings.Contains(message, "CPA connection is already bound"):
 		return "cpa_connection_already_bound"
 	case strings.Contains(message, "cpaBaseUrl and managementKey are required when request monitoring is enabled"):

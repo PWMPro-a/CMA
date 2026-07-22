@@ -1,5 +1,10 @@
 import { formatApiKeyHashLabel } from './base';
-import { sanitizeApiKeyDisplayText, shouldPreferApiKeyAlias } from './apiKeys';
+import { calculateCacheHitRateFromTotals, getCacheHitTotals } from '@/utils/usage';
+import {
+  sanitizeApiKeyDisplayText,
+  shouldPreferApiKeyAlias,
+  type ApiKeyDisplayInfo,
+} from './apiKeys';
 import {
   buildMonitoringAccountFilterValue,
   parseMonitoringAccountFilterValue,
@@ -80,6 +85,18 @@ const normalizeScopeValue = (value: string | null | undefined) =>
     .trim()
     .toLowerCase();
 
+const hasCacheActivity = (
+  row: Pick<MonitoringEventRow, 'cachedTokens' | 'cacheReadTokens' | 'cacheCreationTokens'>,
+  mode: string
+) => {
+  const cachedTokens = row.cachedTokens || 0;
+  const cacheReadTokens = row.cacheReadTokens || 0;
+  const cacheCreationTokens = row.cacheCreationTokens || 0;
+  if (mode === 'read') return cacheReadTokens > 0;
+  if (mode === 'creation') return cacheCreationTokens > 0;
+  return cachedTokens > 0 || cacheReadTokens > 0 || cacheCreationTokens > 0;
+};
+
 export const buildScopeFilteredRows = (
   rows: MonitoringEventRow[],
   scopeFilters?: MonitoringScopeFilters
@@ -92,10 +109,19 @@ export const buildScopeFilteredRows = (
   const accountApiKeyHashes = new Set(accountCriteria.apiKeyHashes.map(normalizeScopeValue));
   const hasAccountSourceHashFilter = accountCriteria.sourceHashes.length > 0;
   const provider = normalizeScopeValue(scopeFilters.provider);
+  const authFile = normalizeScopeValue(scopeFilters.authFile);
+  const projectId = normalizeScopeValue(scopeFilters.projectId);
+  const requestType = normalizeScopeValue(scopeFilters.requestType);
   const model = normalizeScopeValue(scopeFilters.model);
   const channel = normalizeScopeValue(scopeFilters.channel);
   const apiKeyHash = normalizeScopeValue(scopeFilters.apiKeyHash);
   const status = scopeFilters.status;
+  const minLatencyMs =
+    typeof scopeFilters.minLatencyMs === 'number' && scopeFilters.minLatencyMs > 0
+      ? scopeFilters.minLatencyMs
+      : null;
+  const cacheStatus = normalizeScopeValue(scopeFilters.cacheStatus);
+  const headerTraceId = normalizeScopeValue(scopeFilters.headerTraceId);
 
   return rows.filter((row) => {
     if (isActiveScopeFilterValue(scopeFilters.account)) {
@@ -126,6 +152,29 @@ export const buildScopeFilteredRows = (
       return false;
     }
 
+    if (
+      isActiveScopeFilterValue(scopeFilters.authFile) &&
+      normalizeScopeValue(row.source) !== authFile &&
+      normalizeScopeValue(row.sourceMasked) !== authFile &&
+      !normalizeScopeValue(row.searchText).includes(authFile)
+    ) {
+      return false;
+    }
+
+    if (
+      isActiveScopeFilterValue(scopeFilters.projectId) &&
+      normalizeScopeValue(row.projectId) !== projectId
+    ) {
+      return false;
+    }
+
+    if (
+      isActiveScopeFilterValue(scopeFilters.requestType) &&
+      normalizeScopeValue(row.executorType) !== requestType
+    ) {
+      return false;
+    }
+
     if (isActiveScopeFilterValue(scopeFilters.model) && normalizeScopeValue(row.model) !== model) {
       return false;
     }
@@ -146,6 +195,23 @@ export const buildScopeFilteredRows = (
 
     if (status === 'failed' && !row.failed) return false;
     if (status === 'success' && row.failed) return false;
+    if (minLatencyMs !== null && (row.latencyMs === null || row.latencyMs < minLatencyMs)) {
+      return false;
+    }
+    if (cacheStatus === 'hit' && !hasCacheActivity(row, cacheStatus)) return false;
+    if (cacheStatus === 'miss' && hasCacheActivity(row, cacheStatus)) return false;
+    if (
+      (cacheStatus === 'read' || cacheStatus === 'creation') &&
+      !hasCacheActivity(row, cacheStatus)
+    ) {
+      return false;
+    }
+    if (
+      isActiveScopeFilterValue(scopeFilters.headerTraceId) &&
+      normalizeScopeValue(row.headerTraceId) !== headerTraceId
+    ) {
+      return false;
+    }
 
     return true;
   });
@@ -169,6 +235,21 @@ export const buildMonitoringSummary = (rows: MonitoringEventRow[]): MonitoringSu
   const cachedTokens = rows.reduce((sum, row) => sum + row.cachedTokens, 0);
   const cacheReadTokens = rows.reduce((sum, row) => sum + (row.cacheReadTokens ?? 0), 0);
   const cacheCreationTokens = rows.reduce((sum, row) => sum + (row.cacheCreationTokens ?? 0), 0);
+  const cacheHitTotals = rows.reduce(
+    (totals, row) => {
+      const rowTotals = getCacheHitTotals({
+        modelName: row.resolvedModel || row.model,
+        inputTokens: row.inputTokens,
+        cachedTokens: row.cachedTokens,
+        cacheReadTokens: row.cacheReadTokens,
+        cacheCreationTokens: row.cacheCreationTokens,
+      });
+      totals.hitTokens += rowTotals.hitTokens;
+      totals.inputTokens += rowTotals.inputTokens;
+      return totals;
+    },
+    { hitTokens: 0, inputTokens: 0 }
+  );
   const totalTokens = rows.reduce((sum, row) => sum + row.totalTokens, 0);
   const totalCost = rows.reduce((sum, row) => sum + row.totalCost, 0);
 
@@ -210,6 +291,10 @@ export const buildMonitoringSummary = (rows: MonitoringEventRow[]): MonitoringSu
     cachedTokens,
     cacheReadTokens,
     cacheCreationTokens,
+    cacheHitRate: calculateCacheHitRateFromTotals(
+      cacheHitTotals.hitTokens,
+      cacheHitTotals.inputTokens
+    ),
     totalTokens,
     totalCost,
     averageLatencyMs: latencyCount > 0 ? latencySum / latencyCount : null,
@@ -235,6 +320,7 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
       accountMasked: string;
       authLabels: Set<string>;
       authIndices: Set<string>;
+      sourceKeys: Set<string>;
       apiKeyHashes: Set<string>;
       channels: Set<string>;
       modelMap: Map<
@@ -279,6 +365,7 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
       accountMasked: row.accountMasked,
       authLabels: new Set<string>(),
       authIndices: new Set<string>(),
+      sourceKeys: new Set<string>(),
       apiKeyHashes: new Set<string>(),
       channels: new Set<string>(),
       modelMap: new Map(),
@@ -301,6 +388,9 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
     existing.rows.push(row);
     existing.authLabels.add(row.authLabel);
     existing.authIndices.add(row.authIndex);
+    if (row.sourceKey) {
+      existing.sourceKeys.add(row.sourceKey);
+    }
     existing.apiKeyHashes.add(row.apiKeyHash);
     existing.channels.add(row.channel);
     existing.totalCalls += 1;
@@ -355,6 +445,7 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
     .map((item) => {
       const channels = Array.from(item.channels).sort();
       const authIndices = Array.from(item.authIndices).sort();
+      const sourceKeys = Array.from(item.sourceKeys).sort();
       const apiKeyHashes = Array.from(item.apiKeyHashes).sort();
       return {
         id: item.id,
@@ -369,6 +460,7 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
         accountMasked: item.accountMasked,
         authLabels: Array.from(item.authLabels).sort(),
         authIndices,
+        sourceKeys,
         channels,
         totalCalls: item.totalCalls,
         successCalls: item.successCalls,
@@ -402,7 +494,10 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
     );
 };
 
-export const buildApiKeyRows = (rows: MonitoringEventRow[]): MonitoringApiKeyRow[] => {
+export const buildApiKeyRows = (
+  rows: MonitoringEventRow[],
+  apiKeyDisplayMap?: ReadonlyMap<string, ApiKeyDisplayInfo>
+): MonitoringApiKeyRow[] => {
   const grouped = new Map<
     string,
     {
@@ -410,6 +505,7 @@ export const buildApiKeyRows = (rows: MonitoringEventRow[]): MonitoringApiKeyRow
       apiKeyHash: string;
       apiKeyLabel: string;
       apiKeyMasked: string;
+      apiKeyCopyValue?: string;
       isUnknown: boolean;
       authLabels: Set<string>;
       sourceLabels: Set<string>;
@@ -461,6 +557,9 @@ export const buildApiKeyRows = (rows: MonitoringEventRow[]): MonitoringApiKeyRow
       apiKeyHash: row.apiKeyHash,
       apiKeyLabel: sanitizeApiKeyDisplayText(row.apiKeyLabel),
       apiKeyMasked: sanitizeApiKeyDisplayText(row.apiKeyMasked),
+      apiKeyCopyValue: row.apiKeyHash
+        ? apiKeyDisplayMap?.get(row.apiKeyHash.toLowerCase())?.copyValue
+        : undefined,
       isUnknown: !hasKnownApiKey,
       authLabels: new Set<string>(),
       sourceLabels: new Set<string>(),
@@ -483,6 +582,11 @@ export const buildApiKeyRows = (rows: MonitoringEventRow[]): MonitoringApiKeyRow
 
     if (!existing.apiKeyHash && row.apiKeyHash) {
       existing.apiKeyHash = row.apiKeyHash;
+    }
+    if (!existing.apiKeyCopyValue && existing.apiKeyHash) {
+      existing.apiKeyCopyValue = apiKeyDisplayMap?.get(
+        existing.apiKeyHash.toLowerCase()
+      )?.copyValue;
     }
     if (!existing.apiKeyMasked && row.apiKeyMasked) {
       existing.apiKeyMasked = sanitizeApiKeyDisplayText(row.apiKeyMasked);
@@ -551,6 +655,7 @@ export const buildApiKeyRows = (rows: MonitoringEventRow[]): MonitoringApiKeyRow
       apiKeyHash: item.apiKeyHash,
       apiKeyLabel: item.apiKeyLabel || item.apiKeyMasked || formatApiKeyHashLabel(item.apiKeyHash),
       apiKeyMasked: item.apiKeyMasked || item.apiKeyLabel || formatApiKeyHashLabel(item.apiKeyHash),
+      apiKeyCopyValue: item.apiKeyCopyValue,
       isUnknown: item.isUnknown,
       authLabels: Array.from(item.authLabels).filter(Boolean).sort(),
       sourceLabels: Array.from(item.sourceLabels).filter(Boolean).sort(),

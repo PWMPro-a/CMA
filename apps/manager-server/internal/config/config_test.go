@@ -24,6 +24,9 @@ func TestLoadCreatesDefaultConfig(t *testing.T) {
 	if want := filepath.Join(dir, "data", "usage.sqlite"); cfg.DBPath != want {
 		t.Fatalf("DBPath = %q, want %q", cfg.DBPath, want)
 	}
+	if !cfg.DashboardHourlyRollupEnabled {
+		t.Fatal("DashboardHourlyRollupEnabled = false by default")
+	}
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -69,11 +72,15 @@ func TestLoadReadsConfigAndResolvesRelativePaths(t *testing.T) {
   "queue": "custom-usage",
   "popSide": "left",
   "batchSize": 7,
-  "pollIntervalMs": 250,
-  "queryLimit": 900,
-  "panelPath": "panel.html",
+	  "pollIntervalMs": 250,
+	  "queryLimit": 900,
+	  "pprofAddr": "127.0.0.1:6060",
+	  "panelPath": "panel.html",
   "corsOrigins": ["http://panel.local"],
-  "tlsSkipVerify": true
+  "tlsSkipVerify": true,
+  "quotaCooldownEnabled": true,
+  "accountActionsEnabled": true,
+  "accountActionsAutoDisable": true
 }`), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -101,6 +108,9 @@ func TestLoadReadsConfigAndResolvesRelativePaths(t *testing.T) {
 	if cfg.BatchSize != 7 || cfg.PollInterval != 250*time.Millisecond || cfg.QueryLimit != 900 {
 		t.Fatalf("numeric config = %#v", cfg)
 	}
+	if cfg.PprofAddr != "127.0.0.1:6060" {
+		t.Fatalf("PprofAddr = %q", cfg.PprofAddr)
+	}
 	if want := filepath.Join(dir, "panel.html"); cfg.PanelPath != want {
 		t.Fatalf("PanelPath = %q, want %q", cfg.PanelPath, want)
 	}
@@ -109,6 +119,15 @@ func TestLoadReadsConfigAndResolvesRelativePaths(t *testing.T) {
 	}
 	if !cfg.TLSSkipVerify {
 		t.Fatal("TLSSkipVerify = false")
+	}
+	if !cfg.QuotaCooldownEnabled {
+		t.Fatal("QuotaCooldownEnabled = false")
+	}
+	if !cfg.AccountActionsEnabled {
+		t.Fatal("AccountActionsEnabled = false")
+	}
+	if !cfg.AccountActionsAutoDisable {
+		t.Fatal("AccountActionsAutoDisable = false")
 	}
 }
 
@@ -129,6 +148,8 @@ func TestLoadEnvOverridesConfig(t *testing.T) {
 	t.Setenv("USAGE_DATA_DIR", filepath.Join(dir, "env-data"))
 	t.Setenv("CPA_MANAGEMENT_KEY", "env-secret")
 	t.Setenv("USAGE_BATCH_SIZE", "12")
+	t.Setenv("CPA_MANAGER_PPROF_ADDR", "[::1]:6061")
+	t.Setenv("USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED", "false")
 
 	cfg, err := Load()
 	if err != nil {
@@ -145,6 +166,12 @@ func TestLoadEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.BatchSize != 12 {
 		t.Fatalf("BatchSize = %d", cfg.BatchSize)
+	}
+	if cfg.PprofAddr != "[::1]:6061" {
+		t.Fatalf("PprofAddr = %q", cfg.PprofAddr)
+	}
+	if cfg.DashboardHourlyRollupEnabled {
+		t.Fatal("DashboardHourlyRollupEnabled = true, want false")
 	}
 }
 
@@ -185,8 +212,13 @@ func clearConfigEnv(t *testing.T) {
 		"USAGE_BATCH_SIZE",
 		"USAGE_POLL_INTERVAL_MS",
 		"USAGE_QUERY_LIMIT",
+		"CPA_MANAGER_PPROF_ADDR",
 		"USAGE_CORS_ORIGINS",
 		"USAGE_RESP_TLS_SKIP_VERIFY",
+		"USAGE_QUOTA_COOLDOWN_ENABLED",
+		"USAGE_ACCOUNT_ACTIONS_ENABLED",
+		"USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE",
+		"USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED",
 		"PANEL_PATH",
 	} {
 		t.Setenv(key, "")

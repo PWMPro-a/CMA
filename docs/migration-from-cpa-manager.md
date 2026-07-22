@@ -7,7 +7,7 @@ This guide is for users migrating from the old `seakee/cpa-manager` / CPA-Manage
 - Docker image: `seakee/cpa-manager` -> `seakee/cpa-manager-plus`.
 - Native binary/package: `cpa-manager` -> `cpa-manager-plus`.
 - Backend source layout: old `usage-service` -> `apps/manager-server`. Compatible HTTP endpoints under `/usage-service/*` are still kept.
-- Full Docker login now uses the Manager Server admin key `cmp_admin_...`, not the CPA Management Key.
+- Full Docker login now uses the Manager Server admin key `cpamp_...`, not the CPA Management Key.
 - CPA Management Key is encrypted with `/data/data.key` before it is stored in SQLite.
 - Legacy `settings.setup` is migrated to `settings.manager_config_v1` and kept as compatibility data.
 
@@ -106,12 +106,12 @@ Then open `http://<host>:18317/management.html` and log in with the admin key.
 CPA_MANAGER_ADMIN_KEY='replace-with-a-long-random-admin-key' ./cpa-manager-plus
 ```
 
-If it is not set, the service generates a `cmp_admin_...` value and prints it only once in the first startup log.
+If it is not set, the service generates a `cpamp_...` value and prints it only once in the first startup log.
 
 ## Validate the First Startup
 
 1. Check startup logs:
-   - If `CPA_MANAGER_ADMIN_KEY` was not set, save `CPA Manager Plus admin key generated: cmp_admin_...`.
+   - If `CPA_MANAGER_ADMIN_KEY` was not set, save `CPA Manager Plus admin key generated: cpamp_...`.
    - Ensure there are no `decrypt secret`, `open sqlite`, or `bootstrap manager server` errors.
 2. Open **Configuration -> CPA Manager Plus Configuration**.
 3. Verify the bound CPA URL, request monitoring, collection mode, and polling interval.

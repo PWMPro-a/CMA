@@ -3,12 +3,14 @@ package usage
 import (
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/app"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
+	usagesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/usage"
 )
 
 const maxUsageImportBytes int64 = 64 * 1024 * 1024
@@ -27,12 +29,17 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			h.Export(w, r)
 			return
 		}
-		payload, err := h.App.UsageService.GetCompatibleUsage(r.Context(), h.App.Config.QueryLimit)
+		w.Header().Set("Content-Type", "application/json")
+		writer := &countingWriter{writer: w}
+		err := h.App.UsageService.WriteCompatibleUsage(r.Context(), writer, h.App.Config.QueryLimit)
 		if err != nil {
-			response.Error(w, http.StatusInternalServerError, err)
+			if writer.written == 0 {
+				response.Error(w, http.StatusInternalServerError, err)
+			} else {
+				log.Printf("usage compatible stream failed after %d bytes: %v", writer.written, err)
+			}
 			return
 		}
-		response.JSON(w, http.StatusOK, payload)
 	case http.MethodPost:
 		if strings.HasSuffix(r.URL.Path, "/import") {
 			h.Import(w, r)
@@ -45,33 +52,50 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Export(w http.ResponseWriter, r *http.Request) {
-	data, err := h.App.UsageService.Export(r.Context())
-	if err != nil {
-		response.Error(w, http.StatusInternalServerError, err)
-		return
-	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Content-Disposition", `attachment; filename="usage-events.jsonl"`)
-	_, _ = w.Write(data)
+	writer := &countingWriter{writer: w}
+	if err := h.App.UsageService.WriteExport(r.Context(), writer, h.App.Config.QueryLimit); err != nil {
+		if writer.written == 0 {
+			w.Header().Del("Content-Disposition")
+			response.Error(w, http.StatusInternalServerError, err)
+		} else {
+			log.Printf("usage export stream failed after %d bytes: %v", writer.written, err)
+		}
+	}
+}
+
+type countingWriter struct {
+	writer  io.Writer
+	written int64
+}
+
+func (w *countingWriter) Write(data []byte) (int, error) {
+	written, err := w.writer.Write(data)
+	w.written += int64(written)
+	return written, err
 }
 
 func (h *Handler) Import(w http.ResponseWriter, r *http.Request) {
+	if r.ContentLength > maxUsageImportBytes {
+		response.Error(w, http.StatusRequestEntityTooLarge, errors.New("http: request body too large"))
+		return
+	}
 	body := http.MaxBytesReader(w, r.Body, maxUsageImportBytes)
-	data, err := io.ReadAll(body)
+	result, parsed, err := h.App.UsageService.Import(r.Context(), body)
 	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			response.Error(w, http.StatusRequestEntityTooLarge, err)
 			return
 		}
-		response.Error(w, http.StatusBadRequest, err)
-		return
-	}
-
-	result, parsed, err := h.App.UsageService.Import(r.Context(), data)
-	if err != nil {
-		if parsed != nil && len(parsed.Events) > 0 {
+		var persistenceErr *usagesvc.ImportPersistenceError
+		if errors.As(err, &persistenceErr) || result.Added+result.Skipped > 0 {
 			response.Error(w, http.StatusInternalServerError, err)
+			return
+		}
+		if parsed == nil {
+			response.Error(w, http.StatusBadRequest, err)
 			return
 		}
 		response.JSON(w, http.StatusBadRequest, map[string]any{

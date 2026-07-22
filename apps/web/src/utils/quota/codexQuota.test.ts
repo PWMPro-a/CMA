@@ -99,6 +99,58 @@ describe('buildCodexQuotaWindowInfos', () => {
     expect(isCodexRateLimitReached(payload.rate_limit)).toBe(false);
   });
 
+  it('classifies 28 to 31 day windows as monthly quota', () => {
+    const monthLikeDurations = [2_419_200, 2_505_600, 2_592_000, 2_678_400];
+
+    monthLikeDurations.forEach((duration) => {
+      const classified = classifyCodexRateLimitWindows({
+        primary_window: {
+          used_percent: 20,
+          limit_window_seconds: duration,
+        },
+      });
+
+      expect(classified.monthlyWindow?.limit_window_seconds).toBe(duration);
+      expect(classified.weeklyWindow).toBeNull();
+    });
+  });
+
+  it('does not classify windows longer than 31 days as monthly quota', () => {
+    const classified = classifyCodexRateLimitWindows({
+      primary_window: {
+        used_percent: 20,
+        limit_window_seconds: 2_764_800,
+      },
+    });
+
+    expect(classified.monthlyWindow).toBeNull();
+    expect(classified.longWindow?.limit_window_seconds).toBe(2_764_800);
+  });
+
+  it('treats a Team secondary window without duration as monthly quota', () => {
+    const windows = buildCodexQuotaWindowInfos(
+      {
+        plan_type: 'team',
+        rate_limit: {
+          primary_window: {
+            used_percent: 10,
+            reset_after_seconds: 60,
+          },
+          secondary_window: {
+            used_percent: 70,
+            reset_after_seconds: 120,
+          },
+        },
+      },
+      { planType: 'team' }
+    );
+
+    expect(windows.map((window) => [window.id, window.labelKey, window.usedPercent])).toEqual([
+      ['five-hour', 'codex_quota.primary_window', 10],
+      ['monthly', 'codex_quota.monthly_window', 70],
+    ]);
+  });
+
   it('normalizes additional rate limit labels into stable ids and params', () => {
     const windows = buildCodexQuotaWindowInfos({
       additional_rate_limits: [

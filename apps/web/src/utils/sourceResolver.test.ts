@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildSourceInfoMap, resolveSourceDisplay } from './sourceResolver';
+import {
+  buildSourceInfoMap,
+  buildSourceProviderStateMap,
+  resolveSourceDisplay,
+} from './sourceResolver';
 
 describe('source resolver', () => {
   it('resolves CPA masked Codex API key sources to readable base URL hosts', () => {
@@ -18,6 +22,52 @@ describe('source resolver', () => {
     expect(resolved.displayName).toBe('api.first.example');
     expect(resolved.type).toBe('codex');
     expect(resolved.identityKey).toBe('codex:0');
+  });
+
+  it('resolves xAI API key sources independently from xAI OAuth credentials', () => {
+    const sourceInfoMap = buildSourceInfoMap({
+      xaiApiKeys: [
+        {
+          apiKey: 'xai-1234567890abcdef',
+          authIndex: 'xai-api-key-1',
+          prefix: 'Grok API',
+          baseUrl: 'https://api.x.ai/v1',
+        },
+      ],
+    });
+
+    const resolved = resolveSourceDisplay('', 'xai-api-key-1', sourceInfoMap, new Map());
+
+    expect(resolved.displayName).toBe('Grok API');
+    expect(resolved.type).toBe('xai');
+    expect(resolved.identityKey).toBe('xai:0');
+  });
+
+  it('keeps shared upstream names when one key is registered under Codex and Claude', () => {
+    const sharedKey = 'sk-shared1234567890abcdef';
+    const sourceInfoMap = buildSourceInfoMap({
+      codexApiKeys: [
+        {
+          apiKey: sharedKey,
+          prefix: 'Shared Relay',
+          baseUrl: 'https://api.shared.example/v1',
+        },
+      ],
+      claudeApiKeys: [
+        {
+          apiKey: sharedKey,
+          prefix: 'Shared Relay',
+          baseUrl: 'https://api.shared.example/v1',
+        },
+      ],
+    });
+
+    const resolved = resolveSourceDisplay('m:sk-s...cdef', '', sourceInfoMap, new Map());
+
+    expect(resolved.displayName).toBe('Shared Relay');
+    expect(resolved.type).toBe('');
+    expect(resolved.identityKey).toBe('shared:m:sk-s...cdef');
+    expect(resolved.displayName).not.toContain('sk-shared');
   });
 
   it('distinguishes multiple keys from the same base URL without exposing raw keys', () => {
@@ -91,10 +141,7 @@ describe('source resolver', () => {
         {
           name: '',
           baseUrl: 'https://relay.keys.example/v1',
-          apiKeyEntries: [
-            { apiKey: 'sk-openai111111aaaa' },
-            { apiKey: 'sk-openai222222bbbb' },
-          ],
+          apiKeyEntries: [{ apiKey: 'sk-openai111111aaaa' }, { apiKey: 'sk-openai222222bbbb' }],
         },
       ],
     });
@@ -163,5 +210,71 @@ describe('source resolver', () => {
 
     expect(resolved.displayName).toBe('m:sk-x...zzzz');
     expect(resolved.identityKey).toBe('source:m:sk-x...zzzz');
+  });
+
+  it('exposes enabled and disabled OpenAI compatible provider states', () => {
+    const sourceInfoMap = buildSourceInfoMap({
+      openaiCompatibility: [
+        {
+          name: 'Enabled Relay',
+          baseUrl: 'https://enabled.example/v1',
+          authIndex: 'enabled-openai',
+          apiKeyEntries: [],
+        },
+        {
+          name: 'Disabled Relay',
+          baseUrl: 'https://disabled.example/v1',
+          authIndex: 'disabled-openai',
+          apiKeyEntries: [],
+          disabled: true,
+        },
+      ],
+    });
+
+    const stateMap = buildSourceProviderStateMap(sourceInfoMap);
+
+    expect(stateMap.get('openai:0')).toBe('enabled');
+    expect(stateMap.get('openai:1')).toBe('disabled');
+  });
+
+  it('exposes disabled non-OpenAI provider state from disable-all excluded models', () => {
+    const sourceInfoMap = buildSourceInfoMap({
+      codexApiKeys: [
+        {
+          apiKey: 'sk-disabled-codex',
+          excludedModels: ['*'],
+        },
+      ],
+    });
+
+    const stateMap = buildSourceProviderStateMap(sourceInfoMap);
+
+    expect(stateMap.get('codex:0')).toBe('disabled');
+  });
+
+  it('marks shared provider identities as mixed when matched providers differ', () => {
+    const sharedKey = 'sk-shared-provider-state';
+    const sourceInfoMap = buildSourceInfoMap({
+      codexApiKeys: [
+        {
+          apiKey: sharedKey,
+          prefix: 'Shared Relay',
+        },
+      ],
+      claudeApiKeys: [
+        {
+          apiKey: sharedKey,
+          prefix: 'Shared Relay',
+          excludedModels: ['*'],
+        },
+      ],
+    });
+
+    const resolved = resolveSourceDisplay('m:sk-s...tate', '', sourceInfoMap, new Map());
+    const stateMap = buildSourceProviderStateMap(sourceInfoMap);
+    const identityKey = resolved.identityKey || '';
+
+    expect(identityKey).toBe('shared:m:sk-s...tate');
+    expect(stateMap.get(identityKey)).toBe('mixed');
   });
 });

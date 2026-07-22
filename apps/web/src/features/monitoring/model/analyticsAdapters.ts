@@ -15,9 +15,19 @@ import type {
   MonitoringAnalyticsTimelinePoint,
 } from '@/services/api/usageService';
 import type { CredentialInfo } from '@/types/sourceInfo';
-import { buildSourceInfoMap, resolveSourceDisplay } from '@/utils/sourceResolver';
+import {
+  buildSourceInfoMap,
+  resolveSourceDisplay,
+  resolveSourceIdentityKey,
+} from '@/utils/sourceResolver';
 import { normalizeAuthIndex, type UsageDetailWithEndpoint } from '@/utils/usage';
-import { formatApiKeyHashLabel, joinUnique, maskAuthIndex, maskEmailLike, readString } from './base';
+import {
+  formatApiKeyHashLabel,
+  joinUnique,
+  maskAuthIndex,
+  maskEmailLike,
+  readString,
+} from './base';
 import { sanitizeApiKeyDisplayText, type ApiKeyDisplayInfo } from './apiKeys';
 import { buildDayLabel, buildHourLabel, buildLocalDayKey, padNumber } from './range';
 import { buildMonitoringSourceDisplay } from './sourceDisplay';
@@ -53,6 +63,34 @@ const uniqueReadableValues = (values: Array<string | null | undefined> = []) =>
 
 const firstReadableValue = (...values: Array<string | null | undefined>) =>
   values.map(readString).find((value) => value && value !== '-') || '';
+
+const buildSourceKeysFromAnalyticsIdentity = (
+  authIndices: Array<string | null | undefined> | undefined,
+  sources: Array<string | null | undefined> | undefined,
+  sourceInfoMap: ReturnType<typeof buildSourceInfoMap>,
+  authFileMap: Map<string, CredentialInfo>
+) => {
+  const keys = new Set<string>();
+  const normalizedAuthIndices = uniqueReadableValues(authIndices);
+  const normalizedSources = uniqueReadableValues(sources);
+
+  normalizedAuthIndices.forEach((authIndex) => {
+    const key = resolveSourceIdentityKey('', authIndex, sourceInfoMap, authFileMap);
+    if (key) keys.add(key);
+  });
+
+  normalizedSources.forEach((source) => {
+    const sourceOnlyKey = resolveSourceIdentityKey(source, '', sourceInfoMap, authFileMap);
+    if (sourceOnlyKey) keys.add(sourceOnlyKey);
+
+    normalizedAuthIndices.forEach((authIndex) => {
+      const key = resolveSourceIdentityKey(source, authIndex, sourceInfoMap, authFileMap);
+      if (key) keys.add(key);
+    });
+  });
+
+  return Array.from(keys).filter((key) => key && key !== 'source:-').sort();
+};
 
 const normalizeFilterText = (value: string | null | undefined) =>
   readString(value).trim().toLowerCase();
@@ -263,10 +301,28 @@ export const buildAnalyticsFilters = (
   if (isActiveFilterValue(scopeFilters.apiKeyHash)) {
     filters.api_key_hashes = [scopeFilters.apiKeyHash!.trim().toLowerCase()];
   }
+  if (isActiveFilterValue(scopeFilters.authFile)) {
+    filters.auth_files = [scopeFilters.authFile!.trim()];
+  }
+  if (isActiveFilterValue(scopeFilters.projectId)) {
+    filters.project_ids = [scopeFilters.projectId!.trim()];
+  }
+  if (isActiveFilterValue(scopeFilters.requestType)) {
+    filters.request_types = [scopeFilters.requestType!.trim()];
+  }
   if (scopeFilters.status === 'success') {
     filters.include_failed = false;
   } else if (scopeFilters.status === 'failed') {
     filters.failed_only = true;
+  }
+  if (typeof scopeFilters.minLatencyMs === 'number' && scopeFilters.minLatencyMs > 0) {
+    filters.min_latency_ms = scopeFilters.minLatencyMs;
+  }
+  if (isActiveFilterValue(scopeFilters.cacheStatus)) {
+    filters.cache_status = scopeFilters.cacheStatus!.trim();
+  }
+  if (isActiveFilterValue(scopeFilters.headerTraceId)) {
+    filters.header_trace_ids = [scopeFilters.headerTraceId!.trim()];
   }
 
   let authIndices: Set<string> | null = null;
@@ -343,6 +399,7 @@ export const buildSummaryFromAnalytics = (
   cachedTokens: summary.cached_tokens,
   cacheReadTokens: summary.cache_read_tokens ?? 0,
   cacheCreationTokens: summary.cache_creation_tokens ?? 0,
+  cacheHitRate: summary.cache_hit_rate,
   totalTokens: summary.total_tokens,
   totalCost: summary.total_cost,
   averageLatencyMs: summary.average_latency_ms,
@@ -550,6 +607,12 @@ export const buildAccountRowsFromAnalytics = (
         display.sourceLabel,
       ]);
       const channels = uniqueReadableValues([...channelNames, display.channel]);
+      const sourceKeys = buildSourceKeysFromAnalyticsIdentity(
+        row.auth_indices,
+        row.sources,
+        sourceInfoMap,
+        authFileMap
+      );
 
       return {
         id: account || row.id,
@@ -558,6 +621,7 @@ export const buildAccountRowsFromAnalytics = (
         accountMasked: display.accountMasked || maskEmailLike(account),
         authLabels,
         authIndices: uniqueReadableValues(row.auth_indices),
+        sourceKeys,
         channels,
         totalCalls: row.calls,
         successCalls: row.success_calls,
@@ -639,6 +703,7 @@ export const buildApiKeyRowsFromAnalytics = (
         apiKeyHash,
         apiKeyLabel: isUnknown ? '' : apiKeyLabel,
         apiKeyMasked: isUnknown ? '' : apiKeyMasked,
+        apiKeyCopyValue: isUnknown ? undefined : apiKeyDisplay?.copyValue,
         isUnknown,
         authLabels: uniqueReadableValues([
           ...authMetas.map((meta) => meta.label),
@@ -685,6 +750,7 @@ export const buildFilterOptionsFromAnalytics = (
       providers: [],
       models: [],
       channels: [],
+      headerTraceIds: [],
     };
   }
 
@@ -725,6 +791,7 @@ export const buildFilterOptionsFromAnalytics = (
         );
       })
     ),
+    headerTraceIds: uniqueReadableValues(options.header_trace_ids || []),
   };
 };
 
@@ -836,6 +903,7 @@ export const buildUsageDetailsFromAnalyticsEvents = (
     api_key_hash: readString(item.api_key_hash),
     account_snapshot: readString(item.account_snapshot),
     auth_label_snapshot: readString(item.auth_label_snapshot),
+    auth_file_snapshot: readString(item.auth_file_snapshot),
     auth_provider_snapshot: readString(item.auth_provider_snapshot),
     auth_project_id_snapshot: readString(item.auth_project_id_snapshot),
     reasoning_effort: readString(item.reasoning_effort),
@@ -855,6 +923,13 @@ export const buildUsageDetailsFromAnalyticsEvents = (
     failed: item.failed === true,
     fail_status_code: item.fail_status_code ?? null,
     fail_summary: readString(item.fail_summary),
+    response_metadata: item.response_metadata,
+    header_quota_recover_at_ms: item.header_quota_recover_at_ms ?? null,
+    header_quota_used_percent: item.header_quota_used_percent ?? null,
+    header_quota_plan_type: readString(item.header_quota_plan_type),
+    header_error_kind: readString(item.header_error_kind),
+    header_error_code: readString(item.header_error_code),
+    header_trace_id: readString(item.header_trace_id),
     __modelName: item.model,
     __resolvedModel: readString(item.resolved_model),
     __endpoint: item.endpoint || `${item.method} ${item.path}`.trim(),

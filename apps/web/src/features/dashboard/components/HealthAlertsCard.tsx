@@ -95,13 +95,32 @@ export function HealthAlertsCard({
   const buildFailureTooltip = (failure: DashboardRecentFailure) => {
     const statusCode = failure.fail_status_code;
     const summary = maskSensitiveText(failure.fail_summary || '');
-    if (!statusCode && !summary) return null;
+    const diagnostics = [
+      failure.header_error_code || failure.header_error_kind
+        ? `${t('monitoring.header_error')}: ${[failure.header_error_kind, failure.header_error_code]
+            .filter(Boolean)
+            .join(' / ')}`
+        : '',
+      failure.header_trace_id ? `${t('monitoring.header_trace')}: ${failure.header_trace_id}` : '',
+      failure.header_quota_plan_type || typeof failure.header_quota_used_percent === 'number'
+        ? `${t('monitoring.header_quota')}: ${[
+            failure.header_quota_plan_type,
+            typeof failure.header_quota_used_percent === 'number'
+              ? `${failure.header_quota_used_percent.toFixed(0)}%`
+              : '',
+          ]
+            .filter(Boolean)
+            .join(' · ')}`
+        : '',
+    ].filter(Boolean);
+    if (!statusCode && !summary && diagnostics.length === 0) return null;
     const statusText = statusCode ? `${t('monitoring.fail_status_code_short')} ${statusCode}` : '';
     const compactSummary = summary ? truncateText(summary, 160) : '';
     return {
       statusText,
       summary: compactSummary,
-      title: [statusText, compactSummary].filter(Boolean).join(' · '),
+      diagnostics,
+      title: [statusText, compactSummary, ...diagnostics].filter(Boolean).join(' · '),
     };
   };
 
@@ -123,6 +142,11 @@ export function HealthAlertsCard({
           {tooltip.summary ? (
             <span className={styles.failureTooltipBody}>{tooltip.summary}</span>
           ) : null}
+          {tooltip.diagnostics.map((item) => (
+            <span key={item} className={styles.failureTooltipBody}>
+              {item}
+            </span>
+          ))}
         </span>
       ) : null}
     </span>

@@ -301,3 +301,11 @@
     --glass-border: var(--app-border);
   }
 }
+
+[data-visual-effects='reduced'] {
+  --glass-backdrop-filter: none;
+  --glass-filter: none;
+  --glass-bg: var(--app-surface);
+  --glass-bg-secondary: var(--app-surface-muted);
+  --glass-border: var(--app-border);
+}

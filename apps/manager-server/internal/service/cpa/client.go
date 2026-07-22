@@ -28,7 +28,7 @@ func ValidateManagementAPI(ctx context.Context, baseURL string, key string) erro
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	res, err := client.Do(req)
 	if err != nil {
 		return err
@@ -54,7 +54,7 @@ func FetchManagementConfig(ctx context.Context, baseURL string, key string) (Man
 		return ManagementConfig{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	res, err := client.Do(req)
 	if err != nil {
 		return ManagementConfig{}, err
@@ -100,7 +100,7 @@ func SetUsageStatisticsEnabled(ctx context.Context, baseURL string, key string, 
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	res, err := client.Do(req)
 	if err != nil {
 		return err

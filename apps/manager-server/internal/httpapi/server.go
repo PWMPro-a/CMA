@@ -25,7 +25,7 @@ type Server struct {
 	appCtx  *app.Context
 }
 
-func New(cfg config.Config, store *store.Store, collector *collector.Manager) *Server {
+func New(cfg config.Config, store *store.Store, collector *collector.Manager, automationRuntimeService ...app.AutomationRuntimeService) *Server {
 	startedAt := time.Now().UnixMilli()
 	appCtx := app.FromExisting(
 		cfg,
@@ -36,6 +36,7 @@ func New(cfg config.Config, store *store.Store, collector *collector.Manager) *S
 		&modelPriceSyncURL,
 		&openRouterModelPriceSyncURL,
 		serviceID,
+		automationRuntimeService...,
 	)
 	return &Server{
 		handler: router.New(appCtx),

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   QUOTA_PAGE_UI_STATE_STORAGE_KEY,
   getDefaultQuotaPageUiState,
+  normalizeQuotaAccountDisplayMode,
   normalizeQuotaPageUiState,
   normalizeQuotaSectionType,
   normalizeQuotaSectionViewMode,
@@ -56,7 +57,8 @@ describe('quotaPageUiState', () => {
     expect(normalizeQuotaSortMode('unknown')).toBe('default');
     expect(normalizeQuotaSectionViewMode('all')).toBe('all');
     expect(normalizeQuotaSectionViewMode('bad')).toBe('paged');
-    expect(normalizeQuotaSectionType('gemini-cli')).toBe('gemini-cli');
+    expect(normalizeQuotaAccountDisplayMode('full')).toBe('full');
+    expect(normalizeQuotaAccountDisplayMode('visible')).toBe('full');
     expect(normalizeQuotaSectionType('xai')).toBe('xai');
     expect(normalizeQuotaSectionType('bad')).toBeNull();
   });
@@ -72,6 +74,11 @@ describe('quotaPageUiState', () => {
           claude: 'bad',
           unknown: 'all',
         },
+        accountDisplayModes: {
+          codex: 'full',
+          claude: 'bad',
+          unknown: 'full',
+        },
       })
     ).toEqual({
       searchQuery: 'pro',
@@ -79,6 +86,10 @@ describe('quotaPageUiState', () => {
       sectionViewModes: {
         codex: 'all',
         claude: 'paged',
+      },
+      accountDisplayModes: {
+        codex: 'full',
+        claude: 'full',
       },
     });
   });
@@ -91,6 +102,10 @@ describe('quotaPageUiState', () => {
         codex: 'all',
         kimi: 'paged',
       },
+      accountDisplayModes: {
+        codex: 'full',
+        kimi: 'masked',
+      },
     });
 
     expect(JSON.parse(storage.getItem(QUOTA_PAGE_UI_STATE_STORAGE_KEY) ?? '{}')).toEqual({
@@ -100,6 +115,10 @@ describe('quotaPageUiState', () => {
         codex: 'all',
         kimi: 'paged',
       },
+      accountDisplayModes: {
+        codex: 'full',
+        kimi: 'masked',
+      },
     });
     expect(readQuotaPageUiState()).toEqual({
       searchQuery: 'plus',
@@ -107,6 +126,10 @@ describe('quotaPageUiState', () => {
       sectionViewModes: {
         codex: 'all',
         kimi: 'paged',
+      },
+      accountDisplayModes: {
+        codex: 'full',
+        kimi: 'masked',
       },
     });
   });

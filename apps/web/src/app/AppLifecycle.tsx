@@ -1,8 +1,9 @@
 import { useEffect } from 'react';
-import { useLanguageStore, useThemeStore } from '@/stores';
+import { useLanguageStore, useThemeStore, useVisualEffectsStore } from '@/stores';
 
 export function AppLifecycle() {
   const initializeTheme = useThemeStore((state) => state.initializeTheme);
+  const initializeVisualEffects = useVisualEffectsStore((state) => state.initializeVisualEffects);
   const language = useLanguageStore((state) => state.language);
   const setLanguage = useLanguageStore((state) => state.setLanguage);
 
@@ -10,6 +11,10 @@ export function AppLifecycle() {
     const cleanupTheme = initializeTheme();
     return cleanupTheme;
   }, [initializeTheme]);
+
+  useEffect(() => {
+    initializeVisualEffects();
+  }, [initializeVisualEffects]);
 
   useEffect(() => {
     setLanguage(language);

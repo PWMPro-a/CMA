@@ -12,7 +12,7 @@ import (
 
 func TestResetAdminKeyGeneratesNewKey(t *testing.T) {
 	st := newResetTestStore(t)
-	oldCredential, err := security.NewAdminCredential("cmp_admin_old", "test")
+	oldCredential, err := security.NewAdminCredential("cpamp_old", "test")
 	if err != nil {
 		t.Fatalf("create old credential: %v", err)
 	}
@@ -24,7 +24,7 @@ func TestResetAdminKeyGeneratesNewKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reset admin key: %v", err)
 	}
-	if !result.Generated || !strings.HasPrefix(result.AdminKey, "cmp_admin_") {
+	if !result.Generated || !strings.HasPrefix(result.AdminKey, "cpamp_") {
 		t.Fatalf("result = %#v", result)
 	}
 
@@ -35,7 +35,7 @@ func TestResetAdminKeyGeneratesNewKey(t *testing.T) {
 	if !security.VerifyAdminKey(credential, result.AdminKey) {
 		t.Fatal("generated key does not verify")
 	}
-	if security.VerifyAdminKey(credential, "cmp_admin_old") {
+	if security.VerifyAdminKey(credential, "cpamp_old") {
 		t.Fatal("old key still verifies")
 	}
 	if credential.Source != "cli-generated" || credential.RotatedAtMS <= 0 {
@@ -48,7 +48,7 @@ func TestResetAdminKeyGeneratesNewKey(t *testing.T) {
 
 func TestResetAdminKeyUsesProvidedKey(t *testing.T) {
 	st := newResetTestStore(t)
-	const newKey = "cmp_admin_new_key"
+	const newKey = "cpamp_new_key"
 
 	result, err := ResetAdminKey(context.Background(), st, newKey)
 	if err != nil {

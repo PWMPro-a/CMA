@@ -12,7 +12,7 @@ import {
 } from '@/stores';
 import { apiKeysApi } from '@/services/api/apiKeys';
 import { classifyModels } from '@/utils/models';
-import { STORAGE_KEY_AUTH } from '@/utils/constants';
+import { STORAGE_KEY_AUTH, STORAGE_KEY_QUOTA_CACHE } from '@/utils/constants';
 import iconGemini from '@/assets/icons/gemini.svg';
 import iconClaude from '@/assets/icons/claude.svg';
 import iconOpenaiLight from '@/assets/icons/openai-light.svg';
@@ -167,7 +167,14 @@ export function SystemPage() {
       onConfirm: () => {
         auth.logout();
         if (typeof localStorage === 'undefined') return;
-        const keysToRemove = [STORAGE_KEY_AUTH, 'isLoggedIn', 'apiBase', 'apiUrl', 'managementKey'];
+        const keysToRemove = [
+          STORAGE_KEY_AUTH,
+          STORAGE_KEY_QUOTA_CACHE,
+          'isLoggedIn',
+          'apiBase',
+          'apiUrl',
+          'managementKey',
+        ];
         keysToRemove.forEach((key) => localStorage.removeItem(key));
         showNotification(t('notification.login_storage_cleared'), 'success');
       },

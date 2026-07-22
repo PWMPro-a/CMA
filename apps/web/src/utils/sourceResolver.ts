@@ -1,23 +1,45 @@
 import type { GeminiKeyConfig, OpenAIProviderConfig, ProviderKeyConfig } from '@/types';
-import type { CredentialInfo, SourceInfo } from '@/types/sourceInfo';
-import { buildCandidateUsageSourceIds, normalizeAuthIndex, normalizeUsageSourceId } from '@/utils/usage';
+import type { CredentialInfo, SourceInfo, SourceProviderEnabledState } from '@/types/sourceInfo';
+import {
+  buildCandidateUsageSourceIds,
+  normalizeAuthIndex,
+  normalizeUsageSourceId,
+} from '@/utils/usage';
 
 export interface SourceInfoMapInput {
   geminiApiKeys?: GeminiKeyConfig[];
   claudeApiKeys?: ProviderKeyConfig[];
   codexApiKeys?: ProviderKeyConfig[];
+  xaiApiKeys?: ProviderKeyConfig[];
   vertexApiKeys?: ProviderKeyConfig[];
   openaiCompatibility?: OpenAIProviderConfig[];
 }
 
-type SourceInfoEntry = Required<Pick<SourceInfo, 'displayName' | 'type' | 'identityKey'>>;
+type SourceInfoEntry = Required<Pick<SourceInfo, 'displayName' | 'type' | 'identityKey'>> &
+  Pick<SourceInfo, 'providerEnabledState'>;
 
 export interface SourceInfoMap {
   byAuthIndex: Map<string, SourceInfoEntry | null>;
   bySource: Map<string, SourceInfoEntry | null>;
+  byIdentityKey: Map<string, SourceInfoEntry>;
 }
 
 const buildProviderIdentityKey = (type: string, index: number | string) => `${type}:${index}`;
+
+const hasDisableAllModelsRule = (models?: string[]) =>
+  Array.isArray(models) && models.some((model) => String(model ?? '').trim() === '*');
+
+const buildProviderEnabledState = (enabled: boolean): SourceProviderEnabledState =>
+  enabled ? 'enabled' : 'disabled';
+
+const mergeProviderEnabledState = (
+  left?: SourceProviderEnabledState,
+  right?: SourceProviderEnabledState
+): SourceProviderEnabledState | undefined => {
+  if (!left) return right;
+  if (!right || left === right) return left;
+  return 'mixed';
+};
 
 const registerIdentity = (
   map: Map<string, SourceInfoEntry | null>,
@@ -33,6 +55,18 @@ const registerIdentity = (
   }
 
   if (existing === null || existing.identityKey === entry.identityKey) return;
+  if (existing.displayName === entry.displayName) {
+    map.set(key, {
+      displayName: existing.displayName,
+      type: existing.type === entry.type ? existing.type : '',
+      identityKey: `shared:${key}`,
+      providerEnabledState: mergeProviderEnabledState(
+        existing.providerEnabledState,
+        entry.providerEnabledState
+      ),
+    });
+    return;
+  }
   map.set(key, null);
 };
 
@@ -122,6 +156,7 @@ const buildOpenAIKeyDisplayNameMap = (providers: OpenAIProviderConfig[]) => {
 export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
   const byAuthIndex = new Map<string, SourceInfoEntry | null>();
   const bySource = new Map<string, SourceInfoEntry | null>();
+  const byIdentityKey = new Map<string, SourceInfoEntry>();
 
   const registerProvider = (
     entry: SourceInfoEntry,
@@ -138,13 +173,19 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
   };
 
   const providers: Array<{
-    items: Array<{ apiKey?: string; prefix?: string; authIndex?: string }>;
+    items: Array<{
+      apiKey?: string;
+      prefix?: string;
+      authIndex?: string;
+      excludedModels?: string[];
+    }>;
     type: string;
     label: string;
   }> = [
     { items: input.geminiApiKeys || [], type: 'gemini', label: 'Gemini' },
     { items: input.claudeApiKeys || [], type: 'claude', label: 'Claude' },
     { items: input.codexApiKeys || [], type: 'codex', label: 'Codex' },
+    { items: input.xaiApiKeys || [], type: 'xai', label: 'xAI' },
     { items: input.vertexApiKeys || [], type: 'vertex', label: 'Vertex' },
   ];
 
@@ -156,6 +197,9 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
           displayName: displayNames[index] || `${label} #${index + 1}`,
           type,
           identityKey: buildProviderIdentityKey(type, index),
+          providerEnabledState: buildProviderEnabledState(
+            !hasDisableAllModelsRule(item.excludedModels)
+          ),
         },
         [item.authIndex],
         buildCandidateUsageSourceIds({ apiKey: item.apiKey, prefix: item.prefix })
@@ -178,6 +222,7 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
       displayName: openaiProviderDisplayNames[providerIndex] || `OpenAI #${providerIndex + 1}`,
       type: 'openai',
       identityKey: buildProviderIdentityKey('openai', providerIndex),
+      providerEnabledState: buildProviderEnabledState(provider.disabled !== true),
     };
 
     registerProvider(
@@ -194,6 +239,7 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
             providerEntry.displayName,
           type: 'openai',
           identityKey: buildProviderIdentityKey('openai', `${providerIndex}:${entryIndex}`),
+          providerEnabledState: providerEntry.providerEnabledState,
         },
         [entry.authIndex],
         buildCandidateUsageSourceIds({ apiKey: entry.apiKey })
@@ -201,8 +247,26 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
     });
   });
 
-  return { byAuthIndex, bySource };
+  [byAuthIndex, bySource].forEach((map) => {
+    map.forEach((entry) => {
+      if (entry) {
+        byIdentityKey.set(entry.identityKey, entry);
+      }
+    });
+  });
+
+  return { byAuthIndex, bySource, byIdentityKey };
 }
+
+export const buildSourceProviderStateMap = (sourceInfoMap: SourceInfoMap) => {
+  const map = new Map<string, SourceProviderEnabledState>();
+  sourceInfoMap.byIdentityKey.forEach((entry, identityKey) => {
+    if (entry.providerEnabledState) {
+      map.set(identityKey, entry.providerEnabledState);
+    }
+  });
+  return map;
+};
 
 export function resolveSourceDisplay(
   sourceRaw: string,
@@ -251,4 +315,13 @@ export function resolveSourceDisplay(
     type: '',
     identityKey: 'source:-',
   };
+}
+
+export function resolveSourceIdentityKey(
+  sourceRaw: string,
+  authIndex: unknown,
+  sourceInfoMap: SourceInfoMap,
+  authFileMap: Map<string, CredentialInfo>
+): string {
+  return resolveSourceDisplay(sourceRaw, authIndex, sourceInfoMap, authFileMap).identityKey || '';
 }

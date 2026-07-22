@@ -29,7 +29,7 @@ func TestRunGeneratesAdminKey(t *testing.T) {
 		t.Fatalf("output does not contain generated key: %s", output)
 	}
 	adminKey := strings.TrimSpace(strings.Split(output[index+len(marker):], "\n")[0])
-	if !strings.HasPrefix(adminKey, "cmp_admin_") {
+	if !strings.HasPrefix(adminKey, "cpamp_") {
 		t.Fatalf("generated key = %q", adminKey)
 	}
 	requireAdminKeyVerifies(t, dbPath, adminKey)
@@ -37,7 +37,7 @@ func TestRunGeneratesAdminKey(t *testing.T) {
 
 func TestRunUsesProvidedAdminKeyWithoutEchoingIt(t *testing.T) {
 	dbPath := newCommandTestDB(t)
-	const adminKey = "cmp_admin_from_cli"
+	const adminKey = "cpamp_from_cli"
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
@@ -115,7 +115,7 @@ func newCommandTestDB(t testing.TB) string {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	credential, err := security.NewAdminCredential("cmp_admin_old", "test")
+	credential, err := security.NewAdminCredential("cpamp_old", "test")
 	if err != nil {
 		t.Fatalf("create credential: %v", err)
 	}

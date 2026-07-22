@@ -1,5 +1,23 @@
 import axios from 'axios';
 import type { UsagePayload } from '@/features/monitoring/hooks/useUsageData';
+import {
+  getDemoAccountActionCandidates,
+  getDemoAccountProcessingPolicy,
+  getDemoApiKeyAliases,
+  getDemoCodexInspectionRun,
+  getDemoCodexInspectionRuns,
+  getDemoDashboardSummary,
+  getDemoHeaderSnapshots,
+  getDemoManagerConfig,
+  getDemoModelPriceUsageSummary,
+  getDemoModelPrices,
+  getDemoMonitoringAnalytics,
+  getDemoQuotaCooldowns,
+  getDemoUsagePayload,
+  getDemoUsageServiceInfo,
+  getDemoUsageServiceStatus,
+} from '@/features/demo/demoFixtures';
+import { isDemoMode } from '@/features/demo/demoMode';
 import { normalizeApiBase } from '@/utils/connection';
 import type { ModelPrice } from '@/utils/usage';
 
@@ -24,6 +42,7 @@ const USAGE_SERVICE_ERROR_CODES = new Set([
   'api_key_alias_duplicate',
   'model_price_sync_failed',
   'method_not_allowed',
+  'account_processing_policy_env_locked',
 ]);
 
 export interface UsageServiceApiError extends Error {
@@ -66,6 +85,47 @@ export interface UsageServiceStatus {
   events?: number;
   deadLetters?: number;
   collector?: UsageServiceCollectorStatus;
+}
+
+export interface AccountPolicyCapability {
+  enabled: boolean;
+  configured?: boolean;
+  source?: string;
+  locked?: boolean;
+  envKey: string;
+  configFileKey: string;
+  dependsOn?: string;
+}
+
+export interface AccountProcessingPolicy {
+  source: string;
+  updatedAtMs?: number;
+  codexQuotaCooldown: AccountPolicyCapability;
+  authIssueQueue: AccountPolicyCapability;
+  authIssueAutoDisable: AccountPolicyCapability;
+}
+
+export interface AccountProcessingPolicyPatch {
+  codexQuotaCooldownEnabled?: boolean;
+  authIssueQueueEnabled?: boolean;
+  authIssueAutoDisableEnabled?: boolean;
+}
+
+export interface QuotaCooldownInfo {
+  authFileName: string;
+  authIndex?: string;
+  provider?: string;
+  owner?: string;
+  reasonCode?: string;
+  windowKind?: 'five_hour' | 'weekly' | 'monthly' | 'rolling_24h' | 'unknown' | string;
+  recoverAtMs: number;
+  disabledAtMs?: number;
+  createdAtMs?: number;
+  evidence?: ProviderUsageMetadata;
+}
+
+export interface QuotaCooldownsResponse {
+  items: QuotaCooldownInfo[];
 }
 
 export interface UsageServiceSetupRequest {
@@ -117,15 +177,21 @@ export interface ManagerCodexInspectionScheduleConfig {
 export interface ManagerCodexInspectionConfig {
   enabled?: boolean;
   schedule?: ManagerCodexInspectionScheduleConfig;
+  targetTypes?: string[];
   targetType?: string;
   workers?: number;
   deleteWorkers?: number;
   timeout?: number;
   retries?: number;
   userAgent?: string;
+  xaiInferenceUserAgent?: string;
+  xaiInferenceEnabled?: boolean;
+  xaiInferenceModel?: string;
+  xaiInferencePrompt?: string;
   usedPercentThreshold?: number;
   sampleSize?: number;
   autoActionMode?: ManagerCodexInspectionAutoActionMode | string;
+  autoRecoverEnabled?: boolean;
 }
 
 export interface ManagerConfig {
@@ -171,6 +237,15 @@ export interface CodexInspectionRun {
   updatedAtMs: number;
 }
 
+export interface CodexInspectionQuotaWindow {
+  id: string;
+  labelKey: string;
+  labelParams?: Record<string, string | number>;
+  usedPercent?: number | null;
+  resetLabel?: string;
+  limitWindowSeconds?: number | null;
+}
+
 export interface CodexInspectionResult {
   id: number;
   runId: number;
@@ -191,7 +266,12 @@ export interface CodexInspectionResult {
   statusCode?: number;
   usedPercent?: number;
   isQuota: boolean;
+  autoRecoverEligible?: boolean;
   error?: string;
+  planType?: string | null;
+  quotaWindows?: CodexInspectionQuotaWindow[];
+  errorKind?: string;
+  errorDetail?: string;
   createdAtMs: number;
 }
 
@@ -230,8 +310,27 @@ export interface CodexInspectionActionsResponse {
   detail: CodexInspectionRunDetail;
 }
 
+export interface CodexInspectionActionOverride {
+  resultId: number;
+  action: 'delete';
+}
+
 export interface ModelPricesResponse {
   prices: Record<string, ModelPrice>;
+}
+
+export interface ModelPriceUsageStat {
+  model: string;
+  calls: number;
+  requested_calls: number;
+  resolved_calls: number;
+}
+
+export interface ModelPriceUsageSummaryResponse {
+  sampled_events: number;
+  total_events: number;
+  truncated: boolean;
+  models: ModelPriceUsageStat[];
 }
 
 export interface ModelPriceSyncCandidate {
@@ -273,6 +372,41 @@ export interface ApiKeyAlias {
 
 export interface ApiKeyAliasesResponse {
   items: ApiKeyAlias[];
+}
+
+export type AccountActionType = 'delete' | 'reauth' | 'review' | string;
+export type AccountActionStatus = 'pending' | 'ignored' | 'resolved' | 'deleted' | string;
+
+export interface AccountActionCandidate {
+  id: number;
+  actionType: AccountActionType;
+  status: AccountActionStatus;
+  provider?: string;
+  authFileName: string;
+  authIndex?: string;
+  accountSnapshot?: string;
+  accountIdSnapshot?: string;
+  authLabel?: string;
+  reasonCode?: string;
+  reason: string;
+  autoDisableEligible?: boolean;
+  autoDisabledAtMs?: number;
+  evidence?: unknown;
+  lastError?: string;
+  firstSeenAtMs: number;
+  lastSeenAtMs: number;
+  hitCount: number;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface AccountActionCandidatesResponse {
+  items: AccountActionCandidate[];
+  pendingCount: number;
+}
+
+export interface AccountActionCandidateResponse {
+  item: AccountActionCandidate;
 }
 
 export interface UsageImportResponse {
@@ -442,6 +576,13 @@ export interface DashboardRecentFailure {
   duration_ms: number | null;
   fail_status_code?: number | null;
   fail_summary?: string;
+  response_metadata?: ResponseHeaderMetadata;
+  header_quota_recover_at_ms?: number | null;
+  header_quota_used_percent?: number | null;
+  header_quota_plan_type?: string;
+  header_error_kind?: string;
+  header_error_code?: string;
+  header_trace_id?: string;
 }
 
 export interface DashboardSummaryResponse {
@@ -471,21 +612,40 @@ export interface MonitoringAnalyticsFilters {
   models?: string[];
   providers?: string[];
   accounts?: string[];
+  credential_ids?: string[];
+  auth_files?: string[];
   auth_indices?: string[];
   api_key_hashes?: string[];
   source_hashes?: string[];
+  project_ids?: string[];
+  request_types?: string[];
+  header_error_kinds?: string[];
+  header_error_codes?: string[];
+  header_quota_plans?: string[];
+  header_trace_ids?: string[];
   include_failed?: boolean;
   failed_only?: boolean;
-  exclude_zero_token?: boolean;
+  min_latency_ms?: number;
+  cache_status?: string;
 }
 
 export interface MonitoringAnalyticsEventsPageRequest {
   limit?: number;
   before_ms?: number | null;
+  before_id?: number | null;
+}
+
+export interface MonitoringAnalyticsDrilldownPreviewRequest {
+  from_ms: number;
+  to_ms: number;
+  limit?: number;
 }
 
 export interface MonitoringAnalyticsInclude {
   summary?: boolean;
+  summary_profile?: 'full' | 'compact';
+  summary_percentiles?: boolean;
+  summary_comparison?: boolean;
   timeline?: boolean;
   hourly_distribution?: boolean;
   model_share?: boolean;
@@ -493,11 +653,18 @@ export interface MonitoringAnalyticsInclude {
   model_stats?: boolean;
   failure_sources?: boolean;
   account_stats?: boolean;
+  credential_stats?: boolean;
+  credential_timeline?: boolean;
+  api_key_timeline?: boolean;
   api_key_stats?: boolean;
   filter_options?: boolean;
+  filter_selectors?: boolean;
+  heatmap?: boolean;
+  anomaly_points?: boolean;
   task_buckets?: boolean;
   recent_failures?: number;
   events_page?: MonitoringAnalyticsEventsPageRequest;
+  drilldown_preview?: MonitoringAnalyticsDrilldownPreviewRequest;
   granularity?: 'hour' | 'day' | string;
 }
 
@@ -505,6 +672,7 @@ export interface MonitoringAnalyticsRequest {
   from_ms: number;
   to_ms: number;
   now_ms?: number;
+  time_zone?: string;
   search_query?: string;
   search_api_key_hash?: string;
   filters?: MonitoringAnalyticsFilters;
@@ -521,10 +689,14 @@ export interface MonitoringAnalyticsSummary {
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
+  cache_hit_rate?: number;
   reasoning_tokens: number;
   total_tokens: number;
   total_cost: number;
+  average_cost_per_call?: number;
   average_latency_ms: number | null;
+  p95_latency_ms?: number | null;
+  p95_ttft_ms?: number | null;
   zero_token_calls: number;
   rpm_30m: number;
   tpm_30m: number;
@@ -536,19 +708,91 @@ export interface MonitoringAnalyticsSummary {
   zero_token_models: string[];
 }
 
+export interface MonitoringAnalyticsSummaryComparison {
+  from_ms: number;
+  to_ms: number;
+  total_calls: number;
+  success_calls: number;
+  failure_calls: number;
+  success_rate: number;
+  total_tokens: number;
+  total_cost: number;
+}
+
 export interface MonitoringAnalyticsTimelinePoint {
   bucket_ms: number;
+  bucket_end_ms?: number;
   label: string;
   calls: number;
   tokens: number;
   success: number;
   failure: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cached_tokens?: number;
+  cache_read_tokens?: number;
+  cache_creation_tokens?: number;
+  cache_hit_rate?: number;
+  reasoning_tokens?: number;
+  total_tokens?: number;
+  cost?: number;
+  average_latency_ms?: number | null;
+  p95_latency_ms?: number | null;
+  p95_ttft_ms?: number | null;
+  success_rate?: number;
+  failure_rate?: number;
 }
 
 export interface MonitoringAnalyticsHourlyPoint {
   hour: number;
   calls: number;
   tokens: number;
+}
+
+export interface MonitoringAnalyticsHeatmapContributor {
+  key: string;
+  label?: string;
+  calls: number;
+  success: number;
+  failure: number;
+  tokens: number;
+  cost: number;
+  failure_rate: number;
+  share: number;
+}
+
+export interface MonitoringAnalyticsHeatmapPoint {
+  weekday: number;
+  hour: number;
+  calls: number;
+  success: number;
+  failure: number;
+  tokens: number;
+  cost: number;
+  failure_rate: number;
+  model_contributors?: MonitoringAnalyticsHeatmapContributor[];
+  api_key_contributors?: MonitoringAnalyticsHeatmapContributor[];
+  provider_contributors?: MonitoringAnalyticsHeatmapContributor[];
+}
+
+export type MonitoringAnalyticsAnomalySeverity = 'low' | 'medium' | 'high' | string;
+
+export interface MonitoringAnalyticsAnomalyPoint {
+  bucket_ms: number;
+  bucket_end_ms: number;
+  label: string;
+  severity: MonitoringAnalyticsAnomalySeverity;
+  metric_keys: string[];
+  calls: number;
+  total_tokens: number;
+  cost: number;
+  failure_rate: number;
+  request_change: number;
+  cost_change: number;
+  tokens_per_request_change: number;
+  cache_hit_rate_change: number;
+  failure_rate_change: number;
+  latency_p95_change: number;
 }
 
 export interface MonitoringAnalyticsModelShareRow {
@@ -569,6 +813,9 @@ export interface MonitoringAnalyticsModelStat {
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
+  cache_hit_tokens?: number;
+  cache_hit_input_tokens?: number;
+  cache_hit_rate?: number;
   total_tokens: number;
   cost: number;
 }
@@ -611,6 +858,9 @@ export interface MonitoringAnalyticsAccountModelStatRow {
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
+  cache_hit_tokens?: number;
+  cache_hit_input_tokens?: number;
+  cache_hit_rate?: number;
   total_tokens: number;
   cost: number;
   last_seen_ms: number;
@@ -640,6 +890,83 @@ export interface MonitoringAnalyticsAccountStatRow {
   models?: MonitoringAnalyticsAccountModelStatRow[];
 }
 
+export interface MonitoringAnalyticsCredentialStatRow {
+  id: string;
+  auth_file_snapshot?: string;
+  auth_index?: string;
+  source?: string;
+  source_hash?: string;
+  account_snapshot?: string;
+  auth_label_snapshot?: string;
+  auth_provider_snapshot?: string;
+  auth_project_id_snapshot?: string;
+  calls: number;
+  success_calls: number;
+  failure_calls: number;
+  success_rate: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  total_tokens: number;
+  cost: number;
+  average_latency_ms: number | null;
+  last_seen_ms: number;
+  models?: MonitoringAnalyticsAccountModelStatRow[];
+}
+
+export interface MonitoringAnalyticsCredentialTimelinePoint {
+  id: string;
+  label?: string;
+  auth_file_snapshot?: string;
+  auth_index?: string;
+  source?: string;
+  source_hash?: string;
+  account_snapshot?: string;
+  auth_label_snapshot?: string;
+  auth_provider_snapshot?: string;
+  auth_project_id_snapshot?: string;
+  bucket_ms: number;
+  bucket_label?: string;
+  calls: number;
+  tokens: number;
+  success: number;
+  failure: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cached_tokens?: number;
+  cache_read_tokens?: number;
+  cache_creation_tokens?: number;
+  reasoning_tokens?: number;
+  total_tokens?: number;
+  cost?: number;
+  average_latency_ms?: number | null;
+  success_rate?: number;
+  failure_rate?: number;
+}
+
+export interface MonitoringAnalyticsApiKeyTimelinePoint {
+  api_key_hash: string;
+  bucket_ms: number;
+  bucket_label?: string;
+  calls: number;
+  tokens: number;
+  success: number;
+  failure: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cached_tokens?: number;
+  cache_read_tokens?: number;
+  cache_creation_tokens?: number;
+  reasoning_tokens?: number;
+  total_tokens?: number;
+  cost?: number;
+  average_latency_ms?: number | null;
+  success_rate?: number;
+  failure_rate?: number;
+}
+
 export interface MonitoringAnalyticsApiKeyStatRow {
   id: string;
   api_key_hash: string;
@@ -663,6 +990,26 @@ export interface MonitoringAnalyticsApiKeyStatRow {
   average_latency_ms: number | null;
   last_seen_ms: number;
   models?: MonitoringAnalyticsAccountModelStatRow[];
+  contexts?: MonitoringAnalyticsApiKeyContextRow[];
+}
+
+export interface MonitoringAnalyticsApiKeyContextRow {
+  id: string;
+  account_snapshot?: string;
+  auth_label_snapshot?: string;
+  auth_provider_snapshot?: string;
+  auth_index?: string;
+  source?: string;
+  source_hash?: string;
+  calls: number;
+  success_calls: number;
+  failure_calls: number;
+  success_rate: number;
+  failure_rate: number;
+  total_tokens: number;
+  cost: number;
+  average_latency_ms?: number | null;
+  last_seen_ms: number;
 }
 
 export interface MonitoringAnalyticsFilterOptions {
@@ -670,6 +1017,16 @@ export interface MonitoringAnalyticsFilterOptions {
   api_key_stats?: MonitoringAnalyticsApiKeyStatRow[];
   channel_share?: MonitoringAnalyticsChannelShareRow[];
   model_stats?: MonitoringAnalyticsModelStat[];
+  models?: string[];
+  api_key_hashes?: string[];
+  providers?: string[];
+  auth_files?: string[];
+  project_ids?: string[];
+  request_types?: string[];
+  header_error_kinds?: string[];
+  header_error_codes?: string[];
+  header_quota_plans?: string[];
+  header_trace_ids?: string[];
 }
 
 export interface MonitoringAnalyticsTaskBucketRow {
@@ -694,6 +1051,156 @@ export interface MonitoringAnalyticsTaskBucketRow {
   max_latency_ms: number | null;
 }
 
+export interface ResponseHeaderQuotaWindow {
+  used_percent?: number;
+  reset_at_ms?: number;
+  reset_after_seconds?: number;
+  window_minutes?: number;
+}
+
+export interface ResponseHeaderQuotaMetadata {
+  plan_type?: string;
+  active_limit?: string;
+  rate_limit_reached_type?: string;
+  summary_window_kind?: string;
+  summary_window_source?: string;
+  reached_window_kind?: string;
+  reached_window_source?: string;
+  credits_balance?: string;
+  credits_has_credits?: boolean;
+  credits_unlimited?: boolean;
+  primary_over_secondary_limit_percent?: number;
+  primary?: ResponseHeaderQuotaWindow;
+  secondary?: ResponseHeaderQuotaWindow;
+  recover_at_ms?: number;
+  used_percent?: number;
+}
+
+export interface ResponseHeaderErrorMetadata {
+  kind?: string;
+  code?: string;
+  authorization_error?: string;
+  ide_error_code?: string;
+  ide_root_error_code?: string;
+  retry_after_seconds?: number;
+  retry_after_recover_at_ms?: number;
+  rate_limit_bypass?: string;
+  should_retry?: boolean;
+}
+
+export interface ResponseHeaderTraceMetadata {
+  primary_trace_id?: string;
+  openai_request_id?: string;
+  request_id?: string;
+  oneapi_request_id?: string;
+  cf_ray?: string;
+  eagle_id?: string;
+  cloud_ai_companion_trace_id?: string;
+  client_request_id?: string;
+  zeabur_request_id?: string;
+  traceparent?: string;
+}
+
+export interface ResponseHeaderRoutingMetadata {
+  openai_proxy_wasm?: string;
+  models_etag?: string;
+  new_api_version?: string;
+  server?: string;
+  via?: string;
+  cf_cache_status?: string;
+  site_cache_status?: string;
+  served_by?: string;
+  mife_upstream_status?: string;
+}
+
+export interface ResponseHeaderResponseMetadata {
+  content_type?: string;
+  content_length?: number;
+  content_disposition?: string;
+  server_timing?: string;
+}
+
+export interface ResponseHeaderProviderMetadata {
+  antigravity_trace_id?: string;
+  antigravity_server_timing?: string;
+  mife_upstream_status?: string;
+  oneapi_request_id?: string;
+  cloudflare_ray?: string;
+  cloudflare_cache_status?: string;
+}
+
+export interface ResponseHeaderRateLimitBucket {
+  limit?: number;
+  remaining?: number;
+}
+
+export interface ResponseHeaderRateLimitMetadata {
+  requests?: ResponseHeaderRateLimitBucket;
+  tokens?: ResponseHeaderRateLimitBucket;
+}
+
+export interface ResponseHeaderDataPolicyMetadata {
+  retention_mode?: string;
+  zero_retention?: boolean;
+}
+
+export interface ProviderUsageMetadata {
+  provider?: string;
+  kind?: string;
+  state?: string;
+  code?: string;
+  model?: string;
+  unit?: string;
+  actual?: number;
+  limit?: number;
+  remaining?: number;
+  overage?: number;
+  window_kind?: string;
+  observed_at_ms?: number;
+  recover_at_ms?: number;
+  recover_at_estimated?: boolean;
+  source?: string;
+}
+
+export interface ResponseHeaderMetadata {
+  quota?: ResponseHeaderQuotaMetadata;
+  errors?: ResponseHeaderErrorMetadata;
+  trace?: ResponseHeaderTraceMetadata;
+  routing?: ResponseHeaderRoutingMetadata;
+  response?: ResponseHeaderResponseMetadata;
+  providers?: ResponseHeaderProviderMetadata;
+  rate_limit?: ResponseHeaderRateLimitMetadata;
+  data_policy?: ResponseHeaderDataPolicyMetadata;
+  provider_usage?: ProviderUsageMetadata;
+}
+
+export interface UsageHeaderSnapshot {
+  event_hash: string;
+  timestamp_ms: number;
+  auth_file_snapshot?: string;
+  auth_index?: string;
+  account_snapshot?: string;
+  auth_label_snapshot?: string;
+  auth_provider_snapshot?: string;
+  auth_project_id_snapshot?: string;
+  source?: string;
+  source_hash?: string;
+  response_metadata?: ResponseHeaderMetadata;
+  header_quota_recover_at_ms?: number | null;
+  header_quota_used_percent?: number | null;
+  header_quota_plan_type?: string;
+  header_error_kind?: string;
+  header_error_code?: string;
+  header_trace_id?: string;
+}
+
+export interface UsageHeaderSnapshotsResponse {
+  generated_at_ms: number;
+  from_ms: number;
+  to_ms: number;
+  items: UsageHeaderSnapshot[];
+}
+
 export interface MonitoringAnalyticsRecentFailure {
   timestamp_ms: number;
   model: string;
@@ -709,9 +1216,17 @@ export interface MonitoringAnalyticsRecentFailure {
   duration_ms: number | null;
   fail_status_code?: number | null;
   fail_summary?: string;
+  response_metadata?: ResponseHeaderMetadata;
+  header_quota_recover_at_ms?: number | null;
+  header_quota_used_percent?: number | null;
+  header_quota_plan_type?: string;
+  header_error_kind?: string;
+  header_error_code?: string;
+  header_trace_id?: string;
 }
 
 export interface MonitoringAnalyticsEventRow {
+  request_id?: string;
   event_hash: string;
   timestamp_ms: number;
   model: string;
@@ -724,6 +1239,7 @@ export interface MonitoringAnalyticsEventRow {
   api_key_hash: string;
   account_snapshot: string;
   auth_label_snapshot: string;
+  auth_file_snapshot?: string;
   auth_provider_snapshot: string;
   auth_project_id_snapshot?: string;
   resolved_model?: string;
@@ -742,33 +1258,49 @@ export interface MonitoringAnalyticsEventRow {
   failed: boolean;
   fail_status_code?: number | null;
   fail_summary?: string;
+  response_metadata?: ResponseHeaderMetadata;
+  header_quota_recover_at_ms?: number | null;
+  header_quota_used_percent?: number | null;
+  header_quota_plan_type?: string;
+  header_error_kind?: string;
+  header_error_code?: string;
+  header_trace_id?: string;
 }
 
 export interface MonitoringAnalyticsEventsResponse {
   items: MonitoringAnalyticsEventRow[];
   next_before_ms: number;
+  next_before_id?: number;
   has_more: boolean;
+  total_count?: number;
 }
 
 export interface MonitoringAnalyticsResponse {
   generated_at_ms: number;
   granularity: 'hour' | 'day' | string;
   summary?: MonitoringAnalyticsSummary;
+  summary_comparison?: MonitoringAnalyticsSummaryComparison;
   timeline?: MonitoringAnalyticsTimelinePoint[];
   hourly_distribution?: MonitoringAnalyticsHourlyPoint[];
+  heatmap?: MonitoringAnalyticsHeatmapPoint[];
+  anomaly_points?: MonitoringAnalyticsAnomalyPoint[];
   model_share?: MonitoringAnalyticsModelShareRow[];
   model_stats?: MonitoringAnalyticsModelStat[];
   channel_share?: MonitoringAnalyticsChannelShareRow[];
   failure_sources?: MonitoringAnalyticsFailureSourceRow[];
   account_stats?: MonitoringAnalyticsAccountStatRow[];
+  credential_stats?: MonitoringAnalyticsCredentialStatRow[];
+  credential_timeline?: MonitoringAnalyticsCredentialTimelinePoint[];
+  api_key_timeline?: MonitoringAnalyticsApiKeyTimelinePoint[];
   api_key_stats?: MonitoringAnalyticsApiKeyStatRow[];
   filter_options?: MonitoringAnalyticsFilterOptions;
   task_buckets?: MonitoringAnalyticsTaskBucketRow[];
   recent_failures?: MonitoringAnalyticsRecentFailure[];
   events?: MonitoringAnalyticsEventsResponse;
+  drilldown_preview?: MonitoringAnalyticsEventsResponse;
 }
 
-const USAGE_SERVICE_TIMEOUT_MS = 15 * 1000;
+const USAGE_SERVICE_TIMEOUT_MS = 30 * 1000;
 const USAGE_SERVICE_TRANSFER_TIMEOUT_MS = 60 * 1000;
 const CODEX_INSPECTION_RUN_TIMEOUT_MS = 10 * 60 * 1000;
 export const USAGE_SERVICE_ID = 'cpa-manager-plus';
@@ -896,8 +1428,121 @@ const parseContentDispositionFilename = (value: string): string => {
   return plainMatch?.[1]?.trim() || '';
 };
 
+const getDemoAccountActionCandidateResponse = (
+  id: number,
+  status?: AccountActionStatus
+): AccountActionCandidateResponse => {
+  const candidates = getDemoAccountActionCandidates().items;
+  const fallback = candidates[0];
+  const item = candidates.find((candidate) => candidate.id === id) ?? fallback;
+  return {
+    item: {
+      ...item,
+      status: status ?? item.status,
+      updatedAtMs: Date.now(),
+    },
+  };
+};
+
+const getDemoAccountActionCandidatesResponse = (
+  status: string,
+  limit: number
+): AccountActionCandidatesResponse => {
+  const response = getDemoAccountActionCandidates();
+  const filtered =
+    !status || status === 'all'
+      ? response.items
+      : response.items.filter((item) => item.status === status);
+  return {
+    items: filtered.slice(0, limit),
+    pendingCount: response.pendingCount,
+  };
+};
+
+const getDemoPatchedAccountProcessingPolicy = (
+  patch: AccountProcessingPolicyPatch
+): AccountProcessingPolicy => {
+  const policy = getDemoAccountProcessingPolicy();
+  return {
+    ...policy,
+    updatedAtMs: Date.now(),
+    codexQuotaCooldown: {
+      ...policy.codexQuotaCooldown,
+      enabled: patch.codexQuotaCooldownEnabled ?? policy.codexQuotaCooldown.enabled,
+    },
+    authIssueQueue: {
+      ...policy.authIssueQueue,
+      enabled: patch.authIssueQueueEnabled ?? policy.authIssueQueue.enabled,
+    },
+    authIssueAutoDisable: {
+      ...policy.authIssueAutoDisable,
+      enabled: patch.authIssueAutoDisableEnabled ?? policy.authIssueAutoDisable.enabled,
+    },
+  };
+};
+
+const getDemoCodexInspectionActionsResponse = (
+  resultIds: number[],
+  actionOverrides: CodexInspectionActionOverride[] = []
+): CodexInspectionActionsResponse => {
+  const detail = getDemoCodexInspectionRun();
+  const overrideByID = new Map(actionOverrides.map((item) => [item.resultId, item.action]));
+  const selected = resultIds.length
+    ? detail.results.filter((result) => resultIds.includes(result.id))
+    : detail.results;
+  const selectedIds = new Set(selected.map((result) => result.id));
+  detail.results = detail.results.map((result) => {
+    if (!selectedIds.has(result.id)) return result;
+    const executedAction = overrideByID.get(result.id) ?? result.action;
+    return {
+      ...result,
+      actionStatus: 'success',
+      executedAction,
+      actionError: undefined,
+    };
+  });
+  return {
+    outcomes: selected.map((result) => ({
+      resultId: result.id,
+      accountKey: result.accountKey,
+      fileName: result.fileName,
+      displayAccount: result.displayAccount,
+      action: overrideByID.get(result.id) ?? result.action,
+      status: 'done',
+      success: true,
+    })),
+    detail,
+  };
+};
+
+const getDemoModelPriceSyncResponse = (models?: string[]): ModelPriceSyncResponse => {
+  const prices = getDemoModelPrices().prices;
+  const selectedModels = new Set((models || []).map((model) => model.trim()).filter(Boolean));
+  const selectedPrices =
+    selectedModels.size > 0
+      ? Object.fromEntries(Object.entries(prices).filter(([model]) => selectedModels.has(model)))
+      : prices;
+
+  return {
+    prices: selectedPrices,
+    source: 'demo',
+    sources: ['demo'],
+    imported: Object.keys(selectedPrices).length,
+    skipped: 0,
+    matched: selectedPrices,
+    candidates: [],
+    unmatched: [],
+    proxyUsed: false,
+    sourceResults: [{ source: 'demo', models: Object.keys(selectedPrices).length, skipped: 0 }],
+  };
+};
+
 export const usageServiceApi = {
   getInfo: async (base: string): Promise<UsageServiceInfo> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoUsageServiceInfo();
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.get<UsageServiceInfo>(buildUrl(base, '/usage-service/info'), {
         timeout: USAGE_SERVICE_TIMEOUT_MS,
@@ -911,6 +1556,10 @@ export const usageServiceApi = {
     payload: UsageServiceSetupRequest,
     adminKey?: string
   ): Promise<void> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return;
+    }
+
     await withUsageServiceError(async () => {
       await axios.post(buildUrl(base, '/setup'), payload, {
         timeout: USAGE_SERVICE_TIMEOUT_MS,
@@ -923,6 +1572,10 @@ export const usageServiceApi = {
     base: string,
     managementKey?: string
   ): Promise<ManagerConfigResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoManagerConfig();
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.get<ManagerConfigResponse>(
         buildUrl(base, '/usage-service/config'),
@@ -940,6 +1593,10 @@ export const usageServiceApi = {
     config: ManagerConfig,
     managementKey?: string
   ): Promise<ManagerConfigResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return { ...getDemoManagerConfig(), config, source: 'db' };
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.put<ManagerConfigResponse>(
         buildUrl(base, '/usage-service/config'),
@@ -958,6 +1615,11 @@ export const usageServiceApi = {
     managementKey?: string,
     limit = 20
   ): Promise<CodexInspectionRunsResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      const response = getDemoCodexInspectionRuns();
+      return { items: response.items.slice(0, limit) };
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.get<CodexInspectionRunsResponse>(
         buildUrl(base, '/v0/management/codex-inspection/runs'),
@@ -976,6 +1638,10 @@ export const usageServiceApi = {
     managementKey: string | undefined,
     id: number
   ): Promise<CodexInspectionRunDetail> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoCodexInspectionRun();
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.get<CodexInspectionRunDetail>(
         buildUrl(base, `/v0/management/codex-inspection/runs/${id}`),
@@ -992,6 +1658,10 @@ export const usageServiceApi = {
     base: string,
     managementKey?: string
   ): Promise<CodexInspectionRunDetail> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoCodexInspectionRun();
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.post<CodexInspectionRunDetail>(
         buildUrl(base, '/v0/management/codex-inspection/run'),
@@ -1009,12 +1679,17 @@ export const usageServiceApi = {
     base: string,
     managementKey: string | undefined,
     runId: number,
-    resultIds: number[]
+    resultIds: number[],
+    actionOverrides: CodexInspectionActionOverride[] = []
   ): Promise<CodexInspectionActionsResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoCodexInspectionActionsResponse(resultIds, actionOverrides);
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.post<CodexInspectionActionsResponse>(
         buildUrl(base, `/v0/management/codex-inspection/runs/${runId}/actions`),
-        { resultIds },
+        { resultIds, actionOverrides },
         {
           timeout: CODEX_INSPECTION_RUN_TIMEOUT_MS,
           headers: authHeaders(managementKey),
@@ -1025,6 +1700,10 @@ export const usageServiceApi = {
   },
 
   getStatus: async (base: string, managementKey?: string): Promise<UsageServiceStatus> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoUsageServiceStatus();
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.get<UsageServiceStatus>(buildUrl(base, '/status'), {
         timeout: USAGE_SERVICE_TIMEOUT_MS,
@@ -1034,7 +1713,73 @@ export const usageServiceApi = {
     });
   },
 
+  getAccountProcessingPolicy: async (
+    base: string,
+    managementKey?: string
+  ): Promise<AccountProcessingPolicy> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoAccountProcessingPolicy();
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.get<AccountProcessingPolicy>(
+        buildUrl(base, '/usage-service/account-processing-policy'),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  getActiveQuotaCooldowns: async (
+    base: string,
+    managementKey?: string
+  ): Promise<QuotaCooldownInfo[]> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoQuotaCooldowns();
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.get<QuotaCooldownsResponse>(
+        buildUrl(base, '/usage-service/quota-cooldowns'),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data.items ?? [];
+    });
+  },
+
+  updateAccountProcessingPolicy: async (
+    base: string,
+    managementKey: string,
+    patch: AccountProcessingPolicyPatch
+  ): Promise<AccountProcessingPolicy> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoPatchedAccountProcessingPolicy(patch);
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.patch<AccountProcessingPolicy>(
+        buildUrl(base, '/usage-service/account-processing-policy'),
+        patch,
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
   getUsage: async (base: string, managementKey?: string): Promise<UsagePayload> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoUsagePayload() as UsagePayload;
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.get<UsagePayload>(buildUrl(base, '/v0/management/usage'), {
         timeout: USAGE_SERVICE_TIMEOUT_MS,
@@ -1045,6 +1790,10 @@ export const usageServiceApi = {
   },
 
   getModelPrices: async (base: string, managementKey?: string): Promise<ModelPricesResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoModelPrices();
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.get<ModelPricesResponse>(
         buildUrl(base, '/v0/management/model-prices'),
@@ -1057,11 +1806,37 @@ export const usageServiceApi = {
     });
   },
 
+  getModelPriceUsageSummary: async (
+    base: string,
+    managementKey?: string,
+    signal?: AbortSignal
+  ): Promise<ModelPriceUsageSummaryResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoModelPriceUsageSummary();
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.get<ModelPriceUsageSummaryResponse>(
+        buildUrl(base, '/v0/management/model-prices/usage-summary'),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          signal,
+        }
+      );
+      return response.data;
+    });
+  },
+
   saveModelPrices: async (
     base: string,
     prices: Record<string, ModelPrice>,
     managementKey?: string
   ): Promise<ModelPricesResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return { prices };
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.put<ModelPricesResponse>(
         buildUrl(base, '/v0/management/model-prices'),
@@ -1079,6 +1854,10 @@ export const usageServiceApi = {
     base: string,
     managementKey?: string
   ): Promise<ApiKeyAliasesResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoApiKeyAliases();
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.get<ApiKeyAliasesResponse>(
         buildUrl(base, '/v0/management/api-key-aliases'),
@@ -1098,6 +1877,10 @@ export const usageServiceApi = {
     activeApiKeyHashes?: string[],
     allowOrphanAliasCleanup?: boolean
   ): Promise<ApiKeyAliasesResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return { items };
+    }
+
     return withUsageServiceError(async () => {
       const body: {
         items: ApiKeyAlias[];
@@ -1127,6 +1910,10 @@ export const usageServiceApi = {
     apiKeyHash: string,
     managementKey?: string
   ): Promise<void> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return;
+    }
+
     await withUsageServiceError(async () => {
       await axios.delete(
         buildUrl(base, `/v0/management/api-key-aliases/${encodeURIComponent(apiKeyHash)}`),
@@ -1138,11 +1925,137 @@ export const usageServiceApi = {
     });
   },
 
+  listAccountActionCandidates: async (
+    base: string,
+    managementKey?: string,
+    status = 'pending',
+    limit = 100
+  ): Promise<AccountActionCandidatesResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoAccountActionCandidatesResponse(status, limit);
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.get<AccountActionCandidatesResponse>(
+        buildUrl(base, '/v0/management/account-action-candidates'),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          params: { status, limit },
+        }
+      );
+      return response.data;
+    });
+  },
+
+  ignoreAccountActionCandidate: async (
+    base: string,
+    managementKey: string | undefined,
+    id: number
+  ): Promise<AccountActionCandidateResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoAccountActionCandidateResponse(id, 'ignored');
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.post<AccountActionCandidateResponse>(
+        buildUrl(
+          base,
+          `/v0/management/account-action-candidates/${encodeURIComponent(String(id))}/ignore`
+        ),
+        undefined,
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  resolveAccountActionCandidate: async (
+    base: string,
+    managementKey: string | undefined,
+    id: number
+  ): Promise<AccountActionCandidateResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoAccountActionCandidateResponse(id, 'resolved');
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.post<AccountActionCandidateResponse>(
+        buildUrl(
+          base,
+          `/v0/management/account-action-candidates/${encodeURIComponent(String(id))}/resolve`
+        ),
+        undefined,
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  enableAccountActionCandidate: async (
+    base: string,
+    managementKey: string | undefined,
+    id: number
+  ): Promise<AccountActionCandidateResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoAccountActionCandidateResponse(id, 'resolved');
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.post<AccountActionCandidateResponse>(
+        buildUrl(
+          base,
+          `/v0/management/account-action-candidates/${encodeURIComponent(String(id))}/enable`
+        ),
+        undefined,
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
+  deleteAccountActionCandidateAuthFile: async (
+    base: string,
+    managementKey: string | undefined,
+    id: number
+  ): Promise<AccountActionCandidateResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoAccountActionCandidateResponse(id, 'deleted');
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.delete<AccountActionCandidateResponse>(
+        buildUrl(
+          base,
+          `/v0/management/account-action-candidates/${encodeURIComponent(String(id))}/auth-file`
+        ),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
+      return response.data;
+    });
+  },
+
   syncModelPrices: async (
     base: string,
     managementKey?: string,
     models?: string[]
   ): Promise<ModelPriceSyncResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoModelPriceSyncResponse(models);
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.post<ModelPriceSyncResponse>(
         buildUrl(base, '/v0/management/model-prices/sync'),
@@ -1157,6 +2070,15 @@ export const usageServiceApi = {
   },
 
   exportUsage: async (base: string, managementKey?: string): Promise<UsageExportResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return {
+        blob: new Blob(['{"demo":true,"event":"usage-export"}\n'], {
+          type: 'application/jsonl',
+        }),
+        filename: 'demo-usage-events.jsonl',
+      };
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.get<Blob>(buildUrl(base, '/v0/management/usage/export'), {
         timeout: USAGE_SERVICE_TRANSFER_TIMEOUT_MS,
@@ -1176,6 +2098,10 @@ export const usageServiceApi = {
     payload: Blob | string,
     managementKey?: string
   ): Promise<UsageImportResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return { format: 'jsonl', added: 12, skipped: 0, total: 12, failed: 0 };
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.post<UsageImportResponse>(
         buildUrl(base, '/v0/management/usage/import'),
@@ -1196,6 +2122,10 @@ export const dashboardApi = {
     managementKey: string | undefined,
     params: DashboardSummaryParams
   ): Promise<DashboardSummaryResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoDashboardSummary();
+    }
+
     return withUsageServiceError(async () => {
       const query: Record<string, number> = {
         today_start_ms: params.todayStartMs,
@@ -1218,11 +2148,37 @@ export const dashboardApi = {
 };
 
 export const monitoringAnalyticsApi = {
+  getHeaderSnapshots: async (
+    base: string,
+    managementKey: string | undefined,
+    params: { days?: number; limit?: number } = {}
+  ): Promise<UsageHeaderSnapshotsResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoHeaderSnapshots();
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.get<UsageHeaderSnapshotsResponse>(
+        buildUrl(base, '/v0/management/monitoring/header-snapshots'),
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          params,
+        }
+      );
+      return response.data;
+    });
+  },
   getAnalytics: async (
     base: string,
     managementKey: string | undefined,
-    request: MonitoringAnalyticsRequest
+    request: MonitoringAnalyticsRequest,
+    signal?: AbortSignal
   ): Promise<MonitoringAnalyticsResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return getDemoMonitoringAnalytics(request);
+    }
+
     return withUsageServiceError(async () => {
       const response = await axios.post<MonitoringAnalyticsResponse>(
         buildUrl(base, '/v0/management/monitoring/analytics'),
@@ -1230,6 +2186,7 @@ export const monitoringAnalyticsApi = {
         {
           timeout: USAGE_SERVICE_TIMEOUT_MS,
           headers: authHeaders(managementKey),
+          signal,
         }
       );
       return response.data;

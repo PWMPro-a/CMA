@@ -5,11 +5,13 @@ import type {
   CodexUsageWindow,
 } from '@/types';
 import { formatCodexResetLabel } from './formatters';
-import { normalizeNumberValue, normalizeStringValue } from './parsers';
+import { normalizeNumberValue, normalizePlanType, normalizeStringValue } from './parsers';
 
 const FIVE_HOUR_SECONDS = 18_000;
 const WEEK_SECONDS = 604_800;
 const MONTH_SECONDS = 2_592_000;
+const MIN_MONTH_SECONDS = 28 * 24 * 60 * 60;
+const MAX_MONTH_SECONDS = 31 * 24 * 60 * 60;
 
 type CodexQuotaWindowMeta = {
   id: string;
@@ -76,9 +78,14 @@ const formatWindowDuration = (seconds: number | null): string => {
 const hasExplicitWindowSeconds = (window?: CodexUsageWindow | null): boolean =>
   getWindowSeconds(window) !== null;
 
+const isMonthlyWindow = (window?: CodexUsageWindow | null): boolean => {
+  const seconds = getWindowSeconds(window);
+  return seconds !== null && seconds >= MIN_MONTH_SECONDS && seconds <= MAX_MONTH_SECONDS;
+};
+
 const pickClassifiedWindows = (
   limitInfo?: CodexRateLimitInfo | null,
-  options?: { allowOrderFallback?: boolean }
+  options?: { allowOrderFallback?: boolean; teamPlan?: boolean }
 ): {
   fiveHourWindow: CodexUsageWindow | null;
   weeklyWindow: CodexUsageWindow | null;
@@ -87,6 +94,7 @@ const pickClassifiedWindows = (
   windows: CodexUsageWindow[];
 } => {
   const allowOrderFallback = options?.allowOrderFallback ?? true;
+  const teamPlan = options?.teamPlan ?? false;
   const primaryWindow = limitInfo?.primary_window ?? limitInfo?.primaryWindow ?? null;
   const secondaryWindow = limitInfo?.secondary_window ?? limitInfo?.secondaryWindow ?? null;
   const rawWindows = [primaryWindow, secondaryWindow];
@@ -105,7 +113,7 @@ const pickClassifiedWindows = (
       fiveHourWindow = window;
     } else if (seconds === WEEK_SECONDS && !weeklyWindow) {
       weeklyWindow = window;
-    } else if (seconds === MONTH_SECONDS && !monthlyWindow) {
+    } else if ((seconds === MONTH_SECONDS || isMonthlyWindow(window)) && !monthlyWindow) {
       monthlyWindow = window;
     } else if (seconds !== null && seconds > FIVE_HOUR_SECONDS && !genericLongWindow) {
       genericLongWindow = window;
@@ -120,8 +128,15 @@ const pickClassifiedWindows = (
         shouldFallbackPrimary && primaryWindow !== weeklyWindow ? primaryWindow : null;
     }
     if (!weeklyWindow) {
-      weeklyWindow =
-        shouldFallbackSecondary && secondaryWindow !== fiveHourWindow ? secondaryWindow : null;
+      if (teamPlan) {
+        monthlyWindow =
+          !monthlyWindow && shouldFallbackSecondary && secondaryWindow !== fiveHourWindow
+            ? secondaryWindow
+            : monthlyWindow;
+      } else {
+        weeklyWindow =
+          shouldFallbackSecondary && secondaryWindow !== fiveHourWindow ? secondaryWindow : null;
+      }
     }
   }
 
@@ -194,11 +209,12 @@ const addCodexRateLimitWindows = (
   weeklyMeta: CodexQuotaWindowMeta,
   monthlyMeta: CodexQuotaWindowMeta,
   genericLabelKey: string,
-  genericLabelParams?: Record<string, string | number>
+  genericLabelParams?: Record<string, string | number>,
+  options?: { teamPlan?: boolean }
 ) => {
   const limitReached = limitInfo?.limit_reached ?? limitInfo?.limitReached;
   const allowed = limitInfo?.allowed;
-  const classified = pickClassifiedWindows(limitInfo);
+  const classified = pickClassifiedWindows(limitInfo, { teamPlan: options?.teamPlan });
   const added = new Set<CodexUsageWindow>();
 
   addCodexWindowInfo(
@@ -250,7 +266,8 @@ const addCodexRateLimitWindows = (
 
 const addAdditionalRateLimitWindows = (
   windows: CodexQuotaWindowInfo[],
-  additionalRateLimits: CodexAdditionalRateLimit[] | null | undefined
+  additionalRateLimits: CodexAdditionalRateLimit[] | null | undefined,
+  options?: { teamPlan?: boolean }
 ) => {
   if (!Array.isArray(additionalRateLimits)) return;
 
@@ -280,17 +297,23 @@ const addAdditionalRateLimitWindows = (
         labelKey: 'codex_quota.additional_monthly_window',
       },
       'codex_quota.additional_generic_window',
-      { name: limitName }
+      { name: limitName },
+      options
     );
   });
 };
 
-export const buildCodexQuotaWindowInfos = (payload: CodexUsagePayload): CodexQuotaWindowInfo[] => {
+export const buildCodexQuotaWindowInfos = (
+  payload: CodexUsagePayload,
+  options?: { planType?: string | null }
+): CodexQuotaWindowInfo[] => {
   const windows: CodexQuotaWindowInfo[] = [];
   const rateLimit = payload.rate_limit ?? payload.rateLimit ?? undefined;
   const codeReviewLimit =
     payload.code_review_rate_limit ?? payload.codeReviewRateLimit ?? undefined;
   const additionalRateLimits = payload.additional_rate_limits ?? payload.additionalRateLimits;
+  const planType = normalizePlanType(options?.planType ?? payload.plan_type ?? payload.planType);
+  const teamPlan = planType === 'team';
 
   addCodexRateLimitWindows(
     windows,
@@ -298,7 +321,9 @@ export const buildCodexQuotaWindowInfos = (payload: CodexUsagePayload): CodexQuo
     CODEX_WINDOW_META.codeFiveHour,
     CODEX_WINDOW_META.codeWeekly,
     CODEX_WINDOW_META.codeMonthly,
-    'codex_quota.generic_window'
+    'codex_quota.generic_window',
+    undefined,
+    { teamPlan }
   );
   addCodexRateLimitWindows(
     windows,
@@ -306,9 +331,11 @@ export const buildCodexQuotaWindowInfos = (payload: CodexUsagePayload): CodexQuo
     CODEX_WINDOW_META.codeReviewFiveHour,
     CODEX_WINDOW_META.codeReviewWeekly,
     CODEX_WINDOW_META.codeReviewMonthly,
-    'codex_quota.code_review_generic_window'
+    'codex_quota.code_review_generic_window',
+    undefined,
+    { teamPlan }
   );
-  addAdditionalRateLimitWindows(windows, additionalRateLimits);
+  addAdditionalRateLimitWindows(windows, additionalRateLimits, { teamPlan });
 
   return windows;
 };

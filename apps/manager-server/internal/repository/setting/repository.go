@@ -12,12 +12,15 @@ import (
 )
 
 const managerConfigKey = "manager_config_v1"
+const automationSettingsKey = "automation_settings_v1"
 const adminCredentialKey = "admin_credential_v1"
 const bootstrapStateKey = "bootstrap_state_v1"
 
 type Repository interface {
 	SaveManagerConfig(ctx context.Context, cfg model.ManagerConfig) error
 	LoadManagerConfig(ctx context.Context) (model.ManagerConfig, bool, error)
+	SaveAutomationSettings(ctx context.Context, settings model.AutomationSettings) (model.AutomationSettings, error)
+	LoadAutomationSettings(ctx context.Context) (model.AutomationSettings, bool, error)
 	SaveSetup(ctx context.Context, setup model.Setup) error
 	LoadSetup(ctx context.Context) (model.Setup, bool, error)
 	SaveAdminCredential(ctx context.Context, credential model.AdminCredential) error
@@ -123,6 +126,43 @@ func (r *repository) LoadManagerConfig(ctx context.Context) (model.ManagerConfig
 		return model.ManagerConfig{}, false, err
 	}
 	return cfg, true, nil
+}
+
+func (r *repository) SaveAutomationSettings(ctx context.Context, settings model.AutomationSettings) (model.AutomationSettings, error) {
+	settings.UpdatedAtMS = time.Now().UnixMilli()
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return model.AutomationSettings{}, err
+	}
+	_, err = r.db.ExecContext(
+		ctx,
+		`insert into settings(key, value, updated_at_ms)
+		 values(?, ?, ?)
+		 on conflict(key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
+		automationSettingsKey,
+		string(data),
+		settings.UpdatedAtMS,
+	)
+	if err != nil {
+		return model.AutomationSettings{}, err
+	}
+	return settings, nil
+}
+
+func (r *repository) LoadAutomationSettings(ctx context.Context) (model.AutomationSettings, bool, error) {
+	var raw string
+	err := r.db.QueryRowContext(ctx, `select value from settings where key = ?`, automationSettingsKey).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.AutomationSettings{}, false, nil
+	}
+	if err != nil {
+		return model.AutomationSettings{}, false, err
+	}
+	var settings model.AutomationSettings
+	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
+		return model.AutomationSettings{}, false, err
+	}
+	return settings, true, nil
 }
 
 func (r *repository) SaveAdminCredential(ctx context.Context, credential model.AdminCredential) error {

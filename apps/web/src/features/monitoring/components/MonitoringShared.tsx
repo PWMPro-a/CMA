@@ -1,4 +1,11 @@
-import { useEffect, useState, type ComponentType, type KeyboardEvent, type ReactNode } from 'react';
+import {
+  useEffect,
+  useId,
+  useState,
+  type ComponentType,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react';
 import type { TFunction } from 'i18next';
 import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Select';
@@ -6,10 +13,14 @@ import {
   IconArrowDownToLine,
   IconArrowUpFromLine,
   IconBinary,
+  IconChartLine,
   IconCheck,
   IconDatabaseZap,
   IconDollarSign,
   IconInbox,
+  IconRefreshCw,
+  IconShield,
+  IconTrash2,
   IconX,
   type IconProps,
 } from '@/components/ui/icons';
@@ -24,7 +35,13 @@ export type SummaryCardIcon =
   | 'tokens'
   | 'input'
   | 'output'
-  | 'cache';
+  | 'cache'
+  | 'probe'
+  | 'sampled'
+  | 'delete'
+  | 'disable'
+  | 'enable'
+  | 'reauth';
 
 export type SummaryCardAccent =
   | 'blue'
@@ -38,7 +55,9 @@ export type SummaryCardAccent =
 
 export type SummaryCardProps = {
   label: string;
+  fullLabel?: string;
   value: string;
+  valueTitle?: string;
   meta: string;
   tone?: MonitoringStatusTone;
   variant?: 'primary' | 'secondary';
@@ -67,6 +86,12 @@ const parsePageSize = (value: string, fallback: number) => {
 const clampPage = (value: number, totalPages: number) =>
   Math.min(Math.max(Number.isFinite(value) ? value : 1, 1), Math.max(totalPages, 1));
 
+const shortLabel = (t: TFunction, shortKey: string, fallbackKey: string) => {
+  const fallback = t(fallbackKey);
+  const label = t(shortKey, { defaultValue: fallback });
+  return label === shortKey ? fallback : label;
+};
+
 const summaryIconMap: Record<SummaryCardIcon, ComponentType<IconProps>> = {
   calls: IconInbox,
   success: IconCheck,
@@ -76,6 +101,12 @@ const summaryIconMap: Record<SummaryCardIcon, ComponentType<IconProps>> = {
   input: IconArrowDownToLine,
   output: IconArrowUpFromLine,
   cache: IconDatabaseZap,
+  probe: IconInbox,
+  sampled: IconChartLine,
+  delete: IconTrash2,
+  disable: IconShield,
+  enable: IconCheck,
+  reauth: IconRefreshCw,
 };
 
 const summaryAccentClassMap: Record<SummaryCardAccent, string> = {
@@ -91,7 +122,9 @@ const summaryAccentClassMap: Record<SummaryCardAccent, string> = {
 
 export function SummaryCard({
   label,
+  fullLabel,
   value,
+  valueTitle,
   meta,
   tone,
   variant = 'primary',
@@ -99,6 +132,10 @@ export function SummaryCard({
   accent = 'blue',
 }: SummaryCardProps) {
   const Icon = icon ? summaryIconMap[icon] : null;
+  const tooltipId = useId();
+  const tooltipValue = valueTitle ?? value;
+  const resolvedLabel = fullLabel ?? label;
+  const hasValueTooltip = tooltipValue !== value;
   const cardClassName = [
     'card',
     styles.summaryCard,
@@ -116,14 +153,26 @@ export function SummaryCard({
             <Icon size={20} />
           </span>
         ) : null}
-        <span className={styles.summaryLabel} title={label}>
+        <span className={styles.summaryLabel} title={resolvedLabel}>
           {label}
         </span>
       </div>
       <div className={styles.summaryCardBody}>
-        <strong className={`${styles.summaryValue} ${tone ? styles[`tone${tone}`] : ''}`}>
-          {value}
-        </strong>
+        <span className={styles.summaryValueWrap}>
+          <strong
+            className={`${styles.summaryValue} ${tone ? styles[`tone${tone}`] : ''}`}
+            tabIndex={hasValueTooltip ? 0 : undefined}
+            aria-describedby={hasValueTooltip ? tooltipId : undefined}
+          >
+            {value}
+          </strong>
+          {hasValueTooltip ? (
+            <span id={tooltipId} className={styles.summaryValueTooltip} role="tooltip">
+              <span className={styles.summaryValueTooltipLabel}>{resolvedLabel}</span>
+              <span className={styles.summaryValueTooltipValue}>{tooltipValue}</span>
+            </span>
+          ) : null}
+        </span>
         <span className={styles.summaryMeta} title={meta}>
           {meta}
         </span>
@@ -184,7 +233,9 @@ export function PaginationControls({
       </div>
       <div className={styles.paginationControls}>
         <div className={styles.pageSizeField}>
-          <span>{t('monitoring.page_size_label')}</span>
+          <span title={t('monitoring.page_size_label')}>
+            {shortLabel(t, 'monitoring.page_size_label_short', 'monitoring.page_size_label')}
+          </span>
           <Select
             className={styles.pageSizeSelect}
             triggerClassName={styles.pageSizeSelectTrigger}
@@ -204,7 +255,7 @@ export function PaginationControls({
           onClick={() => onPageChange(Math.max(1, currentPage - 1))}
           disabled={currentPage <= 1}
         >
-          {t('monitoring.pagination_prev')}
+          {shortLabel(t, 'monitoring.pagination_prev_short', 'monitoring.pagination_prev')}
         </Button>
         <Button
           variant="secondary"
@@ -212,7 +263,7 @@ export function PaginationControls({
           onClick={() => onPageChange(Math.min(totalPages, currentPage + 1))}
           disabled={currentPage >= totalPages}
         >
-          {t('monitoring.pagination_next')}
+          {shortLabel(t, 'monitoring.pagination_next_short', 'monitoring.pagination_next')}
         </Button>
         <label className={styles.pageJumpField}>
           <span>{t('monitoring.pagination_jump_prefix')}</span>

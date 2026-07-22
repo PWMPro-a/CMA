@@ -8,7 +8,7 @@ import (
 )
 
 func TestAdminCredentialVerifiesOnlyAdminKey(t *testing.T) {
-	const adminKey = "cmp_admin_test_key_0123456789abcdef"
+	const adminKey = "cpamp_test_key_0123456789abcdef"
 
 	credential, err := NewAdminCredential(adminKey, "test")
 	if err != nil {
@@ -25,16 +25,38 @@ func TestAdminCredentialVerifiesOnlyAdminKey(t *testing.T) {
 	}
 }
 
+func TestAdminCredentialStillAcceptsLegacyAdminKeyPrefix(t *testing.T) {
+	const adminKey = "cmp_admin_test_key_0123456789abcdef"
+
+	credential, err := NewAdminCredential(adminKey, "test")
+	if err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	if !VerifyAdminKey(credential, adminKey) {
+		t.Fatal("legacy admin key did not verify")
+	}
+}
+
 func TestGenerateAdminKeyUsesExpectedPrefixAndEntropyLength(t *testing.T) {
 	adminKey, err := GenerateAdminKey()
 	if err != nil {
 		t.Fatalf("generate admin key: %v", err)
 	}
-	if !strings.HasPrefix(adminKey, "cmp_admin_") {
+	if !strings.HasPrefix(adminKey, "cpamp_") {
 		t.Fatalf("admin key = %q", adminKey)
 	}
-	if got, want := len(strings.TrimPrefix(adminKey, "cmp_admin_")), 43; got != want {
-		t.Fatalf("encoded random length = %d, want %d", got, want)
+	secret := strings.TrimPrefix(adminKey, "cpamp_")
+	if got, want := len(secret), 32; got != want {
+		t.Fatalf("random length = %d, want %d", got, want)
+	}
+	if !isAlnum(secret) {
+		t.Fatalf("admin key contains non-alphanumeric characters: %q", adminKey)
+	}
+}
+
+func TestRandomAlnumRejectsInvalidLength(t *testing.T) {
+	if value, err := randomAlnum(0); err == nil || value != "" {
+		t.Fatalf("randomAlnum(0) = %q, %v; want empty value and error", value, err)
 	}
 }
 
@@ -95,4 +117,20 @@ func TestLoadOrCreateDataKeyCreatesStableRestrictedFile(t *testing.T) {
 	if created || string(second) != string(first) {
 		t.Fatalf("second created=%v key stable=%v", created, string(second) == string(first))
 	}
+}
+
+func isAlnum(value string) bool {
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		if r >= 'A' && r <= 'Z' {
+			continue
+		}
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		return false
+	}
+	return value != ""
 }

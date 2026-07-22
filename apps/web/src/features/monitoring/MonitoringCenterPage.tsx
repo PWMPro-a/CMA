@@ -7,6 +7,8 @@ import {
   useState,
   type ChangeEvent,
 } from 'react';
+import { useLocation } from 'react-router-dom';
+import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import {
   buildRealtimeMonitorRows,
@@ -30,6 +32,7 @@ import {
   sortAccountRows,
   readAccountOverviewUiState,
   writeAccountOverviewUiState,
+  type AccountDisplayMode,
   type AccountOverviewPageResetState,
   type AccountSortKey,
   type AccountSortState,
@@ -52,6 +55,7 @@ import { MonitoringDataPanel } from '@/features/monitoring/components/Monitoring
 import { MonitoringActionBar } from '@/features/monitoring/components/MonitoringActionBar';
 import { MonitoringCustomRangeModal } from '@/features/monitoring/components/MonitoringCustomRangeModal';
 import { MonitoringFiltersPanel } from '@/features/monitoring/components/MonitoringFiltersPanel';
+import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { IconInbox } from '@/components/ui/icons';
 import {
   MonitoringStatusHeader,
@@ -71,8 +75,10 @@ import {
   buildApiKeyOptionsFromRows,
   buildApiKeyOverviewColumns,
   buildAuthFilesByAuthIndex,
-  buildAccountQuotaErrorEntry,
+  buildAccountQuotaRefreshFailureEntry,
+  buildObservedCodexAccountQuotaEntry,
   buildChannelOptionsFromValues,
+  buildMonitoringInitialStateFromQuery,
   buildModelOptionsFromValues,
   buildPaginationState,
   buildPrimarySummaryCards,
@@ -84,12 +90,14 @@ import {
   getCurrentInputValue,
   getTodayStartInputValue,
   isUsageImportFile,
+  mergeObservedAccountQuotaState,
   parseDateTimeLocalValue,
   requestAccountQuota,
   type FocusSnapshot,
   type StatusFilter,
 } from '@/features/monitoring/model/monitoringCenterPageModel';
 import { useUsageData } from '@/features/monitoring/hooks/useUsageData';
+import { monitoringAnalyticsApi, type UsageHeaderSnapshot } from '@/services/api/usageService';
 import {
   readMonitoringCenterUiState,
   writeMonitoringCenterUiState,
@@ -99,13 +107,17 @@ import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useInterval } from '@/hooks/useInterval';
 import { useRequestMonitoringAvailability } from '@/hooks/useRequestMonitoringAvailability';
 import { isFileLogsAvailable } from '@/features/logs/logFeatureAvailability';
-import { authFilesApi } from '@/services/api';
 import { useAuthStore, useConfigStore, useNotificationStore } from '@/stores';
 import { formatFileSize } from '@/utils/format';
 import type { StatusBarData } from '@/utils/recentRequests';
 import { downloadBlob } from '@/utils/download';
 import { sha256Hex } from '@/utils/apiKeyHash';
 import { formatCompactNumber } from '@/utils/usage';
+import {
+  buildUsageHeaderSnapshotLookup,
+  getHighConfidenceUsageHeaderSnapshotForAuthFile,
+} from '@/utils/usageHeaderSnapshots';
+import { buildSourceInfoMap, buildSourceProviderStateMap } from '@/utils/sourceResolver';
 import styles from './MonitoringCenterPage.module.scss';
 
 export { AccountExpandedDetails, AccountOverviewCard };
@@ -120,15 +132,40 @@ const EMPTY_STATUS_BAR_DATA: StatusBarData = {
   totalFailure: 0,
 };
 
+const shortLabel = (t: TFunction, shortKey: string, fallbackKey: string) => {
+  const fallback = t(fallbackKey);
+  const label = t(shortKey, { defaultValue: fallback });
+  return label === shortKey ? fallback : label;
+};
+
 export function MonitoringCenterPage() {
   const { t, i18n } = useTranslation();
+  const location = useLocation();
   const config = useConfigStore((state) => state.config);
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
+  const managementKey = useAuthStore((state) => state.managementKey);
   const showNotification = useNotificationStore((state) => state.showNotification);
   const showConfirmation = useNotificationStore((state) => state.showConfirmation);
   const requestMonitoringAvailability = useRequestMonitoringAvailability();
+  const pageTransitionLayer = usePageTransitionLayer();
+  const isCurrentLayer = pageTransitionLayer ? pageTransitionLayer.status === 'current' : true;
   const initialAccountOverviewUiState = useRef(readAccountOverviewUiState());
-  const initialMonitoringCenterUiState = useRef(readMonitoringCenterUiState());
+  const initialMonitoringCenterUiState = useRef(
+    buildMonitoringInitialStateFromQuery(location.search, readMonitoringCenterUiState())
+  );
+  const initialMonitoringDrilldownFilters = useRef(
+    (() => {
+      const params = new URLSearchParams(location.search);
+      const minLatencyMs = Number(params.get('min_latency_ms'));
+      return {
+        authFile: params.get('auth_file')?.trim() || '',
+        projectId: params.get('project_id')?.trim() || '',
+        requestType: params.get('request_type')?.trim() || '',
+        minLatencyMs: Number.isFinite(minLatencyMs) && minLatencyMs > 0 ? minLatencyMs : undefined,
+        cacheStatus: params.get('cache_status')?.trim() || '',
+      };
+    })()
+  );
   const [timeRange, setTimeRange] = useState<MonitoringTimeRange>(
     initialMonitoringCenterUiState.current.timeRange
   );
@@ -150,6 +187,10 @@ export function MonitoringCenterPage() {
   const [autoRefreshMs, setAutoRefreshMs] = useState(
     () => initialMonitoringCenterUiState.current.autoRefreshMs
   );
+  const [documentVisible, setDocumentVisible] = useState(
+    () => typeof document === 'undefined' || document.visibilityState !== 'hidden'
+  );
+  const [headerSnapshots, setHeaderSnapshots] = useState<UsageHeaderSnapshot[]>([]);
   const [selectedAccount, setSelectedAccount] = useState(
     () => initialMonitoringCenterUiState.current.selectedAccount
   );
@@ -165,8 +206,26 @@ export function MonitoringCenterPage() {
   const [selectedApiKeyHash, setSelectedApiKeyHash] = useState(
     () => initialMonitoringCenterUiState.current.selectedApiKeyHash
   );
+  const [selectedHeaderTraceId, setSelectedHeaderTraceId] = useState(
+    () => initialMonitoringCenterUiState.current.selectedHeaderTraceId
+  );
   const [selectedStatus, setSelectedStatus] = useState<StatusFilter>(
     () => initialMonitoringCenterUiState.current.selectedStatus
+  );
+  const [drilldownAuthFile, setDrilldownAuthFile] = useState(
+    () => initialMonitoringDrilldownFilters.current.authFile
+  );
+  const [drilldownProjectId, setDrilldownProjectId] = useState(
+    () => initialMonitoringDrilldownFilters.current.projectId
+  );
+  const [drilldownRequestType, setDrilldownRequestType] = useState(
+    () => initialMonitoringDrilldownFilters.current.requestType
+  );
+  const [drilldownMinLatencyMs, setDrilldownMinLatencyMs] = useState(
+    () => initialMonitoringDrilldownFilters.current.minLatencyMs
+  );
+  const [drilldownCacheStatus, setDrilldownCacheStatus] = useState(
+    () => initialMonitoringDrilldownFilters.current.cacheStatus
   );
   const [expandedAccounts, setExpandedAccounts] = useState<Record<string, boolean>>({});
   const [expandedApiKeys, setExpandedApiKeys] = useState<Record<string, boolean>>({});
@@ -183,6 +242,9 @@ export function MonitoringCenterPage() {
   const [accountOverviewMode, setAccountOverviewMode] = useState<MonitoringAccountOverviewMode>(
     initialAccountOverviewUiState.current.mode
   );
+  const [accountDisplayMode, setAccountDisplayMode] = useState<AccountDisplayMode>(
+    initialAccountOverviewUiState.current.accountDisplayMode
+  );
   const [accountSort, setAccountSort] = useState<AccountSortState>(
     initialAccountOverviewUiState.current.sort
   );
@@ -194,7 +256,6 @@ export function MonitoringCenterPage() {
     table: DEFAULT_ACCOUNT_PAGE_SIZE,
     card: initialAccountOverviewUiState.current.cardPagination.pageSize,
   }));
-  const [accountStatusUpdating, setAccountStatusUpdating] = useState<Record<string, boolean>>({});
   const [apiKeyPage, setApiKeyPage] = useState(1);
   const [apiKeyPageSize, setApiKeyPageSize] = useState<number>(
     initialMonitoringCenterUiState.current.apiKeyPageSize
@@ -275,15 +336,27 @@ export function MonitoringCenterPage() {
     () => ({
       account: selectedAccount,
       provider: selectedProvider,
+      authFile: drilldownAuthFile || undefined,
+      projectId: drilldownProjectId || undefined,
+      requestType: drilldownRequestType || undefined,
+      minLatencyMs: drilldownMinLatencyMs,
+      cacheStatus: drilldownCacheStatus || undefined,
       model: selectedModel,
       channel: selectedChannel,
       apiKeyHash: selectedApiKeyHash,
+      headerTraceId: selectedHeaderTraceId,
       status: selectedStatus,
     }),
     [
+      drilldownAuthFile,
+      drilldownCacheStatus,
+      drilldownMinLatencyMs,
+      drilldownProjectId,
+      drilldownRequestType,
       selectedAccount,
       selectedApiKeyHash,
       selectedChannel,
+      selectedHeaderTraceId,
       selectedModel,
       selectedProvider,
       selectedStatus,
@@ -301,6 +374,9 @@ export function MonitoringCenterPage() {
     filteredRows,
     eventsHasMore,
     eventsLoadingMore,
+    eventsRetentionLimited,
+    eventsTotalCount,
+    eventsLoadedCount,
     lastRefreshedAt: monitoringLastRefreshedAt,
     isTransitioningScope: monitoringScopeTransitioning,
     hasPresentationSnapshot: hasMonitoringPresentationSnapshot,
@@ -317,9 +393,26 @@ export function MonitoringCenterPage() {
     scopeFilters: monitoringScopeFilters,
   });
 
+  const loadHeaderSnapshots = useCallback(async () => {
+    if (!requestMonitoringAvailability.serviceBase) {
+      setHeaderSnapshots([]);
+      return;
+    }
+    try {
+      const response = await monitoringAnalyticsApi.getHeaderSnapshots(
+        requestMonitoringAvailability.serviceBase,
+        managementKey,
+        { days: 30, limit: 1000 }
+      );
+      setHeaderSnapshots(response.items ?? []);
+    } catch {
+      setHeaderSnapshots((current) => current);
+    }
+  }, [managementKey, requestMonitoringAvailability.serviceBase]);
+
   const refreshAll = useCallback(async () => {
-    await Promise.all([loadApiKeyAliases(), refreshMeta(false)]);
-  }, [loadApiKeyAliases, refreshMeta]);
+    await Promise.all([loadApiKeyAliases(), refreshMeta(false), loadHeaderSnapshots()]);
+  }, [loadApiKeyAliases, loadHeaderSnapshots, refreshMeta]);
 
   const setCurrentAccountPage = useCallback(
     (page: number) => {
@@ -335,13 +428,29 @@ export function MonitoringCenterPage() {
     setCurrentAccountPage(1);
   }, [setCurrentAccountPage]);
 
-  useHeaderRefresh(refreshAll);
+  useHeaderRefresh(refreshAll, isCurrentLayer);
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const updateVisibility = () => setDocumentVisible(document.visibilityState !== 'hidden');
+    document.addEventListener('visibilitychange', updateVisibility);
+    return () => document.removeEventListener('visibilitychange', updateVisibility);
+  }, []);
   useInterval(
     () => {
       void refreshAll().catch(() => {});
     },
-    connectionStatus === 'connected' && Number(autoRefreshMs) > 0 ? Number(autoRefreshMs) : null
+    isCurrentLayer &&
+      documentVisible &&
+      connectionStatus === 'connected' &&
+      Number(autoRefreshMs) > 0
+      ? Number(autoRefreshMs)
+      : null
   );
+
+  useEffect(() => {
+    if (!isCurrentLayer || !requestMonitoringAvailability.serviceBase) return;
+    void loadHeaderSnapshots();
+  }, [isCurrentLayer, loadHeaderSnapshots, requestMonitoringAvailability.serviceBase]);
 
   const monitoringUnavailable =
     !requestMonitoringAvailability.checking && !requestMonitoringAvailability.available;
@@ -372,13 +481,20 @@ export function MonitoringCenterPage() {
   useEffect(() => {
     writeAccountOverviewUiState({
       mode: accountOverviewMode,
+      accountDisplayMode,
       sort: accountSort,
       cardPagination: {
         page: accountPageByMode.card,
         pageSize: accountPageSizeByMode.card,
       },
     });
-  }, [accountOverviewMode, accountPageByMode.card, accountPageSizeByMode.card, accountSort]);
+  }, [
+    accountDisplayMode,
+    accountOverviewMode,
+    accountPageByMode.card,
+    accountPageSizeByMode.card,
+    accountSort,
+  ]);
 
   useEffect(() => {
     writeMonitoringCenterUiState({
@@ -393,6 +509,7 @@ export function MonitoringCenterPage() {
       selectedModel,
       selectedChannel,
       selectedApiKeyHash,
+      selectedHeaderTraceId,
       selectedStatus,
       apiKeyPageSize,
       realtimePageSize,
@@ -408,6 +525,7 @@ export function MonitoringCenterPage() {
     selectedAccount,
     selectedApiKeyHash,
     selectedChannel,
+    selectedHeaderTraceId,
     selectedModel,
     selectedProvider,
     selectedStatus,
@@ -420,8 +538,14 @@ export function MonitoringCenterPage() {
   );
 
   const accountOptions = useMemo(
-    () => buildAccountOptions(monitoringFilterOptions.accountRows, selectedAccount, t),
-    [monitoringFilterOptions.accountRows, selectedAccount, t]
+    () =>
+      buildAccountOptions(
+        monitoringFilterOptions.accountRows,
+        selectedAccount,
+        t,
+        accountDisplayMode
+      ),
+    [accountDisplayMode, monitoringFilterOptions.accountRows, selectedAccount, t]
   );
 
   const modelOptions = useMemo(
@@ -442,6 +566,20 @@ export function MonitoringCenterPage() {
   const statusOptions = useMemo(() => buildStatusOptions(t), [t]);
 
   const authFilesByAuthIndex = useMemo(() => buildAuthFilesByAuthIndex(authFiles), [authFiles]);
+  const accountSourceProviderStateBySourceKey = useMemo(
+    () =>
+      buildSourceProviderStateMap(
+        buildSourceInfoMap({
+          geminiApiKeys: config?.geminiApiKeys || [],
+          claudeApiKeys: config?.claudeApiKeys || [],
+          codexApiKeys: config?.codexApiKeys || [],
+          xaiApiKeys: config?.xaiApiKeys || [],
+          vertexApiKeys: config?.vertexApiKeys || [],
+          openaiCompatibility: config?.openaiCompatibility || [],
+        })
+      ),
+    [config]
+  );
 
   const scopedRows = filteredRows;
   const scopedStatsRows = useMemo(
@@ -470,8 +608,13 @@ export function MonitoringCenterPage() {
     return resolvedBounds ? buildEmptyMonitoringStatusData(resolvedBounds) : EMPTY_STATUS_BAR_DATA;
   }, [accountStatusBounds, scopedRows]);
   const accountAuthStateByRowId = useMemo(
-    () => buildMonitoringAccountAuthStateMap(accountRows, authFilesByAuthIndex),
-    [accountRows, authFilesByAuthIndex]
+    () =>
+      buildMonitoringAccountAuthStateMap(
+        accountRows,
+        authFilesByAuthIndex,
+        accountSourceProviderStateBySourceKey
+      ),
+    [accountRows, accountSourceProviderStateBySourceKey, authFilesByAuthIndex]
   );
   const sortedAccountRows = useMemo(
     () => sortAccountRows(accountRows, accountSort),
@@ -502,6 +645,7 @@ export function MonitoringCenterPage() {
       selectedAccount,
       selectedApiKeyHash,
       selectedChannel,
+      selectedHeaderTraceId,
       selectedModel,
       selectedProvider,
       selectedStatus,
@@ -514,6 +658,7 @@ export function MonitoringCenterPage() {
       selectedAccount,
       selectedApiKeyHash,
       selectedChannel,
+      selectedHeaderTraceId,
       selectedModel,
       selectedProvider,
       selectedStatus,
@@ -558,7 +703,32 @@ export function MonitoringCenterPage() {
     () => buildMonitoringAccountQuotaTargetsByAccount(accountRows, accountAuthStateByRowId),
     [accountAuthStateByRowId, accountRows]
   );
+  const headerSnapshotLookup = useMemo(
+    () => buildUsageHeaderSnapshotLookup(headerSnapshots),
+    [headerSnapshots]
+  );
   const scopedFailureCount = scopedSummary.failureCalls;
+  const accountQuotaStatesWithObservedHeaders = useMemo(() => {
+    let changed = false;
+    const nextStates = Object.fromEntries(
+      Object.entries(accountQuotaStates).map(([account, state]) => {
+        const targets = accountQuotaTargetsByAccount.get(account) ?? [];
+        const observedEntries = targets
+          .map((target) =>
+            buildObservedCodexAccountQuotaEntry(
+              target,
+              getHighConfidenceUsageHeaderSnapshotForAuthFile(headerSnapshotLookup, target.file),
+              t
+            )
+          )
+          .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+        const nextState = mergeObservedAccountQuotaState(state, targets, observedEntries) ?? state;
+        changed = changed || nextState !== state;
+        return [account, nextState] as const;
+      })
+    );
+    return changed ? nextStates : accountQuotaStates;
+  }, [accountQuotaStates, accountQuotaTargetsByAccount, headerSnapshotLookup, t]);
 
   const hasSearchFilter = Boolean(deferredSearch.trim());
   const hasScopeFilter =
@@ -567,7 +737,13 @@ export function MonitoringCenterPage() {
     selectedModel !== 'all' ||
     selectedChannel !== 'all' ||
     selectedApiKeyHash !== 'all' ||
-    selectedStatus !== 'all';
+    selectedHeaderTraceId !== 'all' ||
+    selectedStatus !== 'all' ||
+    Boolean(drilldownAuthFile) ||
+    Boolean(drilldownProjectId) ||
+    Boolean(drilldownRequestType) ||
+    Boolean(drilldownMinLatencyMs) ||
+    Boolean(drilldownCacheStatus);
   const hasActiveDataFilter = hasSearchFilter || hasScopeFilter;
   const failedGroupCount = groupedRealtimeRows.filter((row) => row.failureCalls > 0).length;
   const failedOnlyActive = selectedStatus === 'failed';
@@ -610,8 +786,8 @@ export function MonitoringCenterPage() {
   );
 
   const secondarySummaryCards = useMemo(
-    () => buildSecondarySummaryCards(scopedSummary, t),
-    [scopedSummary, t]
+    () => buildSecondarySummaryCards(scopedSummary, i18n.language, t),
+    [i18n.language, scopedSummary, t]
   );
 
   const dataTabs = useMemo<MonitoringTab<MonitoringDataTab>[]>(() => {
@@ -622,21 +798,24 @@ export function MonitoringCenterPage() {
     return [
       {
         id: 'accounts',
-        label: t('monitoring.data_tab_accounts'),
+        label: shortLabel(t, 'monitoring.data_tab_accounts_short', 'monitoring.data_tab_accounts'),
+        fullLabel: t('monitoring.data_tab_accounts'),
         icon: 'accounts',
         badge: accountRows.length,
         badgeTitle: t('monitoring.data_tab_accounts_badge_title', { count: accountRows.length }),
       },
       {
         id: 'apiKeys',
-        label: t('monitoring.data_tab_api_keys'),
+        label: shortLabel(t, 'monitoring.data_tab_api_keys_short', 'monitoring.data_tab_api_keys'),
+        fullLabel: t('monitoring.data_tab_api_keys'),
         icon: 'apiKeys',
         badge: apiKeyRows.length,
         badgeTitle: t('monitoring.data_tab_api_keys_badge_title', { count: apiKeyRows.length }),
       },
       {
         id: 'realtime',
-        label: t('monitoring.data_tab_realtime'),
+        label: shortLabel(t, 'monitoring.data_tab_realtime_short', 'monitoring.data_tab_realtime'),
+        fullLabel: t('monitoring.data_tab_realtime'),
         icon: 'realtime',
         badge: realtimeBadge,
         badgeTone: realtimeHasFailure ? 'failure' : 'default',
@@ -668,6 +847,7 @@ export function MonitoringCenterPage() {
     setSelectedModel(snapshot.selectedModel);
     setSelectedChannel(snapshot.selectedChannel);
     setSelectedApiKeyHash(snapshot.selectedApiKeyHash);
+    setSelectedHeaderTraceId(snapshot.selectedHeaderTraceId);
     setSelectedStatus(snapshot.selectedStatus);
   }, []);
 
@@ -680,7 +860,13 @@ export function MonitoringCenterPage() {
     setSelectedModel('all');
     setSelectedChannel('all');
     setSelectedApiKeyHash('all');
+    setSelectedHeaderTraceId('all');
     setSelectedStatus('all');
+    setDrilldownAuthFile('');
+    setDrilldownProjectId('');
+    setDrilldownRequestType('');
+    setDrilldownMinLatencyMs(undefined);
+    setDrilldownCacheStatus('');
   }, []);
 
   const renderMonitoringEmptyState = () => (
@@ -750,6 +936,19 @@ export function MonitoringCenterPage() {
       const currentState = accountQuotaStatesRef.current[account];
       const targets = accountQuotaTargetsByAccount.get(account) ?? [];
       const targetKey = targets.map((target) => target.key).join('|');
+      const previousEntriesByKey =
+        currentState?.targetKey === targetKey
+          ? new Map(currentState.entries.map((entry) => [entry.key, entry]))
+          : new Map();
+      const observedEntries = targets
+        .map((target) =>
+          buildObservedCodexAccountQuotaEntry(
+            target,
+            getHighConfidenceUsageHeaderSnapshotForAuthFile(headerSnapshotLookup, target.file),
+            t
+          )
+        )
+        .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
       if (
         !force &&
         currentState &&
@@ -768,7 +967,9 @@ export function MonitoringCenterPage() {
           status: 'loading',
           targetKey,
           entries:
-            previous[account]?.targetKey === targetKey ? (previous[account]?.entries ?? []) : [],
+            previous[account]?.targetKey === targetKey
+              ? (previous[account]?.entries ?? observedEntries)
+              : observedEntries,
           lastRefreshedAt: previous[account]?.lastRefreshedAt,
         },
       }));
@@ -792,6 +993,8 @@ export function MonitoringCenterPage() {
       );
       if (accountQuotaRequestIdsRef.current[account] !== requestId) return;
 
+      const hasFailure = settled.some((result) => result.status === 'rejected');
+      const completedAtMs = Date.now();
       const entries = settled.map((result, index) => {
         const fallback = targets[index];
         if (result.status === 'fulfilled') {
@@ -802,22 +1005,36 @@ export function MonitoringCenterPage() {
           result.reason instanceof Error
             ? result.reason.message
             : String(result.reason || t('common.unknown_error'));
-        return buildAccountQuotaErrorEntry(fallback, error, t);
+        const observedEntry = buildObservedCodexAccountQuotaEntry(
+          fallback,
+          getHighConfidenceUsageHeaderSnapshotForAuthFile(headerSnapshotLookup, fallback.file),
+          t
+        );
+        return buildAccountQuotaRefreshFailureEntry(
+          fallback,
+          error,
+          t,
+          previousEntriesByKey.get(fallback.key),
+          observedEntry,
+          completedAtMs
+        );
       });
 
       const hasSuccess = entries.some((entry) => !entry.error);
+      const firstError = entries.find((entry) => entry.error)?.error;
       setAccountQuotaStates((previous) => ({
         ...previous,
         [account]: {
-          status: hasSuccess ? 'success' : 'error',
+          status: hasFailure ? 'error' : hasSuccess ? 'success' : 'error',
           targetKey,
           entries,
-          error: hasSuccess ? '' : entries[0]?.error || t('common.unknown_error'),
-          lastRefreshedAt: Date.now(),
+          error: hasFailure ? firstError || t('common.unknown_error') : '',
+          failedAtMs: hasFailure ? completedAtMs : undefined,
+          lastRefreshedAt: hasFailure ? previous[account]?.lastRefreshedAt : completedAtMs,
         },
       }));
     },
-    [accountQuotaTargetsByAccount, t]
+    [accountQuotaTargetsByAccount, headerSnapshotLookup, t]
   );
 
   const toggleAccountExpanded = useCallback(
@@ -850,6 +1067,7 @@ export function MonitoringCenterPage() {
           selectedModel,
           selectedChannel,
           selectedApiKeyHash,
+          selectedHeaderTraceId,
           selectedStatus,
         };
       }
@@ -864,6 +1082,7 @@ export function MonitoringCenterPage() {
       selectedAccount,
       selectedApiKeyHash,
       selectedChannel,
+      selectedHeaderTraceId,
       selectedModel,
       selectedProvider,
       selectedStatus,
@@ -897,52 +1116,6 @@ export function MonitoringCenterPage() {
     setApiKeyPageSize(normalizeAccountOverviewPageSize(pageSize, 'table'));
     setApiKeyPage(1);
   }, []);
-
-  const handleAccountStatusToggle = useCallback(
-    async (row: MonitoringAccountRow, enabled: boolean) => {
-      const authState = accountAuthStateByRowId.get(row.id);
-      const fileNames = authState?.toggleableFileNames ?? [];
-      if (fileNames.length === 0) return;
-
-      setAccountStatusUpdating((previous) => ({ ...previous, [row.id]: true }));
-
-      const results = await Promise.allSettled(
-        fileNames.map((fileName) => authFilesApi.setStatusWithFallback(fileName, !enabled))
-      );
-
-      const successCount = results.filter((result) => result.status === 'fulfilled').length;
-      const failureCount = results.length - successCount;
-
-      try {
-        await refreshMeta(false);
-      } finally {
-        setAccountStatusUpdating((previous) => {
-          const next = { ...previous };
-          delete next[row.id];
-          return next;
-        });
-      }
-
-      if (failureCount === 0) {
-        showNotification(
-          enabled
-            ? t('monitoring.account_overview_status_enabled_success', { count: successCount })
-            : t('monitoring.account_overview_status_disabled_success', { count: successCount }),
-          'success'
-        );
-        return;
-      }
-
-      showNotification(
-        t('monitoring.account_overview_status_partial', {
-          success: successCount,
-          failed: failureCount,
-        }),
-        successCount > 0 ? 'warning' : 'error'
-      );
-    },
-    [accountAuthStateByRowId, refreshMeta, showNotification, t]
-  );
 
   const handleRealtimePageSizeChange = useCallback((pageSize: number) => {
     setRealtimePageSize(pageSize);
@@ -987,6 +1160,7 @@ export function MonitoringCenterPage() {
       return (
         <AccountOverviewPanelActions
           mode={accountOverviewMode}
+          accountDisplayMode={accountDisplayMode}
           searchInput={searchInput}
           accountSort={accountSort}
           accountSortOptions={accountSortOptions}
@@ -996,6 +1170,7 @@ export function MonitoringCenterPage() {
           onRefreshAll={refreshAll}
           onAccountSortKeyChange={handleAccountSortKeyChange}
           onModeChange={setAccountOverviewMode}
+          onAccountDisplayModeChange={setAccountDisplayMode}
         />
       );
     }
@@ -1009,12 +1184,15 @@ export function MonitoringCenterPage() {
         rowCount={realtimeLogRows.length}
         scopedFailureCount={scopedFailureCount}
         failedOnlyActive={failedOnlyActive}
+        accountDisplayMode={accountDisplayMode}
         t={t}
         onToggleFailedOnly={toggleFailedOnly}
+        onAccountDisplayModeChange={setAccountDisplayMode}
       />
     );
   }, [
     accountOverviewMode,
+    accountDisplayMode,
     accountSort,
     accountSortOptions,
     activeDataTab,
@@ -1246,6 +1424,7 @@ export function MonitoringCenterPage() {
               <AccountOverviewPanel
                 embedded
                 mode={accountOverviewMode}
+                accountDisplayMode={accountDisplayMode}
                 searchInput={searchInput}
                 columns={accountOverviewColumns}
                 rows={sortedAccountRows}
@@ -1257,8 +1436,7 @@ export function MonitoringCenterPage() {
                 accountAuthStateByRowId={accountAuthStateByRowId}
                 accountStatusDataByRowId={accountStatusDataByRowId}
                 emptyAccountStatusData={emptyAccountStatusData}
-                accountQuotaStates={accountQuotaStates}
-                accountStatusUpdating={accountStatusUpdating}
+                accountQuotaStates={accountQuotaStatesWithObservedHeaders}
                 accountPageSize={accountPageSize}
                 accountPageSizeOptions={accountPageSizeOptions}
                 accountOverviewScopeText={accountOverviewScopeText}
@@ -1271,8 +1449,8 @@ export function MonitoringCenterPage() {
                 onRefreshAll={refreshAll}
                 onAccountSortKeyChange={handleAccountSortKeyChange}
                 onModeChange={setAccountOverviewMode}
+                onAccountDisplayModeChange={setAccountDisplayMode}
                 onAccountSort={handleAccountSort}
-                onAccountStatusToggle={handleAccountStatusToggle}
                 onLoadAccountQuota={loadAccountQuota}
                 onToggleExpanded={toggleAccountExpanded}
                 onFocusAccount={focusAccount}
@@ -1313,12 +1491,17 @@ export function MonitoringCenterPage() {
               failedOnlyActive={failedOnlyActive}
               eventsHasMore={eventsHasMore}
               eventsLoadingMore={eventsLoadingMore}
+              eventsRetentionLimited={eventsRetentionLimited}
+              eventsTotalCount={eventsTotalCount}
+              eventsLoadedCount={eventsLoadedCount}
               overallLoading={overallLoading}
               hasPrices={hasPrices}
+              accountDisplayMode={accountDisplayMode}
               locale={i18n.language}
               emptyState={renderMonitoringEmptyState()}
               t={t}
               onToggleFailedOnly={toggleFailedOnly}
+              onAccountDisplayModeChange={setAccountDisplayMode}
               onPageChange={setRealtimePage}
               onPageSizeChange={handleRealtimePageSizeChange}
               onLoadMoreEvents={loadMoreEvents}

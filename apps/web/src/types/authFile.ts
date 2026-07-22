@@ -9,7 +9,6 @@ export type AuthFileType =
   | 'qwen'
   | 'kimi'
   | 'gemini'
-  | 'gemini-cli'
   | 'aistudio'
   | 'claude'
   | 'codex'
@@ -83,6 +82,7 @@ export interface AgentIdentityRecoveryConfig {
   history_limit: number;
 }
 export interface AuthFileItem {
+  id?: string;
   name: string;
   type?: AuthFileType | string;
   provider?: string;

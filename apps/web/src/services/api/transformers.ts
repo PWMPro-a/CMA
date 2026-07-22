@@ -5,9 +5,6 @@ import type {
   ModelAlias,
   OpenAIProviderConfig,
   ProviderKeyConfig,
-  AmpcodeConfig,
-  AmpcodeModelMapping,
-  AmpcodeUpstreamApiKeyMapping
 } from '@/types';
 import type { Config } from '@/types/config';
 import { buildHeaderObject } from '@/utils/headers';
@@ -31,6 +28,11 @@ const normalizeString = (value: unknown): string | undefined => {
   if (value === undefined || value === null) return undefined;
   const trimmed = String(value).trim();
   return trimmed ? trimmed : undefined;
+};
+
+const normalizeStringList = (value: unknown): string[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  return value.map(normalizeString).filter((item): item is string => Boolean(item));
 };
 
 const normalizeNumber = (value: unknown): number | undefined => {
@@ -75,6 +77,32 @@ const normalizeModelAliases = (models: unknown): ModelAlias[] => {
       if (testModel) {
         entry.testModel = String(testModel);
       }
+      const image = normalizeBoolean(item.image ?? item['image']);
+      if (image !== undefined) {
+        entry.image = image;
+      }
+      const forceMapping = normalizeBoolean(
+        item['force-mapping'] ?? item.forceMapping ?? item.force_mapping
+      );
+      if (forceMapping !== undefined) {
+        entry.forceMapping = forceMapping;
+      }
+      const inputModalities = normalizeExcludedModels(
+        item['input-modalities'] ?? item.inputModalities ?? item.input_modalities
+      );
+      if (inputModalities.length) {
+        entry.inputModalities = inputModalities;
+      }
+      const outputModalities = normalizeExcludedModels(
+        item['output-modalities'] ?? item.outputModalities ?? item.output_modalities
+      );
+      if (outputModalities.length) {
+        entry.outputModalities = outputModalities;
+      }
+      const thinking = item.thinking ?? item['thinking'];
+      if (isRecord(thinking)) {
+        entry.thinking = thinking;
+      }
       return entry;
     })
     .filter(Boolean) as ModelAlias[];
@@ -91,7 +119,11 @@ const normalizeHeaders = (headers: unknown) => {
 };
 
 const normalizeExcludedModels = (input: unknown): string[] => {
-  const rawList = Array.isArray(input) ? input : typeof input === 'string' ? input.split(/[\n,]/) : [];
+  const rawList = Array.isArray(input)
+    ? input
+    : typeof input === 'string'
+      ? input.split(/[\n,]/)
+      : [];
   const seen = new Set<string>();
   const normalized: string[] = [];
 
@@ -123,20 +155,23 @@ const normalizeApiKeyEntry = (entry: unknown): ApiKeyEntry | null => {
   if (entry === undefined || entry === null) return null;
   const record = isRecord(entry) ? entry : null;
   const apiKey =
-    record?.['api-key'] ?? record?.apiKey ?? record?.key ?? (typeof entry === 'string' ? entry : '');
+    record?.['api-key'] ??
+    record?.apiKey ??
+    record?.key ??
+    (typeof entry === 'string' ? entry : '');
   const trimmed = String(apiKey || '').trim();
   const authIndex = normalizeAuthIndex(
     record?.['auth-index'] ?? record?.authIndex ?? record?.['auth_index']
   );
   if (!trimmed && !authIndex) return null;
 
-  const proxyUrl = record ? record['proxy-url'] ?? record.proxyUrl : undefined;
+  const proxyUrl = record ? (record['proxy-url'] ?? record.proxyUrl) : undefined;
   const headers = record ? normalizeHeaders(record.headers) : undefined;
 
   const result: ApiKeyEntry = {
     apiKey: trimmed,
     proxyUrl: proxyUrl ? String(proxyUrl) : undefined,
-    headers
+    headers,
   };
   if (authIndex) result.authIndex = authIndex;
   return result;
@@ -162,11 +197,29 @@ const normalizeProviderKeyConfig = (item: unknown): ProviderKeyConfig | null => 
   }
   const prefix = normalizePrefix(record?.prefix ?? record?.['prefix']);
   if (prefix) config.prefix = prefix;
-  const baseUrl = record ? record['base-url'] ?? record.baseUrl : undefined;
-  const proxyUrl = record ? record['proxy-url'] ?? record.proxyUrl : undefined;
+  const baseUrl = record ? (record['base-url'] ?? record.baseUrl) : undefined;
+  const proxyUrl = record ? (record['proxy-url'] ?? record.proxyUrl) : undefined;
   if (baseUrl) config.baseUrl = String(baseUrl);
   const websockets = normalizeBoolean(record?.websockets ?? record?.['websockets']);
   if (websockets !== undefined) config.websockets = websockets;
+  const disableCooling = normalizeBoolean(
+    record?.['disable-cooling'] ?? record?.disableCooling ?? record?.disable_cooling
+  );
+  if (disableCooling !== undefined) config.disableCooling = disableCooling;
+  const experimentalCchSigning = normalizeBoolean(
+    record?.['experimental-cch-signing'] ??
+      record?.experimentalCchSigning ??
+      record?.experimental_cch_signing
+  );
+  if (experimentalCchSigning !== undefined) config.experimentalCchSigning = experimentalCchSigning;
+  const rebuildMidSystemMessage = normalizeBoolean(
+    record?.['rebuild-mid-system-message'] ??
+      record?.rebuildMidSystemMessage ??
+      record?.rebuild_mid_system_message
+  );
+  if (rebuildMidSystemMessage !== undefined) {
+    config.rebuildMidSystemMessage = rebuildMidSystemMessage;
+  }
   if (proxyUrl) config.proxyUrl = String(proxyUrl);
   const headers = normalizeHeaders(record?.headers);
   if (headers) config.headers = headers;
@@ -200,6 +253,12 @@ const normalizeProviderKeyConfig = (item: unknown): ProviderKeyConfig | null => 
     if (sensitiveWords.length) {
       cloak.sensitiveWords = sensitiveWords;
     }
+    const cacheUserId = normalizeBoolean(
+      cloakRaw['cache-user-id'] ?? cloakRaw.cacheUserId ?? cloakRaw.cache_user_id
+    );
+    if (cacheUserId !== undefined) {
+      cloak.cacheUserId = cacheUserId;
+    }
     if (Object.keys(cloak).length) {
       config.cloak = cloak;
     }
@@ -231,15 +290,23 @@ const normalizeGeminiKeyConfig = (item: unknown): GeminiKeyConfig | null => {
   }
   const prefix = normalizePrefix(record?.prefix ?? record?.['prefix']);
   if (prefix) config.prefix = prefix;
-  const baseUrl = record ? record['base-url'] ?? record.baseUrl ?? record['base_url'] : undefined;
+  const baseUrl = record ? (record['base-url'] ?? record.baseUrl ?? record['base_url']) : undefined;
   if (baseUrl) config.baseUrl = String(baseUrl);
-  const proxyUrl = record ? record['proxy-url'] ?? record.proxyUrl ?? record['proxy_url'] : undefined;
+  const proxyUrl = record
+    ? (record['proxy-url'] ?? record.proxyUrl ?? record['proxy_url'])
+    : undefined;
   if (proxyUrl) config.proxyUrl = String(proxyUrl);
+  const disableCooling = normalizeBoolean(
+    record?.['disable-cooling'] ?? record?.disableCooling ?? record?.disable_cooling
+  );
+  if (disableCooling !== undefined) config.disableCooling = disableCooling;
   const models = normalizeModelAliases(record?.models);
   if (models.length) config.models = models;
   const headers = normalizeHeaders(record?.headers);
   if (headers) config.headers = headers;
-  const excludedModels = normalizeExcludedModels(record?.['excluded-models'] ?? record?.excludedModels);
+  const excludedModels = normalizeExcludedModels(
+    record?.['excluded-models'] ?? record?.excludedModels
+  );
   if (excludedModels.length) config.excludedModels = excludedModels;
   if (authIndex) config.authIndex = authIndex;
   return config;
@@ -270,11 +337,15 @@ const normalizeOpenAIProvider = (provider: unknown): OpenAIProviderConfig | null
   const result: OpenAIProviderConfig = {
     name: String(name),
     baseUrl: String(baseUrl),
-    apiKeyEntries
+    apiKeyEntries,
   };
 
   const disabled = normalizeBoolean(provider.disabled ?? provider['disabled']);
   if (disabled !== undefined) result.disabled = disabled;
+  const disableCooling = normalizeBoolean(
+    provider['disable-cooling'] ?? provider.disableCooling ?? provider.disable_cooling
+  );
+  if (disableCooling !== undefined) result.disableCooling = disableCooling;
   const prefix = normalizePrefix(provider.prefix ?? provider['prefix']);
   if (prefix) result.prefix = prefix;
   if (headers) result.headers = headers;
@@ -302,87 +373,6 @@ const normalizeOauthExcluded = (payload: unknown): Record<string, string[]> | un
   return map;
 };
 
-const normalizeAmpcodeModelMappings = (input: unknown): AmpcodeModelMapping[] => {
-  if (!Array.isArray(input)) return [];
-  const seen = new Set<string>();
-  const mappings: AmpcodeModelMapping[] = [];
-
-  input.forEach((entry) => {
-    if (!isRecord(entry)) return;
-    const from = String(entry.from ?? entry['from'] ?? '').trim();
-    const to = String(entry.to ?? entry['to'] ?? '').trim();
-    if (!from || !to) return;
-    const key = from.toLowerCase();
-    if (seen.has(key)) return;
-    seen.add(key);
-    mappings.push({ from, to });
-  });
-
-  return mappings;
-};
-
-const normalizeAmpcodeUpstreamApiKeys = (input: unknown): AmpcodeUpstreamApiKeyMapping[] => {
-  if (!Array.isArray(input)) return [];
-
-  const seen = new Set<string>();
-  const mappings: AmpcodeUpstreamApiKeyMapping[] = [];
-
-  input.forEach((entry) => {
-    if (!isRecord(entry)) return;
-
-    const upstreamApiKey = String(
-      entry['upstream-api-key'] ?? entry.upstreamApiKey ?? entry['upstream_api_key'] ?? ''
-    ).trim();
-    if (!upstreamApiKey || seen.has(upstreamApiKey)) return;
-
-    const rawApiKeys = entry['api-keys'] ?? entry.apiKeys ?? entry['api_keys'] ?? [];
-    const apiKeys = Array.isArray(rawApiKeys)
-      ? Array.from(new Set(rawApiKeys.map((item) => String(item ?? '').trim()).filter(Boolean)))
-      : [];
-    if (!apiKeys.length) return;
-
-    seen.add(upstreamApiKey);
-    mappings.push({ upstreamApiKey, apiKeys });
-  });
-
-  return mappings;
-};
-
-const normalizeAmpcodeConfig = (payload: unknown): AmpcodeConfig | undefined => {
-  const sourceRaw = isRecord(payload) ? (payload.ampcode ?? payload) : payload;
-  if (!isRecord(sourceRaw)) return undefined;
-  const source = sourceRaw;
-
-  const config: AmpcodeConfig = {};
-  const upstreamUrl = source['upstream-url'] ?? source.upstreamUrl ?? source['upstream_url'];
-  if (upstreamUrl) config.upstreamUrl = String(upstreamUrl);
-  const upstreamApiKey = source['upstream-api-key'] ?? source.upstreamApiKey ?? source['upstream_api_key'];
-  if (upstreamApiKey) config.upstreamApiKey = String(upstreamApiKey);
-
-  const upstreamApiKeys = normalizeAmpcodeUpstreamApiKeys(
-    source['upstream-api-keys'] ?? source.upstreamApiKeys ?? source['upstream_api_keys']
-  );
-  if (upstreamApiKeys.length) {
-    config.upstreamApiKeys = upstreamApiKeys;
-  }
-
-  const forceModelMappings = normalizeBoolean(
-    source['force-model-mappings'] ?? source.forceModelMappings ?? source['force_model_mappings']
-  );
-  if (forceModelMappings !== undefined) {
-    config.forceModelMappings = forceModelMappings;
-  }
-
-  const modelMappings = normalizeAmpcodeModelMappings(
-    source['model-mappings'] ?? source.modelMappings ?? source['model_mappings']
-  );
-  if (modelMappings.length) {
-    config.modelMappings = modelMappings;
-  }
-
-  return config;
-};
-
 /**
  * 规范化 /config 返回值
  */
@@ -395,7 +385,11 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
   config.debug = normalizeBoolean(raw.debug);
   const proxyUrl = raw['proxy-url'] ?? raw.proxyUrl;
   config.proxyUrl =
-    typeof proxyUrl === 'string' ? proxyUrl : proxyUrl === undefined || proxyUrl === null ? undefined : String(proxyUrl);
+    typeof proxyUrl === 'string'
+      ? proxyUrl
+      : proxyUrl === undefined || proxyUrl === null
+        ? undefined
+        : String(proxyUrl);
   const requestRetry = raw['request-retry'] ?? raw.requestRetry;
   if (typeof requestRetry === 'number' && Number.isFinite(requestRetry)) {
     config.requestRetry = requestRetry;
@@ -415,7 +409,7 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
       ),
       antigravityCredits: normalizeBoolean(
         quota['antigravity-credits'] ?? quota.antigravityCredits
-      )
+      ),
     };
   }
 
@@ -429,6 +423,9 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
     config.clean = {
       baseUrl: normalizeString(clean['base_url'] ?? clean.baseUrl ?? clean['base-url']),
       token: normalizeString(clean.token),
+      targetTypes: normalizeStringList(
+        clean['target_types'] ?? clean.targetTypes ?? clean['target-types']
+      ),
       targetType: normalizeString(clean['target_type'] ?? clean.targetType ?? clean['target-type']),
       workers: normalizeNumber(clean.workers),
       deleteWorkers: normalizeNumber(
@@ -437,6 +434,22 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
       timeout: normalizeNumber(clean.timeout),
       retries: normalizeNumber(clean.retries),
       userAgent: normalizeString(clean['user_agent'] ?? clean.userAgent ?? clean['user-agent']),
+      xaiInferenceUserAgent: normalizeString(
+        clean['xai_inference_user_agent'] ??
+          clean.xaiInferenceUserAgent ??
+          clean['xai-inference-user-agent']
+      ),
+      xaiInferenceEnabled: normalizeBoolean(
+        clean['xai_inference_enabled'] ??
+          clean.xaiInferenceEnabled ??
+          clean['xai-inference-enabled']
+      ),
+      xaiInferenceModel: normalizeString(
+        clean['xai_inference_model'] ?? clean.xaiInferenceModel ?? clean['xai-inference-model']
+      ),
+      xaiInferencePrompt: normalizeString(
+        clean['xai_inference_prompt'] ?? clean.xaiInferencePrompt ?? clean['xai-inference-prompt']
+      ),
       usedPercentThreshold: threshold,
       sampleSize: normalizeNumber(clean['sample_size'] ?? clean.sampleSize ?? clean['sample-size']),
     };
@@ -459,6 +472,12 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
       config.logsMaxTotalSizeMb = parsed;
     }
   }
+  const plugins = raw.plugins;
+  if (isRecord(plugins)) {
+    config.pluginsEnabled = normalizeBoolean(plugins.enabled);
+  } else {
+    config.pluginsEnabled = normalizeBoolean(raw['plugins-enabled'] ?? raw.pluginsEnabled);
+  }
   config.wsAuth = normalizeBoolean(raw['ws-auth'] ?? raw.wsAuth);
   config.forceModelPrefix = normalizeBoolean(raw['force-model-prefix'] ?? raw.forceModelPrefix);
   const routing = raw.routing;
@@ -480,9 +499,24 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
       .filter(Boolean) as GeminiKeyConfig[];
   }
 
+  const interactionsList =
+    raw['interactions-api-key'] ?? raw.interactionsApiKey ?? raw.interactionsApiKeys;
+  if (Array.isArray(interactionsList)) {
+    config.interactionsApiKeys = interactionsList
+      .map((item) => normalizeGeminiKeyConfig(item))
+      .filter(Boolean) as GeminiKeyConfig[];
+  }
+
   const codexList = raw['codex-api-key'] ?? raw.codexApiKey ?? raw.codexApiKeys;
   if (Array.isArray(codexList)) {
     config.codexApiKeys = codexList
+      .map((item) => normalizeProviderKeyConfig(item))
+      .filter(Boolean) as ProviderKeyConfig[];
+  }
+
+  const xaiList = raw['xai-api-key'] ?? raw.xaiApiKey ?? raw.xaiApiKeys;
+  if (Array.isArray(xaiList)) {
+    config.xaiApiKeys = xaiList
       .map((item) => normalizeProviderKeyConfig(item))
       .filter(Boolean) as ProviderKeyConfig[];
   }
@@ -501,19 +535,17 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
       .filter(Boolean) as ProviderKeyConfig[];
   }
 
-  const openaiList = raw['openai-compatibility'] ?? raw.openaiCompatibility ?? raw.openAICompatibility;
+  const openaiList =
+    raw['openai-compatibility'] ?? raw.openaiCompatibility ?? raw.openAICompatibility;
   if (Array.isArray(openaiList)) {
     config.openaiCompatibility = openaiList
       .map((item) => normalizeOpenAIProvider(item))
       .filter(Boolean) as OpenAIProviderConfig[];
   }
 
-  const ampcode = normalizeAmpcodeConfig(raw.ampcode);
-  if (ampcode) {
-    config.ampcode = ampcode;
-  }
-
-  const oauthExcluded = normalizeOauthExcluded(raw['oauth-excluded-models'] ?? raw.oauthExcludedModels);
+  const oauthExcluded = normalizeOauthExcluded(
+    raw['oauth-excluded-models'] ?? raw.oauthExcludedModels
+  );
   if (oauthExcluded) {
     config.oauthExcludedModels = oauthExcluded;
   }
@@ -529,7 +561,4 @@ export {
   normalizeProviderKeyConfig,
   normalizeHeaders,
   normalizeExcludedModels,
-  normalizeAmpcodeConfig,
-  normalizeAmpcodeModelMappings,
-  normalizeAmpcodeUpstreamApiKeys
 };

@@ -91,6 +91,33 @@ func TestAggregateBetween(t *testing.T) {
 	}
 }
 
+func TestFilterOptionValuesWithFilterIncludesHeaderTraceIDs(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	event := aggregationEvent("event-trace-option", 1_000, "gpt-a", false, 10, 20, 0, 0, 0, 30, nil)
+	event.HeaderTraceID = "req-filter-option"
+	if _, err := db.InsertEvents(context.Background(), []usage.Event{event}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	options, err := db.FilterOptionValuesWithFilter(context.Background(), AnalyticsFilter{
+		FromMS: 1_000,
+		ToMS:   2_000,
+	})
+	if err != nil {
+		t.Fatalf("filter option values: %v", err)
+	}
+	if len(options.HeaderTraceIDs) != 1 || options.HeaderTraceIDs[0] != "req-filter-option" {
+		t.Fatalf("header trace filter options = %#v", options.HeaderTraceIDs)
+	}
+}
+
 func aggregationEvent(
 	hash string,
 	timestampMS int64,

@@ -8,7 +8,6 @@ export type OAuthProvider =
   | 'codex'
   | 'anthropic'
   | 'antigravity'
-  | 'gemini-cli'
   | 'kimi';
 
 // OAuth 流程状态
@@ -39,6 +38,7 @@ export interface OAuthModelAliasEntry {
   name: string;
   alias: string;
   fork?: boolean;
+  forceMapping?: boolean;
 }
 
 export type OAuthModelAlias = Record<string, OAuthModelAliasEntry[]>;

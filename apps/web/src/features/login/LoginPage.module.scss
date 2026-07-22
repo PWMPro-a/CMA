@@ -36,8 +36,8 @@
   background: var(--app-surface-muted);
   color: var(--text-primary);
   box-shadow: var(--glass-shadow);
-  backdrop-filter: blur(var(--app-blur));
-  -webkit-backdrop-filter: blur(var(--app-blur));
+  backdrop-filter: var(--glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   display: inline-grid;
   place-items: center;
   cursor: pointer;
@@ -70,8 +70,8 @@
   border-radius: var(--app-radius-md);
   background: color-mix(in srgb, var(--app-surface-strong) 96%, transparent);
   box-shadow: var(--glass-shadow);
-  backdrop-filter: blur(var(--app-blur));
-  -webkit-backdrop-filter: blur(var(--app-blur));
+  backdrop-filter: var(--glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -136,8 +136,8 @@
   border-radius: var(--app-radius-lg);
   background: var(--glass-bg);
   box-shadow: var(--glass-shadow);
-  backdrop-filter: blur(var(--app-blur));
-  -webkit-backdrop-filter: blur(var(--app-blur));
+  backdrop-filter: var(--glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   animation: cardEnter 0.48s cubic-bezier(0.16, 1, 0.3, 1);
 
   @media (max-width: $breakpoint-mobile) {

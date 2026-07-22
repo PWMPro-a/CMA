@@ -13,6 +13,21 @@
 .cardTitleIcon {
   width: 24px;
   height: 24px;
+  object-fit: contain;
+}
+
+.pluginIconFallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: $radius-sm;
+  border: 1px solid var(--border-color);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .content {

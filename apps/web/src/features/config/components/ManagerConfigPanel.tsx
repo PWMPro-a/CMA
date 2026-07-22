@@ -4,6 +4,7 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { IconEye, IconEyeOff, IconX } from '@/components/ui/icons';
+import { AccountProcessingPolicySection } from './AccountProcessingPolicySection';
 import styles from '../ConfigPage.module.scss';
 
 type ManagerConfigPanelProps = {
@@ -147,11 +148,18 @@ export function ManagerConfigPanel({
           />
           <Input
             label={t('config_management.manager.cpa_management_key_label')}
+            name="manager-cpa-management-key-rotation"
             type={managerCPAManagementKeyVisible ? 'text' : 'password'}
             value={managerCPAManagementKeyInput}
             placeholder={t('config_management.manager.cpa_management_key_placeholder')}
             onChange={(event) => onCPAManagementKeyInputChange(event.target.value)}
             disabled={connectionInputDisabled}
+            autoComplete="new-password"
+            autoCorrect="off"
+            autoCapitalize="none"
+            spellCheck={false}
+            data-lpignore="true"
+            data-1p-ignore="true"
             className={styles.managerCpaKeyInput}
             hint={t('config_management.manager.cpa_management_key_section_hint')}
             rightElement={
@@ -292,6 +300,10 @@ export function ManagerConfigPanel({
             }
           />
         </div>
+      </section>
+
+      <section className={styles.managerSection}>
+        <AccountProcessingPolicySection />
       </section>
 
       <div className={styles.managerMetaGrid}>

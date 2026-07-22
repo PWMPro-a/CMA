@@ -94,17 +94,21 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       set({
         config: data,
         cache: newCache,
-        loading: false
+        loading: false,
       });
 
       return section ? extractConfigSectionValue(data, section) : data;
     } catch (error: unknown) {
       const message =
-        error instanceof Error ? error.message : typeof error === 'string' ? error : 'Failed to fetch config';
+        error instanceof Error
+          ? error.message
+          : typeof error === 'string'
+            ? error
+            : 'Failed to fetch config';
       if (requestId === configRequestToken) {
         set({
           error: message || 'Failed to fetch config',
-          loading: false
+          loading: false,
         });
       }
       throw error;
@@ -140,6 +144,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         case 'logging-to-file':
           nextConfig.loggingToFile = value as Config['loggingToFile'];
           break;
+        case 'plugins':
+          nextConfig.pluginsEnabled =
+            value !== null &&
+            typeof value === 'object' &&
+            !Array.isArray(value) &&
+            (value as { enabled?: unknown }).enabled === true;
+          break;
         case 'logs-max-total-size-mb':
           nextConfig.logsMaxTotalSizeMb = value as Config['logsMaxTotalSizeMb'];
           break;
@@ -155,14 +166,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         case 'api-keys':
           nextConfig.apiKeys = value as Config['apiKeys'];
           break;
-        case 'ampcode':
-          nextConfig.ampcode = value as Config['ampcode'];
-          break;
         case 'gemini-api-key':
           nextConfig.geminiApiKeys = value as Config['geminiApiKeys'];
           break;
+        case 'interactions-api-key':
+          nextConfig.interactionsApiKeys = value as Config['interactionsApiKeys'];
+          break;
         case 'codex-api-key':
           nextConfig.codexApiKeys = value as Config['codexApiKeys'];
+          break;
+        case 'xai-api-key':
+          nextConfig.xaiApiKeys = value as Config['xaiApiKeys'];
           break;
         case 'claude-api-key':
           nextConfig.claudeApiKeys = value as Config['claudeApiKeys'];
@@ -222,5 +236,5 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     if (!cached) return false;
 
     return Date.now() - cached.timestamp < CACHE_EXPIRY_MS;
-  }
+  },
 }));

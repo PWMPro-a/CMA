@@ -364,21 +364,6 @@
     white-space: nowrap;
   }
 
-  .accountEnabledControl {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 8px;
-    min-width: max-content;
-  }
-
-  .accountEnabledLabel {
-    color: var(--monitor-muted);
-    font-size: 12px;
-    font-weight: 700;
-    white-space: nowrap;
-  }
-
   .accountMetaRow {
     display: flex;
     align-items: center;
@@ -404,99 +389,6 @@
 
   .accountMetaSeparator {
     color: var(--monitor-muted);
-  }
-
-  .accountOverviewToggleRow {
-    display: flex;
-    align-items: flex-start;
-    justify-content: flex-start;
-    gap: 12px;
-    flex-wrap: wrap;
-    padding: 12px 14px;
-    border: 1px solid color-mix(in srgb, var(--monitor-line) 82%, transparent);
-    border-radius: 18px;
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 84%, var(--monitor-surface));
-  }
-
-  .accountOverviewToggleMeta,
-  .accountOverviewToggleMetaRow {
-    display: grid;
-    gap: 6px;
-    min-width: 0;
-  }
-
-  .accountOverviewToggleMetaRow {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .accountOverviewToggleLabel,
-  .accountOverviewStatusLabel {
-    color: var(--monitor-muted);
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0;
-    text-transform: uppercase;
-  }
-
-  .accountOverviewStatusLabel {
-    display: none;
-  }
-
-  .accountOverviewToggleActions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .accountOverviewEnabledStateBadge,
-  .accountOverviewLinkedFilesMeta,
-  .accountOverviewStatusPill {
-    display: inline-flex;
-    align-items: center;
-    min-height: 28px;
-    padding: 0 10px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 700;
-    white-space: nowrap;
-  }
-
-  .accountOverviewEnabledStateBadge {
-    border: 1px solid transparent;
-  }
-
-  .accountOverviewEnabledStateEnabled {
-    color: var(--success-badge-text, #065f46);
-    background: var(--success-badge-bg, #d1fae5);
-    border-color: var(--success-badge-border, #6ee7b7);
-  }
-
-  .accountOverviewEnabledStateDisabled {
-    color: var(--text-secondary);
-    background: color-mix(in srgb, var(--surface-subtle) 84%, transparent);
-    border-color: var(--monitor-line);
-  }
-
-  .accountOverviewEnabledStateMixed {
-    color: var(--warning-text);
-    background: var(--warning-bg);
-    border-color: var(--warning-border);
-  }
-
-  .accountOverviewEnabledStateUnavailable {
-    color: var(--monitor-muted);
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 82%, var(--monitor-surface));
-    border-color: color-mix(in srgb, var(--monitor-line) 90%, transparent);
-  }
-
-  .accountOverviewLinkedFilesMeta {
-    color: var(--monitor-muted);
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 82%, var(--monitor-surface));
-    border: 1px solid color-mix(in srgb, var(--monitor-line) 90%, transparent);
   }
 
   .accountOverviewStatusSection,
@@ -1095,11 +987,121 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
+    min-width: 0;
   }
 
   .quotaWindowHeader span {
     color: var(--monitor-ink);
     font-size: 12px;
+  }
+
+  .quotaWindowLabel {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    max-width: 100%;
+    overflow: visible;
+  }
+
+  .quotaWindowLabel > span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .quotaInfoTrigger {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    flex: 0 0 auto;
+    color: var(--monitor-muted);
+    cursor: help;
+    outline: none;
+  }
+
+  .quotaInfoTrigger:hover,
+  .quotaInfoTrigger:focus-visible {
+    color: var(--monitor-ink);
+  }
+
+  .quotaInfoTrigger:focus-visible {
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--monitor-accent) 24%, transparent);
+  }
+
+  .quotaInfoIcon {
+    display: block;
+  }
+
+  .quotaInfoTooltip {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    z-index: 20;
+    display: grid;
+    gap: 4px;
+    min-width: 210px;
+    max-width: min(320px, calc(100vw - 32px));
+    padding: 8px 10px;
+    border: 1px solid var(--monitor-line);
+    border-radius: 8px;
+    background: var(--monitor-surface);
+    box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+    color: var(--monitor-ink);
+    font-size: 11px;
+    line-height: 1.45;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(4px);
+    transition:
+      opacity 0.14s ease,
+      transform 0.14s ease,
+      visibility 0.14s ease;
+    visibility: hidden;
+    white-space: normal;
+  }
+
+  .quotaInfoTooltip::after {
+    content: '';
+    position: absolute;
+    bottom: -5px;
+    left: 6px;
+    width: 9px;
+    height: 9px;
+    border-right: 1px solid var(--monitor-line);
+    border-bottom: 1px solid var(--monitor-line);
+    background: inherit;
+    transform: rotate(45deg);
+  }
+
+  .quotaInfoTrigger:hover .quotaInfoTooltip,
+  .quotaInfoTrigger:focus-within .quotaInfoTooltip {
+    opacity: 1;
+    transform: translateY(0);
+    visibility: visible;
+  }
+
+  .quotaInfoTooltipRow {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 8px;
+    align-items: baseline;
+  }
+
+  .quotaInfoTooltipLabel {
+    color: var(--monitor-muted);
+    white-space: nowrap;
+  }
+
+  .quotaInfoTooltipValue {
+    color: var(--monitor-ink);
+    font-weight: 700;
+    overflow-wrap: anywhere;
   }
 
   .quotaProgressTrack {

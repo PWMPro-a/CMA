@@ -32,6 +32,226 @@ type ImportParseResult struct {
 	Warnings    []string
 }
 
+type ImportStreamResult struct {
+	Format      string
+	Total       int
+	Failed      int
+	Unsupported int
+	Warnings    []string
+}
+
+type importBatcher struct {
+	batchSize int
+	batch     []Event
+	total     int
+	consume   func([]Event) error
+}
+
+func StreamImportPayload(reader io.Reader, batchSize int, consume func([]Event) error) (ImportStreamResult, error) {
+	if batchSize <= 0 {
+		batchSize = 256
+	}
+	buffered := bufio.NewReader(reader)
+	first, err := peekNonWhitespaceByte(buffered)
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return ImportStreamResult{}, errors.New("empty usage import payload")
+		}
+		return ImportStreamResult{}, err
+	}
+
+	batcher := &importBatcher{
+		batchSize: batchSize,
+		batch:     make([]Event, 0, batchSize),
+		consume:   consume,
+	}
+	var result ImportStreamResult
+	switch first {
+	case '[':
+		result, err = streamJSONArrayImport(buffered, batcher)
+	case '{':
+		result, err = streamJSONObjectOrJSONLImport(buffered, batcher)
+	default:
+		result = ImportStreamResult{Format: ImportFormatJSONL}
+		err = streamJSONLImport(buffered, batcher, &result)
+	}
+	result.Total = batcher.total
+	return result, err
+}
+
+func streamJSONArrayImport(reader io.Reader, batcher *importBatcher) (ImportStreamResult, error) {
+	result := ImportStreamResult{Format: ImportFormatJSONL}
+	decoder := json.NewDecoder(reader)
+	decoder.UseNumber()
+	token, err := decoder.Token()
+	if err != nil {
+		return result, err
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '[' {
+		return result, ErrUnsupportedImportFormat
+	}
+	for decoder.More() {
+		var item json.RawMessage
+		if err := decoder.Decode(&item); err != nil {
+			return result, err
+		}
+		event, err := eventFromJSONRecord(item)
+		if err != nil {
+			result.Failed++
+			continue
+		}
+		if err := batcher.add(event); err != nil {
+			return result, err
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return result, err
+	}
+	if err := ensureDecoderEOF(decoder); err != nil {
+		return result, err
+	}
+	return result, batcher.flush()
+}
+
+func streamJSONObjectOrJSONLImport(reader io.Reader, batcher *importBatcher) (ImportStreamResult, error) {
+	decoder := json.NewDecoder(reader)
+	decoder.UseNumber()
+	var first json.RawMessage
+	if err := decoder.Decode(&first); err != nil {
+		return ImportStreamResult{Format: ImportFormatJSONL}, err
+	}
+
+	parsed, err := parseJSONObjectImport(first)
+	if parsed.Format == ImportFormatLegacyExport || parsed.Format == ImportFormatLegacyPayload {
+		result := ImportStreamResult{
+			Format:      parsed.Format,
+			Failed:      parsed.Failed,
+			Unsupported: parsed.Unsupported,
+			Warnings:    parsed.Warnings,
+		}
+		if err != nil {
+			return result, err
+		}
+		if err := ensureOnlyWhitespace(io.MultiReader(decoder.Buffered(), reader)); err != nil {
+			return result, err
+		}
+		for _, event := range parsed.Events {
+			if err := batcher.add(event); err != nil {
+				return result, err
+			}
+		}
+		return result, batcher.flush()
+	}
+	if err != nil {
+		return ImportStreamResult{Format: ImportFormatJSONL, Failed: parsed.Failed}, err
+	}
+
+	result := ImportStreamResult{Format: ImportFormatJSONL, Failed: parsed.Failed}
+	for _, event := range parsed.Events {
+		if err := batcher.add(event); err != nil {
+			return result, err
+		}
+	}
+	if err := streamJSONLImport(io.MultiReader(decoder.Buffered(), reader), batcher, &result); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func streamJSONLImport(reader io.Reader, batcher *importBatcher, result *ImportStreamResult) error {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		event, err := eventFromJSONRecord([]byte(line))
+		if err != nil {
+			result.Failed++
+			continue
+		}
+		if err := batcher.add(event); err != nil {
+			return err
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return batcher.flush()
+}
+
+func (b *importBatcher) add(event Event) error {
+	b.batch = append(b.batch, event)
+	b.total++
+	if len(b.batch) < b.batchSize {
+		return nil
+	}
+	return b.flush()
+}
+
+func (b *importBatcher) flush() error {
+	if len(b.batch) == 0 {
+		return nil
+	}
+	// Import is intentionally batched rather than all-or-nothing: batches that
+	// completed before a later parse, size-limit, or database error stay committed.
+	if err := b.consume(b.batch); err != nil {
+		return err
+	}
+	b.batch = b.batch[:0]
+	return nil
+}
+
+func peekNonWhitespaceByte(reader *bufio.Reader) (byte, error) {
+	for {
+		value, err := reader.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+		switch value {
+		case ' ', '\t', '\r', '\n':
+			continue
+		default:
+			if err := reader.UnreadByte(); err != nil {
+				return 0, err
+			}
+			return value, nil
+		}
+	}
+}
+
+func ensureDecoderEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("usage import payload contains multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func ensureOnlyWhitespace(reader io.Reader) error {
+	buffer := make([]byte, 4096)
+	for {
+		read, err := reader.Read(buffer)
+		for _, value := range buffer[:read] {
+			switch value {
+			case ' ', '\t', '\r', '\n':
+			default:
+				return errors.New("usage import payload contains multiple JSON values")
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
 func ParseImportPayload(data []byte) (ImportParseResult, error) {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 {
@@ -57,6 +277,12 @@ func parseJSONObjectImport(data []byte) (ImportParseResult, error) {
 	if err := decodeJSON(data, &record); err != nil {
 		return ImportParseResult{}, err
 	}
+	if event, ok, err := eventFromExportedRecord(record); ok || err != nil {
+		if err != nil {
+			return ImportParseResult{Format: ImportFormatJSONL, Failed: 1}, err
+		}
+		return ImportParseResult{Format: ImportFormatJSONL, Events: []Event{event}}, nil
+	}
 
 	if usageRaw, ok := record["usage"]; ok {
 		usageRecord, ok := usageRaw.(map[string]any)
@@ -78,13 +304,6 @@ func parseJSONObjectImport(data []byte) (ImportParseResult, error) {
 
 	if hasUsageAPIs(record) {
 		return eventsFromLegacyUsage(record, ImportFormatLegacyPayload)
-	}
-
-	if event, ok, err := eventFromExportedRecord(record); ok || err != nil {
-		if err != nil {
-			return ImportParseResult{Format: ImportFormatJSONL, Failed: 1}, err
-		}
-		return ImportParseResult{Format: ImportFormatJSONL, Events: []Event{event}}, nil
 	}
 
 	if looksLikeLegacyUsageSummary(record) {
@@ -172,72 +391,109 @@ func eventFromExportedRecord(record map[string]any) (Event, bool, error) {
 	}
 
 	inputTokens, outputTokens, reasoningTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens, totalTokens := readTokenFields(record)
-	if totalTokens <= 0 {
-		totalTokens = inputTokens + outputTokens + reasoningTokens +
-			CompatibleCachedTokens(cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens) +
-			maxInt64(cacheReadTokens, 0) + maxInt64(cacheCreationTokens, 0)
-	}
 	failStatusCode, failBody := readFailFields(record)
 	failSummary := readString(record, "fail_summary", "failSummary")
 	if failSummary == "" {
 		failSummary = FailSummaryFromBody(failBody)
 	}
 
+	requestedModel := readString(record, "requested_model", "requestedModel")
+	resolvedModel := readString(record, "resolved_model", "resolvedModel")
+	model := readString(record, "model")
+	if model == "" {
+		model = requestedModel
+	}
+	if model == "" {
+		model = resolvedModel
+	}
+	if model == "" {
+		model = "-"
+	}
+	provider := readString(record, "provider")
+	executorType := readString(record, "executor_type", "executorType")
+	providerSnapshot := readString(record, "auth_provider_snapshot", "authProviderSnapshot")
+	rawJSON := importCacheAccountingRawJSON(record)
+	rawHints := RawCacheAccountingHintsFromJSON(rawJSON)
+	explicitMode := cacheInputModeFromRecord(record)
+	if explicitMode == "" {
+		explicitMode = rawHints.ExplicitMode
+	}
+	accounting := NormalizeCacheAccounting(CacheInputContext{
+		ExplicitMode:     explicitMode,
+		ExecutorType:     executorType,
+		Provider:         provider,
+		ProviderSnapshot: providerSnapshot,
+		ResolvedModel:    resolvedModel,
+		RequestedModel:   requestedModel,
+		DisplayModel:     model,
+	}, inputTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens)
+	if totalTokens <= 0 && rawHints.HasExplicitTotal {
+		totalTokens = rawHints.ExplicitTotal
+	}
+	if totalTokens <= 0 {
+		totalTokens = accounting.TotalInputTokens + maxInt64(outputTokens, 0) + maxInt64(reasoningTokens, 0)
+	}
+
 	event := Event{
-		RequestID:             readString(record, "request_id", "requestId"),
-		EventHash:             eventHash,
-		TimestampMS:           timestampMS,
-		Timestamp:             timestamp,
-		Provider:              readString(record, "provider"),
-		ExecutorType:          readString(record, "executor_type", "executorType"),
-		Model:                 readString(record, "model"),
-		RequestedModel:        readString(record, "requested_model", "requestedModel"),
-		ResolvedModel:         readString(record, "resolved_model", "resolvedModel"),
-		Endpoint:              readString(record, "endpoint"),
-		Method:                readString(record, "method"),
-		Path:                  readString(record, "path"),
-		AuthType:              readString(record, "auth_type", "authType"),
-		AuthIndex:             readString(record, "auth_index", "authIndex", "AuthIndex"),
-		Source:                readString(record, "source"),
-		SourceHash:            readString(record, "source_hash", "sourceHash"),
-		APIKeyHash:            readString(record, "api_key_hash", "apiKeyHash"),
-		AccountSnapshot:       readString(record, "account_snapshot", "accountSnapshot"),
-		AuthLabelSnapshot:     readString(record, "auth_label_snapshot", "authLabelSnapshot"),
-		AuthFileSnapshot:      readString(record, "auth_file_snapshot", "authFileSnapshot"),
-		AuthProviderSnapshot:  readString(record, "auth_provider_snapshot", "authProviderSnapshot"),
-		AuthProjectIDSnapshot: readString(record, "auth_project_id_snapshot", "authProjectIdSnapshot"),
-		AuthSnapshotAtMS:      readInt(record, "auth_snapshot_at_ms", "authSnapshotAtMs"),
-		ReasoningEffort:       readString(record, "reasoning_effort", "reasoningEffort"),
-		ServiceTier:           readString(record, "service_tier", "serviceTier"),
-		InputTokens:           inputTokens,
-		OutputTokens:          outputTokens,
-		ReasoningTokens:       reasoningTokens,
-		CachedTokens:          cachedTokens,
-		CacheTokens:           cacheTokens,
-		CacheReadTokens:       cacheReadTokens,
-		CacheCreationTokens:   cacheCreationTokens,
-		TotalTokens:           totalTokens,
-		LatencyMS:             readOptionalInt(record, "latency_ms", "latencyMs"),
-		TTFTMS:                readOptionalInt(record, "ttft_ms", "ttftMs", "time_to_first_token_ms", "timeToFirstTokenMs"),
-		Failed:                readBool(record, "failed", "is_failed", "isFailed"),
-		FailStatusCode:        int(failStatusCode),
-		FailSummary:           failSummary,
-		FailBody:              failBody,
-		RawJSON:               SafeRawJSON(readString(record, "raw_json", "rawJson")),
-		CreatedAtMS:           readInt(record, "created_at_ms", "createdAtMs"),
+		RequestID:                     readString(record, "request_id", "requestId"),
+		EventHash:                     eventHash,
+		TimestampMS:                   timestampMS,
+		Timestamp:                     timestamp,
+		Provider:                      provider,
+		ExecutorType:                  executorType,
+		Model:                         model,
+		RequestedModel:                requestedModel,
+		ResolvedModel:                 resolvedModel,
+		Endpoint:                      readString(record, "endpoint"),
+		Method:                        readString(record, "method"),
+		Path:                          readString(record, "path"),
+		AuthType:                      readString(record, "auth_type", "authType"),
+		AuthIndex:                     readString(record, "auth_index", "authIndex", "AuthIndex"),
+		Source:                        readString(record, "source"),
+		SourceHash:                    readString(record, "source_hash", "sourceHash"),
+		APIKeyHash:                    readString(record, "api_key_hash", "apiKeyHash"),
+		AccountSnapshot:               readString(record, "account_snapshot", "accountSnapshot"),
+		AuthLabelSnapshot:             readString(record, "auth_label_snapshot", "authLabelSnapshot"),
+		AuthFileSnapshot:              readString(record, "auth_file_snapshot", "authFileSnapshot"),
+		AuthProviderSnapshot:          providerSnapshot,
+		AuthProjectIDSnapshot:         readString(record, "auth_project_id_snapshot", "authProjectIdSnapshot"),
+		AuthSnapshotAtMS:              readInt(record, "auth_snapshot_at_ms", "authSnapshotAtMs"),
+		ReasoningEffort:               readString(record, "reasoning_effort", "reasoningEffort"),
+		ServiceTier:                   readString(record, "service_tier", "serviceTier"),
+		RequestServiceTier:            readString(record, "request_service_tier", "requestServiceTier"),
+		ResponseServiceTier:           readString(record, "response_service_tier", "responseServiceTier"),
+		CacheInputMode:                accounting.Mode,
+		InputTokens:                   inputTokens,
+		OutputTokens:                  outputTokens,
+		ReasoningTokens:               reasoningTokens,
+		CachedTokens:                  cachedTokens,
+		CacheTokens:                   cacheTokens,
+		CacheReadTokens:               cacheReadTokens,
+		CacheCreationTokens:           cacheCreationTokens,
+		NormalizedUncachedInputTokens: accounting.UncachedInputTokens,
+		NormalizedTotalInputTokens:    accounting.TotalInputTokens,
+		NormalizedCacheReadTokens:     accounting.CacheReadTokens,
+		NormalizedCacheCreationTokens: accounting.CacheCreationTokens,
+		TotalTokens:                   totalTokens,
+		LatencyMS:                     readOptionalInt(record, "latency_ms", "latencyMs"),
+		TTFTMS:                        readOptionalInt(record, "ttft_ms", "ttftMs", "time_to_first_token_ms", "timeToFirstTokenMs"),
+		Failed:                        readBool(record, "failed", "is_failed", "isFailed"),
+		FailStatusCode:                int(failStatusCode),
+		FailSummary:                   failSummary,
+		FailBody:                      failBody,
+		RawJSON:                       rawJSON,
+		CreatedAtMS:                   readInt(record, "created_at_ms", "createdAtMs"),
 	}
-	if event.Model == "" {
-		if event.RequestedModel != "" {
-			event.Model = event.RequestedModel
-		} else if event.ResolvedModel != "" {
-			event.Model = event.ResolvedModel
-		} else {
-			event.Model = "-"
-		}
-	}
+	event.ServiceTier = EffectiveServiceTier(CacheInputContext{
+		ExecutorType:     event.ExecutorType,
+		Provider:         event.Provider,
+		ProviderSnapshot: event.AuthProviderSnapshot,
+		AuthType:         event.AuthType,
+	}, event.RequestServiceTier, event.ServiceTier, event.ResponseServiceTier)
 	if event.Endpoint == "" {
 		event.Endpoint = "-"
 	}
+	AttachResponseHeaderMetadata(&event, ResponseHeaderMetadataFromRecord(record, time.UnixMilli(timestampMS)))
 	if event.CreatedAtMS <= 0 {
 		event.CreatedAtMS = time.Now().UnixMilli()
 	}
@@ -338,11 +594,6 @@ func eventFromLegacyDetail(
 	timestampMS, normalizedTimestamp := readTimestamp(detail)
 
 	inputTokens, outputTokens, reasoningTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens, totalTokens := readTokenFields(detail)
-	if totalTokens <= 0 {
-		totalTokens = inputTokens + outputTokens + reasoningTokens +
-			CompatibleCachedTokens(cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens) +
-			maxInt64(cacheReadTokens, 0) + maxInt64(cacheCreationTokens, 0)
-	}
 	failStatusCode, failBody := readFailFields(detail)
 	failSummary := readString(detail, "fail_summary", "failSummary")
 	if failSummary == "" {
@@ -353,59 +604,121 @@ func eventFromLegacyDetail(
 	apiKey := readString(detail, "api_key", "apiKey", "key")
 	authIndex := readString(detail, "auth_index", "authIndex", "AuthIndex")
 	rawJSON := legacyRawJSON(endpoint, model, detail)
+	provider := readString(detail, "provider", "type", "auth_type", "authType")
+	executorType := readString(detail, "executor_type", "executorType")
+	providerSnapshot := readString(detail, "auth_provider_snapshot", "authProviderSnapshot")
+	requestedModel := readString(detail, "requested_model", "requestedModel", "alias")
+	resolvedModel := readString(detail, "resolved_model", "resolvedModel")
+	accounting := NormalizeCacheAccounting(CacheInputContext{
+		ExplicitMode:     cacheInputModeFromRecord(detail),
+		ExecutorType:     executorType,
+		Provider:         provider,
+		ProviderSnapshot: providerSnapshot,
+		ResolvedModel:    resolvedModel,
+		RequestedModel:   requestedModel,
+		DisplayModel:     model,
+	}, inputTokens, cachedTokens, cacheTokens, cacheReadTokens, cacheCreationTokens)
+	if totalTokens <= 0 {
+		totalTokens = accounting.TotalInputTokens + maxInt64(outputTokens, 0) + maxInt64(reasoningTokens, 0)
+	}
 	requestID := readString(detail, "request_id", "requestId", "id")
 	if requestID == "" {
 		requestID = legacyRequestID(endpoint, model, normalizedTimestamp, rawJSON, endpointIndex, modelIndex, detailIndex)
 	}
 
 	event := Event{
-		RequestID:             requestID,
-		TimestampMS:           timestampMS,
-		Timestamp:             normalizedTimestamp,
-		Provider:              readString(detail, "provider", "type", "auth_type", "authType"),
-		ExecutorType:          readString(detail, "executor_type", "executorType"),
-		Model:                 model,
-		Endpoint:              endpoint,
-		Method:                method,
-		Path:                  path,
-		AuthType:              readString(detail, "auth_type", "authType"),
-		AuthIndex:             authIndex,
-		Source:                maskSource(sourceRaw),
-		SourceHash:            hashString(sourceRaw),
-		APIKeyHash:            hashString(apiKey),
-		AccountSnapshot:       readString(detail, "account_snapshot", "accountSnapshot"),
-		AuthLabelSnapshot:     readString(detail, "auth_label_snapshot", "authLabelSnapshot"),
-		AuthFileSnapshot:      readString(detail, "auth_file_snapshot", "authFileSnapshot"),
-		AuthProviderSnapshot:  readString(detail, "auth_provider_snapshot", "authProviderSnapshot"),
-		AuthProjectIDSnapshot: readString(detail, "auth_project_id_snapshot", "authProjectIdSnapshot"),
-		AuthSnapshotAtMS:      readInt(detail, "auth_snapshot_at_ms", "authSnapshotAtMs"),
-		ReasoningEffort:       readString(detail, "reasoning_effort", "reasoningEffort"),
-		ServiceTier:           readString(detail, "service_tier", "serviceTier"),
-		InputTokens:           inputTokens,
-		OutputTokens:          outputTokens,
-		ReasoningTokens:       reasoningTokens,
-		CachedTokens:          cachedTokens,
-		CacheTokens:           cacheTokens,
-		CacheReadTokens:       cacheReadTokens,
-		CacheCreationTokens:   cacheCreationTokens,
-		TotalTokens:           totalTokens,
-		LatencyMS:             readOptionalInt(detail, "latency_ms", "latencyMs", "duration_ms", "durationMs", "elapsed_ms", "elapsedMs"),
-		TTFTMS:                readOptionalInt(detail, "ttft_ms", "ttftMs", "time_to_first_token_ms", "timeToFirstTokenMs"),
-		Failed:                readFailed(detail),
-		FailStatusCode:        int(failStatusCode),
-		FailSummary:           failSummary,
-		FailBody:              failBody,
-		RawJSON:               rawJSON,
-		CreatedAtMS:           now,
+		RequestID:                     requestID,
+		TimestampMS:                   timestampMS,
+		Timestamp:                     normalizedTimestamp,
+		Provider:                      provider,
+		ExecutorType:                  executorType,
+		Model:                         model,
+		RequestedModel:                requestedModel,
+		ResolvedModel:                 resolvedModel,
+		Endpoint:                      endpoint,
+		Method:                        method,
+		Path:                          path,
+		AuthType:                      readString(detail, "auth_type", "authType"),
+		AuthIndex:                     authIndex,
+		Source:                        maskSource(sourceRaw),
+		SourceHash:                    hashString(sourceRaw),
+		APIKeyHash:                    hashString(apiKey),
+		AccountSnapshot:               readString(detail, "account_snapshot", "accountSnapshot"),
+		AuthLabelSnapshot:             readString(detail, "auth_label_snapshot", "authLabelSnapshot"),
+		AuthFileSnapshot:              readString(detail, "auth_file_snapshot", "authFileSnapshot"),
+		AuthProviderSnapshot:          providerSnapshot,
+		AuthProjectIDSnapshot:         readString(detail, "auth_project_id_snapshot", "authProjectIdSnapshot"),
+		AuthSnapshotAtMS:              readInt(detail, "auth_snapshot_at_ms", "authSnapshotAtMs"),
+		ReasoningEffort:               readString(detail, "reasoning_effort", "reasoningEffort"),
+		ServiceTier:                   readString(detail, "service_tier", "serviceTier"),
+		RequestServiceTier:            readString(detail, "request_service_tier", "requestServiceTier"),
+		ResponseServiceTier:           readString(detail, "response_service_tier", "responseServiceTier"),
+		CacheInputMode:                accounting.Mode,
+		InputTokens:                   inputTokens,
+		OutputTokens:                  outputTokens,
+		ReasoningTokens:               reasoningTokens,
+		CachedTokens:                  cachedTokens,
+		CacheTokens:                   cacheTokens,
+		CacheReadTokens:               cacheReadTokens,
+		CacheCreationTokens:           cacheCreationTokens,
+		NormalizedUncachedInputTokens: accounting.UncachedInputTokens,
+		NormalizedTotalInputTokens:    accounting.TotalInputTokens,
+		NormalizedCacheReadTokens:     accounting.CacheReadTokens,
+		NormalizedCacheCreationTokens: accounting.CacheCreationTokens,
+		TotalTokens:                   totalTokens,
+		LatencyMS:                     readOptionalInt(detail, "latency_ms", "latencyMs", "duration_ms", "durationMs", "elapsed_ms", "elapsedMs"),
+		TTFTMS:                        readOptionalInt(detail, "ttft_ms", "ttftMs", "time_to_first_token_ms", "timeToFirstTokenMs"),
+		Failed:                        readFailed(detail),
+		FailStatusCode:                int(failStatusCode),
+		FailSummary:                   failSummary,
+		FailBody:                      failBody,
+		RawJSON:                       rawJSON,
+		CreatedAtMS:                   now,
 	}
+	event.ServiceTier = EffectiveServiceTier(CacheInputContext{
+		ExecutorType:     event.ExecutorType,
+		Provider:         event.Provider,
+		ProviderSnapshot: event.AuthProviderSnapshot,
+		AuthType:         event.AuthType,
+	}, event.RequestServiceTier, event.ServiceTier, event.ResponseServiceTier)
 	if event.Model == "" {
 		event.Model = "-"
 	}
 	if event.Endpoint == "" {
 		event.Endpoint = "-"
 	}
+	AttachResponseHeaderMetadata(&event, ResponseHeaderMetadataFromRecord(detail, time.UnixMilli(timestampMS)))
 	event.EventHash = buildEventHash(event)
 	return event, nil
+}
+
+func importCacheAccountingRawJSON(record map[string]any) string {
+	existing := SafeRawJSON(readString(record, "raw_json", "rawJson"))
+	recordHints := RawCacheAccountingHints{
+		ExplicitMode: cacheInputModeFromRecord(record),
+	}
+	if total, ok := explicitPositiveTotalFromRecord(record); ok {
+		recordHints.ExplicitTotal = total
+		recordHints.HasExplicitTotal = true
+	}
+	existingHints := RawCacheAccountingHintsFromJSON(existing)
+	modeCovered := recordHints.ExplicitMode == "" || existingHints.ExplicitMode == recordHints.ExplicitMode
+	totalCovered := !recordHints.HasExplicitTotal || (existingHints.HasExplicitTotal && existingHints.ExplicitTotal == recordHints.ExplicitTotal)
+	if modeCovered && totalCovered {
+		return existing
+	}
+	provenance := map[string]any{}
+	if recordHints.ExplicitMode != "" {
+		provenance["cache_input_mode"] = recordHints.ExplicitMode
+	}
+	if recordHints.HasExplicitTotal {
+		provenance["total_tokens"] = recordHints.ExplicitTotal
+	}
+	if existing != "" {
+		provenance["raw_json"] = existing
+	}
+	raw, _ := json.Marshal(provenance)
+	return string(raw)
 }
 
 func legacyRawJSON(endpoint string, model string, detail map[string]any) string {

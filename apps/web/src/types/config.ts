@@ -4,7 +4,6 @@
  */
 
 import type { GeminiKeyConfig, ProviderKeyConfig, OpenAIProviderConfig } from './provider';
-import type { AmpcodeConfig } from './ampcode';
 
 export interface QuotaExceededConfig {
   switchProject?: boolean;
@@ -15,12 +14,17 @@ export interface QuotaExceededConfig {
 export interface AuthPoolCleanConfig {
   baseUrl?: string;
   token?: string;
+  targetTypes?: string[];
   targetType?: string;
   workers?: number;
   deleteWorkers?: number;
   timeout?: number;
   retries?: number;
   userAgent?: string;
+  xaiInferenceUserAgent?: string;
+  xaiInferenceEnabled?: boolean;
+  xaiInferenceModel?: string;
+  xaiInferencePrompt?: string;
   usedPercentThreshold?: number;
   sampleSize?: number;
 }
@@ -36,13 +40,15 @@ export interface Config {
   requestLog?: boolean;
   loggingToFile?: boolean;
   logsMaxTotalSizeMb?: number;
+  pluginsEnabled?: boolean;
   wsAuth?: boolean;
   forceModelPrefix?: boolean;
   routingStrategy?: string;
   apiKeys?: string[];
-  ampcode?: AmpcodeConfig;
   geminiApiKeys?: GeminiKeyConfig[];
+  interactionsApiKeys?: GeminiKeyConfig[];
   codexApiKeys?: ProviderKeyConfig[];
+  xaiApiKeys?: ProviderKeyConfig[];
   claudeApiKeys?: ProviderKeyConfig[];
   vertexApiKeys?: ProviderKeyConfig[];
   openaiCompatibility?: OpenAIProviderConfig[];
@@ -60,13 +66,15 @@ export type RawConfigSection =
   | 'request-log'
   | 'logging-to-file'
   | 'logs-max-total-size-mb'
+  | 'plugins'
   | 'ws-auth'
   | 'force-model-prefix'
   | 'routing/strategy'
   | 'api-keys'
-  | 'ampcode'
   | 'gemini-api-key'
+  | 'interactions-api-key'
   | 'codex-api-key'
+  | 'xai-api-key'
   | 'claude-api-key'
   | 'vertex-api-key'
   | 'openai-compatibility'

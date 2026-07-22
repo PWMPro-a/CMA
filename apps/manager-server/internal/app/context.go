@@ -1,12 +1,15 @@
 package app
 
 import (
+	"context"
 	"io/fs"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	accountactionsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/accountaction"
 	adminauthsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/adminauth"
 	apikeyaliassvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/apikeyalias"
+	automationsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/automation"
 	bootstrapsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
 	codexinspectionsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/codexinspection"
 	collectorsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
@@ -22,6 +25,10 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
+type AutomationRuntimeService interface {
+	Reload(ctx context.Context) error
+}
+
 type Context struct {
 	Config    config.Config
 	Store     *store.Store
@@ -31,19 +38,22 @@ type Context struct {
 	ServiceID string
 	Bootstrap bootstrapsvc.Result
 
-	SetupService           *setupsvc.Service
-	AdminAuthService       *adminauthsvc.Service
-	ManagerConfigService   *managerconfigsvc.Service
-	CollectorService       *collectorsvc.Service
-	UsageService           *usagesvc.Service
-	DashboardService       *dashboardsvc.Service
-	CodexInspectionService *codexinspectionsvc.Service
-	ContainerOpsService    *containeropssvc.Service
-	MonitoringService      *monitoringsvc.Service
-	ModelPriceService      *modelpricesvc.Service
-	APIKeyAliasService     *apikeyaliassvc.Service
-	ProxyService           *proxysvc.Service
-	PanelService           *panelsvc.Service
+	SetupService                   *setupsvc.Service
+	AdminAuthService               *adminauthsvc.Service
+	ManagerConfigService           *managerconfigsvc.Service
+	CollectorService               *collectorsvc.Service
+	UsageService                   *usagesvc.Service
+	DashboardService               *dashboardsvc.Service
+	CodexInspectionService         *codexinspectionsvc.Service
+	ContainerOpsService            *containeropssvc.Service
+	MonitoringService              *monitoringsvc.Service
+	ModelPriceService              *modelpricesvc.Service
+	APIKeyAliasService             *apikeyaliassvc.Service
+	AccountActionService           *accountactionsvc.Service
+	AccountProcessingPolicyService *automationsvc.Service
+	ProxyService                   *proxysvc.Service
+	PanelService                   *panelsvc.Service
+	AutomationRuntimeService       AutomationRuntimeService
 }
 
 func FromExisting(
@@ -55,9 +65,15 @@ func FromExisting(
 	modelPriceSyncURL *string,
 	openRouterModelPriceSyncURL *string,
 	serviceID string,
+	automationRuntimeService ...AutomationRuntimeService,
 ) *Context {
+	var runtimeService AutomationRuntimeService
+	if len(automationRuntimeService) > 0 {
+		runtimeService = automationRuntimeService[0]
+	}
 	collectorService := collectorsvc.New(collectorManager)
 	managerConfigService := managerconfigsvc.New(cfg, st, collectorService)
+	accountProcessingPolicyService := automationsvc.New(cfg, st)
 	return &Context{
 		Config:                 cfg,
 		Store:                  st,
@@ -69,17 +85,20 @@ func FromExisting(
 		ManagerConfigService:   managerConfigService,
 		CollectorService:       collectorService,
 		UsageService:           usagesvc.New(st),
-		DashboardService:       dashboardsvc.New(st),
+		DashboardService:       dashboardsvc.New(st, cfg.DashboardHourlyRollupEnabled),
 		CodexInspectionService: codexinspectionsvc.New(st, managerConfigService),
 		ContainerOpsService: containeropssvc.New(containeropssvc.Options{
 			AgentURL:   cfg.ContainerOpsAgentURL,
 			AgentToken: cfg.ContainerOpsAgentToken,
 			AuditStore: st,
 		}),
-		MonitoringService:  monitoringsvc.New(st),
-		ModelPriceService:  modelpricesvc.NewMultiSource(st, modelPriceSyncURL, openRouterModelPriceSyncURL, managerConfigService),
-		APIKeyAliasService: apikeyaliassvc.New(st),
-		ProxyService:       proxysvc.New(managerConfigService),
-		PanelService:       panelsvc.New(cfg.PanelPath, embeddedPanel),
+		MonitoringService:              monitoringsvc.New(st, cfg.DashboardHourlyRollupEnabled),
+		ModelPriceService:              modelpricesvc.NewMultiSource(st, modelPriceSyncURL, openRouterModelPriceSyncURL, managerConfigService),
+		APIKeyAliasService:             apikeyaliassvc.New(st),
+		AccountActionService:           accountactionsvc.New(st, managerConfigService),
+		AccountProcessingPolicyService: accountProcessingPolicyService,
+		ProxyService:                   proxysvc.New(managerConfigService, st),
+		PanelService:                   panelsvc.New(cfg.PanelPath, embeddedPanel),
+		AutomationRuntimeService:       runtimeService,
 	}
 }

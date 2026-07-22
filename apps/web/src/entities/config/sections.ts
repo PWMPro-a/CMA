@@ -8,23 +8,22 @@ export const CONFIG_SECTION_KEYS: RawConfigSection[] = [
   'request-log',
   'logging-to-file',
   'logs-max-total-size-mb',
+  'plugins',
   'ws-auth',
   'force-model-prefix',
   'routing/strategy',
   'api-keys',
-  'ampcode',
   'gemini-api-key',
+  'interactions-api-key',
   'codex-api-key',
+  'xai-api-key',
   'claude-api-key',
   'vertex-api-key',
   'openai-compatibility',
   'oauth-excluded-models',
 ];
 
-export const extractConfigSectionValue = (
-  config: Config | null,
-  section?: RawConfigSection
-) => {
+export const extractConfigSectionValue = (config: Config | null, section?: RawConfigSection) => {
   if (!config) return undefined;
   switch (section) {
     case 'debug':
@@ -41,6 +40,10 @@ export const extractConfigSectionValue = (
       return config.loggingToFile;
     case 'logs-max-total-size-mb':
       return config.logsMaxTotalSizeMb;
+    case 'plugins':
+      return config.pluginsEnabled === undefined
+        ? config.raw?.plugins
+        : { enabled: config.pluginsEnabled };
     case 'ws-auth':
       return config.wsAuth;
     case 'force-model-prefix':
@@ -49,12 +52,14 @@ export const extractConfigSectionValue = (
       return config.routingStrategy;
     case 'api-keys':
       return config.apiKeys;
-    case 'ampcode':
-      return config.ampcode;
     case 'gemini-api-key':
       return config.geminiApiKeys;
+    case 'interactions-api-key':
+      return config.interactionsApiKeys;
     case 'codex-api-key':
       return config.codexApiKeys;
+    case 'xai-api-key':
+      return config.xaiApiKeys;
     case 'claude-api-key':
       return config.claudeApiKeys;
     case 'vertex-api-key':

@@ -1,31 +1,57 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AuthFileItem } from '@/types';
+import en from '@/i18n/locales/en.json';
+import ru from '@/i18n/locales/ru.json';
+import zhCN from '@/i18n/locales/zh-CN.json';
+import zhTW from '@/i18n/locales/zh-TW.json';
 import { authFilesApi } from '@/services/api/authFiles';
+import { formatQuotaResetTime } from '@/utils/quota/formatters';
+import serverInspectionPageSource from './ServerCodexInspectionPage.tsx?raw';
 import {
   CODEX_INSPECTION_LAST_RUN_STORAGE_KEY,
   CODEX_INSPECTION_SETTINGS_STORAGE_KEY,
   createCodexInspectionConnectionFingerprint,
   executeCodexInspectionActions,
   hydrateCodexInspectionLastRun,
+  isReauthAction,
   loadCodexInspectionConfigurableSettings,
   loadCodexInspectionLastRun,
   resolveCodexInspectionAutoActionItems,
   saveCodexInspectionLastRun,
+  toReauthDeleteExecutionItem,
   type CodexInspectionAction,
   type CodexInspectionResultItem,
   type CodexInspectionRunResult,
 } from './codexInspection';
 import {
+  ACTION_FILTERS,
   buildCodexInspectionPaginationState,
   buildConfigOverviewItems,
+  countHandlingStates,
   countActions,
+  filterInspectionResults,
   filterByAction,
+  formatInspectionQuotaResetLabel,
+  formatPercent,
+  formatServerCodexInspectionLogDetail,
+  getInspectionProbePresentation,
+  getInspectionUserAgentVisibility,
+  getVisibleActionFilters,
   getCanonicalServerCodexInspectionActionIds,
+  normalizeActionFilter,
   getMixedServerCodexInspectionActionIds,
   isActionableServerCodexInspectionResult,
+  isPendingServerReauthResult,
   normalizeServerCodexInspectionActionStatus,
+  shouldShowInspectionConclusionReason,
+  summarizeInspectionError,
+  getXaiInferenceState,
   validateInspectionConfigDraft,
 } from './model/codexInspectionPresentation';
+import {
+  getCodexInspectionOwnedDisableFileNames,
+  recordCodexInspectionDisableOwnership,
+} from './model/codexInspectionOwnership';
 
 const createStorage = () => {
   const values = new Map<string, string>();
@@ -54,6 +80,7 @@ const createResultItem = (
   accountId: overrides.accountId ?? 'account-1',
   provider: overrides.provider ?? 'codex',
   disabled: overrides.disabled ?? false,
+  autoRecoverOwned: overrides.autoRecoverOwned ?? false,
   status: overrides.status ?? '',
   state: overrides.state ?? '',
   raw:
@@ -68,7 +95,12 @@ const createResultItem = (
   statusCode: overrides.statusCode ?? (action === 'delete' ? 401 : 200),
   usedPercent: overrides.usedPercent ?? null,
   isQuota: overrides.isQuota ?? false,
+  autoRecoverEligible: overrides.autoRecoverEligible ?? false,
   error: overrides.error ?? '',
+  planType: overrides.planType ?? null,
+  quotaWindows: overrides.quotaWindows ?? [],
+  errorKind: overrides.errorKind ?? '',
+  errorDetail: overrides.errorDetail ?? '',
 });
 
 const createRunResult = (): CodexInspectionRunResult => {
@@ -77,12 +109,17 @@ const createRunResult = (): CodexInspectionRunResult => {
     settings: {
       baseUrl: 'https://secret.example.test',
       token: 'management-secret-token',
+      targetTypes: ['codex'],
       targetType: 'codex',
       workers: 2,
       deleteWorkers: 1,
       timeout: 1000,
       retries: 0,
       userAgent: 'test-agent',
+      xaiInferenceUserAgent: 'xai-test-agent',
+      xaiInferenceEnabled: false,
+      xaiInferenceModel: 'grok-test',
+      xaiInferencePrompt: 'Reply OK.',
       usedPercentThreshold: 90,
       sampleSize: 0,
     },
@@ -119,7 +156,132 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('credential inspection state labels', () => {
+  it('describes the state without repeating the file context', () => {
+    expect([
+      en.monitoring.codex_inspection_state_enabled,
+      en.monitoring.codex_inspection_state_disabled,
+    ]).toEqual(['Enabled', 'Disabled']);
+    expect([
+      zhCN.monitoring.codex_inspection_state_enabled,
+      zhCN.monitoring.codex_inspection_state_disabled,
+    ]).toEqual(['已启用', '已禁用']);
+    expect([
+      zhTW.monitoring.codex_inspection_state_enabled,
+      zhTW.monitoring.codex_inspection_state_disabled,
+    ]).toEqual(['已啟用', '已禁用']);
+    expect([
+      ru.monitoring.codex_inspection_state_enabled,
+      ru.monitoring.codex_inspection_state_disabled,
+    ]).toEqual(['Включено', 'Отключено']);
+  });
+
+  it('keeps server execution state separate from conclusion reasons', () => {
+    expect(serverInspectionPageSource).not.toContain("reasonParts.join(' · ')");
+    expect(serverInspectionPageSource).not.toContain('formatServerResultStateDetail');
+    expect(serverInspectionPageSource).toContain('formatServerTerminalActionStatusLabel');
+  });
+
+  it('keeps demo conclusion reason translations available in every locale', () => {
+    const keys = [
+      'codex_inspection_reason_healthy',
+      'codex_inspection_reason_reauth',
+      'codex_inspection_reason_quota_threshold',
+      'codex_inspection_reason_recovered',
+    ] as const;
+
+    for (const locale of [en, zhCN, zhTW, ru]) {
+      for (const key of keys) {
+        expect(locale.monitoring[key]).toBeTypeOf('string');
+      }
+    }
+  });
+});
+
+describe('xAI inference presentation', () => {
+  it('classifies provider inference states', () => {
+    expect(getXaiInferenceState({ provider: 'codex', errorKind: 'inference_healthy' })).toBe(
+      'not-applicable'
+    );
+    expect(getXaiInferenceState({ provider: 'xai', errorKind: 'inference_healthy' })).toBe(
+      'success'
+    );
+    expect(getXaiInferenceState({ provider: 'xai', errorKind: 'missing_auth_index' })).toBe(
+      'skipped'
+    );
+    expect(getXaiInferenceState({ provider: 'xai', errorKind: 'billing_healthy' })).toBe('skipped');
+    expect(getXaiInferenceState({ provider: 'xai', errorKind: 'billing_partial' })).toBe('skipped');
+    expect(getXaiInferenceState({ provider: 'xai', errorKind: 'identity_healthy' })).toBe(
+      'skipped'
+    );
+    expect(getXaiInferenceState({ provider: 'xai', errorKind: 'model_unavailable' })).toBe(
+      'failed'
+    );
+    expect(getXaiInferenceState({ provider: 'xai', errorKind: 'future_failure' })).toBe('failed');
+  });
+
+  it('presents the active probe source without treating billing health as inference health', () => {
+    expect(
+      getInspectionProbePresentation(
+        { provider: 'xai', errorKind: 'billing_healthy', statusCode: null },
+        { xaiInferenceEnabled: false }
+      )
+    ).toEqual({ source: 'xai_billing', state: 'success', statusCode: null });
+    expect(
+      getInspectionProbePresentation(
+        { provider: 'xai', errorKind: 'billing_partial', statusCode: null },
+        { xaiInferenceEnabled: false }
+      )
+    ).toEqual({ source: 'xai_billing', state: 'success', statusCode: null });
+    expect(
+      getInspectionProbePresentation(
+        { provider: 'xai', errorKind: 'inference_healthy', statusCode: 200 },
+        { xaiInferenceEnabled: true }
+      )
+    ).toEqual({ source: 'xai_inference', state: 'success', statusCode: 200 });
+    expect(
+      getInspectionProbePresentation(
+        { provider: 'xai', errorKind: 'model_unavailable', statusCode: 404 },
+        { xaiInferenceEnabled: true }
+      )
+    ).toEqual({ source: 'xai_inference', state: 'failed', statusCode: 404 });
+  });
+});
+
+describe('inspection quota reset presentation', () => {
+  it('formats server ISO reset values while preserving existing display labels', () => {
+    const isoReset = '2026-07-29T00:00:00+00:00';
+    expect(formatInspectionQuotaResetLabel(isoReset)).toBe(formatQuotaResetTime(isoReset));
+    expect(formatInspectionQuotaResetLabel('2h 18m')).toBe('2h 18m');
+    expect(formatInspectionQuotaResetLabel('-')).toBe('');
+  });
+
+  it('formats percentages that are already expressed on a 0-100 scale', () => {
+    expect(formatPercent(97)).toBe('97.0%');
+    expect(formatPercent(null)).toBe('--');
+  });
+});
+
 describe('Codex inspection settings', () => {
+  it('shows provider User-Agent fields only when their request path is active', () => {
+    expect(getInspectionUserAgentVisibility('codex', false)).toEqual({
+      codex: true,
+      xaiInference: false,
+    });
+    expect(getInspectionUserAgentVisibility('xai', false)).toEqual({
+      codex: false,
+      xaiInference: false,
+    });
+    expect(getInspectionUserAgentVisibility('xai', true)).toEqual({
+      codex: false,
+      xaiInference: true,
+    });
+    expect(getInspectionUserAgentVisibility('codex+xai', true)).toEqual({
+      codex: true,
+      xaiInference: true,
+    });
+  });
+
   it('migrates legacy auto execute settings to auto disable', () => {
     const storage = createStorage();
     vi.stubGlobal('localStorage', storage);
@@ -144,21 +306,26 @@ describe('Codex inspection settings', () => {
 
     const invalid = validateInspectionConfigDraft(
       {
-        targetType: ' ',
+        targetTypes: ' ',
         workers: '0',
         deleteWorkers: '2',
         timeout: '15000',
         retries: '-1',
         userAgent: 'agent',
+        xaiInferenceUserAgent: 'xai-agent',
+        xaiInferenceEnabled: false,
+        xaiInferenceModel: '',
+        xaiInferencePrompt: '',
         usedPercentThreshold: '120',
         sampleSize: 'all',
         autoActionMode: 'delete',
+        autoRecoverEnabled: false,
       },
       t
     );
 
     expect(invalid.ok).toBe(false);
-    expect(invalid.errors.targetType).toBe(
+    expect(invalid.errors.targetTypes).toBe(
       'monitoring.codex_inspection_settings_target_type_required'
     );
     expect(invalid.errors.workers).toContain('>= 1');
@@ -166,32 +333,63 @@ describe('Codex inspection settings', () => {
     expect(invalid.errors.usedPercentThreshold).toContain('0-100');
     expect(invalid.errors.sampleSize).toContain('>= 0');
 
+    const inferenceDisabled = validateInspectionConfigDraft(
+      {
+        targetTypes: 'xai',
+        workers: '3',
+        deleteWorkers: '2',
+        timeout: '15000',
+        retries: '0',
+        userAgent: 'agent',
+        xaiInferenceUserAgent: 'xai-agent',
+        xaiInferenceEnabled: false,
+        xaiInferenceModel: '',
+        xaiInferencePrompt: '',
+        usedPercentThreshold: '100',
+        sampleSize: '0',
+        autoActionMode: 'none',
+        autoRecoverEnabled: false,
+      },
+      t
+    );
+    expect(inferenceDisabled.ok).toBe(true);
+
     const valid = validateInspectionConfigDraft(
       {
-        targetType: ' Codex ',
+        targetTypes: ' Codex + xAI ',
         workers: '3',
         deleteWorkers: '2',
         timeout: '15000',
         retries: '0',
         userAgent: ' agent ',
+        xaiInferenceUserAgent: ' xai-agent ',
+        xaiInferenceEnabled: true,
+        xaiInferenceModel: ' grok-custom ',
+        xaiInferencePrompt: ' Reply briefly. ',
         usedPercentThreshold: '99.5',
         sampleSize: '0',
         autoActionMode: 'unexpected',
+        autoRecoverEnabled: true,
       },
       t
     );
 
     expect(valid.ok).toBe(true);
     expect(valid.values).toEqual({
-      targetType: 'Codex',
+      targetTypes: ['codex', 'xai'],
       workers: 3,
       deleteWorkers: 2,
       timeout: 15000,
       retries: 0,
       userAgent: 'agent',
+      xaiInferenceUserAgent: 'xai-agent',
+      xaiInferenceEnabled: true,
+      xaiInferenceModel: 'grok-custom',
+      xaiInferencePrompt: 'Reply briefly.',
       usedPercentThreshold: 99.5,
       sampleSize: 0,
       autoActionMode: 'none',
+      autoRecoverEnabled: true,
     });
   });
 
@@ -201,9 +399,13 @@ describe('Codex inspection settings', () => {
       'monitoring.codex_inspection_sample_size': 'Sample',
       'monitoring.codex_inspection_settings_auto_action_mode_label': 'Auto',
       'monitoring.codex_inspection_settings_auto_action_mode_delete': 'Auto delete',
+      'monitoring.codex_inspection_settings_auto_recover_label': 'Recovery',
       'monitoring.codex_inspection_workers': 'Workers',
       'monitoring.codex_inspection_settings_timeout_label': 'Timeout',
       'monitoring.codex_inspection_target_type': 'Target',
+      'monitoring.codex_inspection_target_codex': 'Codex',
+      'monitoring.codex_inspection_target_xai': 'xAI',
+      'monitoring.codex_inspection_target_codex_xai': 'Codex + xAI',
       'monitoring.server_codex_inspection_sample_all': 'All',
       'monitoring.server_codex_inspection_config_summary_schedule': 'Schedule',
       'monitoring.server_codex_inspection_config_summary_trigger': 'Trigger',
@@ -212,23 +414,31 @@ describe('Codex inspection settings', () => {
       'monitoring.server_codex_inspection_config_summary_auto': 'Auto',
       'monitoring.server_codex_inspection_schedule_enabled': 'Enabled',
       'monitoring.server_codex_inspection_schedule_disabled': 'Disabled',
+      'common.enabled': 'Enabled',
+      'common.disabled': 'Disabled',
     };
     const t = ((key: string) => labels[key] ?? key) as never;
     const settings = {
+      targetTypes: ['codex'],
       targetType: 'codex',
       workers: 4,
       timeout: 15000,
       usedPercentThreshold: 100,
       sampleSize: 0,
       autoActionMode: 'delete' as const,
+      autoRecoverEnabled: false,
+      xaiInferenceEnabled: false,
+      xaiInferenceModel: 'grok-4.5',
+      xaiInferencePrompt: 'Reply with exactly OK.',
     };
 
     expect(buildConfigOverviewItems(settings, { mode: 'local', t })).toMatchObject([
       { key: 'threshold', value: '100%', field: 'usedPercentThreshold' },
       { key: 'sample', value: 'All', field: 'sampleSize' },
       { key: 'auto', value: 'Auto delete', tone: 'bad', field: 'autoActionMode' },
+      { key: 'recover', value: 'Disabled', tone: 'idle', field: 'autoActionMode' },
       { key: 'concurrency', value: '4', hint: 'Timeout: 15000', field: 'workers' },
-      { key: 'target', value: 'codex', field: 'targetType' },
+      { key: 'target', value: 'Codex', field: 'targetTypes' },
     ]);
 
     expect(
@@ -244,19 +454,125 @@ describe('Codex inspection settings', () => {
       { key: 'threshold', value: '100%', field: 'usedPercentThreshold' },
       { key: 'sample', value: 'All', field: 'sampleSize' },
       { key: 'auto', value: 'Auto delete', tone: 'bad', field: 'autoActionMode' },
+      { key: 'recover', value: 'Disabled', tone: 'idle', field: 'autoActionMode' },
+      { key: 'target', value: 'Codex', field: 'targetTypes' },
     ]);
+
+    const xaiSettings = {
+      ...settings,
+      targetTypes: ['codex', 'xai'],
+      xaiInferenceEnabled: true,
+      xaiInferenceModel: 'grok-custom',
+      xaiInferencePrompt: 'Return a short health response.',
+    };
+    const xaiOverviewItems = buildConfigOverviewItems(xaiSettings, { mode: 'local', t });
+    expect(xaiOverviewItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'target', field: 'targetTypes' }),
+        expect.objectContaining({
+          key: 'xai-inference',
+          value: 'Enabled',
+          field: 'xaiInferenceEnabled',
+        }),
+      ])
+    );
+    expect(xaiOverviewItems.map((item) => item.key)).not.toContain('xai-model');
+    expect(xaiOverviewItems.map((item) => item.key)).not.toContain('xai-prompt');
+  });
+});
+
+describe('Codex inspection error summaries', () => {
+  const t = ((key: string) => {
+    const messages: Record<string, string> = {
+      'xai_quota.diagnostic_protocol_changed':
+        'The billing endpoint returned data that cannot currently be recognized',
+      'monitoring.codex_inspection_error_summary_http_status':
+        'The service did not complete the request',
+    };
+    return messages[key] ?? key;
+  }) as never;
+
+  it.each(['billing_healthy', 'billing_partial', 'identity_healthy', 'official_api_healthy'])(
+    'does not present a healthy xAI classification %s as an error',
+    (errorKind) => {
+      expect(
+        summarizeInspectionError(
+          createResultItem('keep', {
+            provider: 'xai',
+            errorKind,
+            statusCode: 200,
+          }),
+          t
+        )
+      ).toBe('');
+    }
+  );
+
+  it('translates xAI diagnostic classifications into user-facing explanations', () => {
+    const summary = summarizeInspectionError(
+      createResultItem('keep', {
+        provider: 'xai',
+        errorKind: 'protocol_changed',
+        statusCode: 200,
+      }),
+      t
+    );
+
+    expect(summary).toBe('The billing endpoint returned data that cannot currently be recognized');
+    expect(summary).not.toContain('protocol_changed');
+    expect(summary).not.toContain('HTTP 200');
+  });
+
+  it('uses a user-facing explanation for generic HTTP failures', () => {
+    expect(
+      summarizeInspectionError(
+        createResultItem('keep', {
+          provider: 'codex',
+          errorKind: 'http_status',
+          statusCode: 403,
+        }),
+        t
+      )
+    ).toBe('The service did not complete the request');
+  });
+});
+
+describe('Server Codex inspection log details', () => {
+  const t = ((key: string) => {
+    const messages: Record<string, string> = {
+      'monitoring.codex_inspection_action_keep': '保留',
+    };
+    return messages[key] ?? key;
+  }) as never;
+
+  it('localizes structured action values without mutating the source detail', () => {
+    const detail = { fileName: 'xai.json', partial: false, action: 'keep' };
+
+    const formatted = formatServerCodexInspectionLogDetail(detail, t);
+
+    expect(JSON.parse(formatted)).toEqual({
+      fileName: 'xai.json',
+      partial: false,
+      action: '保留',
+    });
+    expect(formatted).not.toContain('"action":"keep"');
+    expect(detail.action).toBe('keep');
+  });
+
+  it('keeps string log details unchanged', () => {
+    expect(formatServerCodexInspectionLogDetail('network timeout', t)).toBe('network timeout');
   });
 });
 
 describe('resolveCodexInspectionAutoActionItems', () => {
   const deleteItem = createResultItem('delete');
   const disableItem = createResultItem('disable');
-  const enableItem = createResultItem('enable');
+  const enableItem = createResultItem('enable', { autoRecoverEligible: true });
   const reauthItem = createResultItem('reauth', { statusCode: 401 });
 
   it('does nothing when automatic mode is none', () => {
     expect(
-      resolveCodexInspectionAutoActionItems('none', [
+      resolveCodexInspectionAutoActionItems('none', false, [
         deleteItem,
         disableItem,
         enableItem,
@@ -266,7 +582,7 @@ describe('resolveCodexInspectionAutoActionItems', () => {
   });
 
   it('only enables recovered accounts in auto enable mode', () => {
-    const items = resolveCodexInspectionAutoActionItems('enable', [
+    const items = resolveCodexInspectionAutoActionItems('enable', true, [
       deleteItem,
       disableItem,
       enableItem,
@@ -276,8 +592,36 @@ describe('resolveCodexInspectionAutoActionItems', () => {
     expect(items.map((item) => [item.fileName, item.action])).toEqual([['enable.json', 'enable']]);
   });
 
+  it('runs automatic recovery independently from the problem-account mode', () => {
+    const items = resolveCodexInspectionAutoActionItems('none', true, [
+      deleteItem,
+      disableItem,
+      enableItem,
+    ]);
+
+    expect(items.map((item) => [item.fileName, item.action])).toEqual([['enable.json', 'enable']]);
+  });
+
+  it('never auto-enables an account without inspection ownership', () => {
+    const unownedEnable = createResultItem('enable', { autoRecoverEligible: false });
+
+    expect(resolveCodexInspectionAutoActionItems('delete', true, [unownedEnable])).toEqual([]);
+  });
+
+  it('blocks mixed actions for the same file before automatic execution', () => {
+    const mixed = [
+      createResultItem('enable', {
+        fileName: 'mixed.json',
+        autoRecoverEligible: true,
+      }),
+      createResultItem('delete', { fileName: 'mixed.json' }),
+    ];
+
+    expect(resolveCodexInspectionAutoActionItems('delete', true, mixed)).toEqual([]);
+  });
+
   it('turns delete suggestions into disable actions in auto disable mode', () => {
-    const items = resolveCodexInspectionAutoActionItems('disable', [
+    const items = resolveCodexInspectionAutoActionItems('disable', false, [
       deleteItem,
       disableItem,
       enableItem,
@@ -287,12 +631,11 @@ describe('resolveCodexInspectionAutoActionItems', () => {
     expect(items.map((item) => [item.fileName, item.action])).toEqual([
       ['delete.json', 'disable'],
       ['disable.json', 'disable'],
-      ['enable.json', 'enable'],
     ]);
   });
 
   it('keeps delete, disable, and enable suggestions in auto delete mode', () => {
-    const items = resolveCodexInspectionAutoActionItems('delete', [
+    const items = resolveCodexInspectionAutoActionItems('delete', true, [
       deleteItem,
       disableItem,
       enableItem,
@@ -307,8 +650,79 @@ describe('resolveCodexInspectionAutoActionItems', () => {
   });
 });
 
+describe('reauth delete execution mapping', () => {
+  it('keeps reauth as a non-auto-executable action until the user chooses delete', () => {
+    const reauthItem = createResultItem('reauth', {
+      fileName: 'reauth.json',
+      statusCode: 401,
+      actionReason: '接口返回 401，认证令牌已失效，建议重新登录账号',
+    });
+
+    expect(isReauthAction(reauthItem)).toBe(true);
+
+    const deleteItem = toReauthDeleteExecutionItem(reauthItem);
+    expect(deleteItem).toMatchObject({
+      fileName: 'reauth.json',
+      action: 'delete',
+    });
+    expect(deleteItem.actionReason).toContain('用户选择删除需重新登录账号');
+  });
+
+  it('allows an xAI reauth result to become an explicit manual delete action', () => {
+    const reauthItem = createResultItem('reauth', {
+      fileName: 'xai-reauth.json',
+      provider: 'xai',
+      raw: { name: 'xai-reauth.json', type: 'xai', auth_index: 'xai-1' },
+    });
+
+    expect(toReauthDeleteExecutionItem(reauthItem)).toMatchObject({
+      fileName: 'xai-reauth.json',
+      provider: 'xai',
+      action: 'delete',
+    });
+  });
+});
+
 describe('Codex inspection action presentation', () => {
-  it('counts reauth suggestions and filters 401 results independently', () => {
+  it('keeps every suggested action filter visible', () => {
+    expect(getVisibleActionFilters()).toEqual([
+      'all',
+      'reauth',
+      'delete',
+      'disable',
+      'enable',
+      'keep',
+    ]);
+  });
+
+  it('hides repetitive reasons only for enabled healthy keep results', () => {
+    expect(
+      shouldShowInspectionConclusionReason(
+        createResultItem('keep', { errorKind: 'inference_healthy', statusCode: 200 })
+      )
+    ).toBe(false);
+    expect(
+      shouldShowInspectionConclusionReason(
+        createResultItem('keep', {
+          disabled: true,
+          errorKind: 'inference_healthy',
+          statusCode: 200,
+        })
+      )
+    ).toBe(true);
+    expect(
+      shouldShowInspectionConclusionReason(
+        createResultItem('keep', { errorKind: 'protocol_changed', statusCode: 200 })
+      )
+    ).toBe(true);
+    expect(
+      shouldShowInspectionConclusionReason(
+        createResultItem('keep', { errorKind: 'billing_partial', statusCode: null })
+      )
+    ).toBe(true);
+  });
+
+  it('counts reauth suggestions and separates handling status from action filters', () => {
     const items = [
       createResultItem('delete', { statusCode: 500 }),
       createResultItem('reauth', { statusCode: 401 }),
@@ -321,9 +735,20 @@ describe('Codex inspection action presentation', () => {
       enable: 0,
       reauth: 1,
       http401: 2,
+      keep: 1,
+    });
+    expect(ACTION_FILTERS).not.toContain('http_401');
+    expect(normalizeActionFilter('http_401')).toBe('reauth');
+    expect(countHandlingStates(items)).toEqual({
+      all: 3,
+      pending: 3,
+      no_action: 0,
     });
     expect(filterByAction(items, 'reauth').map((item) => item.action)).toEqual(['reauth']);
-    expect(filterByAction(items, 'http_401').map((item) => item.statusCode)).toEqual([401, 401]);
+    expect(filterInspectionResults(items, 'pending', 'reauth').map((item) => item.action)).toEqual([
+      'reauth',
+    ]);
+    expect(filterByAction(items, 'keep').map((item) => item.action)).toEqual(['keep']);
   });
 
   it('paginates inspection results and clamps out-of-range pages', () => {
@@ -418,9 +843,232 @@ describe('Server Codex inspection action presentation', () => {
 
     expect(Array.from(canonicalIds)).toEqual([1, 2]);
   });
+
+  it('hides completed server reauth deletion from pending actions', () => {
+    expect(isPendingServerReauthResult({ action: 'reauth' })).toBe(true);
+    expect(
+      isPendingServerReauthResult({
+        action: 'reauth',
+        actionStatus: 'failed',
+      })
+    ).toBe(true);
+    expect(
+      isPendingServerReauthResult({
+        action: 'reauth',
+        actionStatus: 'success',
+        executedAction: 'delete',
+      })
+    ).toBe(false);
+    expect(
+      isPendingServerReauthResult({
+        action: 'reauth',
+        actionStatus: 'skipped',
+      })
+    ).toBe(false);
+  });
 });
 
 describe('executeCodexInspectionActions', () => {
+  it('deletes reauth accounts only after explicit delete mapping', async () => {
+    const deleteSpy = vi.spyOn(authFilesApi, 'deleteFileByName').mockResolvedValue({
+      status: 'ok',
+      deleted: 1,
+      files: ['reauth.json'],
+      failed: [],
+    });
+    vi.spyOn(authFilesApi, 'list')
+      .mockResolvedValueOnce({
+        files: [
+          {
+            name: 'reauth.json',
+            type: 'xai',
+            auth_index: '1',
+          } as AuthFileItem,
+        ],
+      })
+      .mockResolvedValueOnce({ files: [] });
+
+    const execution = await executeCodexInspectionActions({
+      settings: createRunResult().settings,
+      items: [
+        toReauthDeleteExecutionItem(
+          createResultItem('reauth', {
+            fileName: 'reauth.json',
+            statusCode: 401,
+            provider: 'xai',
+            accountId: '',
+          })
+        ),
+      ],
+      previousFiles: [],
+      connectionFingerprint: 'scope-test',
+      source: 'manual',
+    });
+
+    expect(deleteSpy).toHaveBeenCalledWith('reauth.json');
+    expect(execution.outcomes).toEqual([
+      {
+        action: 'delete',
+        fileName: 'reauth.json',
+        displayAccount: 'reauth@example.com',
+        success: true,
+        error: '',
+      },
+    ]);
+  });
+
+  it('rejects deletion when the current auth file belongs to another provider', async () => {
+    const deleteSpy = vi.spyOn(authFilesApi, 'deleteFileByName').mockResolvedValue({
+      status: 'ok',
+      deleted: 1,
+      files: ['reauth.json'],
+      failed: [],
+    });
+    vi.spyOn(authFilesApi, 'list')
+      .mockResolvedValueOnce({
+        files: [
+          {
+            name: 'reauth.json',
+            type: 'codex',
+            auth_index: '1',
+          } as AuthFileItem,
+        ],
+      })
+      .mockResolvedValueOnce({ files: [] });
+
+    const execution = await executeCodexInspectionActions({
+      settings: createRunResult().settings,
+      items: [
+        toReauthDeleteExecutionItem(
+          createResultItem('reauth', {
+            fileName: 'reauth.json',
+            provider: 'xai',
+            authIndex: '1',
+            accountId: null,
+          })
+        ),
+      ],
+      previousFiles: [],
+      connectionFingerprint: 'scope-test',
+      source: 'manual',
+    });
+
+    expect(deleteSpy).not.toHaveBeenCalled();
+    expect(execution.outcomes).toEqual([
+      expect.objectContaining({
+        action: 'delete',
+        fileName: 'reauth.json',
+        success: false,
+      }),
+    ]);
+  });
+
+  it('treats an unconfirmed delete response as a failed action', async () => {
+    const deleteSpy = vi.spyOn(authFilesApi, 'deleteFileByName').mockResolvedValue({
+      status: 'ok',
+      deleted: 0,
+      files: [],
+      failed: [],
+    });
+    vi.spyOn(authFilesApi, 'list')
+      .mockResolvedValueOnce({
+        files: [{ name: 'reauth.json', type: 'xai', auth_index: '1' } as AuthFileItem],
+      })
+      .mockResolvedValueOnce({ files: [] });
+
+    const execution = await executeCodexInspectionActions({
+      settings: createRunResult().settings,
+      items: [
+        toReauthDeleteExecutionItem(
+          createResultItem('reauth', { fileName: 'reauth.json', provider: 'xai', accountId: '' })
+        ),
+      ],
+      previousFiles: [],
+      connectionFingerprint: 'scope-test',
+      source: 'manual',
+    });
+
+    expect(deleteSpy).toHaveBeenCalledWith('reauth.json');
+    expect(execution.outcomes).toEqual([
+      expect.objectContaining({ success: false, error: '删除接口未确认认证文件已删除' }),
+    ]);
+  });
+
+  it('rejects deletion when current auth files cannot be refreshed', async () => {
+    const deleteSpy = vi.spyOn(authFilesApi, 'deleteFileByName').mockResolvedValue({
+      status: 'ok',
+      deleted: 1,
+      files: ['reauth.json'],
+      failed: [],
+    });
+    vi.spyOn(authFilesApi, 'list')
+      .mockRejectedValueOnce(new Error('refresh failed'))
+      .mockResolvedValueOnce({ files: [] });
+
+    const execution = await executeCodexInspectionActions({
+      settings: createRunResult().settings,
+      items: [
+        toReauthDeleteExecutionItem(
+          createResultItem('reauth', {
+            fileName: 'reauth.json',
+            provider: 'xai',
+            accountId: '',
+          })
+        ),
+      ],
+      previousFiles: [],
+      connectionFingerprint: 'scope-test',
+      source: 'manual',
+    });
+
+    expect(deleteSpy).not.toHaveBeenCalled();
+    expect(execution.outcomes[0]).toMatchObject({
+      action: 'delete',
+      success: false,
+      error: expect.stringContaining('删除前刷新认证文件失败'),
+    });
+  });
+
+  it('rejects deletion when the current auth identity changed', async () => {
+    const deleteSpy = vi.spyOn(authFilesApi, 'deleteFileByName').mockResolvedValue({
+      status: 'ok',
+      deleted: 1,
+      files: ['reauth.json'],
+      failed: [],
+    });
+    vi.spyOn(authFilesApi, 'list')
+      .mockResolvedValueOnce({
+        files: [
+          {
+            name: 'reauth.json',
+            type: 'xai',
+            auth_index: 'replacement',
+          } as AuthFileItem,
+        ],
+      })
+      .mockResolvedValueOnce({ files: [] });
+
+    const execution = await executeCodexInspectionActions({
+      settings: createRunResult().settings,
+      items: [
+        toReauthDeleteExecutionItem(
+          createResultItem('reauth', {
+            fileName: 'reauth.json',
+            provider: 'xai',
+            authIndex: 'original',
+            accountId: null,
+          })
+        ),
+      ],
+      previousFiles: [],
+      connectionFingerprint: 'scope-test',
+      source: 'manual',
+    });
+
+    expect(deleteSpy).not.toHaveBeenCalled();
+    expect(execution.outcomes[0]).toMatchObject({ success: false, action: 'delete' });
+  });
+
   it('uses action concurrency for disable and enable operations', async () => {
     let activeStatusUpdates = 0;
     let maxStatusUpdates = 0;
@@ -448,10 +1096,143 @@ describe('executeCodexInspectionActions', () => {
         createResultItem('enable', { fileName: 'enable-a.json' }),
       ],
       previousFiles: [],
+      connectionFingerprint: 'scope-test',
+      source: 'manual',
     });
 
     expect(execution.outcomes).toHaveLength(3);
     expect(maxStatusUpdates).toBe(1);
+  });
+
+  it('records ownership for automatic disables and clears it after manual recovery', async () => {
+    const storage = createStorage();
+    vi.stubGlobal('localStorage', storage);
+    vi.spyOn(authFilesApi, 'setStatusWithFallback').mockResolvedValue(
+      {} as Awaited<ReturnType<typeof authFilesApi.setStatusWithFallback>>
+    );
+    vi.spyOn(authFilesApi, 'list').mockResolvedValue({ files: [] });
+    const scope = 'scope-auto-recovery';
+    const disabledFile = {
+      name: 'owned.json',
+      type: 'codex',
+      auth_index: 'auth-1',
+      disabled: true,
+    } as AuthFileItem;
+
+    await executeCodexInspectionActions({
+      settings: createRunResult().settings,
+      items: [
+        {
+          ...createResultItem('disable', {
+            fileName: 'owned.json',
+            authIndex: 'auth-1',
+          }),
+          accountId: null,
+        },
+      ],
+      previousFiles: [],
+      connectionFingerprint: scope,
+      source: 'auto',
+    });
+    expect(Array.from(getCodexInspectionOwnedDisableFileNames(scope, [disabledFile]))).toEqual([
+      'owned.json',
+    ]);
+
+    await executeCodexInspectionActions({
+      settings: createRunResult().settings,
+      items: [
+        {
+          ...createResultItem('enable', {
+            fileName: 'owned.json',
+            authIndex: 'auth-1',
+            autoRecoverEligible: true,
+          }),
+          accountId: null,
+        },
+      ],
+      previousFiles: [],
+      connectionFingerprint: scope,
+      source: 'manual',
+    });
+    expect(getCodexInspectionOwnedDisableFileNames(scope, [disabledFile]).size).toBe(0);
+  });
+});
+
+describe('Codex inspection disable ownership', () => {
+  it('isolates records by connection fingerprint and invalidates identity changes', () => {
+    const storage = createStorage();
+    vi.stubGlobal('localStorage', storage);
+    const file = {
+      name: 'owned.json',
+      type: 'codex',
+      auth_index: 'auth-1',
+      disabled: true,
+    } as AuthFileItem;
+
+    recordCodexInspectionDisableOwnership('scope-a', {
+      fileName: 'owned.json',
+      provider: 'codex',
+      authIndex: 'auth-1',
+      accountId: null,
+    });
+
+    expect(Array.from(getCodexInspectionOwnedDisableFileNames('scope-a', [file]))).toEqual([
+      'owned.json',
+    ]);
+    expect(getCodexInspectionOwnedDisableFileNames('scope-b', [file]).size).toBe(0);
+    expect(
+      getCodexInspectionOwnedDisableFileNames('scope-a', [
+        { ...file, auth_index: 'auth-2' } as AuthFileItem,
+      ]).size
+    ).toBe(0);
+    expect(getCodexInspectionOwnedDisableFileNames('scope-a', [file]).size).toBe(0);
+  });
+
+  it('does not transfer local disable ownership across providers', () => {
+    const storage = createStorage();
+    vi.stubGlobal('localStorage', storage);
+    recordCodexInspectionDisableOwnership('scope-provider', {
+      fileName: 'shared.json',
+      provider: 'codex',
+      authIndex: 'shared-auth',
+      accountId: null,
+    });
+
+    const xaiFile = {
+      name: 'shared.json',
+      type: 'xai',
+      auth_index: 'shared-auth',
+      disabled: true,
+    } as AuthFileItem;
+    expect(getCodexInspectionOwnedDisableFileNames('scope-provider', [xaiFile]).size).toBe(0);
+  });
+
+  it('treats legacy ownership records without provider as Codex', () => {
+    const storage = createStorage();
+    storage.setItem(
+      'cli-proxy-codex-inspection-disable-ownership-v1',
+      JSON.stringify({
+        'scope-legacy': {
+          'legacy.json': {
+            fileName: 'legacy.json',
+            authIndex: 'legacy-auth',
+            accountId: null,
+            disabledAtMs: 1,
+          },
+        },
+      })
+    );
+    vi.stubGlobal('localStorage', storage);
+
+    const codexFile = {
+      name: 'legacy.json',
+      type: 'codex',
+      auth_index: 'legacy-auth',
+      disabled: true,
+    } as AuthFileItem;
+    expect(
+      Array.from(getCodexInspectionOwnedDisableFileNames('scope-legacy', [codexFile]))
+    ).toEqual(['legacy.json']);
   });
 });
 
@@ -579,6 +1360,52 @@ describe('Codex inspection last-run cache', () => {
     expect(restored?.result.summary.sampledCount).toBe(0);
   });
 
+  it('stores and restores quota windows and error details', () => {
+    const storage = createStorage();
+    vi.stubGlobal('localStorage', storage);
+    const baseResult = createRunResult();
+    const resultWithQuota: CodexInspectionRunResult = {
+      ...baseResult,
+      results: [
+        createResultItem('disable', {
+          statusCode: 402,
+          usedPercent: 87,
+          isQuota: true,
+          planType: 'team',
+          quotaWindows: [
+            {
+              id: 'monthly',
+              labelKey: 'codex_quota.monthly_window',
+              usedPercent: 87,
+              resetLabel: '06/18 12:00',
+              limitWindowSeconds: 2_592_000,
+            },
+          ],
+          error: 'HTTP 402',
+          errorKind: 'http_status',
+          errorDetail: '{"message":"limit reached"}',
+        }),
+      ],
+    };
+
+    saveCodexInspectionLastRun({ result: resultWithQuota });
+
+    const loaded = loadCodexInspectionLastRun();
+    expect(loaded?.result.results[0].planType).toBe('team');
+    expect(loaded?.result.results[0].quotaWindows).toEqual([
+      {
+        id: 'monthly',
+        labelKey: 'codex_quota.monthly_window',
+        labelParams: undefined,
+        usedPercent: 87,
+        resetLabel: '06/18 12:00',
+        limitWindowSeconds: 2_592_000,
+      },
+    ]);
+    expect(loaded?.result.results[0].errorKind).toBe('http_status');
+    expect(loaded?.result.results[0].errorDetail).toContain('limit reached');
+  });
+
   it('loads sanitized last-run records from storage', () => {
     const storage = createStorage();
     vi.stubGlobal('localStorage', storage);
@@ -595,7 +1422,7 @@ describe('Codex inspection last-run cache', () => {
     expect(loaded?.result.summary.deleteCount).toBe(1);
   });
 
-  it('stores and restores reauth suggestions and 401 filters', () => {
+  it('restores legacy 401 filters as reauth filters', () => {
     const storage = createStorage();
     vi.stubGlobal('localStorage', storage);
     const baseResult = createRunResult();
@@ -612,12 +1439,12 @@ describe('Codex inspection last-run cache', () => {
 
     saveCodexInspectionLastRun({
       result: reauthResult,
-      actionFilter: 'http_401',
+      actionFilter: 'http_401' as never,
     });
 
     const loaded = loadCodexInspectionLastRun();
 
-    expect(loaded?.actionFilter).toBe('http_401');
+    expect(loaded?.actionFilter).toBe('reauth');
     expect(loaded?.result.results[0].action).toBe('reauth');
     expect(loaded?.result.summary.reauthCount).toBe(1);
   });

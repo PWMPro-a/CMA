@@ -4,16 +4,28 @@ import { Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
 import { providersApi } from '@/services/api';
-import { useAuthStore, useClaudeEditDraftStore, useConfigStore, useNotificationStore } from '@/stores';
+import {
+  useAuthStore,
+  useClaudeEditDraftStore,
+  useConfigStore,
+  useNotificationStore,
+} from '@/stores';
 import type { ProviderKeyConfig } from '@/types';
 import type { ModelInfo } from '@/utils/models';
 import type { ModelEntry, ProviderFormState } from '@/components/providers/types';
 import { buildHeaderObject, headersToEntries, normalizeHeaderEntries } from '@/utils/headers';
 import { normalizeAuthIndex } from '@/utils/authIndex';
-import { areKeyValueEntriesEqual, areModelEntriesEqual, areStringArraysEqual } from '@/utils/compare';
+import {
+  areKeyValueEntriesEqual,
+  areModelEntriesEqual,
+  areStringArraysEqual,
+} from '@/utils/compare';
 import { excludedModelsToText, parseExcludedModels } from '@/components/providers/utils';
 import { modelsToEntries } from '@/components/ui/modelInputListUtils';
-import { buildProviderDraftKey, parseProviderIndexParam } from '@/features/aiProviders/model/routeParams';
+import {
+  buildProviderDraftKey,
+  parseProviderIndexParam,
+} from '@/features/aiProviders/model/routeParams';
 import type { ClaudeEditBaseline } from '@/stores/useClaudeEditDraftStore';
 
 type LocationState = { fromAiProviders?: boolean } | null;
@@ -62,21 +74,24 @@ const getErrorMessage = (err: unknown) => {
   return '';
 };
 
-const normalizeClaudeModelEntries = (entries: Array<{ name: string; alias: string }>) =>
-  (entries ?? []).reduce<Array<{ name: string; alias: string }>>((acc, entry) => {
+const normalizeClaudeModelEntries = (entries: ProviderFormState['modelEntries']) =>
+  (entries ?? []).reduce<ProviderFormState['modelEntries']>((acc, entry) => {
     const name = String(entry?.name ?? '').trim();
     let alias = String(entry?.alias ?? '').trim();
     if (name) {
       alias = alias || name;
     }
     if (!name && !alias) return acc;
-    acc.push({ name, alias });
+    acc.push({ ...entry, name, alias });
     return acc;
   }, []);
 
 const normalizeCloakConfig = (cloak: ProviderFormState['cloak']) => {
   if (!cloak) return null;
-  const mode = String(cloak.mode ?? '').trim().toLowerCase() || 'auto';
+  const mode =
+    String(cloak.mode ?? '')
+      .trim()
+      .toLowerCase() || 'auto';
   const strictMode = Boolean(cloak.strictMode);
   const sensitiveWords = Array.isArray(cloak.sensitiveWords)
     ? cloak.sensitiveWords.map((word) => String(word ?? '').trim()).filter(Boolean)
@@ -92,17 +107,24 @@ const buildClaudeBaseline = (form: ProviderFormState): ClaudeEditBaseline => ({
   apiKey: String(form.apiKey ?? '').trim(),
   authIndex: normalizeAuthIndex(form.authIndex) ?? '',
   priority:
-    form.priority !== undefined && Number.isFinite(form.priority) ? Math.trunc(form.priority) : null,
+    form.priority !== undefined && Number.isFinite(form.priority)
+      ? Math.trunc(form.priority)
+      : null,
   prefix: String(form.prefix ?? '').trim(),
   baseUrl: String(form.baseUrl ?? '').trim(),
   proxyUrl: String(form.proxyUrl ?? '').trim(),
+  disableCooling: Boolean(form.disableCooling),
+  rebuildMidSystemMessage: Boolean(form.rebuildMidSystemMessage),
   headers: normalizeHeaderEntries(form.headers),
   models: normalizeClaudeModelEntries(form.modelEntries),
   excludedModels: parseExcludedModels(form.excludedText ?? ''),
   cloak: normalizeCloakConfig(form.cloak),
 });
 
-const areCloakConfigsEqual = (left: ClaudeEditBaseline['cloak'], right: ClaudeEditBaseline['cloak']) => {
+const areCloakConfigsEqual = (
+  left: ClaudeEditBaseline['cloak'],
+  right: ClaudeEditBaseline['cloak']
+) => {
   if (left === right) return true;
   if (!left || !right) return false;
   if (left.mode !== right.mode || left.strictMode !== right.strictMode) return false;
@@ -311,6 +333,8 @@ export function AiProvidersClaudeEditLayout() {
       baseline.prefix !== String(form.prefix ?? '').trim() ||
       baseline.baseUrl !== String(form.baseUrl ?? '').trim() ||
       baseline.proxyUrl !== String(form.proxyUrl ?? '').trim() ||
+      baseline.disableCooling !== Boolean(form.disableCooling) ||
+      baseline.rebuildMidSystemMessage !== Boolean(form.rebuildMidSystemMessage) ||
       isHeadersDirty ||
       isModelsDirty ||
       isExcludedModelsDirty ||
@@ -327,8 +351,7 @@ export function AiProvidersClaudeEditLayout() {
     enabled: canGuard,
     shouldBlock: ({ nextLocation }) => {
       const nextPath = nextLocation.pathname;
-      const isWithinRoot =
-        nextPath === editorRootPath || nextPath.startsWith(`${editorRootPath}/`);
+      const isWithinRoot = nextPath === editorRootPath || nextPath.startsWith(`${editorRootPath}/`);
       return isDirty && !isWithinRoot;
     },
     dialog: {
@@ -369,7 +392,7 @@ export function AiProvidersClaudeEditLayout() {
         prev.modelEntries.forEach((entry) => {
           const name = entry.name.trim();
           if (!name) return;
-          mergedMap.set(name, { name, alias: entry.alias?.trim() || '' });
+          mergedMap.set(name, { ...entry, name, alias: entry.alias?.trim() || '' });
         });
 
         selectedModels.forEach((model) => {
@@ -387,7 +410,10 @@ export function AiProvidersClaudeEditLayout() {
       });
 
       if (addedCount > 0) {
-        showNotification(t('ai_providers.claude_models_fetch_added', { count: addedCount }), 'success');
+        showNotification(
+          t('ai_providers.claude_models_fetch_added', { count: addedCount }),
+          'success'
+        );
       }
     },
     [setForm, showNotification, t]
@@ -412,25 +438,34 @@ export function AiProvidersClaudeEditLayout() {
             const name = entry.name.trim();
             if (!name) return null;
             const alias = entry.alias.trim();
-            return { name, alias: alias || name };
+            return { ...entry, name, alias: alias || name };
           })
           .filter(Boolean) as ProviderKeyConfig['models'],
         excludedModels: parseExcludedModels(form.excludedText),
         cloak: form.cloak,
         authIndex: normalizeAuthIndex(form.authIndex) ?? undefined,
+        disableCooling: form.disableCooling,
+        experimentalCchSigning: form.experimentalCchSigning,
+        rebuildMidSystemMessage: form.rebuildMidSystemMessage,
       };
 
-      const nextList =
+      if (editIndex !== null) {
+        await providersApi.updateClaudeConfig(configs[editIndex], payload);
+      } else {
+        await providersApi.createClaudeConfig(payload);
+      }
+      const syncedList = await providersApi.getClaudeConfigs().catch(() =>
         editIndex !== null
-          ? configs.map((item, idx) => (idx === editIndex ? payload : item))
-          : [...configs, payload];
-
-      await providersApi.saveClaudeConfigs(nextList);
-      setConfigs(nextList);
-      updateConfigValue('claude-api-key', nextList);
+          ? configs.map((item, index) => (index === editIndex ? payload : item))
+          : [...configs, payload]
+      );
+      setConfigs(syncedList);
+      updateConfigValue('claude-api-key', syncedList);
       clearCache('claude-api-key');
       showNotification(
-        editIndex !== null ? t('notification.claude_config_updated') : t('notification.claude_config_added'),
+        editIndex !== null
+          ? t('notification.claude_config_updated')
+          : t('notification.claude_config_added'),
         'success'
       );
       allowNextNavigation();
@@ -462,27 +497,29 @@ export function AiProvidersClaudeEditLayout() {
 
   return (
     <Outlet
-      context={{
-        hasIndexParam,
-        editIndex,
-        invalidIndexParam,
-        invalidIndex,
-        disableControls,
-        loading: resolvedLoading,
-        saving,
-        form,
-        setForm,
-        testModel,
-        setTestModel,
-        testStatus,
-        setTestStatus,
-        testMessage,
-        setTestMessage,
-        availableModels,
-        handleBack,
-        handleSave,
-        mergeDiscoveredModels,
-      } satisfies ClaudeEditOutletContext}
+      context={
+        {
+          hasIndexParam,
+          editIndex,
+          invalidIndexParam,
+          invalidIndex,
+          disableControls,
+          loading: resolvedLoading,
+          saving,
+          form,
+          setForm,
+          testModel,
+          setTestModel,
+          testStatus,
+          setTestStatus,
+          testMessage,
+          setTestMessage,
+          availableModels,
+          handleBack,
+          handleSave,
+          mergeDiscoveredModels,
+        } satisfies ClaudeEditOutletContext
+      }
     />
   );
 }

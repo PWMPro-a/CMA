@@ -15,6 +15,7 @@ import { animate } from 'motion/mini';
 import type { AnimationPlaybackControlsWithThen } from 'motion-dom';
 import { useInterval } from '@/hooks/useInterval';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
+import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -28,8 +29,14 @@ import {
 } from '@/components/ui/icons';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
+import {
+  CODEX_CONFIG,
+  buildObservedCodexQuotaState,
+  getQuotaStoreKey,
+  resolveQuotaDisplayState,
+} from '@/components/quota';
 import { copyToClipboard } from '@/utils/clipboard';
-import { resolveAuthProvider } from '@/utils/quota';
+import { getStatusFromError, resolveAuthProvider } from '@/utils/quota';
 import {
   MAX_CARD_PAGE_SIZE,
   MIN_CARD_PAGE_SIZE,
@@ -46,6 +53,8 @@ import {
   isRuntimeOnlyAuthFile,
   normalizeProviderKey,
   parseNonNegativeIntegerValue,
+  parsePriorityValue,
+  supportsAuthFileWebsockets,
   type QuotaProviderType,
   type ResolvedTheme,
 } from '@/features/authFiles/constants';
@@ -59,16 +68,35 @@ import {
 } from '@/features/authFiles/importDefaults';
 import { OAuthExcludedCard } from '@/features/authFiles/components/OAuthExcludedCard';
 import { OAuthModelAliasCard } from '@/features/authFiles/components/OAuthModelAliasCard';
+import { CodexReauthDialog } from '@/features/oauth/CodexReauthDialog';
+import {
+  createCodexReauthTargetFromAuthFile,
+  type CodexReauthTarget,
+} from '@/features/oauth/codexReauthModel';
+import {
+  monitoringAnalyticsApi,
+  usageServiceApi,
+  type AccountActionCandidate,
+  type QuotaCooldownInfo,
+  type UsageHeaderSnapshot,
+} from '@/services/api/usageService';
+import {
+  buildUsageHeaderSnapshotLookup,
+  getHighConfidenceUsageHeaderSnapshotForAuthFile,
+  isUsageHeaderQuotaSnapshotExpired,
+} from '@/utils/usageHeaderSnapshots';
 import { useAuthFilesData } from '@/features/authFiles/hooks/useAuthFilesData';
 import { useAuthFilesModels } from '@/features/authFiles/hooks/useAuthFilesModels';
 import { useAuthFilesOauth } from '@/features/authFiles/hooks/useAuthFilesOauth';
 import { useAuthFilesPrefixProxyEditor } from '@/features/authFiles/hooks/useAuthFilesPrefixProxyEditor';
 import { useAuthFilesStatusBarCache } from '@/features/authFiles/hooks/useAuthFilesStatusBarCache';
+import { useAntigravitySubscriptions } from '@/features/authFiles/hooks/useAntigravitySubscriptions';
 import {
   BATCH_BAR_BASE_TRANSFORM,
   BATCH_BAR_HIDDEN_TRANSFORM,
   DEFAULT_COMPACT_PAGE_SIZE,
   DEFAULT_REGULAR_PAGE_SIZE,
+  authFileMatchesCodexPlanFilter,
   authFileMatchesCodexStatusFilter,
   buildAuthFileCodexInspectionMap,
   buildWildcardSearch,
@@ -77,15 +105,28 @@ import {
   compareAuthFilePriority,
   easePower2In,
   easePower3Out,
+  getAuthFileCodexInspectionKey,
   getAuthFileCodexInspectionKeyForFile,
   getAuthFileCodexStatus,
+  getAuthFilePatchTarget,
   getAuthFilePlanSortRank,
+  getAuthFileScopedCodexQuota,
   getAuthFileSearchValues,
+  getAuthFileSelectionKey,
+  getAuthFileNameFromSelectionKey,
+  getFreshAuthFileCodexStatusSources,
+  hasPartialSharedAuthFileSelection,
+  normalizeAuthFilesCodexPlanFilter,
   normalizeAuthFilesCodexStatusFilter,
   stringifySearchValue,
   type AuthFileCodexInspectionSnapshot,
+  type AuthFilesCodexPlanFilter,
   type AuthFilesCodexStatusFilter,
 } from '@/features/authFiles/model/authFilesPageModel';
+import {
+  canBulkDeleteAccountActions,
+  selectAccountActionCandidate,
+} from '@/features/authFiles/model/accountAutomationPresentation';
 import {
   createCodexInspectionConnectionFingerprint,
   loadCodexInspectionLastRun,
@@ -100,9 +141,16 @@ import {
   type AuthFilesSortMode,
 } from '@/features/authFiles/uiState';
 import type { AuthJsonInputType } from '@/features/authFiles/sessionAuthConverter';
-import { authFilesApi, type AuthFileFieldsPatch } from '@/services/api';
-import type { AuthFileItem } from '@/types';
-import { useAuthStore, useNotificationStore, useQuotaStore, useThemeStore } from '@/stores';
+import type { AuthFileFieldsPatch } from '@/services/api';
+import type { AuthFileItem, CodexQuotaState } from '@/types';
+import {
+  captureQuotaCacheGeneration,
+  commitIfQuotaCacheCurrent,
+  useAuthStore,
+  useNotificationStore,
+  useQuotaStore,
+  useThemeStore,
+} from '@/stores';
 import styles from './AuthFilesPage.module.scss';
 
 const hasInlineQuotaLayout = (file: AuthFileItem): boolean => {
@@ -141,6 +189,65 @@ const buildRuntimeLimitBatchPatch = (draft: RuntimeLimitBatchDraft): AuthFileFie
   return patch;
 };
 
+type CodexInspectionSnapshotSource = {
+  fileName: string;
+  provider?: string | null;
+  authIndex?: string | number | null;
+  statusCode?: number | string | null;
+  action?: string | null;
+  usedPercent?: number | string | null;
+  isQuota?: boolean | null;
+  errorKind?: string | null;
+};
+
+const readCodexInspectionRunAtMs = (run: {
+  finishedAtMs?: number;
+  updatedAtMs?: number;
+  startedAtMs?: number;
+}): number | null =>
+  run.finishedAtMs && Number.isFinite(run.finishedAtMs)
+    ? run.finishedAtMs
+    : run.updatedAtMs && Number.isFinite(run.updatedAtMs)
+      ? run.updatedAtMs
+      : run.startedAtMs && Number.isFinite(run.startedAtMs)
+        ? run.startedAtMs
+        : null;
+
+const toAuthFileCodexInspectionSnapshots = (
+  results: CodexInspectionSnapshotSource[],
+  inspectionAtMs?: number | null
+): AuthFileCodexInspectionSnapshot[] =>
+  results.map((item) => ({
+    fileName: item.fileName,
+    provider: item.provider ?? null,
+    authIndex: item.authIndex ?? null,
+    statusCode: item.statusCode ?? null,
+    action: item.action ?? null,
+    usedPercent: item.usedPercent ?? null,
+    isQuota: item.isQuota ?? null,
+    errorKind: item.errorKind ?? null,
+    inspectionAtMs: inspectionAtMs ?? null,
+  }));
+
+const isStaleCodexReauthSnapshot = (item: AuthFileCodexInspectionSnapshot): boolean => {
+  const action = typeof item.action === 'string' ? item.action.trim().toLowerCase() : '';
+  const statusCode =
+    typeof item.statusCode === 'number'
+      ? item.statusCode
+      : typeof item.statusCode === 'string'
+        ? Number(item.statusCode)
+        : null;
+  return action === 'reauth' || statusCode === 401;
+};
+
+type QuotaCooldownState = {
+  contextKey: string;
+  items: Map<string, QuotaCooldownInfo>;
+};
+
+const getQuotaCooldownContextKey = (managerServiceBase: string, managementKey: string): string =>
+  `${managerServiceBase}\u0000${managementKey}`;
+
 export function AuthFilesPage() {
   const { t } = useTranslation();
   const showNotification = useNotificationStore((state) => state.showNotification);
@@ -149,9 +256,16 @@ export function AuthFilesPage() {
   const managementKey = useAuthStore((state) => state.managementKey);
   const resolvedTheme: ResolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const codexQuota = useQuotaStore((state) => state.codexQuota);
+  const setCodexQuota = useQuotaStore((state) => state.setCodexQuota);
+  const featureAvailability = usePanelFeatureAvailability();
+  const managerServiceBase = featureAvailability.managerServiceBase;
   const pageTransitionLayer = usePageTransitionLayer();
   const isCurrentLayer = pageTransitionLayer ? pageTransitionLayer.status === 'current' : true;
   const navigate = useNavigate();
+  const connectionFingerprint = useMemo(
+    () => createCodexInspectionConnectionFingerprint(apiBase, managementKey),
+    [apiBase, managementKey]
+  );
 
   const [filter, setFilter] = useState<'all' | string>('all');
   const [problemOnly, setProblemOnly] = useState(false);
@@ -161,6 +275,7 @@ export function AuthFilesPage() {
   const [runtimeUnlimitedOnly, setRuntimeUnlimitedOnly] = useState(false);
   const [freezeConfiguredOnly, setFreezeConfiguredOnly] = useState(false);
   const [codexStatusFilter, setCodexStatusFilter] = useState<AuthFilesCodexStatusFilter>('all');
+  const [codexPlanFilter, setCodexPlanFilter] = useState<AuthFilesCodexPlanFilter>('all');
   const [compactMode, setCompactMode] = useState(false);
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
@@ -183,13 +298,49 @@ export function AuthFilesPage() {
     rateLimitWindowSeconds: '',
     selectionErrorFreezeSeconds: '',
   });
+  const [batchPriorityOpen, setBatchPriorityOpen] = useState(false);
+  const [batchPriorityValue, setBatchPriorityValue] = useState('');
+  const [codexReauthTarget, setCodexReauthTarget] = useState<CodexReauthTarget | null>(null);
   const [lastCodexInspectionResults, setLastCodexInspectionResults] = useState<
     AuthFileCodexInspectionSnapshot[]
   >([]);
+  const [quotaCooldownState, setQuotaCooldownState] = useState<QuotaCooldownState>(() => ({
+    contextKey: getQuotaCooldownContextKey(managerServiceBase, managementKey),
+    items: new Map(),
+  }));
+  const quotaCooldowns = quotaCooldownState.items;
+  const [accountActionCandidates, setAccountActionCandidates] = useState<AccountActionCandidate[]>(
+    []
+  );
+  const [headerSnapshots, setHeaderSnapshots] = useState<UsageHeaderSnapshot[]>([]);
+  const [headerSnapshotGeneratedAtMs, setHeaderSnapshotGeneratedAtMs] = useState(0);
   const floatingBatchActionsRef = useRef<HTMLDivElement>(null);
   const batchActionAnimationRef = useRef<AnimationPlaybackControlsWithThen | null>(null);
   const previousSelectionCountRef = useRef(0);
   const selectionCountRef = useRef(0);
+  const quotaCooldownsRef = useRef<QuotaCooldownState>({
+    contextKey: getQuotaCooldownContextKey(managerServiceBase, managementKey),
+    items: new Map(),
+  });
+  const accountActionCandidatesRef = useRef<AccountActionCandidate[]>([]);
+  const pendingRecoveredCodexQuotaRefreshRef = useRef<Set<string>>(new Set());
+  const autoRefreshingCodexQuotaRef = useRef<Set<string>>(new Set());
+  const expiredHeaderCodexQuotaRefreshRef = useRef<Set<string>>(new Set());
+  const skipNextRecoveredCooldownRefreshRef = useRef(false);
+  // Generation token for in-flight cooldown fetches. Every fetch and every
+  // context identity change bump it, so a slow, superseded response can be
+  // detected and dropped; otherwise it would re-introduce stale badges after
+  // the old context was invalidated.
+  const cooldownReqId = useRef(0);
+  const accountActionReqId = useRef(0);
+  const headerSnapshotReqId = useRef(0);
+  // Tracks the context identity so the layout effect can detect cross-context
+  // transitions synchronously (before passive effects fire) and invalidate any
+  // in-flight request that belongs to the old context.
+  const cooldownContextRef = useRef({ managerServiceBase, managementKey });
+  const accountActionContextRef = useRef({ managerServiceBase, managementKey });
+  const cooldownRecoveryContextRef = useRef({ managerServiceBase, managementKey });
+  const headerSnapshotContextRef = useRef({ managerServiceBase, managementKey });
 
   const {
     files,
@@ -202,9 +353,11 @@ export function AuthFilesPage() {
     deleting,
     deletingAll,
     statusUpdating,
+    credentialRefreshing = {},
     batchStatusUpdating,
     registrationRetrying,
     batchRegistrationRetrying,
+    batchFieldsUpdating,
     fileInputRef,
     loadFiles,
     handleUploadClick,
@@ -213,6 +366,7 @@ export function AuthFilesPage() {
     handleDelete,
     handleDeleteAll,
     handleDownload,
+    handleCredentialRefresh,
     handleStatusToggle,
     toggleSelect,
     selectAllVisible,
@@ -223,8 +377,9 @@ export function AuthFilesPage() {
     retryAgentIdentityRegistration,
     rebuildAgentIdentityRegistration,
     batchRetryAgentIdentityRegistration,
+    batchPatchFields,
     batchDelete,
-  } = useAuthFilesData({ importDefaults });
+  } = useAuthFilesData({ importDefaults, connectionFingerprint });
 
   const handleDefaultWebsocketsChange = useCallback((websockets: boolean) => {
     setImportDefaults((current) => {
@@ -233,8 +388,108 @@ export function AuthFilesPage() {
       return next;
     });
   }, []);
+  const loadFilesRef = useRef(loadFiles);
+
+  useLayoutEffect(() => {
+    loadFilesRef.current = loadFiles;
+  }, [loadFiles]);
 
   const statusBarCache = useAuthFilesStatusBarCache(files);
+  const uniqueAuthFileKeyByFallbackCooldownKey = useMemo(() => {
+    const fallbackEntries = new Map<string, { authFileKey: string; count: number }>();
+    files.forEach((file) => {
+      const provider = resolveAuthProvider(file);
+      if (isRuntimeOnlyAuthFile(file) || (provider !== 'codex' && provider !== 'xai')) return;
+      const fallbackKey = getAuthFileCodexInspectionKey(file.name, null);
+      const authFileKey = getAuthFileCodexInspectionKeyForFile(file);
+      const existing = fallbackEntries.get(fallbackKey);
+      if (existing) {
+        existing.count += 1;
+        return;
+      }
+      fallbackEntries.set(fallbackKey, { authFileKey, count: 1 });
+    });
+
+    const uniqueKeys = new Map<string, string>();
+    fallbackEntries.forEach((entry, fallbackKey) => {
+      if (entry.count === 1) uniqueKeys.set(fallbackKey, entry.authFileKey);
+    });
+    return uniqueKeys;
+  }, [files]);
+  const getQuotaCooldownForFile = useCallback(
+    (file: AuthFileItem): QuotaCooldownInfo | undefined => {
+      const provider = resolveAuthProvider(file);
+      if (isRuntimeOnlyAuthFile(file) || (provider !== 'codex' && provider !== 'xai')) {
+        return undefined;
+      }
+      const authFileKey = getAuthFileCodexInspectionKeyForFile(file);
+      const exactCooldown = quotaCooldowns.get(authFileKey);
+      if (exactCooldown) return exactCooldown;
+
+      const fallbackKey = getAuthFileCodexInspectionKey(file.name, null);
+      if (uniqueAuthFileKeyByFallbackCooldownKey.get(fallbackKey) !== authFileKey) {
+        return undefined;
+      }
+      return quotaCooldowns.get(fallbackKey);
+    },
+    [quotaCooldowns, uniqueAuthFileKeyByFallbackCooldownKey]
+  );
+  const uniqueAuthFileKeyByFallbackActionKey = useMemo(() => {
+    const fallbackEntries = new Map<string, { authFileKey: string; count: number }>();
+    files.forEach((file) => {
+      if (isRuntimeOnlyAuthFile(file)) return;
+      const fallbackKey = getAuthFileCodexInspectionKey(file.name, null);
+      const authFileKey = getAuthFileCodexInspectionKeyForFile(file);
+      const existing = fallbackEntries.get(fallbackKey);
+      if (existing) {
+        existing.count += 1;
+        return;
+      }
+      fallbackEntries.set(fallbackKey, { authFileKey, count: 1 });
+    });
+    const uniqueKeys = new Map<string, string>();
+    fallbackEntries.forEach((entry, fallbackKey) => {
+      if (entry.count === 1) uniqueKeys.set(fallbackKey, entry.authFileKey);
+    });
+    return uniqueKeys;
+  }, [files]);
+  const accountActionsByAuthFileKey = useMemo(() => {
+    const next = new Map<string, AccountActionCandidate[]>();
+    accountActionCandidates.forEach((candidate) => {
+      if (candidate.status !== 'pending' || !candidate.authFileName) return;
+      const key = getAuthFileCodexInspectionKey(
+        candidate.authFileName,
+        candidate.authIndex ?? null
+      );
+      next.set(key, [...(next.get(key) ?? []), candidate]);
+    });
+    return next;
+  }, [accountActionCandidates]);
+  const getAccountActionsForFile = useCallback(
+    (file: AuthFileItem): AccountActionCandidate[] => {
+      if (isRuntimeOnlyAuthFile(file)) return [];
+      const authFileKey = getAuthFileCodexInspectionKeyForFile(file);
+      const exact = accountActionsByAuthFileKey.get(authFileKey) ?? [];
+      const fallbackKey = getAuthFileCodexInspectionKey(file.name, null);
+      if (
+        fallbackKey === authFileKey ||
+        uniqueAuthFileKeyByFallbackActionKey.get(fallbackKey) !== authFileKey
+      ) {
+        return exact;
+      }
+      const byID = new Map(exact.map((candidate) => [candidate.id, candidate]));
+      (accountActionsByAuthFileKey.get(fallbackKey) ?? []).forEach((candidate) => {
+        byID.set(candidate.id, candidate);
+      });
+      return Array.from(byID.values());
+    },
+    [accountActionsByAuthFileKey, uniqueAuthFileKeyByFallbackActionKey]
+  );
+  const getAccountActionForFile = useCallback(
+    (file: AuthFileItem): AccountActionCandidate | undefined =>
+      selectAccountActionCandidate(getAccountActionsForFile(file)),
+    [getAccountActionsForFile]
+  );
 
   const {
     excluded,
@@ -280,11 +535,6 @@ export function AuthFilesPage() {
   const disableControls = connectionStatus !== 'connected';
   const normalizedFilter = normalizeProviderKey(String(filter));
   const pageSize = compactMode ? pageSizeByMode.compact : pageSizeByMode.regular;
-  const connectionFingerprint = useMemo(
-    () => createCodexInspectionConnectionFingerprint(apiBase, managementKey),
-    [apiBase, managementKey]
-  );
-
   useEffect(() => {
     const persistedCompactMode = readPersistedAuthFilesCompactMode();
     if (typeof persistedCompactMode === 'boolean') {
@@ -319,6 +569,10 @@ export function AuthFilesPage() {
       );
       if (persistedCodexStatusFilter) {
         setCodexStatusFilter(persistedCodexStatusFilter);
+      }
+      const persistedCodexPlanFilter = normalizeAuthFilesCodexPlanFilter(persisted.codexPlanFilter);
+      if (persistedCodexPlanFilter) {
+        setCodexPlanFilter(persistedCodexPlanFilter);
       }
       if (typeof persistedCompactMode !== 'boolean' && typeof persisted.compactMode === 'boolean') {
         setCompactMode(persisted.compactMode);
@@ -370,6 +624,7 @@ export function AuthFilesPage() {
       runtimeUnlimitedOnly,
       freezeConfiguredOnly,
       codexStatusFilter,
+      codexPlanFilter,
       compactMode,
       search,
       page,
@@ -381,6 +636,7 @@ export function AuthFilesPage() {
     });
     writePersistedAuthFilesCompactMode(compactMode);
   }, [
+    codexPlanFilter,
     codexStatusFilter,
     compactMode,
     disabledOnly,
@@ -403,13 +659,63 @@ export function AuthFilesPage() {
     setPageSizeInput(String(pageSize));
   }, [pageSize]);
 
-  useEffect(() => {
-    if (!isCurrentLayer) return;
+  const loadCodexInspectionSnapshots = useCallback(async () => {
     const lastRun = connectionFingerprint
       ? loadCodexInspectionLastRun(connectionFingerprint)
       : null;
-    setLastCodexInspectionResults(lastRun?.result.results ?? []);
-  }, [connectionFingerprint, isCurrentLayer]);
+
+    const managerServiceBase = featureAvailability.managerServiceBase;
+    if (
+      !featureAvailability.checking &&
+      featureAvailability.serverCodexInspectionAvailable &&
+      managerServiceBase
+    ) {
+      try {
+        const runs = await usageServiceApi.listCodexInspectionRuns(
+          managerServiceBase,
+          managementKey,
+          1
+        );
+        const latestRun = runs.items[0];
+        if (latestRun) {
+          const detail = await usageServiceApi.getCodexInspectionRun(
+            managerServiceBase,
+            managementKey,
+            latestRun.id
+          );
+          setLastCodexInspectionResults(
+            toAuthFileCodexInspectionSnapshots(
+              detail.results,
+              readCodexInspectionRunAtMs(detail.run)
+            )
+          );
+          return;
+        }
+      } catch {
+        // Fall back to the browser-side cache when the manager service is unavailable.
+      }
+    }
+
+    setLastCodexInspectionResults(
+      lastRun
+        ? toAuthFileCodexInspectionSnapshots(
+            lastRun.result.results,
+            lastRun.result.finishedAt || lastRun.result.startedAt || null
+          )
+        : []
+    );
+  }, [
+    connectionFingerprint,
+    featureAvailability.checking,
+    featureAvailability.managerServiceBase,
+    featureAvailability.serverCodexInspectionAvailable,
+    managementKey,
+  ]);
+
+  useEffect(() => {
+    if (!isCurrentLayer) return;
+    void loadCodexInspectionSnapshots();
+  }, [isCurrentLayer, loadCodexInspectionSnapshots]);
 
   const setCurrentModePageSize = useCallback(
     (next: number) => {
@@ -476,8 +782,13 @@ export function AuthFilesPage() {
   );
 
   const handleHeaderRefresh = useCallback(async () => {
-    await Promise.all([loadFiles(), loadExcluded(), loadModelAlias()]);
-  }, [loadFiles, loadExcluded, loadModelAlias]);
+    await Promise.all([
+      loadFiles(),
+      loadExcluded(),
+      loadModelAlias(),
+      loadCodexInspectionSnapshots(),
+    ]);
+  }, [loadFiles, loadExcluded, loadModelAlias, loadCodexInspectionSnapshots]);
 
   useHeaderRefresh(handleHeaderRefresh);
 
@@ -495,6 +806,284 @@ export function AuthFilesPage() {
     isCurrentLayer ? 240_000 : null
   );
 
+  const loadQuotaCooldowns = useCallback(async () => {
+    // Stamp this fetch with a fresh id so a later fetch or context identity
+    // invalidation can supersede it. If the generation has changed by the time
+    // we land, we drop the result instead of writing stale badges back.
+    const id = ++cooldownReqId.current;
+    const contextKey = getQuotaCooldownContextKey(managerServiceBase, managementKey);
+    try {
+      const items = await usageServiceApi.getActiveQuotaCooldowns(
+        managerServiceBase,
+        managementKey
+      );
+      if (id !== cooldownReqId.current) return;
+      const next = new Map<string, QuotaCooldownInfo>();
+      for (const item of items) {
+        if (!item.authFileName) continue;
+        const cooldownKey = getAuthFileCodexInspectionKey(
+          item.authFileName,
+          item.authIndex ?? null
+        );
+        const existing = next.get(cooldownKey);
+        if (!existing || (item.recoverAtMs ?? 0) > (existing.recoverAtMs ?? 0)) {
+          next.set(cooldownKey, item);
+        }
+      }
+      const hasNewActive = Array.from(next.keys()).some(
+        (authFileKey) => !quotaCooldownsRef.current.items.has(authFileKey)
+      );
+      setQuotaCooldownState({ contextKey, items: next });
+      if (hasNewActive) void loadFilesRef.current().catch(() => {});
+    } catch {
+      // The cooldown badge is a derived hint; fail silently and keep the last known state.
+    }
+  }, [managerServiceBase, managementKey]);
+
+  const loadAccountActionCandidates = useCallback(async () => {
+    const id = ++accountActionReqId.current;
+    if (!managerServiceBase) {
+      setAccountActionCandidates([]);
+      return;
+    }
+    try {
+      const response = await usageServiceApi.listAccountActionCandidates(
+        managerServiceBase,
+        managementKey,
+        'pending',
+        500
+      );
+      if (id !== accountActionReqId.current) return;
+      const items = response.items ?? [];
+      const previousByID = new Map(
+        accountActionCandidatesRef.current.map((item) => [item.id, item])
+      );
+      const hasNewAutoDisable = items.some((item) => {
+        if (!item.autoDisabledAtMs) return false;
+        return item.autoDisabledAtMs > (previousByID.get(item.id)?.autoDisabledAtMs ?? 0);
+      });
+      accountActionCandidatesRef.current = items;
+      setAccountActionCandidates(items);
+      if (hasNewAutoDisable) void loadFilesRef.current().catch(() => {});
+    } catch {
+      // Account automation is a Manager-only enhancement; keep auth files usable on failure.
+    }
+  }, [managerServiceBase, managementKey]);
+
+  const loadHeaderSnapshots = useCallback(async () => {
+    if (!managerServiceBase) {
+      setHeaderSnapshots([]);
+      setHeaderSnapshotGeneratedAtMs(0);
+      return;
+    }
+    const id = ++headerSnapshotReqId.current;
+    try {
+      const response = await monitoringAnalyticsApi.getHeaderSnapshots(
+        managerServiceBase,
+        managementKey,
+        {
+          days: 30,
+          limit: 1000,
+        }
+      );
+      if (id !== headerSnapshotReqId.current) return;
+      const generatedAtMs =
+        response.generated_at_ms ??
+        (response as { generatedAtMs?: number }).generatedAtMs ??
+        Date.now();
+      expiredHeaderCodexQuotaRefreshRef.current.clear();
+      setHeaderSnapshots(response.items ?? []);
+      setHeaderSnapshotGeneratedAtMs(generatedAtMs);
+    } catch {
+      // Header snapshots are passive hints; keep the current page usable if Manager data is unavailable.
+    }
+  }, [managementKey, managerServiceBase]);
+
+  const refreshRecoveredCodexQuotaForFile = useCallback(
+    async (file: AuthFileItem) => {
+      if (resolveAuthProvider(file) !== 'codex') return false;
+      if (isRuntimeOnlyAuthFile(file) || file.disabled) return false;
+
+      const authFileKey = getAuthFileCodexInspectionKeyForFile(file);
+      if (autoRefreshingCodexQuotaRef.current.has(authFileKey)) return false;
+      autoRefreshingCodexQuotaRef.current.add(authFileKey);
+      const cacheGeneration = captureQuotaCacheGeneration();
+
+      const storeKey = getQuotaStoreKey(CODEX_CONFIG, file);
+      const previousQuota =
+        (codexQuota[storeKey] as CodexQuotaState | undefined) ??
+        (codexQuota[file.name] as CodexQuotaState | undefined);
+      setCodexQuota((prev) => ({
+        ...prev,
+        [storeKey]: CODEX_CONFIG.buildLoadingState(file),
+      }));
+
+      try {
+        const data = await CODEX_CONFIG.fetchQuota(file, t);
+        return commitIfQuotaCacheCurrent(cacheGeneration, () => {
+          setCodexQuota((prev) => ({
+            ...prev,
+            [storeKey]: CODEX_CONFIG.buildSuccessState(data, file),
+          }));
+        });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : t('common.unknown_error');
+        const status = getStatusFromError(err);
+        commitIfQuotaCacheCurrent(cacheGeneration, () => {
+          setCodexQuota((prev) => ({
+            ...prev,
+            [storeKey]: CODEX_CONFIG.buildFailureState
+              ? CODEX_CONFIG.buildFailureState(message, status, file, previousQuota, Date.now())
+              : CODEX_CONFIG.buildErrorState(message, status, file),
+          }));
+        });
+        return false;
+      } finally {
+        autoRefreshingCodexQuotaRef.current.delete(authFileKey);
+      }
+    },
+    [codexQuota, setCodexQuota, t]
+  );
+
+  const refreshPendingRecoveredCodexQuotas = useCallback(() => {
+    if (pendingRecoveredCodexQuotaRefreshRef.current.size === 0) return;
+
+    for (const file of files) {
+      const authFileKey = getAuthFileCodexInspectionKeyForFile(file);
+      const fallbackKey = getAuthFileCodexInspectionKey(file.name, null);
+      const hasExactPending = pendingRecoveredCodexQuotaRefreshRef.current.has(authFileKey);
+      const hasFallbackPending =
+        fallbackKey !== authFileKey &&
+        pendingRecoveredCodexQuotaRefreshRef.current.has(fallbackKey) &&
+        uniqueAuthFileKeyByFallbackCooldownKey.get(fallbackKey) === authFileKey;
+      if (!hasExactPending && !hasFallbackPending) continue;
+      if (file.disabled || resolveAuthProvider(file) !== 'codex' || isRuntimeOnlyAuthFile(file)) {
+        continue;
+      }
+      if (hasExactPending) pendingRecoveredCodexQuotaRefreshRef.current.delete(authFileKey);
+      if (hasFallbackPending) pendingRecoveredCodexQuotaRefreshRef.current.delete(fallbackKey);
+      void refreshRecoveredCodexQuotaForFile(file);
+    }
+  }, [files, refreshRecoveredCodexQuotaForFile, uniqueAuthFileKeyByFallbackCooldownKey]);
+
+  // Synchronously invalidate in-flight cooldown requests when the context
+  // (managerServiceBase or managementKey) changes, regardless of direction
+  // (A to B, A to empty, empty to A). This runs in the layout phase, before any
+  // passive effect that might fire a new loadQuotaCooldowns, so a stale
+  // response that resolves between renders or inside the gap between a
+  // re-render and its passive effects will find its generation token already
+  // invalidated.
+  useLayoutEffect(() => {
+    const prev = cooldownContextRef.current;
+    if (prev.managerServiceBase === managerServiceBase && prev.managementKey === managementKey) {
+      return;
+    }
+    cooldownContextRef.current = { managerServiceBase, managementKey };
+    cooldownReqId.current += 1;
+    const contextKey = getQuotaCooldownContextKey(managerServiceBase, managementKey);
+    quotaCooldownsRef.current = { contextKey, items: new Map() };
+    pendingRecoveredCodexQuotaRefreshRef.current.clear();
+    skipNextRecoveredCooldownRefreshRef.current = true;
+    setQuotaCooldownState((current) =>
+      current.contextKey === contextKey && current.items.size === 0
+        ? current
+        : { contextKey, items: new Map() }
+    );
+  }, [managerServiceBase, managementKey]);
+
+  useLayoutEffect(() => {
+    const prev = headerSnapshotContextRef.current;
+    if (prev.managerServiceBase === managerServiceBase && prev.managementKey === managementKey) {
+      return;
+    }
+    headerSnapshotContextRef.current = { managerServiceBase, managementKey };
+    headerSnapshotReqId.current += 1;
+    expiredHeaderCodexQuotaRefreshRef.current.clear();
+    setHeaderSnapshots((current) => (current.length === 0 ? current : []));
+    setHeaderSnapshotGeneratedAtMs(0);
+  }, [managerServiceBase, managementKey]);
+
+  useLayoutEffect(() => {
+    const prev = accountActionContextRef.current;
+    if (prev.managerServiceBase === managerServiceBase && prev.managementKey === managementKey) {
+      return;
+    }
+    accountActionContextRef.current = { managerServiceBase, managementKey };
+    accountActionReqId.current += 1;
+    accountActionCandidatesRef.current = [];
+    setAccountActionCandidates((current) => (current.length === 0 ? current : []));
+  }, [managerServiceBase, managementKey]);
+
+  useEffect(() => {
+    if (!isCurrentLayer || !managerServiceBase) return;
+    void loadQuotaCooldowns();
+    void loadHeaderSnapshots();
+    void loadAccountActionCandidates();
+  }, [
+    isCurrentLayer,
+    loadAccountActionCandidates,
+    loadHeaderSnapshots,
+    loadQuotaCooldowns,
+    managerServiceBase,
+  ]);
+
+  useInterval(
+    () => {
+      void loadQuotaCooldowns();
+      void loadHeaderSnapshots();
+      void loadAccountActionCandidates();
+    },
+    isCurrentLayer && managerServiceBase ? 60_000 : null
+  );
+
+  useEffect(() => {
+    const previous = quotaCooldownsRef.current;
+    const currentContextKey = getQuotaCooldownContextKey(managerServiceBase, managementKey);
+    const previousContext = cooldownRecoveryContextRef.current;
+    const contextChanged =
+      previousContext.managerServiceBase !== managerServiceBase ||
+      previousContext.managementKey !== managementKey;
+    cooldownRecoveryContextRef.current = { managerServiceBase, managementKey };
+    quotaCooldownsRef.current = quotaCooldownState;
+    if (
+      contextChanged ||
+      previous.contextKey !== quotaCooldownState.contextKey ||
+      quotaCooldownState.contextKey !== currentContextKey ||
+      skipNextRecoveredCooldownRefreshRef.current
+    ) {
+      skipNextRecoveredCooldownRefreshRef.current = false;
+      pendingRecoveredCodexQuotaRefreshRef.current.clear();
+      return;
+    }
+    if (!isCurrentLayer || !managerServiceBase) return;
+
+    const nowMs = Date.now();
+    let hasRecovered = false;
+    previous.items.forEach((item, authFileKey) => {
+      if (quotaCooldowns.has(authFileKey)) return;
+      if (item.owner && item.owner !== 'cpamp_usage_429') return;
+      if (item.recoverAtMs > nowMs + 60_000) return;
+      pendingRecoveredCodexQuotaRefreshRef.current.add(authFileKey);
+      hasRecovered = true;
+    });
+
+    if (!hasRecovered) return;
+    void loadFiles().catch(() => {});
+    refreshPendingRecoveredCodexQuotas();
+  }, [
+    isCurrentLayer,
+    loadFiles,
+    managerServiceBase,
+    managementKey,
+    quotaCooldowns,
+    quotaCooldownState,
+    refreshPendingRecoveredCodexQuotas,
+  ]);
+
+  useEffect(() => {
+    refreshPendingRecoveredCodexQuotas();
+  }, [files, refreshPendingRecoveredCodexQuotas]);
+
   const existingTypes = useMemo(() => {
     const types = new Set<string>(['all']);
     files.forEach((file) => {
@@ -509,49 +1098,181 @@ export function AuthFilesPage() {
     [lastCodexInspectionResults]
   );
 
+  const headerSnapshotLookup = useMemo(
+    () => buildUsageHeaderSnapshotLookup(headerSnapshots),
+    [headerSnapshots]
+  );
+
+  const getActiveCodexQuota = useCallback(
+    (file: AuthFileItem): CodexQuotaState | undefined => {
+      if (resolveAuthProvider(file) !== 'codex') return undefined;
+      const storeKey = getAuthFileCodexInspectionKeyForFile(file);
+      return getAuthFileScopedCodexQuota(file, codexQuota[storeKey] ?? codexQuota[file.name]);
+    },
+    [codexQuota]
+  );
+
+  useEffect(() => {
+    if (!isCurrentLayer || !managerServiceBase) return;
+    const nowMs = headerSnapshotGeneratedAtMs || Date.now();
+    for (const file of files) {
+      if (resolveAuthProvider(file) !== 'codex' || isRuntimeOnlyAuthFile(file) || file.disabled) {
+        continue;
+      }
+      const headerSnapshot = getHighConfidenceUsageHeaderSnapshotForAuthFile(
+        headerSnapshotLookup,
+        file
+      );
+      if (!isUsageHeaderQuotaSnapshotExpired(headerSnapshot, nowMs)) continue;
+
+      const activeQuota = getActiveCodexQuota(file);
+      const fetchedAtMs =
+        activeQuota?.status === 'success' && typeof activeQuota.fetchedAtMs === 'number'
+          ? activeQuota.fetchedAtMs
+          : 0;
+      const headerAtMs =
+        typeof headerSnapshot?.timestamp_ms === 'number' ? headerSnapshot.timestamp_ms : 0;
+      if (fetchedAtMs > headerAtMs) continue;
+
+      const authFileKey = getAuthFileCodexInspectionKeyForFile(file);
+      const marker = `${authFileKey}:${headerSnapshot?.event_hash ?? ''}:${headerAtMs}`;
+      if (expiredHeaderCodexQuotaRefreshRef.current.has(marker)) continue;
+      expiredHeaderCodexQuotaRefreshRef.current.add(marker);
+      void refreshRecoveredCodexQuotaForFile(file);
+    }
+  }, [
+    files,
+    getActiveCodexQuota,
+    headerSnapshotGeneratedAtMs,
+    headerSnapshotLookup,
+    isCurrentLayer,
+    managerServiceBase,
+    refreshRecoveredCodexQuotaForFile,
+  ]);
+
+  const codexStatusSourcesByAuthFileKey = useMemo(() => {
+    const sourcesMap = new Map<string, ReturnType<typeof getFreshAuthFileCodexStatusSources>>();
+    files.forEach((file) => {
+      const statusKey = getAuthFileCodexInspectionKeyForFile(file);
+      const headerSnapshot = getHighConfidenceUsageHeaderSnapshotForAuthFile(
+        headerSnapshotLookup,
+        file
+      );
+      const freshHeaderSnapshot = isUsageHeaderQuotaSnapshotExpired(
+        headerSnapshot,
+        headerSnapshotGeneratedAtMs || Date.now()
+      )
+        ? undefined
+        : headerSnapshot;
+      sourcesMap.set(
+        statusKey,
+        getFreshAuthFileCodexStatusSources(
+          file,
+          getActiveCodexQuota(file),
+          codexInspectionByAuthFile.get(statusKey),
+          freshHeaderSnapshot
+        )
+      );
+    });
+    return sourcesMap;
+  }, [
+    codexInspectionByAuthFile,
+    files,
+    getActiveCodexQuota,
+    headerSnapshotGeneratedAtMs,
+    headerSnapshotLookup,
+  ]);
+
+  const getDisplayCodexQuota = useCallback(
+    (file: AuthFileItem): CodexQuotaState | undefined => {
+      if (resolveAuthProvider(file) !== 'codex') return undefined;
+      const statusKey = getAuthFileCodexInspectionKeyForFile(file);
+      const activeQuota = getActiveCodexQuota(file);
+      const observedQuota = buildObservedCodexQuotaState(
+        file,
+        codexStatusSourcesByAuthFileKey.get(statusKey)?.headerSnapshot,
+        t
+      );
+      return resolveQuotaDisplayState(activeQuota, observedQuota);
+    },
+    [codexStatusSourcesByAuthFileKey, getActiveCodexQuota, t]
+  );
+
   const codexStatusByAuthFileKey = useMemo(() => {
     const statusMap = new Map<string, ReturnType<typeof getAuthFileCodexStatus>>();
     files.forEach((file) => {
       const statusKey = getAuthFileCodexInspectionKeyForFile(file);
+      const sources = codexStatusSourcesByAuthFileKey.get(statusKey);
       statusMap.set(
         statusKey,
         getAuthFileCodexStatus(
           file,
-          codexQuota[file.name],
-          codexInspectionByAuthFile.get(statusKey)
+          getDisplayCodexQuota(file),
+          sources?.inspection,
+          sources?.headerSnapshot
         )
       );
     });
     return statusMap;
-  }, [codexInspectionByAuthFile, codexQuota, files]);
+  }, [codexStatusSourcesByAuthFileKey, files, getDisplayCodexQuota]);
 
   const filesMatchingStatusFilters = useMemo(
     () =>
       files.filter((file) => {
-        if (problemOnly && !hasAuthFileStatusMessage(file)) return false;
         if (disabledOnly && file.disabled !== true) return false;
-        if (healthyOnly && !isHealthyAuthFile(file)) return false;
         if (rateLimitedOnly && !hasAuthFileRateLimitConfig(file)) return false;
         if (runtimeUnlimitedOnly && !isAuthFileRuntimeUnlimited(file)) return false;
         if (freezeConfiguredOnly && !hasAuthFileFreezeConfig(file)) return false;
         const codexStatus = codexStatusByAuthFileKey.get(
           getAuthFileCodexInspectionKeyForFile(file)
         );
+        const accountActions = getAccountActionsForFile(file);
+        const quotaCooldown = getQuotaCooldownForFile(file);
+        const hasAutomationProblem = accountActions.length > 0 || Boolean(quotaCooldown);
+        if (
+          healthyOnly &&
+          (!isHealthyAuthFile(file) || hasAutomationProblem || Boolean(codexStatus?.badges.length))
+        ) {
+          return false;
+        }
+        if (
+          problemOnly &&
+          !hasAuthFileStatusMessage(file) &&
+          !codexStatus?.badges.length &&
+          !hasAutomationProblem
+        ) {
+          return false;
+        }
         if (codexStatus && !authFileMatchesCodexStatusFilter(codexStatus, codexStatusFilter)) {
+          return false;
+        }
+        if (
+          !authFileMatchesCodexPlanFilter(
+            file,
+            getDisplayCodexQuota(file),
+            codexPlanFilter,
+            getHighConfidenceUsageHeaderSnapshotForAuthFile(headerSnapshotLookup, file)
+          )
+        ) {
           return false;
         }
         return true;
       }),
     [
+      codexPlanFilter,
       codexStatusByAuthFileKey,
       codexStatusFilter,
       disabledOnly,
       files,
       freezeConfiguredOnly,
-      healthyOnly,
-      problemOnly,
       rateLimitedOnly,
       runtimeUnlimitedOnly,
+      getAccountActionsForFile,
+      getDisplayCodexQuota,
+      getQuotaCooldownForFile,
+      headerSnapshotLookup,
+      healthyOnly,
+      problemOnly,
     ]
   );
 
@@ -573,6 +1294,7 @@ export function AuthFilesPage() {
     () => [
       { value: 'all', label: t('auth_files.codex_status_filter_all') },
       { value: 'reauth', label: t('auth_files.codex_status_filter_reauth') },
+      { value: 'quota_limited', label: t('auth_files.codex_status_filter_quota_limited') },
       {
         value: 'five_hour_limited',
         label: t('auth_files.codex_status_filter_five_hour_limited'),
@@ -583,6 +1305,19 @@ export function AuthFilesPage() {
         value: 'disabled_with_reset',
         label: t('auth_files.codex_status_filter_disabled_with_reset'),
       },
+    ],
+    [t]
+  );
+
+  const codexPlanFilterOptions = useMemo(
+    () => [
+      { value: 'all', label: t('auth_files.codex_plan_filter_all') },
+      { value: 'free', label: t('codex_quota.plan_free') },
+      { value: 'plus', label: t('codex_quota.plan_plus') },
+      { value: 'team', label: t('codex_quota.plan_team') },
+      { value: 'prolite', label: t('codex_quota.plan_prolite') },
+      { value: 'pro', label: t('codex_quota.plan_pro') },
+      { value: 'unknown', label: t('auth_files.codex_plan_filter_unknown') },
     ],
     [t]
   );
@@ -606,14 +1341,22 @@ export function AuthFilesPage() {
     return filesMatchingStatusFilters.filter((item) => {
       const type = normalizeProviderKey(String(item.type ?? item.provider ?? ''));
       const matchType = normalizedFilter === 'all' || type === normalizedFilter;
+      const authFileKey = getAuthFileCodexInspectionKeyForFile(item);
+      const planHeaderSnapshot = getHighConfidenceUsageHeaderSnapshotForAuthFile(
+        headerSnapshotLookup,
+        item
+      );
+      const statusHeaderSnapshot = codexStatusSourcesByAuthFileKey.get(authFileKey)?.headerSnapshot;
       const matchSearch =
         !normalizedSearch ||
         stringifySearchValue(
           getAuthFileSearchValues(
             item,
             t,
-            codexQuota[item.name],
-            codexStatusByAuthFileKey.get(getAuthFileCodexInspectionKeyForFile(item))
+            getDisplayCodexQuota(item),
+            codexStatusByAuthFileKey.get(authFileKey),
+            statusHeaderSnapshot,
+            planHeaderSnapshot
           )
         ).some((value) => {
           const content = value.toString();
@@ -624,14 +1367,26 @@ export function AuthFilesPage() {
       return matchType && matchSearch;
     });
   }, [
-    codexQuota,
     codexStatusByAuthFileKey,
+    codexStatusSourcesByAuthFileKey,
     filesMatchingStatusFilters,
+    getDisplayCodexQuota,
+    headerSnapshotLookup,
     normalizedFilter,
     normalizedSearch,
     t,
     wildcardSearch,
   ]);
+
+  const safeDeleteFilteredFiles = useMemo(() => {
+    if (!problemOnly) return filtered;
+    return filtered.filter((file) => {
+      if (getQuotaCooldownForFile(file)) return false;
+      const candidates = getAccountActionsForFile(file);
+      if (candidates.length > 0) return canBulkDeleteAccountActions(candidates);
+      return hasAuthFileStatusMessage(file);
+    });
+  }, [filtered, getAccountActionsForFile, getQuotaCooldownForFile, problemOnly]);
 
   const sorted = useMemo(() => {
     const copy = [...filtered];
@@ -653,8 +1408,16 @@ export function AuthFilesPage() {
       );
     } else if (sortMode === 'plan-asc' || sortMode === 'plan-desc') {
       copy.sort((a, b) => {
-        const leftRank = getAuthFilePlanSortRank(a, codexQuota[a.name]);
-        const rightRank = getAuthFilePlanSortRank(b, codexQuota[b.name]);
+        const leftRank = getAuthFilePlanSortRank(
+          a,
+          getDisplayCodexQuota(a),
+          getHighConfidenceUsageHeaderSnapshotForAuthFile(headerSnapshotLookup, a)
+        );
+        const rightRank = getAuthFilePlanSortRank(
+          b,
+          getDisplayCodexQuota(b),
+          getHighConfidenceUsageHeaderSnapshotForAuthFile(headerSnapshotLookup, b)
+        );
         const leftKnown = leftRank !== null && leftRank !== undefined;
         const rightKnown = rightRank !== null && rightRank !== undefined;
 
@@ -669,12 +1432,14 @@ export function AuthFilesPage() {
       });
     }
     return copy;
-  }, [codexQuota, filtered, sortMode]);
+  }, [filtered, getDisplayCodexQuota, headerSnapshotLookup, sortMode]);
 
   const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const start = (currentPage - 1) * pageSize;
-  const pageItems = sorted.slice(start, start + pageSize);
+  const pageItems = useMemo(() => sorted.slice(start, start + pageSize), [pageSize, sorted, start]);
+  const { subscriptions: antigravitySubscriptions, refreshSubscription } =
+    useAntigravitySubscriptions();
   const pageHasInlineQuotaCards = !compactMode && pageItems.some(hasInlineQuotaLayout);
   const selectablePageItems = useMemo(
     () => pageItems.filter((file) => !isRuntimeOnlyAuthFile(file)),
@@ -684,27 +1449,74 @@ export function AuthFilesPage() {
     () => sorted.filter((file) => !isRuntimeOnlyAuthFile(file)),
     [sorted]
   );
-  const selectedNames = useMemo(() => Array.from(selectedFiles), [selectedFiles]);
+  const fileBySelectionKey = useMemo(() => {
+    const map = new Map<string, AuthFileItem>();
+    files.forEach((file) => {
+      map.set(getAuthFileSelectionKey(file), file);
+    });
+    return map;
+  }, [files]);
+  const selectedKeys = useMemo(() => Array.from(selectedFiles), [selectedFiles]);
+  const selectedFileNames = useMemo(
+    () =>
+      Array.from(
+        new Set(selectedKeys.map(getAuthFileNameFromSelectionKey).filter((name) => name.trim()))
+      ),
+    [selectedKeys]
+  );
+  const selectedTargetFiles = useMemo(
+    () =>
+      selectedKeys
+        .map((key) => fileBySelectionKey.get(key))
+        .filter((file): file is AuthFileItem => Boolean(file)),
+    [fileBySelectionKey, selectedKeys]
+  );
+  const selectedPatchTargets = useMemo(
+    () => selectedTargetFiles.map(getAuthFilePatchTarget),
+    [selectedTargetFiles]
+  );
+  const selectedWebsocketPatchTargets = useMemo(
+    () =>
+      selectedTargetFiles
+        .filter((file) => supportsAuthFileWebsockets(String(file.type ?? file.provider ?? '')))
+        .map(getAuthFilePatchTarget),
+    [selectedTargetFiles]
+  );
+  const selectedNames = selectedFileNames;
   const retryableAgentRegistrationNames = useMemo(
     () =>
-      files
-        .filter((file) => {
-          if (!selectedFiles.has(file.name)) return false;
-          const registration = file.agent_identity_registration ?? file.agentIdentityRegistration;
-          return registration?.can_retry === true;
-        })
-        .map((file) => file.name),
-    [files, selectedFiles]
+      Array.from(
+        new Set(
+          selectedTargetFiles
+            .filter((file) => {
+              const registration =
+                file.agent_identity_registration ?? file.agentIdentityRegistration;
+              return registration?.can_retry === true;
+            })
+            .map((file) => file.name)
+        )
+      ),
+    [selectedTargetFiles]
   );
   const selectedHasStatusUpdating = useMemo(
-    () => selectedNames.some((name) => statusUpdating[name] === true),
-    [selectedNames, statusUpdating]
+    () => selectedFileNames.some((name) => statusUpdating[name] === true),
+    [selectedFileNames, statusUpdating]
+  );
+  const selectedHasPartialSharedAuthFile = useMemo(
+    () => hasPartialSharedAuthFileSelection(files, selectedKeys),
+    [files, selectedKeys]
   );
   const batchStatusButtonsDisabled =
     disableControls ||
-    selectedNames.length === 0 ||
+    selectedFileNames.length === 0 ||
     batchStatusUpdating ||
     selectedHasStatusUpdating;
+  const batchFieldsButtonsDisabled =
+    disableControls || selectedPatchTargets.length === 0 || batchFieldsUpdating;
+  const batchCodexFieldsButtonsDisabled =
+    disableControls || selectedWebsocketPatchTargets.length === 0 || batchFieldsUpdating;
+  const batchDeleteButtonsDisabled =
+    disableControls || selectedFileNames.length === 0 || selectedHasPartialSharedAuthFile;
 
   const openRuntimeLimitBatchEditor = useCallback(() => {
     setRuntimeLimitBatchDraft({
@@ -723,37 +1535,18 @@ export function AuthFilesPage() {
       return;
     }
 
-    const targetNames = Array.from(new Set(selectedNames));
-    if (targetNames.length === 0) return;
+    if (selectedPatchTargets.length === 0) return;
 
     setRuntimeLimitBatchSaving(true);
     try {
-      const results = await Promise.allSettled(
-        targetNames.map((name) => authFilesApi.patchFields(name, patch))
-      );
-      const successCount = results.filter((result) => result.status === 'fulfilled').length;
-      const failCount = results.length - successCount;
-      if (failCount === 0) {
-        showNotification(
-          t('auth_files.batch_runtime_limits_success', { count: successCount }),
-          'success'
-        );
-      } else {
-        showNotification(
-          t('auth_files.batch_runtime_limits_partial', {
-            success: successCount,
-            failed: failCount,
-          }),
-          'warning'
-        );
+      const result = await batchPatchFields(selectedPatchTargets, patch);
+      if (result) {
+        setRuntimeLimitBatchOpen(false);
       }
-      await loadFiles();
-      setRuntimeLimitBatchOpen(false);
-      deselectAll();
     } finally {
       setRuntimeLimitBatchSaving(false);
     }
-  }, [deselectAll, loadFiles, runtimeLimitBatchDraft, selectedNames, showNotification, t]);
+  }, [batchPatchFields, runtimeLimitBatchDraft, selectedPatchTargets, showNotification, t]);
 
   const copyTextWithNotification = useCallback(
     async (text: string) => {
@@ -767,6 +1560,46 @@ export function AuthFilesPage() {
     },
     [showNotification, t]
   );
+
+  const handleOpenBatchPriority = useCallback(() => {
+    setBatchPriorityValue('');
+    setBatchPriorityOpen(true);
+  }, []);
+
+  const handleBatchPrioritySave = useCallback(async () => {
+    const parsedPriority = parsePriorityValue(batchPriorityValue);
+    if (parsedPriority === undefined) {
+      showNotification(t('auth_files.batch_priority_invalid'), 'error');
+      return;
+    }
+
+    const result = await batchPatchFields(selectedPatchTargets, { priority: parsedPriority });
+    if (result) {
+      setBatchPriorityOpen(false);
+    }
+  }, [batchPatchFields, batchPriorityValue, selectedPatchTargets, showNotification, t]);
+
+  const handleBatchCodexWebsockets = useCallback(
+    (websockets: boolean) => {
+      void batchPatchFields(selectedWebsocketPatchTargets, { websockets });
+    },
+    [batchPatchFields, selectedWebsocketPatchTargets]
+  );
+
+  const handleCodexReauthSuccess = useCallback(async () => {
+    const target = codexReauthTarget;
+    await loadFiles();
+    await loadCodexInspectionSnapshots();
+    if (!target?.fileName) return;
+
+    const targetKey = getAuthFileCodexInspectionKey(target.fileName, target.authIndex ?? null);
+    setLastCodexInspectionResults((current) =>
+      current.filter((item) => {
+        const itemKey = getAuthFileCodexInspectionKey(item.fileName, item.authIndex ?? null);
+        return itemKey !== targetKey || !isStaleCodexReauthSnapshot(item);
+      })
+    );
+  }, [codexReauthTarget, loadCodexInspectionSnapshots, loadFiles]);
 
   const openExcludedEditor = useCallback(
     (provider?: string) => {
@@ -938,8 +1771,9 @@ export function AuthFilesPage() {
     </div>
   );
 
+  const codexResultFilterActive = codexStatusFilter !== 'all' || codexPlanFilter !== 'all';
   const deleteAllButtonLabel = (() => {
-    if (disabledOnly || healthyOnly || codexStatusFilter !== 'all') {
+    if (disabledOnly || healthyOnly || codexResultFilterActive) {
       return t('auth_files.delete_filtered_result_button');
     }
     if (problemOnly) {
@@ -1006,12 +1840,18 @@ export function AuthFilesPage() {
                       problemOnly,
                       disabledOnly,
                       healthyOnly,
-                      filteredFiles: codexStatusFilter !== 'all' ? filtered : undefined,
+                      filteredFiles:
+                        codexResultFilterActive || problemOnly
+                          ? safeDeleteFilteredFiles
+                          : undefined,
                       onResetFilterToAll: () => setFilter('all'),
                       onResetProblemOnly: () => setProblemOnly(false),
                       onResetDisabledOnly: () => setDisabledOnly(false),
                       onResetHealthyOnly: () => setHealthyOnly(false),
-                      onResetResultFilters: () => setCodexStatusFilter('all'),
+                      onResetResultFilters: () => {
+                        setCodexStatusFilter('all');
+                        setCodexPlanFilter('all');
+                      },
                     })
                   }
                   disabled={disableControls || loading || deletingAll}
@@ -1106,6 +1946,22 @@ export function AuthFilesPage() {
                       setPage(1);
                     }}
                     ariaLabel={t('auth_files.codex_status_filter_label')}
+                    fullWidth
+                  />
+                </div>
+                <div className={styles.filterItem}>
+                  <label>{t('auth_files.codex_plan_filter_label')}</label>
+                  <Select
+                    className={styles.sortSelect}
+                    value={codexPlanFilter}
+                    options={codexPlanFilterOptions}
+                    onChange={(value) => {
+                      const next = normalizeAuthFilesCodexPlanFilter(value);
+                      if (!next || next === codexPlanFilter) return;
+                      setCodexPlanFilter(next);
+                      setPage(1);
+                    }}
+                    ariaLabel={t('auth_files.codex_plan_filter_label')}
                     fullWidth
                   />
                 </div>
@@ -1242,27 +2098,39 @@ export function AuthFilesPage() {
               >
                 {pageItems.map((file) => {
                   const authFileKey = getAuthFileCodexInspectionKeyForFile(file);
+                  const codexStatus = codexStatusByAuthFileKey.get(authFileKey);
                   return (
                     <AuthFileCard
                       key={authFileKey}
                       file={file}
                       compact={compactMode}
-                      selected={selectedFiles.has(file.name)}
+                      selected={selectedFiles.has(getAuthFileSelectionKey(file))}
                       resolvedTheme={resolvedTheme}
                       disableControls={disableControls}
                       deleting={deleting}
                       statusUpdating={statusUpdating}
                       registrationRetrying={registrationRetrying[file.name] === true}
                       statusBarCache={statusBarCache}
-                      codexStatusBadges={codexStatusByAuthFileKey.get(authFileKey)?.badges ?? []}
+                      codexStatusBadges={codexStatus?.badges ?? []}
+                      codexNeedsReauth={codexStatus?.needsReauth ?? false}
+                      codexDisplayQuota={getDisplayCodexQuota(file)}
+                      antigravitySubscription={antigravitySubscriptions[file.name]}
+                      onRefreshAntigravitySubscription={refreshSubscription}
+                      quotaCooldown={getQuotaCooldownForFile(file)}
+                      accountActionCandidate={getAccountActionForFile(file)}
                       onShowModels={showModels}
+                      onReauth={(targetFile) =>
+                        resolveAuthProvider(targetFile) === 'xai'
+                          ? navigate('/oauth#oauth-provider-xai')
+                          : setCodexReauthTarget(createCodexReauthTargetFromAuthFile(targetFile))
+                      }
                       onDownload={handleDownload}
                       onOpenPrefixProxyEditor={openPrefixProxyEditor}
                       onDelete={handleDelete}
                       onToggleStatus={handleStatusToggle}
                       onRetryAgentIdentityRegistration={retryAgentIdentityRegistration}
                       onRebuildAgentIdentityRegistration={rebuildAgentIdentityRegistration}
-                      onToggleSelect={toggleSelect}
+                      onToggleSelect={() => toggleSelect(getAuthFileSelectionKey(file))}
                     />
                   );
                 })}
@@ -1302,8 +2170,9 @@ export function AuthFilesPage() {
 
       <OAuthExcludedCard
         disableControls={disableControls}
-        excludedError={excludedError}
+        loadState={excludedError}
         excluded={excluded}
+        onRetry={loadExcluded}
         onAdd={() => openExcludedEditor()}
         onEdit={openExcludedEditor}
         onDelete={deleteExcluded}
@@ -1313,10 +2182,11 @@ export function AuthFilesPage() {
         disableControls={disableControls}
         viewMode={viewMode}
         onViewModeChange={setViewMode}
+        onRetry={loadModelAlias}
         onAdd={() => openModelAliasEditor()}
         onEditProvider={openModelAliasEditor}
         onDeleteProvider={deleteModelAlias}
-        modelAliasError={modelAliasError}
+        loadState={modelAliasError}
         modelAlias={modelAlias}
         allProviderModels={allProviderModels}
         onUpdate={handleMappingUpdate}
@@ -1343,9 +2213,14 @@ export function AuthFilesPage() {
         editor={prefixProxyEditor}
         updatedText={prefixProxyUpdatedText}
         dirty={prefixProxyDirty}
+        credentialRefreshing={Boolean(
+          prefixProxyEditor?.authFile &&
+          credentialRefreshing[getAuthFileSelectionKey(prefixProxyEditor.authFile)] === true
+        )}
         onClose={closePrefixProxyEditor}
         onCopyText={copyTextWithNotification}
         onSave={handlePrefixProxySave}
+        onRefreshCredential={handleCredentialRefresh}
         onChange={handlePrefixProxyChange}
       />
 
@@ -1359,6 +2234,13 @@ export function AuthFilesPage() {
         onSave={handleSavePastedAuthJson}
       />
 
+      <CodexReauthDialog
+        open={Boolean(codexReauthTarget)}
+        target={codexReauthTarget}
+        onClose={() => setCodexReauthTarget(null)}
+        onSuccess={handleCodexReauthSuccess}
+      />
+
       <Modal
         open={runtimeLimitBatchOpen}
         onClose={() => {
@@ -1368,22 +2250,24 @@ export function AuthFilesPage() {
         width={560}
         title={t('auth_files.batch_runtime_limits_title', { count: selectedNames.length })}
         footer={
-          <>
+          <div className={styles.batchPriorityFooter}>
             <Button
               variant="secondary"
+              size="sm"
               onClick={() => setRuntimeLimitBatchOpen(false)}
               disabled={runtimeLimitBatchSaving}
             >
               {t('common.cancel')}
             </Button>
             <Button
+              size="sm"
               onClick={() => void handleRuntimeLimitBatchSave()}
               loading={runtimeLimitBatchSaving}
               disabled={disableControls || runtimeLimitBatchSaving || selectedNames.length === 0}
             >
               {t('common.save')}
             </Button>
-          </>
+          </div>
         }
       >
         <div className={styles.runtimeLimitBatchForm}>
@@ -1442,6 +2326,53 @@ export function AuthFilesPage() {
         </div>
       </Modal>
 
+      <Modal
+        open={batchPriorityOpen}
+        onClose={() => {
+          if (!batchFieldsUpdating) setBatchPriorityOpen(false);
+        }}
+        closeDisabled={batchFieldsUpdating}
+        title={t('auth_files.batch_priority_title')}
+        width={420}
+        footer={
+          <div className={styles.batchPriorityFooter}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setBatchPriorityOpen(false)}
+              disabled={batchFieldsUpdating}
+            >
+              {t('common.cancel')}
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => void handleBatchPrioritySave()}
+              disabled={batchFieldsButtonsDisabled}
+              loading={batchFieldsUpdating}
+            >
+              {t('common.confirm')}
+            </Button>
+          </div>
+        }
+      >
+        <div className={styles.batchPriorityModal}>
+          <Input
+            label={t('auth_files.priority_label')}
+            placeholder={t('auth_files.priority_placeholder')}
+            hint={t('auth_files.priority_hint')}
+            value={batchPriorityValue}
+            onChange={(event) => setBatchPriorityValue(event.target.value)}
+            disabled={disableControls || batchFieldsUpdating}
+            inputMode="numeric"
+            autoFocus
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter' || batchFieldsButtonsDisabled) return;
+              void handleBatchPrioritySave();
+            }}
+          />
+        </div>
+      </Modal>
+
       {batchActionBarVisible && typeof document !== 'undefined'
         ? createPortal(
             <div className={styles.batchActionContainer} ref={floatingBatchActionsRef}>
@@ -1482,8 +2413,8 @@ export function AuthFilesPage() {
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() => void batchDownload(selectedNames)}
-                    disabled={disableControls || selectedNames.length === 0}
+                    onClick={() => void batchDownload(selectedFileNames)}
+                    disabled={disableControls || selectedFileNames.length === 0}
                   >
                     {t('auth_files.batch_download')}
                   </Button>
@@ -1513,7 +2444,7 @@ export function AuthFilesPage() {
                   </Button>
                   <Button
                     size="sm"
-                    onClick={() => batchSetStatus(selectedNames, true)}
+                    onClick={() => void batchSetStatus(selectedFileNames, true)}
                     disabled={batchStatusButtonsDisabled}
                   >
                     {t('auth_files.batch_enable')}
@@ -1521,16 +2452,43 @@ export function AuthFilesPage() {
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() => batchSetStatus(selectedNames, false)}
+                    onClick={() => void batchSetStatus(selectedFileNames, false)}
                     disabled={batchStatusButtonsDisabled}
                   >
                     {t('auth_files.batch_disable')}
                   </Button>
                   <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={handleOpenBatchPriority}
+                    disabled={batchFieldsButtonsDisabled}
+                    loading={batchFieldsUpdating}
+                  >
+                    {t('auth_files.batch_priority_button')}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => handleBatchCodexWebsockets(true)}
+                    disabled={batchCodexFieldsButtonsDisabled}
+                    loading={batchFieldsUpdating}
+                  >
+                    {t('auth_files.batch_websockets_enable')}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => handleBatchCodexWebsockets(false)}
+                    disabled={batchCodexFieldsButtonsDisabled}
+                    loading={batchFieldsUpdating}
+                  >
+                    {t('auth_files.batch_websockets_disable')}
+                  </Button>
+                  <Button
                     variant="danger"
                     size="sm"
-                    onClick={() => batchDelete(selectedNames)}
-                    disabled={disableControls || selectedNames.length === 0}
+                    onClick={() => batchDelete(selectedFileNames)}
+                    disabled={batchDeleteButtonsDisabled}
                   >
                     {t('common.delete')}
                   </Button>

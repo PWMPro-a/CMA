@@ -25,6 +25,7 @@ import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { useAuthStore, useConfigStore, useNotificationStore } from '@/stores';
 import { logsApi } from '@/services/api/logs';
+import type { LogsQuery, LogsResponse } from '@/services/api/logs';
 import { copyToClipboard } from '@/utils/clipboard';
 import { downloadBlob } from '@/utils/download';
 import { MANAGEMENT_API_PREFIX } from '@/utils/constants';
@@ -38,6 +39,7 @@ import {
 import { parseLogLine } from './hooks/logParsing';
 import { useLogFilters } from './hooks/useLogFilters';
 import { isNearBottom, useLogScroller } from './hooks/useLogScroller';
+import { isFileLogsAvailable } from './logFeatureAvailability';
 import styles from './LogsPage.module.scss';
 
 interface ErrorLogItem {
@@ -63,6 +65,20 @@ const getErrorMessage = (err: unknown): string => {
 };
 
 type TabType = 'logs' | 'errors';
+type LogPosition = Pick<LogsQuery, 'after' | 'cursor'>;
+
+const buildLogsQuery = (incremental: boolean, position: LogPosition): LogsQuery => {
+  if (!incremental) return { limit: MAX_BUFFER_LINES };
+
+  const params: LogsQuery = { limit: MAX_BUFFER_LINES };
+  if (position.cursor) {
+    params.cursor = position.cursor;
+  }
+  if (position.after !== undefined && position.after > 0) {
+    params.after = position.after;
+  }
+  return params;
+};
 
 export function LogsPage() {
   const { t } = useTranslation();
@@ -70,11 +86,12 @@ export function LogsPage() {
   const { showNotification, showConfirmation } = useNotificationStore();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const config = useConfigStore((state) => state.config);
-  const requestLogEnabled = config?.requestLog ?? false;
+  const fileLogsAvailable = isFileLogsAvailable(config);
 
   const [activeTab, setActiveTab] = useState<TabType>(() =>
     searchParams.get('tab') === 'errors' ? 'errors' : 'logs'
   );
+  const requestLogEnabled = config?.requestLog ?? false;
   const [logState, setLogState] = useState<LogState>({ buffer: [], visibleFrom: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -106,10 +123,29 @@ export function LogsPage() {
   const logRequestInFlightRef = useRef(false);
   const pendingFullReloadRef = useRef(false);
 
-  // 保存最新时间戳用于增量获取
-  const latestTimestampRef = useRef<number>(0);
+  // 新版 CPA 优先使用 cursor，旧版接口继续使用 after 时间戳。
+  const logPositionRef = useRef<LogPosition>({});
+
+  const resetLogPosition = () => {
+    logPositionRef.current = {};
+  };
+
+  const updateLogPosition = (data: LogsResponse, incremental: boolean) => {
+    const currentPosition = logPositionRef.current;
+    const nextPosition: LogPosition = {};
+    if (data.nextCursor) {
+      nextPosition.cursor = data.nextCursor;
+    }
+    if (data.latestAfter !== undefined) {
+      nextPosition.after = data.latestAfter;
+    } else if (incremental && currentPosition.after !== undefined) {
+      nextPosition.after = currentPosition.after;
+    }
+    logPositionRef.current = nextPosition;
+  };
 
   const disableControls = connectionStatus !== 'connected';
+  const canLoadFileLogs = activeTab === 'logs' && fileLogsAvailable;
 
   const handleTabChange = (tab: TabType) => {
     setActiveTab(tab);
@@ -123,6 +159,11 @@ export function LogsPage() {
   };
 
   const loadLogs = async (incremental = false) => {
+    if (!canLoadFileLogs) {
+      setLoading(false);
+      return;
+    }
+
     if (connectionStatus !== 'connected') {
       setLoading(false);
       return;
@@ -150,18 +191,17 @@ export function LogsPage() {
         scrollerInstance?.requestScrollToBottom();
       }
 
-      const params =
-        incremental && latestTimestampRef.current > 0 ? { after: latestTimestampRef.current } : {};
+      const params = buildLogsQuery(incremental, logPositionRef.current);
       const data = await logsApi.fetchLogs(params);
-
-      // 更新时间戳
-      if (data['latest-timestamp']) {
-        latestTimestampRef.current = data['latest-timestamp'];
-      }
+      updateLogPosition(data, incremental);
 
       const newLines = Array.isArray(data.lines) ? data.lines : [];
 
-      if (incremental && newLines.length > 0) {
+      if (incremental && data.cursorReset) {
+        const buffer = newLines.slice(-MAX_BUFFER_LINES);
+        const visibleFrom = Math.max(buffer.length - INITIAL_DISPLAY_LINES, 0);
+        setLogState({ buffer, visibleFrom });
+      } else if (incremental && newLines.length > 0) {
         // 增量更新：追加新日志并限制缓冲区大小（避免内存与渲染膨胀）
         setLogState((prev) => {
           const prevRenderedCount = prev.buffer.length - prev.visibleFrom;
@@ -200,8 +240,6 @@ export function LogsPage() {
     }
   };
 
-  useHeaderRefresh(() => loadLogs(false));
-
   const clearLogs = async () => {
     showConfirmation({
       title: t('logs.clear_confirm_title', { defaultValue: 'Clear Logs' }),
@@ -212,7 +250,7 @@ export function LogsPage() {
         try {
           await logsApi.clearLogs();
           setLogState({ buffer: [], visibleFrom: 0 });
-          latestTimestampRef.current = 0;
+          resetLogPosition();
           showNotification(t('logs.clear_success'), 'success');
         } catch (err: unknown) {
           const message = getErrorMessage(err);
@@ -255,6 +293,13 @@ export function LogsPage() {
     }
   };
 
+  useHeaderRefresh(() => {
+    if (activeTab === 'errors') {
+      return loadErrorLogs();
+    }
+    return loadLogs(false);
+  }, connectionStatus === 'connected');
+
   const downloadErrorLog = async (name: string) => {
     try {
       const response = await logsApi.downloadErrorLog(name);
@@ -275,12 +320,20 @@ export function LogsPage() {
   }, [searchParams]);
 
   useEffect(() => {
-    if (connectionStatus === 'connected') {
-      latestTimestampRef.current = 0;
-      loadLogs(false);
+    if (connectionStatus !== 'connected') {
+      setLoading(false);
+      return;
     }
+
+    if (!canLoadFileLogs) {
+      setLoading(false);
+      return;
+    }
+
+    resetLogPosition();
+    loadLogs(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connectionStatus]);
+  }, [connectionStatus, canLoadFileLogs]);
 
   useEffect(() => {
     if (activeTab !== 'errors') return;
@@ -290,7 +343,7 @@ export function LogsPage() {
   }, [activeTab, connectionStatus, requestLogEnabled]);
 
   useEffect(() => {
-    if (!autoRefresh || connectionStatus !== 'connected') {
+    if (!autoRefresh || connectionStatus !== 'connected' || !canLoadFileLogs) {
       return;
     }
     const id = window.setInterval(() => {
@@ -298,7 +351,7 @@ export function LogsPage() {
     }, 8000);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRefresh, connectionStatus]);
+  }, [autoRefresh, connectionStatus, canLoadFileLogs]);
 
   const visibleLines = useMemo(
     () => logState.buffer.slice(logState.visibleFrom),

@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/pricing"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/usagehourly"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
 const (
@@ -22,11 +25,19 @@ const (
 )
 
 type Service struct {
-	store *store.Store
+	store        *store.Store
+	hourlyReader *usagehourly.Reader
 }
 
-func New(store *store.Store) *Service {
-	return &Service{store: store}
+func New(store *store.Store, hourlyRollupEnabled ...bool) *Service {
+	enabled := true
+	if len(hourlyRollupEnabled) > 0 {
+		enabled = hourlyRollupEnabled[0]
+	}
+	return &Service{
+		store:        store,
+		hourlyReader: usagehourly.New(store, enabled, "dashboard-rollup"),
+	}
 }
 
 type SummaryParams struct {
@@ -164,20 +175,27 @@ type FailureSource struct {
 }
 
 type RecentFailure struct {
-	TimestampMS           int64  `json:"timestamp_ms"`
-	Model                 string `json:"model"`
-	APIKeyHash            string `json:"api_key_hash"`
-	Source                string `json:"source,omitempty"`
-	SourceHash            string `json:"source_hash"`
-	AuthIndex             string `json:"auth_index"`
-	AccountSnapshot       string `json:"account_snapshot,omitempty"`
-	AuthLabelSnapshot     string `json:"auth_label_snapshot,omitempty"`
-	AuthProviderSnapshot  string `json:"auth_provider_snapshot,omitempty"`
-	AuthProjectIDSnapshot string `json:"auth_project_id_snapshot,omitempty"`
-	Endpoint              string `json:"endpoint"`
-	DurationMS            *int64 `json:"duration_ms"`
-	FailStatusCode        *int64 `json:"fail_status_code,omitempty"`
-	FailSummary           string `json:"fail_summary,omitempty"`
+	TimestampMS            int64                         `json:"timestamp_ms"`
+	Model                  string                        `json:"model"`
+	APIKeyHash             string                        `json:"api_key_hash"`
+	Source                 string                        `json:"source,omitempty"`
+	SourceHash             string                        `json:"source_hash"`
+	AuthIndex              string                        `json:"auth_index"`
+	AccountSnapshot        string                        `json:"account_snapshot,omitempty"`
+	AuthLabelSnapshot      string                        `json:"auth_label_snapshot,omitempty"`
+	AuthProviderSnapshot   string                        `json:"auth_provider_snapshot,omitempty"`
+	AuthProjectIDSnapshot  string                        `json:"auth_project_id_snapshot,omitempty"`
+	Endpoint               string                        `json:"endpoint"`
+	DurationMS             *int64                        `json:"duration_ms"`
+	FailStatusCode         *int64                        `json:"fail_status_code,omitempty"`
+	FailSummary            string                        `json:"fail_summary,omitempty"`
+	ResponseMetadata       *usage.ResponseHeaderMetadata `json:"response_metadata,omitempty"`
+	HeaderQuotaRecoverAtMS *int64                        `json:"header_quota_recover_at_ms,omitempty"`
+	HeaderQuotaUsedPercent *float64                      `json:"header_quota_used_percent,omitempty"`
+	HeaderQuotaPlanType    string                        `json:"header_quota_plan_type,omitempty"`
+	HeaderErrorKind        string                        `json:"header_error_kind,omitempty"`
+	HeaderErrorCode        string                        `json:"header_error_code,omitempty"`
+	HeaderTraceID          string                        `json:"header_trace_id,omitempty"`
 }
 
 type SummaryResponse struct {
@@ -219,52 +237,84 @@ func (s *Service) Summary(ctx context.Context, p SummaryParams) (SummaryResponse
 		recentLimit = defaultRecentFailures
 	}
 
-	todayAgg, err := s.store.AggregateBetween(ctx, p.TodayStartMS, nowMS)
-	if err != nil {
-		return SummaryResponse{}, err
-	}
 	rollingStartMS := nowMS - rollingWindowMs
-	rollingAgg, err := s.store.AggregateBetween(ctx, rollingStartMS, nowMS)
-	if err != nil {
-		return SummaryResponse{}, err
-	}
-	modelStats, err := s.store.ModelStatsBetween(ctx, p.TodayStartMS, nowMS)
-	if err != nil {
-		return SummaryResponse{}, err
-	}
-	topStats, err := s.store.TopModelsBetween(ctx, p.TodayStartMS, nowMS, topLimit)
-	if err != nil {
-		return SummaryResponse{}, err
-	}
-	recentFailures, err := s.store.RecentFailuresBetween(ctx, p.TodayStartMS, nowMS, recentLimit)
-	if err != nil {
-		return SummaryResponse{}, err
-	}
-	prices, err := s.store.LoadModelPrices(ctx)
-	if err != nil {
-		return SummaryResponse{}, err
-	}
 	filter := store.AnalyticsFilter{
 		FromMS:        p.TodayStartMS,
 		ToMS:          nowMS,
 		IncludeFailed: true,
 	}
-	timeline, err := s.store.HourlyTimelineBetween(ctx, p.TodayStartMS, nowMS)
-	if err != nil {
-		return SummaryResponse{}, err
-	}
 	healthTimelineToMS := p.TodayStartMS + int64(healthTimelineBuckets)*healthTimelineBucketMs
-	healthTimelinePoints, err := s.store.BucketTimelineBetween(ctx, p.TodayStartMS, nowMS, healthTimelineBucketMs)
-	if err != nil {
-		return SummaryResponse{}, err
+
+	queryCtx, cancelQueries := context.WithCancel(ctx)
+	defer cancelQueries()
+
+	var (
+		todayAgg             store.Aggregate
+		modelStats           []store.ModelStat
+		topStats             []store.ModelStat
+		timeline             []store.TimelinePoint
+		rollingAgg           store.Aggregate
+		recentFailures       []store.RecentFailure
+		prices               map[string]store.ModelPrice
+		healthTimelinePoints []store.TimelinePoint
+		channelStats         []store.ChannelModelStat
+		failureSources       []store.FailureSourceStat
+	)
+	var waitGroup sync.WaitGroup
+	var firstError error
+	var errorOnce sync.Once
+	runQuery := func(query func() error) {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			if err := query(); err != nil {
+				errorOnce.Do(func() {
+					firstError = err
+					cancelQueries()
+				})
+			}
+		}()
 	}
-	channelStats, err := s.store.ChannelModelStatsWithFilter(ctx, filter)
-	if err != nil {
-		return SummaryResponse{}, err
-	}
-	failureSources, err := s.store.FailureSourcesWithFilter(ctx, filter)
-	if err != nil {
-		return SummaryResponse{}, err
+
+	runQuery(func() error {
+		var err error
+		todayAgg, modelStats, topStats, timeline, err = s.loadTodayMetrics(queryCtx, p.TodayStartMS, nowMS, topLimit)
+		return err
+	})
+	runQuery(func() error {
+		var err error
+		rollingAgg, err = s.store.AggregateBetween(queryCtx, rollingStartMS, nowMS)
+		return err
+	})
+	runQuery(func() error {
+		var err error
+		recentFailures, err = s.store.RecentFailuresBetween(queryCtx, p.TodayStartMS, nowMS, recentLimit)
+		return err
+	})
+	runQuery(func() error {
+		var err error
+		prices, err = s.store.LoadModelPrices(queryCtx)
+		return err
+	})
+	runQuery(func() error {
+		var err error
+		healthTimelinePoints, err = s.store.BucketTimelineBetween(queryCtx, p.TodayStartMS, nowMS, healthTimelineBucketMs)
+		return err
+	})
+	runQuery(func() error {
+		var err error
+		channelStats, err = s.store.ChannelModelStatsWithFilter(queryCtx, filter)
+		return err
+	})
+	runQuery(func() error {
+		var err error
+		failureSources, err = s.store.FailureSourcesWithFilter(queryCtx, filter)
+		return err
+	})
+
+	waitGroup.Wait()
+	if firstError != nil {
+		return SummaryResponse{}, firstError
 	}
 	today := buildTodaySummary(todayAgg, modelStats, prices)
 	trafficTimeline := buildTrafficTimeline(p.TodayStartMS, nowMS, timeline)
@@ -288,6 +338,76 @@ func (s *Service) Summary(ctx context.Context, p SummaryParams) (SummaryResponse
 		FailureSources:  buildFailureSources(failureSources, defaultHealthRows),
 		RecentFailures:  buildRecentFailures(recentFailures),
 	}, nil
+}
+
+func (s *Service) loadTodayMetrics(ctx context.Context, fromMS, toMS int64, topLimit int) (store.Aggregate, []store.ModelStat, []store.ModelStat, []store.TimelinePoint, error) {
+	if agg, modelStats, timeline, ok := s.loadTodayMetricsFromRollup(ctx, fromMS, toMS); ok {
+		return agg, modelStats, selectTopModelStats(modelStats, topLimit), timeline, nil
+	}
+
+	agg, err := s.store.AggregateBetween(ctx, fromMS, toMS)
+	if err != nil {
+		return store.Aggregate{}, nil, nil, nil, err
+	}
+	modelStats, err := s.store.ModelStatsBetween(ctx, fromMS, toMS)
+	if err != nil {
+		return store.Aggregate{}, nil, nil, nil, err
+	}
+	topStats, err := s.store.TopModelsBetween(ctx, fromMS, toMS, topLimit)
+	if err != nil {
+		return store.Aggregate{}, nil, nil, nil, err
+	}
+	timeline, err := s.store.HourlyTimelineBetween(ctx, fromMS, toMS)
+	if err != nil {
+		return store.Aggregate{}, nil, nil, nil, err
+	}
+	return agg, modelStats, topStats, timeline, nil
+}
+
+func (s *Service) loadTodayMetricsFromRollup(ctx context.Context, fromMS, toMS int64) (store.Aggregate, []store.ModelStat, []store.TimelinePoint, bool) {
+	snapshot, ok := s.hourlyReader.Load(ctx, fromMS, toMS)
+	if !ok {
+		return store.Aggregate{}, nil, nil, false
+	}
+	timeline, ok := s.hourlyReader.DashboardTimeline(ctx, snapshot, fromMS, toMS)
+	if !ok {
+		return store.Aggregate{}, nil, nil, false
+	}
+	return snapshot.Aggregate, snapshot.ModelStats, timeline, true
+}
+
+func selectTopModelStats(stats []store.ModelStat, limit int) []store.ModelStat {
+	if limit <= 0 {
+		limit = defaultTopModels
+	}
+	callsByModel := make(map[string]int64)
+	for _, stat := range stats {
+		callsByModel[stat.Model] += stat.Calls
+	}
+	models := make([]string, 0, len(callsByModel))
+	for model := range callsByModel {
+		models = append(models, model)
+	}
+	sort.SliceStable(models, func(i, j int) bool {
+		if callsByModel[models[i]] != callsByModel[models[j]] {
+			return callsByModel[models[i]] > callsByModel[models[j]]
+		}
+		return models[i] < models[j]
+	})
+	if len(models) > limit {
+		models = models[:limit]
+	}
+	selected := make(map[string]bool, len(models))
+	for _, model := range models {
+		selected[model] = true
+	}
+	result := make([]store.ModelStat, 0)
+	for _, stat := range stats {
+		if selected[stat.Model] {
+			result = append(result, stat)
+		}
+	}
+	return result
 }
 
 func buildTodaySummary(agg store.Aggregate, modelStats []store.ModelStat, prices map[string]store.ModelPrice) TodaySummary {
@@ -447,15 +567,39 @@ func requestHealthTone(calls int64, failureRate float64, future bool) string {
 }
 
 func buildTokenMix(today TodaySummary) []TokenMixSegment {
-	total := today.InputTokens + today.OutputTokens + today.ReasoningTokens +
-		today.CachedTokens + today.CacheReadTokens + today.CacheCreationTokens
+	totalInputTokens := max(today.InputTokens, int64(0))
+	cachedTokens := max(today.CachedTokens, int64(0)) +
+		max(today.CacheReadTokens, int64(0)) +
+		max(today.CacheCreationTokens, int64(0))
+	// InputTokens is normalized total input, so cache buckets are already included in it.
+	inputTokens := max(totalInputTokens-cachedTokens, int64(0))
+	outputTokens := max(today.OutputTokens, int64(0))
+	reasoningTokens := max(today.ReasoningTokens, int64(0))
+
+	if today.TotalTokens > 0 {
+		overflow := inputTokens + cachedTokens + outputTokens + reasoningTokens - today.TotalTokens
+		if overflow > 0 {
+			reasoningDeduction := min(min(outputTokens, reasoningTokens), overflow)
+			outputTokens -= reasoningDeduction
+			overflow -= reasoningDeduction
+		}
+		if overflow > 0 {
+			outputDeduction := min(outputTokens, overflow)
+			outputTokens -= outputDeduction
+			overflow -= outputDeduction
+		}
+		if overflow > 0 {
+			inputDeduction := min(inputTokens, overflow)
+			inputTokens -= inputDeduction
+		}
+	}
+
+	total := inputTokens + cachedTokens + outputTokens + reasoningTokens
 	return []TokenMixSegment{
-		{Key: "input", Tokens: today.InputTokens, Share: rate(today.InputTokens, total)},
-		{Key: "output", Tokens: today.OutputTokens, Share: rate(today.OutputTokens, total)},
-		{Key: "reasoning", Tokens: today.ReasoningTokens, Share: rate(today.ReasoningTokens, total)},
-		{Key: "cached", Tokens: today.CachedTokens, Share: rate(today.CachedTokens, total)},
-		{Key: "cache_read", Tokens: today.CacheReadTokens, Share: rate(today.CacheReadTokens, total)},
-		{Key: "cache_creation", Tokens: today.CacheCreationTokens, Share: rate(today.CacheCreationTokens, total)},
+		{Key: "input", Tokens: inputTokens, Share: rate(inputTokens, total)},
+		{Key: "cached", Tokens: cachedTokens, Share: rate(cachedTokens, total)},
+		{Key: "output", Tokens: outputTokens, Share: rate(outputTokens, total)},
+		{Key: "reasoning", Tokens: reasoningTokens, Share: rate(reasoningTokens, total)},
 	}
 }
 
@@ -518,9 +662,9 @@ func buildChannelHealth(stats []store.ChannelModelStat, prices map[string]store.
 		entry.row.Failures += stat.FailureCalls
 		entry.row.Tokens += stat.TotalTokens
 		entry.row.Cost += costForChannelStat(stat, prices)
-		if stat.AvgLatencyMS.Valid {
-			entry.latencySum += stat.AvgLatencyMS.Float64
-			entry.latencyN++
+		if stat.AvgLatencyMS.Valid && stat.LatencySamples > 0 {
+			entry.latencySum += stat.AvgLatencyMS.Float64 * float64(stat.LatencySamples)
+			entry.latencyN += stat.LatencySamples
 		}
 	}
 
@@ -601,20 +745,27 @@ func buildRecentFailures(failures []store.RecentFailure) []RecentFailure {
 	result := make([]RecentFailure, 0, len(failures))
 	for _, failure := range failures {
 		result = append(result, RecentFailure{
-			TimestampMS:           failure.TimestampMS,
-			Model:                 failure.Model,
-			APIKeyHash:            failure.APIKeyHash,
-			Source:                failure.Source,
-			SourceHash:            failure.SourceHash,
-			AuthIndex:             failure.AuthIndex,
-			AccountSnapshot:       failure.AccountSnapshot,
-			AuthLabelSnapshot:     failure.AuthLabelSnapshot,
-			AuthProviderSnapshot:  failure.AuthProviderSnapshot,
-			AuthProjectIDSnapshot: failure.AuthProjectIDSnapshot,
-			Endpoint:              failure.Endpoint,
-			DurationMS:            nullableInt(failure.LatencyMS.Valid, failure.LatencyMS.Int64),
-			FailStatusCode:        nullableInt(failure.FailStatusCode.Valid, failure.FailStatusCode.Int64),
-			FailSummary:           failure.FailSummary,
+			TimestampMS:            failure.TimestampMS,
+			Model:                  failure.Model,
+			APIKeyHash:             failure.APIKeyHash,
+			Source:                 failure.Source,
+			SourceHash:             failure.SourceHash,
+			AuthIndex:              failure.AuthIndex,
+			AccountSnapshot:        failure.AccountSnapshot,
+			AuthLabelSnapshot:      failure.AuthLabelSnapshot,
+			AuthProviderSnapshot:   failure.AuthProviderSnapshot,
+			AuthProjectIDSnapshot:  failure.AuthProjectIDSnapshot,
+			Endpoint:               failure.Endpoint,
+			DurationMS:             nullableInt(failure.LatencyMS.Valid, failure.LatencyMS.Int64),
+			FailStatusCode:         nullableInt(failure.FailStatusCode.Valid, failure.FailStatusCode.Int64),
+			FailSummary:            failure.FailSummary,
+			ResponseMetadata:       failure.ResponseMetadata,
+			HeaderQuotaRecoverAtMS: nullableInt(failure.HeaderQuotaRecoverAtMS.Valid, failure.HeaderQuotaRecoverAtMS.Int64),
+			HeaderQuotaUsedPercent: nullableFloat(failure.HeaderQuotaUsedPercent.Valid, failure.HeaderQuotaUsedPercent.Float64),
+			HeaderQuotaPlanType:    failure.HeaderQuotaPlanType,
+			HeaderErrorKind:        failure.HeaderErrorKind,
+			HeaderErrorCode:        failure.HeaderErrorCode,
+			HeaderTraceID:          failure.HeaderTraceID,
 		})
 	}
 	return result
@@ -662,30 +813,32 @@ func aggregateModelStats(stats []store.ModelStat, prices map[string]store.ModelP
 }
 
 func costForStat(stat store.ModelStat, prices map[string]store.ModelPrice) float64 {
-	model := stat.BillingModel
-	if model == "" {
-		model = stat.Model
-	}
-	return pricing.CostForModel(model, pricing.ModelTokens{
-		InputTokens:         stat.InputTokens,
-		OutputTokens:        stat.OutputTokens,
-		CachedTokens:        stat.CachedTokens,
-		CacheReadTokens:     stat.CacheReadTokens,
-		CacheCreationTokens: stat.CacheCreationTokens,
+	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
+		InputTokens:             stat.InputTokens,
+		OutputTokens:            stat.OutputTokens,
+		CachedTokens:            stat.CachedTokens,
+		CacheReadTokens:         stat.CacheReadTokens,
+		CacheCreationTokens:     stat.CacheCreationTokens,
+		LongInputTokens:         stat.LongInputTokens,
+		LongOutputTokens:        stat.LongOutputTokens,
+		LongCachedTokens:        stat.LongCachedTokens,
+		LongCacheReadTokens:     stat.LongCacheReadTokens,
+		LongCacheCreationTokens: stat.LongCacheCreationTokens,
 	}, prices)
 }
 
 func costForChannelStat(stat store.ChannelModelStat, prices map[string]store.ModelPrice) float64 {
-	model := stat.BillingModel
-	if model == "" {
-		model = stat.Model
-	}
-	return pricing.CostForModel(model, pricing.ModelTokens{
-		InputTokens:         stat.InputTokens,
-		OutputTokens:        stat.OutputTokens,
-		CachedTokens:        stat.CachedTokens,
-		CacheReadTokens:     stat.CacheReadTokens,
-		CacheCreationTokens: stat.CacheCreationTokens,
+	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
+		InputTokens:             stat.InputTokens,
+		OutputTokens:            stat.OutputTokens,
+		CachedTokens:            stat.CachedTokens,
+		CacheReadTokens:         stat.CacheReadTokens,
+		CacheCreationTokens:     stat.CacheCreationTokens,
+		LongInputTokens:         stat.LongInputTokens,
+		LongOutputTokens:        stat.LongOutputTokens,
+		LongCachedTokens:        stat.LongCachedTokens,
+		LongCacheReadTokens:     stat.LongCacheReadTokens,
+		LongCacheCreationTokens: stat.LongCacheCreationTokens,
 	}, prices)
 }
 

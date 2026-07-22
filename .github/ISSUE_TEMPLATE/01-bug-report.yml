@@ -10,6 +10,25 @@ body:
         感谢反馈。请尽量完整填写下面信息，否则很难判断是 CPA、CPA Manager Plus、网络、Docker 还是配置问题。
 
   - type: dropdown
+    id: problem-type
+    attributes:
+      label: 问题类型
+      description: 请选择最接近的问题类型，便于快速分流。
+      options:
+        - 请求监控为空或数据延迟
+        - 用量 / 成本统计不准确
+        - AI 提供商不可用或测活异常
+        - 认证文件 / 配额 / 巡检异常
+        - 自动禁用 / 自动恢复异常
+        - 登录 / 权限 / Management Key
+        - 配置保存或配置读取异常
+        - 前端显示或交互异常
+        - 部署 / 网络 / 反代异常
+        - 其他
+    validations:
+      required: true
+
+  - type: dropdown
     id: deploy-mode
     attributes:
       label: 部署方式

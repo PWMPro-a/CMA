@@ -4,6 +4,8 @@
 
 export type Theme = 'white' | 'dark' | 'auto';
 
+export type VisualEffectsMode = 'full' | 'reduced';
+
 export type Language = 'zh-CN' | 'zh-TW' | 'en' | 'ru';
 
 export type NotificationType = 'info' | 'success' | 'warning' | 'error';

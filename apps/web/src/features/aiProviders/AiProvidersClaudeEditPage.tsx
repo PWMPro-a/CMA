@@ -365,7 +365,9 @@ export function AiProvidersClaudeEditPage() {
 
             <div className={styles.modelConfigSection}>
               <div className={styles.modelConfigHeader}>
-                <label className={styles.modelConfigTitle}>{t('ai_providers.claude_models_label')}</label>
+                <label className={styles.modelConfigTitle}>
+                  {t('ai_providers.claude_models_label')}
+                </label>
                 <div className={styles.modelConfigToolbar}>
                   <Button
                     variant="secondary"
@@ -392,6 +394,7 @@ export function AiProvidersClaudeEditPage() {
               </div>
 
               <div className={styles.sectionHint}>{t('ai_providers.claude_models_hint')}</div>
+              <div className={styles.sectionHint}>{t('ai_providers.model_alias_scope_hint')}</div>
 
               <ModelInputList
                 entries={form.modelEntries}
@@ -406,11 +409,15 @@ export function AiProvidersClaudeEditPage() {
                 removeButtonClassName={styles.modelRowRemoveButton}
                 removeButtonTitle={t('common.delete')}
                 removeButtonAriaLabel={t('common.delete')}
+                showForceMapping
+                forceMappingLabel={t('ai_providers.force_mapping_label')}
               />
 
               <div className={styles.modelTestPanel}>
                 <div className={styles.modelTestMeta}>
-                  <label className={styles.modelTestLabel}>{t('ai_providers.claude_test_title')}</label>
+                  <label className={styles.modelTestLabel}>
+                    {t('ai_providers.claude_test_title')}
+                  </label>
                   <span className={styles.modelTestHint}>{t('ai_providers.claude_test_hint')}</span>
                 </div>
                 <div className={styles.modelTestControls}>
@@ -484,9 +491,36 @@ export function AiProvidersClaudeEditPage() {
               <div className="hint">{t('ai_providers.excluded_models_hint')}</div>
             </div>
 
+            <div className="form-group">
+              <label>{t('ai_providers.disable_cooling_label')}</label>
+              <ToggleSwitch
+                checked={Boolean(form.disableCooling)}
+                onChange={(value) => setForm((prev) => ({ ...prev, disableCooling: value }))}
+                disabled={saving || disableControls || isTesting}
+                ariaLabel={t('ai_providers.disable_cooling_label')}
+              />
+              <div className="hint">{t('ai_providers.disable_cooling_hint')}</div>
+            </div>
+            <div className="form-group">
+              <label>{t('ai_providers.rebuild_mid_system_message_label')}</label>
+              <ToggleSwitch
+                checked={Boolean(form.rebuildMidSystemMessage)}
+                onChange={(value) =>
+                  setForm((prev) => ({ ...prev, rebuildMidSystemMessage: value }))
+                }
+                disabled={saving || disableControls || isTesting}
+                ariaLabel={t('ai_providers.rebuild_mid_system_message_label')}
+              />
+              <div className="hint">
+                {t('ai_providers.rebuild_mid_system_message_hint')}
+              </div>
+            </div>
+
             <div className={styles.modelConfigSection}>
               <div className={styles.modelConfigHeader}>
-                <label className={styles.modelConfigTitle}>{t('ai_providers.claude_cloak_title')}</label>
+                <label className={styles.modelConfigTitle}>
+                  {t('ai_providers.claude_cloak_title')}
+                </label>
                 <div className={styles.modelConfigToolbar}>
                   <ToggleSwitch
                     checked={Boolean(form.cloak)}
@@ -499,9 +533,12 @@ export function AiProvidersClaudeEditPage() {
                           return { ...prev, cloak: undefined };
                         }
 
-                        const restored = prev.cloak
-                          ?? lastCloakConfigRef.current
-                          ?? { mode: 'auto', strictMode: false, sensitiveWords: [] };
+                        const restored = prev.cloak ??
+                          lastCloakConfigRef.current ?? {
+                            mode: 'auto',
+                            strictMode: false,
+                            sensitiveWords: [],
+                          };
                         const mode = String(restored.mode ?? 'auto').trim() || 'auto';
                         return {
                           ...prev,
@@ -509,6 +546,7 @@ export function AiProvidersClaudeEditPage() {
                             mode,
                             strictMode: restored.strictMode ?? false,
                             sensitiveWords: restored.sensitiveWords ?? [],
+                            cacheUserId: restored.cacheUserId,
                           },
                         };
                       })
@@ -581,7 +619,9 @@ export function AiProvidersClaudeEditPage() {
                       rows={3}
                       disabled={saving || disableControls || isTesting}
                     />
-                    <div className="hint">{t('ai_providers.claude_cloak_sensitive_words_hint')}</div>
+                    <div className="hint">
+                      {t('ai_providers.claude_cloak_sensitive_words_hint')}
+                    </div>
                   </div>
                 </>
               ) : null}

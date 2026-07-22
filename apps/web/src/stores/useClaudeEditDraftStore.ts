@@ -27,8 +27,16 @@ export type ClaudeEditBaseline = {
   prefix: string;
   baseUrl: string;
   proxyUrl: string;
+  disableCooling: boolean;
+  rebuildMidSystemMessage: boolean;
   headers: Array<{ key: string; value: string }>;
-  models: Array<{ name: string; alias: string }>;
+  models: Array<{
+    name: string;
+    alias: string;
+    forceMapping?: boolean;
+    inputModalities?: string[];
+    outputModalities?: string[];
+  }>;
   excludedModels: string[];
   cloak: ClaudeCloakBaseline;
 };

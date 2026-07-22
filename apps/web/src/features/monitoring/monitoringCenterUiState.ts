@@ -10,7 +10,7 @@ export const MONITORING_DATA_TABS: readonly MonitoringDataTab[] = [
 
 export const DEFAULT_MONITORING_DATA_TAB: MonitoringDataTab = 'accounts';
 export const DEFAULT_MONITORING_TIME_RANGE: MonitoringCenterTimeRange = 'today';
-export const DEFAULT_MONITORING_AUTO_REFRESH_MS = '5000';
+export const DEFAULT_MONITORING_AUTO_REFRESH_MS = '30000';
 export const DEFAULT_MONITORING_TABLE_PAGE_SIZE = 12;
 export const DEFAULT_MONITORING_REALTIME_PAGE_SIZE = 10;
 
@@ -28,6 +28,7 @@ export type MonitoringCenterUiState = {
   selectedModel: string;
   selectedChannel: string;
   selectedApiKeyHash: string;
+  selectedHeaderTraceId: string;
   selectedStatus: MonitoringCenterStatusFilter;
   apiKeyPageSize: number;
   realtimePageSize: number;
@@ -98,6 +99,7 @@ export const getDefaultMonitoringCenterUiState = (): MonitoringCenterUiState => 
   selectedModel: 'all',
   selectedChannel: 'all',
   selectedApiKeyHash: 'all',
+  selectedHeaderTraceId: 'all',
   selectedStatus: 'all',
   apiKeyPageSize: DEFAULT_MONITORING_TABLE_PAGE_SIZE,
   realtimePageSize: DEFAULT_MONITORING_REALTIME_PAGE_SIZE,
@@ -122,6 +124,9 @@ export const normalizeMonitoringCenterUiState = (value: unknown): MonitoringCent
     selectedModel: normalizeSelectValue(record.selectedModel),
     selectedChannel: normalizeSelectValue(record.selectedChannel),
     selectedApiKeyHash: normalizeSelectValue(record.selectedApiKeyHash),
+    // Trace IDs are high-cardinality diagnostics. Keep URL-driven exact filters
+    // supported at runtime, but do not persist hidden trace filters across visits.
+    selectedHeaderTraceId: defaults.selectedHeaderTraceId,
     selectedStatus: normalizeMonitoringStatusFilter(record.selectedStatus),
     apiKeyPageSize: normalizePageSize(
       record.apiKeyPageSize,

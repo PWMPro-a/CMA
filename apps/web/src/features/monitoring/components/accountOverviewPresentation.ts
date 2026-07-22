@@ -27,6 +27,10 @@ export type AccountQuotaEntry = {
   emptyMessage?: string;
   windows: AccountQuotaWindow[];
   error?: string;
+  failedAtMs?: number;
+  fetchedAtMs?: number;
+  observedAtMs?: number;
+  observedFromUsageHeaders?: boolean;
 };
 
 export type AccountQuotaState = {
@@ -34,14 +38,22 @@ export type AccountQuotaState = {
   targetKey: string;
   entries: AccountQuotaEntry[];
   error?: string;
+  failedAtMs?: number;
   lastRefreshedAt?: number;
 };
 
 export type AccountSummaryMetric = {
   key: string;
   label: string;
+  fullLabel?: string;
   value: string;
   valueClassName?: string;
+};
+
+export type CacheTokenPresentation = {
+  label: string;
+  fullLabel: string;
+  value: string;
 };
 
 export const formatPercent = (value: number) => `${(value * 100).toFixed(1)}%`;
@@ -51,6 +63,67 @@ const joinShort = (values: string[], limit = 2) => {
     return values.join(', ');
   }
   return `${values.slice(0, limit).join(', ')} +${values.length - limit}`;
+};
+
+const shortLabel = (t: TFunction, shortKey: string, fallbackKey: string) => {
+  const fallback = t(fallbackKey);
+  const label = t(shortKey, { defaultValue: fallback });
+  return label === shortKey ? fallback : label;
+};
+
+export const buildCacheTokenPresentation = (
+  tokens: Pick<MonitoringAccountRow, 'cachedTokens' | 'cacheReadTokens' | 'cacheCreationTokens'>,
+  t: TFunction
+): CacheTokenPresentation => {
+  const cachedTokens = Math.max(tokens.cachedTokens || 0, 0);
+  const cacheReadTokens = Math.max(tokens.cacheReadTokens || 0, 0);
+  const cacheCreationTokens = Math.max(tokens.cacheCreationTokens || 0, 0);
+  const hasFineGrainedCache = cacheReadTokens > 0 || cacheCreationTokens > 0;
+
+  if (!hasFineGrainedCache) {
+    return {
+      label: shortLabel(t, 'monitoring.cached_tokens_short', 'monitoring.cached_tokens'),
+      fullLabel: t('monitoring.cached_tokens'),
+      value: formatCompactNumber(cachedTokens),
+    };
+  }
+
+  const parts = [
+    cachedTokens > 0
+      ? { code: 'C', fullLabel: t('monitoring.cached_tokens'), value: cachedTokens }
+      : null,
+    cacheReadTokens > 0
+      ? { code: 'CR', fullLabel: t('monitoring.cache_read_tokens'), value: cacheReadTokens }
+      : null,
+    cacheCreationTokens > 0
+      ? {
+          code: 'CW',
+          fullLabel: t('monitoring.cache_creation_tokens'),
+          value: cacheCreationTokens,
+        }
+      : null,
+  ].filter((part): part is { code: string; fullLabel: string; value: number } => part !== null);
+
+  return {
+    label: parts.map((part) => part.code).join(' / '),
+    fullLabel: parts
+      .map((part) => `${part.fullLabel}: ${formatCompactNumber(part.value)}`)
+      .join(' · '),
+    value: parts.map((part) => formatCompactNumber(part.value)).join(' / '),
+  };
+};
+
+const buildAccountCacheSummaryMetric = (
+  row: MonitoringAccountRow,
+  t: TFunction
+): AccountSummaryMetric => {
+  const cacheMetric = buildCacheTokenPresentation(row, t);
+  return {
+    key: 'cached-tokens',
+    label: cacheMetric.label,
+    fullLabel: cacheMetric.fullLabel,
+    value: cacheMetric.value,
+  };
 };
 
 export const getCodexPlanLabel = (
@@ -69,18 +142,29 @@ export const getCodexPlanLabel = (
   return planType || normalized;
 };
 
+const isRedundantAccountSecondaryLabel = (candidate: string, primaryText: string) => {
+  if (!candidate || !primaryText || candidate === primaryText) return true;
+  const lowerCandidate = candidate.toLowerCase();
+  const lowerPrimary = primaryText.toLowerCase();
+  return (
+    lowerPrimary.startsWith(`${lowerCandidate} #`) || lowerCandidate.startsWith(`${lowerPrimary} #`)
+  );
+};
+
 export const buildAccountSecondaryText = (row: MonitoringAccountRow) => {
   const primaryText = row.displayAccount || row.account;
-  if (row.account && row.account !== primaryText) {
+  if (row.account && !isRedundantAccountSecondaryLabel(row.account, primaryText)) {
     return row.account;
   }
 
-  const extraAuthLabels = row.authLabels.filter((label) => label && label !== primaryText);
+  const extraAuthLabels = row.authLabels.filter(
+    (label) => label && !isRedundantAccountSecondaryLabel(label, primaryText)
+  );
   if (extraAuthLabels.length > 0) {
     return joinShort(extraAuthLabels, 2);
   }
   const extraChannels = row.channels.filter(
-    (label) => label && label !== '-' && label !== primaryText
+    (label) => label && label !== '-' && !isRedundantAccountSecondaryLabel(label, primaryText)
   );
   if (extraChannels.length > 0) {
     return joinShort(extraChannels, 2);
@@ -96,49 +180,69 @@ export const buildAccountSummaryMetrics = (
 ): AccountSummaryMetric[] => [
   {
     key: 'total-calls',
-    label: t('monitoring.total_calls'),
+    label: shortLabel(t, 'monitoring.total_calls_short', 'monitoring.total_calls'),
+    fullLabel: t('monitoring.total_calls'),
     value: formatCompactNumber(row.totalCalls),
   },
   {
     key: 'success-calls',
-    label: t('monitoring.success_calls'),
+    label: shortLabel(t, 'monitoring.success_calls_short', 'monitoring.success_calls'),
+    fullLabel: t('monitoring.success_calls'),
     value: formatCompactNumber(row.successCalls),
     valueClassName: styles.goodText,
   },
   {
     key: 'failure-calls',
-    label: t('monitoring.failure_calls'),
+    label: shortLabel(t, 'monitoring.failure_calls_short', 'monitoring.failure_calls'),
+    fullLabel: t('monitoring.failure_calls'),
     value: formatCompactNumber(row.failureCalls),
     valueClassName: row.failureCalls > 0 ? styles.badText : undefined,
   },
   {
     key: 'total-tokens',
-    label: t('monitoring.total_tokens'),
+    label: shortLabel(t, 'monitoring.total_tokens_short', 'monitoring.total_tokens'),
+    fullLabel: t('monitoring.total_tokens'),
     value: formatCompactNumber(row.totalTokens),
   },
   {
     key: 'input-tokens',
-    label: t('monitoring.input_tokens'),
+    label: shortLabel(t, 'monitoring.input_tokens_short', 'monitoring.input_tokens'),
+    fullLabel: t('monitoring.input_tokens'),
     value: formatCompactNumber(row.inputTokens),
   },
   {
     key: 'output-tokens',
-    label: t('monitoring.output_tokens'),
+    label: shortLabel(t, 'monitoring.output_tokens_short', 'monitoring.output_tokens'),
+    fullLabel: t('monitoring.output_tokens'),
     value: formatCompactNumber(row.outputTokens),
   },
+  buildAccountCacheSummaryMetric(row, t),
   {
-    key: 'cached-tokens',
-    label: t('monitoring.cached_tokens'),
-    value: formatCompactNumber(row.cachedTokens),
+    key: 'cache-creation-tokens',
+    label: shortLabel(
+      t,
+      'monitoring.cache_creation_tokens_short',
+      'monitoring.cache_creation_tokens'
+    ),
+    fullLabel: t('monitoring.cache_creation_tokens'),
+    value: formatCompactNumber(row.cacheCreationTokens),
+  },
+  {
+    key: 'cache-read-tokens',
+    label: shortLabel(t, 'monitoring.cache_read_tokens_short', 'monitoring.cache_read_tokens'),
+    fullLabel: t('monitoring.cache_read_tokens'),
+    value: formatCompactNumber(row.cacheReadTokens),
   },
   {
     key: 'estimated-cost',
-    label: t('monitoring.estimated_cost'),
+    label: shortLabel(t, 'monitoring.estimated_cost_short', 'monitoring.estimated_cost'),
+    fullLabel: t('monitoring.estimated_cost'),
     value: hasPrices ? formatUsd(row.totalCost) : '--',
   },
   {
     key: 'latest-request-time',
-    label: t('monitoring.latest_request_time'),
+    label: shortLabel(t, 'monitoring.latest_request_time_short', 'monitoring.latest_request_time'),
+    fullLabel: t('monitoring.latest_request_time'),
     value: new Date(row.lastSeenAt).toLocaleString(locale),
   },
 ];

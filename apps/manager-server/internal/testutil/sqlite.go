@@ -10,7 +10,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
-const AdminKey = "cmp_admin_test_key_0123456789abcdef"
+const AdminKey = "cpamp_test_key_0123456789abcdef"
 
 func NewConfig(t testing.TB) config.Config {
 	t.Helper()

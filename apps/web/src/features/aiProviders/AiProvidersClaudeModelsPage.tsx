@@ -50,9 +50,21 @@ export function AiProvidersClaudeModelsPage() {
       return name.includes(filter) || alias.includes(filter) || desc.includes(filter);
     });
   }, [models, search]);
+  const configuredModelNames = useMemo(
+    () =>
+      new Set(
+        form.modelEntries
+          .map((entry) => entry.name.trim().toLowerCase())
+          .filter(Boolean)
+      ),
+    [form.modelEntries]
+  );
   const visibleModelNames = useMemo(
-    () => filteredModels.map((model) => model.name),
-    [filteredModels]
+    () =>
+      filteredModels
+        .map((model) => model.name)
+        .filter((name) => !configuredModelNames.has(name.trim().toLowerCase())),
+    [configuredModelNames, filteredModels]
   );
   const allVisibleSelected = useMemo(
     () => visibleModelNames.length > 0 && visibleModelNames.every((name) => selected.has(name)),
@@ -135,7 +147,7 @@ export function AiProvidersClaudeModelsPage() {
       let changed = false;
       const next = new Set<string>();
       prev.forEach((name) => {
-        if (availableNames.has(name)) {
+        if (availableNames.has(name) && !configuredModelNames.has(name.toLowerCase())) {
           next.add(name);
         } else {
           changed = true;
@@ -143,7 +155,7 @@ export function AiProvidersClaudeModelsPage() {
       });
       return changed ? next : prev;
     });
-  }, [models]);
+  }, [configuredModelNames, models]);
 
   const handleBack = useCallback(() => {
     navigate(-1);
@@ -162,6 +174,7 @@ export function AiProvidersClaudeModelsPage() {
   }, [handleBack]);
 
   const toggleSelection = (name: string) => {
+    if (configuredModelNames.has(name.toLowerCase())) return;
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(name)) {
@@ -303,12 +316,13 @@ export function AiProvidersClaudeModelsPage() {
             <div className={styles.modelDiscoveryList}>
               {filteredModels.map((model) => {
                 const checked = selected.has(model.name);
+                const alreadyConfigured = configuredModelNames.has(model.name.trim().toLowerCase());
                 return (
                   <SelectionCheckbox
                     key={model.name}
                     checked={checked}
                     onChange={() => toggleSelection(model.name)}
-                    disabled={disableControls || saving || fetching}
+                    disabled={disableControls || saving || fetching || alreadyConfigured}
                     ariaLabel={model.name}
                     className={`${styles.modelDiscoveryRow} ${
                       checked ? styles.modelDiscoveryRowSelected : ''
@@ -317,9 +331,16 @@ export function AiProvidersClaudeModelsPage() {
                     label={
                       <div className={styles.modelDiscoveryMeta}>
                         <div className={styles.modelDiscoveryName}>
-                          {model.name}
-                          {model.alias && (
-                            <span className={styles.modelDiscoveryAlias}>{model.alias}</span>
+                          <div className={styles.modelDiscoveryNameText}>
+                            {model.name}
+                            {model.alias && (
+                              <span className={styles.modelDiscoveryAlias}>{model.alias}</span>
+                            )}
+                          </div>
+                          {alreadyConfigured && (
+                            <span className={styles.modelDiscoveryAddedBadge}>
+                              {t('ai_providers.model_discovery_already_added')}
+                            </span>
                           )}
                         </div>
                         {model.description && (

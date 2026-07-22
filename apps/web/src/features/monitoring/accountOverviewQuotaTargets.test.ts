@@ -28,12 +28,15 @@ const createAccountRow = (overrides: Partial<MonitoringAccountRow> = {}): Monito
   models: overrides.models ?? [],
 });
 
+const createAuthState = (overrides: MonitoringAccountAuthState): MonitoringAccountAuthState =>
+  overrides;
+
 describe('accountOverviewQuotaTargets', () => {
   it('builds quota targets for providers the account actually used', () => {
     const authStateByRowId = new Map<string, MonitoringAccountAuthState>([
       [
         'account@example.com',
-        {
+        createAuthState({
           files: [
             {
               name: 'alpha.json',
@@ -57,9 +60,8 @@ describe('accountOverviewQuotaTargets', () => {
               account: 'account@example.com',
             },
           ],
-          toggleableFileNames: ['alpha.json', 'beta.json', 'gamma.json'],
           enabledState: 'enabled',
-        },
+        }),
       ],
     ]);
 
@@ -85,7 +87,7 @@ describe('accountOverviewQuotaTargets', () => {
     const authStateByRowId = new Map<string, MonitoringAccountAuthState>([
       [
         'account@example.com',
-        {
+        createAuthState({
           files: [
             {
               name: 'codex-without-account.json',
@@ -95,9 +97,8 @@ describe('accountOverviewQuotaTargets', () => {
               account: 'account@example.com',
             },
           ],
-          toggleableFileNames: ['codex-without-account.json'],
           enabledState: 'enabled',
-        },
+        }),
       ],
     ]);
 
@@ -127,7 +128,7 @@ describe('accountOverviewQuotaTargets', () => {
     const authStateByRowId = new Map<string, MonitoringAccountAuthState>([
       [
         'account@example.com',
-        {
+        createAuthState({
           files: [
             {
               name: 'antigravity.json',
@@ -136,35 +137,21 @@ describe('accountOverviewQuotaTargets', () => {
               label: 'Antigravity',
             },
             {
-              name: 'gemini-cli.json',
-              type: 'gemini-cli',
-              authIndex: '2',
-              label: 'Gemini CLI',
-            },
-            {
               name: 'kimi.json',
               type: 'kimi',
-              authIndex: '3',
+              authIndex: '2',
               label: 'Kimi',
-            },
-            {
-              name: 'runtime-gemini-cli.json',
-              type: 'gemini-cli',
-              authIndex: '4',
-              runtimeOnly: true,
-              label: 'Runtime Gemini CLI',
             },
             {
               name: 'disabled-claude.json',
               type: 'claude',
-              authIndex: '5',
+              authIndex: '3',
               disabled: true,
               label: 'Disabled Claude',
             },
           ],
-          toggleableFileNames: [],
           enabledState: 'enabled',
-        },
+        }),
       ],
     ]);
 
@@ -173,7 +160,7 @@ describe('accountOverviewQuotaTargets', () => {
         createAccountRow({
           id: 'account@example.com',
           account: 'account@example.com',
-          authIndices: ['1', '2', '3', '4', '5'],
+          authIndices: ['1', '2', '3'],
         }),
       ],
       authStateByRowId
@@ -181,7 +168,6 @@ describe('accountOverviewQuotaTargets', () => {
 
     expect(result.get('account@example.com')).toMatchObject([
       { provider: 'antigravity', fileName: 'antigravity.json' },
-      { provider: 'gemini-cli', fileName: 'gemini-cli.json' },
       { provider: 'kimi', fileName: 'kimi.json' },
     ]);
   });
@@ -190,7 +176,7 @@ describe('accountOverviewQuotaTargets', () => {
     const authStateByRowId = new Map<string, MonitoringAccountAuthState>([
       [
         'account@example.com',
-        {
+        createAuthState({
           files: [
             {
               name: 'codex.json',
@@ -207,9 +193,8 @@ describe('accountOverviewQuotaTargets', () => {
               account: 'account@example.com',
             },
           ],
-          toggleableFileNames: ['codex.json', 'claude.json'],
           enabledState: 'enabled',
-        },
+        }),
       ],
     ]);
 

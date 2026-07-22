@@ -26,6 +26,10 @@
   &.sidebar-is-collapsed {
     --sidebar-active-width: var(--sidebar-collapsed-width);
   }
+
+  &.plugin-resource-shell {
+    background: var(--bg-primary);
+  }
 }
 
 .main-body {
@@ -50,8 +54,8 @@
   height: var(--navbar-height);
   overflow: visible;
   background: var(--app-surface);
-  backdrop-filter: blur(var(--app-blur));
-  -webkit-backdrop-filter: blur(var(--app-blur));
+  backdrop-filter: var(--glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   border-bottom: 1px solid var(--app-border);
   box-shadow: none;
   display: flex;
@@ -140,6 +144,7 @@
   background: transparent;
   color: var(--app-text-regular);
   box-shadow: none;
+  text-decoration: none;
 
   > span {
     display: inline-flex;
@@ -155,7 +160,8 @@
 }
 
 .language-menu,
-.theme-menu {
+.theme-menu,
+.visual-effects-menu {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -167,7 +173,8 @@
 }
 
 .language-menu-popover,
-.theme-menu-popover {
+.theme-menu-popover,
+.visual-effects-menu-popover {
   position: absolute;
   top: calc(100% + 8px);
   right: 0;
@@ -176,8 +183,8 @@
   border-radius: var(--app-radius-md);
   background: color-mix(in srgb, var(--app-surface-strong) 96%, transparent);
   box-shadow: none;
-  backdrop-filter: blur(var(--app-blur));
-  -webkit-backdrop-filter: blur(var(--app-blur));
+  backdrop-filter: var(--glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--glass-backdrop-filter);
 }
 
 .language-menu-popover {
@@ -224,9 +231,20 @@
   width: 46px;
 }
 
+.visual-effects-menu-popover {
+  width: max-content;
+  min-width: 146px;
+  max-width: calc(100vw - 24px);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 [data-theme='white'] {
   .language-menu-popover,
-  .theme-menu-popover {
+  .theme-menu-popover,
+  .visual-effects-menu-popover {
     border-color: color-mix(in srgb, var(--primary-color) 18%, var(--app-border-strong));
     box-shadow:
       inset 0 0 0 1px rgba(255, 255, 255, 0.72),
@@ -234,7 +252,8 @@
   }
 }
 
-.theme-option {
+.theme-option,
+.visual-effects-option {
   width: 34px;
   height: 34px;
   border: 0;
@@ -261,6 +280,15 @@
   }
 }
 
+.visual-effects-option {
+  width: 100%;
+  min-width: 100%;
+  gap: 10px;
+  justify-content: flex-start;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
 .theme-option-icon {
   display: inline-flex;
   align-items: center;
@@ -270,6 +298,53 @@
   svg {
     width: 16px;
     height: 16px;
+  }
+}
+
+.visual-effects-option-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+
+  svg {
+    width: 16px;
+    height: 16px;
+  }
+}
+
+.visual-effects-option-label {
+  color: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+[data-visual-effects='reduced'] {
+  .navbar,
+  .language-menu-popover,
+  .theme-menu-popover,
+  .visual-effects-menu-popover,
+  .sidebar,
+  .nav-item,
+  .nav-item:hover,
+  .nav-item.active {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce), (prefers-reduced-transparency: reduce) {
+  .navbar,
+  .language-menu-popover,
+  .theme-menu-popover,
+  .visual-effects-menu-popover,
+  .sidebar,
+  .nav-item,
+  .nav-item:hover,
+  .nav-item.active {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
 }
 
@@ -294,8 +369,8 @@
   height: 100%;
   overflow: hidden;
   background: var(--sidebar-bg-color);
-  backdrop-filter: blur(var(--app-blur));
-  -webkit-backdrop-filter: blur(var(--app-blur));
+  backdrop-filter: var(--glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--glass-backdrop-filter);
   border-right: 1px solid var(--app-border);
   box-shadow: var(--sidebar-shadow);
   display: flex;
@@ -474,6 +549,14 @@
     height: var(--sidebar-icon-size);
     display: block;
   }
+
+  img {
+    width: var(--sidebar-icon-size);
+    height: var(--sidebar-icon-size);
+    display: block;
+    object-fit: contain;
+    border-radius: 5px;
+  }
 }
 
 .nav-label {
@@ -498,6 +581,11 @@
   &.content-logs {
     overflow: hidden;
   }
+
+  &.content-plugin-resource {
+    overflow: hidden;
+    scrollbar-gutter: auto;
+  }
 }
 
 .main-content {
@@ -516,6 +604,14 @@
   &.main-content-logs {
     height: 100vh;
     min-height: 0;
+    overflow: hidden;
+  }
+
+  &.main-content-plugin-resource {
+    height: 100vh;
+    min-height: 0;
+    padding: var(--header-height) 0 0;
+    gap: 0;
     overflow: hidden;
   }
 }
@@ -628,6 +724,17 @@
       height: auto;
       overflow: visible;
     }
+
+    &.content-plugin-resource {
+      height: 100vh;
+      min-height: 100vh;
+      overflow: hidden;
+
+      @supports (height: 100dvh) {
+        height: 100dvh;
+        min-height: 100dvh;
+      }
+    }
   }
 
   .main-content {
@@ -638,6 +745,13 @@
       height: auto;
       min-height: 100vh;
       overflow: visible;
+    }
+
+    &.main-content-plugin-resource {
+      height: 100%;
+      min-height: 0;
+      padding: var(--header-height) 0 0;
+      overflow: hidden;
     }
   }
 }

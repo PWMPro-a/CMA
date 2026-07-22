@@ -4,9 +4,7 @@ import {
   isClaudeFile,
   isCodexFile,
   isDisabledAuthFile,
-  isGeminiCliFile,
   isKimiFile,
-  isRuntimeOnlyAuthFile,
   isXaiFile,
   normalizeAuthIndex,
   resolveCodexChatgptAccountId,
@@ -19,7 +17,6 @@ export type MonitoringAccountQuotaProvider =
   | 'antigravity'
   | 'claude'
   | 'codex'
-  | 'gemini-cli'
   | 'kimi'
   | 'xai';
 
@@ -54,15 +51,13 @@ export const resolveMonitoringAccountQuotaProvider = (
   if (isCodexFile(file)) return 'codex';
   if (isClaudeFile(file)) return 'claude';
   if (isAntigravityFile(file)) return 'antigravity';
-  if (isGeminiCliFile(file)) return 'gemini-cli';
   if (isKimiFile(file)) return 'kimi';
   if (isXaiFile(file)) return 'xai';
   return null;
 };
 
-const isQuotaTargetable = (file: AuthFileItem, provider: MonitoringAccountQuotaProvider) => {
+const isQuotaTargetable = (file: AuthFileItem) => {
   if (isDisabledAuthFile(file)) return false;
-  if (provider === 'gemini-cli' && isRuntimeOnlyAuthFile(file)) return false;
   return true;
 };
 
@@ -105,7 +100,7 @@ export const buildMonitoringAccountQuotaTargetsByAccount = (
         const authIndex = normalizeAuthIndex(file['auth_index'] ?? file.authIndex);
         const provider = resolveMonitoringAccountQuotaProvider(file);
         if (!authIndex || !provider || !activeProviders.has(provider)) return;
-        if (!isQuotaTargetable(file, provider)) return;
+        if (!isQuotaTargetable(file)) return;
 
         const dedupeKey = `${provider}::${authIndex}::${file.name}`;
         if (bucket.has(dedupeKey)) return;

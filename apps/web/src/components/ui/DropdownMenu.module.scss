@@ -53,13 +53,27 @@
   min-width: 168px;
   max-width: 280px;
   padding: 4px;
-  border: 1px solid var(--border-color, #e5e7eb);
+  border: 1px solid
+    color-mix(in srgb, var(--primary-color, #409eff) 22%, var(--border-primary, #d1d5db));
   border-radius: 12px;
   background: var(--bg-primary, #fff);
-  box-shadow: var(--shadow-lg, 0 16px 32px rgba(15, 23, 42, 0.12));
+  box-shadow:
+    0 16px 32px rgba(15, 23, 42, 0.14),
+    0 0 0 1px color-mix(in srgb, var(--primary-color, #409eff) 8%, transparent);
   color: var(--text-primary, #111827);
   font-size: 13px;
   line-height: 1.4;
+}
+
+:global([data-theme='dark']) .menu {
+  border-color: color-mix(
+    in srgb,
+    var(--primary-color, #409eff) 30%,
+    var(--border-primary, rgba(255, 255, 255, 0.12))
+  );
+  box-shadow:
+    0 16px 32px rgba(0, 0, 0, 0.42),
+    0 0 0 1px color-mix(in srgb, var(--primary-color, #409eff) 14%, transparent);
 }
 
 .item {

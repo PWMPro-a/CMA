@@ -48,6 +48,20 @@
   }
 }
 
+[data-visual-effects='reduced'] .app-background__shape {
+  display: none;
+  filter: none;
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce), (prefers-reduced-transparency: reduce) {
+  .app-background__shape {
+    display: none;
+    filter: none;
+    animation: none;
+  }
+}
+
 @media (max-width: 768px) {
   .app-background__shape-1 {
     width: 420px;

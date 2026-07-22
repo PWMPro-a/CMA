@@ -1,9 +1,9 @@
-import { collectUsageDetailsWithEndpoint, type ModelPrice } from '@/utils/usage';
+import type { ModelPrice } from '@/utils/usage';
 import type {
+  ModelPriceUsageSummaryResponse,
   ModelPriceSyncCandidate,
   ModelPriceSyncCandidateSet,
 } from '@/services/api/usageService';
-import type { UsagePayload } from '@/features/monitoring/hooks/useUsageData';
 
 export type ModelPriceFilter = 'all' | 'missing' | 'saved' | 'candidates';
 
@@ -12,6 +12,8 @@ export type PriceDraft = {
   prompt: string;
   completion: string;
   cache: string;
+  cacheRead: string;
+  cacheCreation: string;
 };
 
 export type ModelPriceRow = {
@@ -36,13 +38,26 @@ export const createEmptyPriceDraft = (): PriceDraft => ({
   prompt: '',
   completion: '',
   cache: '',
+  cacheRead: '',
+  cacheCreation: '',
 });
+
+const createConfiguredDraftValue = (value: number | undefined, configured?: boolean): string =>
+  configured || Number(value) > 0 ? String(Number(value) || 0) : '';
 
 export const createPriceDraft = (model: string, price?: ModelPrice): PriceDraft => ({
   model,
-  prompt: price ? String(price.prompt) : '',
-  completion: price ? String(price.completion) : '',
+  prompt: price ? createConfiguredDraftValue(price.prompt, price.promptConfigured) : '',
+  completion: price
+    ? createConfiguredDraftValue(price.completion, price.completionConfigured)
+    : '',
   cache: price ? String(price.cache) : '',
+  cacheRead: price
+    ? createConfiguredDraftValue(price.cacheRead, price.cacheReadConfigured)
+    : '',
+  cacheCreation: price
+    ? createConfiguredDraftValue(price.cacheCreation, price.cacheCreationConfigured)
+    : '',
 });
 
 export const parsePriceValue = (value: string) => {
@@ -56,7 +71,18 @@ export const buildPriceFromDraft = (draft: PriceDraft): ModelPrice | null => {
   const prompt = parsePriceValue(draft.prompt);
   const completion = parsePriceValue(draft.completion);
   const cache = draft.cache.trim() === '' ? prompt : parsePriceValue(draft.cache);
-  return { prompt, completion, cache, source: 'manual' };
+  return {
+    prompt,
+    completion,
+    cache,
+    cacheRead: parsePriceValue(draft.cacheRead),
+    cacheCreation: parsePriceValue(draft.cacheCreation),
+    promptConfigured: draft.prompt.trim() !== '',
+    completionConfigured: draft.completion.trim() !== '',
+    cacheReadConfigured: draft.cacheRead.trim() !== '',
+    cacheCreationConfigured: draft.cacheCreation.trim() !== '',
+    source: 'manual',
+  };
 };
 
 export const applyCandidatePrice = (
@@ -72,14 +98,13 @@ export const applyCandidatePrice = (
   },
 });
 
-export const buildSyncPriceModelsFromUsage = (
-  usage: UsagePayload | null,
+export const buildSyncPriceModelsFromSummary = (
+  summary: ModelPriceUsageSummaryResponse | null,
   prices: Record<string, ModelPrice>
 ) => {
   const models = new Set<string>(Object.keys(prices));
-  collectUsageDetailsWithEndpoint(usage).forEach((detail) => {
-    if (detail.__modelName) models.add(detail.__modelName);
-    if (detail.__resolvedModel) models.add(detail.__resolvedModel);
+  summary?.models?.forEach((item) => {
+    if (item.model) models.add(item.model);
   });
   return Array.from(models)
     .filter(Boolean)
@@ -96,7 +121,7 @@ export const buildCandidateMap = (candidateSets: ModelPriceSyncCandidateSet[] = 
 };
 
 export const buildModelPriceRows = (
-  usage: UsagePayload | null,
+  summary: ModelPriceUsageSummaryResponse | null,
   prices: Record<string, ModelPrice>,
   candidateSets: ModelPriceSyncCandidateSet[] = []
 ): ModelPriceRow[] => {
@@ -123,17 +148,12 @@ export const buildModelPriceRows = (
   Object.keys(prices).forEach(ensureRow);
   candidateMap.forEach((_candidates, model) => ensureRow(model));
 
-  collectUsageDetailsWithEndpoint(usage).forEach((detail) => {
-    if (detail.__modelName) {
-      const row = ensureRow(detail.__modelName);
-      row.calls += 1;
-      row.requestedCalls += 1;
-    }
-    if (detail.__resolvedModel && detail.__resolvedModel !== detail.__modelName) {
-      const row = ensureRow(detail.__resolvedModel);
-      row.calls += 1;
-      row.resolvedCalls += 1;
-    }
+  summary?.models?.forEach((item) => {
+    if (!item.model) return;
+    const row = ensureRow(item.model);
+    row.calls += Number(item.calls) || 0;
+    row.requestedCalls += Number(item.requested_calls) || 0;
+    row.resolvedCalls += Number(item.resolved_calls) || 0;
   });
 
   return Array.from(rowMap.values()).sort(

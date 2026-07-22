@@ -19,6 +19,7 @@ style.md
 
 node_modules
 dist
+dist-demo
 dist-ssr
 *.local
 skills
@@ -38,9 +39,13 @@ settings.local.json
 *.sw?
 
 TODO.md
+/docs/plan/
 
 /bin/tmp/
 /bin/cpa-manager
 /data/usage.sqlite*
 /run/*.pid
 /run/*.log
+
+# Local temp scratch files
+.tmp-*

@@ -4,19 +4,25 @@ import type {
   AuthFileItem,
   ClaudeQuotaWindow,
   CodexQuotaWindow,
-  GeminiCliQuotaBucketState,
   KimiQuotaRow,
   XaiBillingSummary,
 } from '@/types';
+import type { UsageHeaderSnapshot } from '@/services/api/usageService';
 import type {
   MonitoringAccountRow,
   MonitoringApiKeyRow,
   MonitoringEventRow,
   MonitoringSummary,
 } from '@/features/monitoring/hooks/useMonitoringData';
-import type { AccountSortKey } from '@/features/monitoring/accountOverviewState';
+import {
+  resolveAccountDisplayText,
+  type AccountDisplayMode,
+  type AccountSortKey,
+} from '@/features/monitoring/accountOverviewState';
+import type { MonitoringCenterUiState } from '@/features/monitoring/monitoringCenterUiState';
 import type {
   AccountQuotaEntry,
+  AccountQuotaState,
   AccountQuotaWindow,
 } from '@/features/monitoring/components/accountOverviewPresentation';
 import {
@@ -33,14 +39,25 @@ import {
   fetchAntigravityQuota,
   fetchClaudeQuota,
   fetchCodexQuota,
-  fetchGeminiCliCodeAssist,
-  fetchGeminiCliQuotaBuckets,
   fetchKimiQuota,
   fetchXaiQuota,
+  buildCodexQuotaWindowInfos,
   formatKimiResetHint,
   formatQuotaResetTime,
 } from '@/utils/quota';
 import {
+  buildObservedCodexQuotaFromHeaderSnapshot,
+  getHeaderSnapshotErrorCode,
+  getHeaderSnapshotErrorKind,
+  getHeaderSnapshotPlanType,
+  getHeaderSnapshotRecoverAtMs,
+  getHeaderSnapshotTraceId,
+  getHeaderSnapshotUsedPercent,
+  hasUsageHeaderQuotaSignal,
+} from '@/utils/usageHeaderSnapshots';
+import { formatXaiBillingDiagnostics } from '@/utils/quota/xaiPresentation';
+import {
+  calculateCacheHitRateFromTotals,
   formatCompactNumber,
   formatDurationMs,
   formatUsd,
@@ -58,6 +75,7 @@ export type FocusSnapshot = {
   selectedChannel: string;
   selectedApiKeyHash: string;
   selectedStatus: StatusFilter;
+  selectedHeaderTraceId: string;
 };
 
 export type PriceDraft = {
@@ -76,6 +94,7 @@ export type RealtimeLogRow = MonitoringEventRow & {
 export type AccountOverviewColumn = {
   key: string;
   label: string;
+  fullLabel?: string;
   sortKey?: AccountSortKey;
 };
 
@@ -105,10 +124,80 @@ export const getTodayStartInputValue = () => {
 
 export const getCurrentInputValue = () => formatDateTimeLocalValue(new Date());
 
+const formatFullNumber = (value: number, locale?: string) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '0';
+
+  try {
+    return new Intl.NumberFormat(locale || undefined, {
+      maximumFractionDigits: 0,
+    }).format(num);
+  } catch {
+    return String(Math.round(num));
+  }
+};
+
 export const parseDateTimeLocalValue = (value: string) => {
   if (!value) return null;
   const timestamp = new Date(value).getTime();
   return Number.isFinite(timestamp) ? timestamp : null;
+};
+
+const parseQueryTimestamp = (params: URLSearchParams, key: string) => {
+  const value = Number(params.get(key));
+  return Number.isFinite(value) && value > 0 ? value : null;
+};
+
+export const buildMonitoringInitialStateFromQuery = (
+  search: string,
+  state: MonitoringCenterUiState
+): MonitoringCenterUiState => {
+  const params = new URLSearchParams(search);
+  const fromMs = parseQueryTimestamp(params, 'from_ms');
+  const toMs = parseQueryTimestamp(params, 'to_ms');
+  const model = params.get('model')?.trim();
+  const apiKeyHash = params.get('api_key_hash')?.trim();
+  const status = params.get('status')?.trim();
+  const provider = params.get('provider')?.trim();
+  const authFile = params.get('auth_file')?.trim();
+  const projectId = params.get('project_id')?.trim();
+  const requestType = params.get('request_type')?.trim();
+  const searchQuery = params.get('search')?.trim();
+  const minLatencyMs = params.get('min_latency_ms')?.trim();
+  const cacheStatus = params.get('cache_status')?.trim();
+  const headerTraceId = params.get('header_trace_id')?.trim();
+  const hasRange = fromMs !== null && toMs !== null && fromMs < toMs;
+  const hasStructuredScopeFilter = Boolean(
+    authFile || projectId || requestType || minLatencyMs || cacheStatus || headerTraceId
+  );
+
+  return {
+    ...state,
+    timeRange: hasRange ? 'custom' : state.timeRange,
+    customStartInput: hasRange
+      ? formatDateTimeLocalValue(new Date(fromMs))
+      : state.customStartInput,
+    customEndInput: hasRange ? formatDateTimeLocalValue(new Date(toMs)) : state.customEndInput,
+    selectedModel: model || state.selectedModel,
+    selectedProvider: provider || state.selectedProvider,
+    selectedApiKeyHash: apiKeyHash || state.selectedApiKeyHash,
+    selectedHeaderTraceId: headerTraceId || state.selectedHeaderTraceId,
+    selectedStatus:
+      status === 'success' || status === 'failed' || status === 'all'
+        ? status
+        : state.selectedStatus,
+    searchInput: searchQuery || state.searchInput,
+    activeDataTab:
+      hasRange ||
+      model ||
+      apiKeyHash ||
+      status ||
+      provider ||
+      searchQuery ||
+      hasStructuredScopeFilter
+        ? 'realtime'
+        : state.activeDataTab,
+  };
 };
 
 export const ensureSelectedOption = <T extends { value: string; label: string }>(
@@ -128,6 +217,17 @@ const buildSortedValueOptions = (values: string[]): MonitoringOption[] =>
     .sort((left, right) => left.localeCompare(right))
     .map((value) => ({ value, label: value }));
 
+const shortLabel = (
+  t: TFunction,
+  shortKey: string,
+  fallbackKey: string,
+  options?: Record<string, unknown>
+) => {
+  const fallback = t(fallbackKey, options);
+  const label = t(shortKey, { ...(options ?? {}), defaultValue: fallback });
+  return label === shortKey ? fallback : label;
+};
+
 export const buildProviderOptions = (
   rows: MonitoringEventRow[],
   selectedProvider: string,
@@ -146,7 +246,14 @@ export const buildProviderOptionsFromValues = (
 ) =>
   ensureSelectedOption(
     [
-      { value: 'all', label: t('monitoring.filter_all_providers') },
+      {
+        value: 'all',
+        label: shortLabel(
+          t,
+          'monitoring.filter_all_providers_short',
+          'monitoring.filter_all_providers'
+        ),
+      },
       ...buildSortedValueOptions(providers),
     ],
     selectedProvider
@@ -155,14 +262,25 @@ export const buildProviderOptionsFromValues = (
 export const buildAccountOptions = (
   rows: MonitoringAccountRow[],
   selectedAccount: string,
-  t: TFunction
+  t: TFunction,
+  accountDisplayMode: AccountDisplayMode = 'masked'
 ) =>
   ensureSelectedOption(
     [
-      { value: 'all', label: t('monitoring.filter_all_accounts') },
+      {
+        value: 'all',
+        label: shortLabel(
+          t,
+          'monitoring.filter_all_accounts_short',
+          'monitoring.filter_all_accounts'
+        ),
+      },
       ...Array.from(
         new Map(
-          rows.map((row) => [row.filterValue || row.account, buildAccountOptionLabel(row)])
+          rows.map((row) => [
+            row.filterValue || row.account,
+            buildAccountOptionLabel(row, accountDisplayMode),
+          ])
         ).entries()
       )
         .sort((left, right) => left[1].localeCompare(right[1]))
@@ -189,7 +307,10 @@ export const buildModelOptionsFromValues = (
 ) =>
   ensureSelectedOption(
     [
-      { value: 'all', label: t('monitoring.filter_all_models') },
+      {
+        value: 'all',
+        label: shortLabel(t, 'monitoring.filter_all_models_short', 'monitoring.filter_all_models'),
+      },
       ...buildSortedValueOptions(models),
     ],
     selectedModel
@@ -213,7 +334,14 @@ export const buildChannelOptionsFromValues = (
 ) =>
   ensureSelectedOption(
     [
-      { value: 'all', label: t('monitoring.filter_all_channels') },
+      {
+        value: 'all',
+        label: shortLabel(
+          t,
+          'monitoring.filter_all_channels_short',
+          'monitoring.filter_all_channels'
+        ),
+      },
       ...buildSortedValueOptions(channels),
     ],
     selectedChannel
@@ -226,7 +354,14 @@ const buildApiKeyOptionsFromMap = (
 ) =>
   ensureSelectedOption(
     [
-      { value: 'all', label: t('monitoring.filter_all_api_keys') },
+      {
+        value: 'all',
+        label: shortLabel(
+          t,
+          'monitoring.filter_all_api_keys_short',
+          'monitoring.filter_all_api_keys'
+        ),
+      },
       ...Array.from(optionMap.entries())
         .sort((left, right) => left[1].localeCompare(right[1]))
         .map(([value, label]) => ({ value, label })),
@@ -264,9 +399,26 @@ export const buildApiKeyOptionsFromRows = (
 };
 
 export const buildStatusOptions = (t: TFunction): MonitoringOption[] => [
-  { value: 'all', label: t('monitoring.filter_all_statuses') },
-  { value: 'success', label: t('monitoring.filter_status_success') },
-  { value: 'failed', label: t('monitoring.filter_status_failed') },
+  {
+    value: 'all',
+    label: shortLabel(t, 'monitoring.filter_all_statuses_short', 'monitoring.filter_all_statuses'),
+  },
+  {
+    value: 'success',
+    label: shortLabel(
+      t,
+      'monitoring.filter_status_success_short',
+      'monitoring.filter_status_success'
+    ),
+  },
+  {
+    value: 'failed',
+    label: shortLabel(
+      t,
+      'monitoring.filter_status_failed_short',
+      'monitoring.filter_status_failed'
+    ),
+  },
 ];
 
 export const buildSyncPriceModels = (
@@ -299,42 +451,109 @@ export const buildAuthFilesByAuthIndex = (authFiles: AuthFileItem[]) => {
 };
 
 export const buildAccountOverviewColumns = (t: TFunction): AccountOverviewColumn[] => [
-  { key: 'account', label: t('monitoring.account_overview_col_account') },
+  {
+    key: 'account',
+    label: shortLabel(
+      t,
+      'monitoring.account_overview_col_account_short',
+      'monitoring.account_overview_col_account'
+    ),
+    fullLabel: t('monitoring.account_overview_col_account'),
+  },
   { key: 'status', label: t('monitoring.column_status') },
-  { key: 'total-calls', label: t('monitoring.total_calls'), sortKey: 'totalCalls' },
+  {
+    key: 'total-calls',
+    label: shortLabel(t, 'monitoring.total_calls_short', 'monitoring.total_calls'),
+    fullLabel: t('monitoring.total_calls'),
+    sortKey: 'totalCalls',
+  },
   {
     key: 'success-calls',
-    label: t('monitoring.account_overview_col_success'),
+    label: shortLabel(t, 'monitoring.success_calls_short', 'monitoring.success_calls'),
+    fullLabel: t('monitoring.success_calls'),
     sortKey: 'successCalls',
   },
   {
     key: 'failure-calls',
-    label: t('monitoring.account_overview_col_failure'),
+    label: shortLabel(t, 'monitoring.failure_calls_short', 'monitoring.failure_calls'),
+    fullLabel: t('monitoring.failure_calls'),
     sortKey: 'failureCalls',
   },
-  { key: 'success-rate', label: t('monitoring.column_success_rate'), sortKey: 'successRate' },
-  { key: 'total-tokens', label: t('monitoring.total_tokens'), sortKey: 'totalTokens' },
+  {
+    key: 'success-rate',
+    label: shortLabel(t, 'monitoring.column_success_rate_short', 'monitoring.column_success_rate'),
+    fullLabel: t('monitoring.column_success_rate'),
+    sortKey: 'successRate',
+  },
+  {
+    key: 'total-tokens',
+    label: shortLabel(t, 'monitoring.total_tokens_short', 'monitoring.total_tokens'),
+    fullLabel: t('monitoring.total_tokens'),
+    sortKey: 'totalTokens',
+  },
   {
     key: 'estimated-cost',
-    label: t('monitoring.account_overview_col_cost'),
+    label: shortLabel(
+      t,
+      'monitoring.account_overview_col_cost_short',
+      'monitoring.account_overview_col_cost'
+    ),
+    fullLabel: t('monitoring.account_overview_col_cost'),
     sortKey: 'totalCost',
   },
   {
     key: 'latest-request-time',
-    label: t('monitoring.latest_request_time'),
+    label: shortLabel(t, 'monitoring.latest_request_time_short', 'monitoring.latest_request_time'),
+    fullLabel: t('monitoring.latest_request_time'),
     sortKey: 'lastSeenAt',
   },
   { key: 'action', label: t('common.action') },
 ];
 
 export const buildApiKeyOverviewColumns = (t: TFunction): AccountOverviewColumn[] => [
-  { key: 'api-key', label: t('monitoring.api_key_summary_col_key') },
-  { key: 'total-calls', label: t('monitoring.total_calls') },
-  { key: 'success-calls', label: t('monitoring.account_overview_col_success') },
-  { key: 'failure-calls', label: t('monitoring.account_overview_col_failure') },
-  { key: 'total-tokens', label: t('monitoring.total_tokens') },
-  { key: 'estimated-cost', label: t('monitoring.account_overview_col_cost') },
-  { key: 'latest-request-time', label: t('monitoring.latest_request_time') },
+  {
+    key: 'api-key',
+    label: shortLabel(
+      t,
+      'monitoring.api_key_summary_col_key_short',
+      'monitoring.api_key_summary_col_key'
+    ),
+    fullLabel: t('monitoring.api_key_summary_col_key'),
+  },
+  {
+    key: 'total-calls',
+    label: shortLabel(t, 'monitoring.total_calls_short', 'monitoring.total_calls'),
+    fullLabel: t('monitoring.total_calls'),
+  },
+  {
+    key: 'success-calls',
+    label: shortLabel(t, 'monitoring.success_calls_short', 'monitoring.success_calls'),
+    fullLabel: t('monitoring.success_calls'),
+  },
+  {
+    key: 'failure-calls',
+    label: shortLabel(t, 'monitoring.failure_calls_short', 'monitoring.failure_calls'),
+    fullLabel: t('monitoring.failure_calls'),
+  },
+  {
+    key: 'total-tokens',
+    label: shortLabel(t, 'monitoring.total_tokens_short', 'monitoring.total_tokens'),
+    fullLabel: t('monitoring.total_tokens'),
+  },
+  {
+    key: 'estimated-cost',
+    label: shortLabel(
+      t,
+      'monitoring.account_overview_col_cost_short',
+      'monitoring.account_overview_col_cost'
+    ),
+    fullLabel: t('monitoring.account_overview_col_cost'),
+  },
+  {
+    key: 'latest-request-time',
+    label: shortLabel(t, 'monitoring.latest_request_time_short', 'monitoring.latest_request_time'),
+    fullLabel: t('monitoring.latest_request_time'),
+  },
 ];
 
 export const buildAccountSortOptions = (
@@ -368,14 +587,17 @@ export const buildPrimarySummaryCards = ({
   t: TFunction;
 }): SummaryCardProps[] => [
   {
-    label: t('monitoring.total_calls'),
+    label: shortLabel(t, 'monitoring.total_calls_short', 'monitoring.total_calls'),
+    fullLabel: t('monitoring.total_calls'),
     value: formatCompactNumber(summary.totalCalls),
+    valueTitle: formatFullNumber(summary.totalCalls, locale),
     meta: `${accountCount} ${t('monitoring.accounts_suffix')}`,
     icon: 'calls',
     accent: 'blue',
   },
   {
-    label: t('monitoring.call_success_rate'),
+    label: shortLabel(t, 'monitoring.call_success_rate_short', 'monitoring.call_success_rate'),
+    fullLabel: t('monitoring.call_success_rate'),
     value: formatPercent(summary.successRate),
     meta: formatDurationMs(summary.averageLatencyMs, { locale }),
     tone: summary.successRate >= 0.95 ? 'good' : summary.successRate >= 0.85 ? 'warn' : 'bad',
@@ -383,16 +605,20 @@ export const buildPrimarySummaryCards = ({
     accent: 'green',
   },
   {
-    label: t('monitoring.failure_calls'),
+    label: shortLabel(t, 'monitoring.failure_calls_short', 'monitoring.failure_calls'),
+    fullLabel: t('monitoring.failure_calls'),
     value: formatCompactNumber(summary.failureCalls),
+    valueTitle: formatFullNumber(summary.failureCalls, locale),
     meta: `${failedGroupCount} ${t('monitoring.groups_suffix')}`,
     tone: summary.failureCalls > 0 ? 'bad' : 'good',
     icon: 'failure',
     accent: 'red',
   },
   {
-    label: t('monitoring.estimated_cost'),
+    label: shortLabel(t, 'monitoring.estimated_cost_short', 'monitoring.estimated_cost'),
+    fullLabel: t('monitoring.estimated_cost'),
     value: hasPrices ? formatUsd(summary.totalCost) : '--',
+    valueTitle: hasPrices ? formatUsd(summary.totalCost) : undefined,
     meta: hasPrices ? t('monitoring.estimated_cost_hint') : t('monitoring.estimated_cost_missing'),
     tone: hasPrices ? undefined : 'warn',
     icon: 'cost',
@@ -402,45 +628,66 @@ export const buildPrimarySummaryCards = ({
 
 export const buildSecondarySummaryCards = (
   summary: MonitoringSummary,
+  locale: string,
   t: TFunction
-): SummaryCardProps[] => [
-  {
-    label: t('monitoring.total_tokens'),
-    value: formatCompactNumber(summary.totalTokens),
-    meta: `${t('monitoring.reasoning_tokens')} ${formatCompactNumber(summary.reasoningTokens)}`,
-    variant: 'secondary',
-    icon: 'tokens',
-    accent: 'indigo',
-  },
-  {
-    label: t('monitoring.input_tokens'),
-    value: formatCompactNumber(summary.inputTokens),
-    meta: `${t('monitoring.of_token_mix')} ${formatPercent(summary.totalTokens > 0 ? summary.inputTokens / summary.totalTokens : 0)}`,
-    variant: 'secondary',
-    icon: 'input',
-    accent: 'cyan',
-  },
-  {
-    label: t('monitoring.output_tokens'),
-    value: formatCompactNumber(summary.outputTokens),
-    meta: `${t('monitoring.of_token_mix')} ${formatPercent(summary.totalTokens > 0 ? summary.outputTokens / summary.totalTokens : 0)}`,
-    variant: 'secondary',
-    icon: 'output',
-    accent: 'violet',
-  },
-  {
-    label: t('monitoring.cached_tokens'),
-    value: formatCompactNumber(summary.cachedTokens),
-    meta: [
-      `${t('monitoring.of_input_tokens')} ${formatPercent(summary.inputTokens > 0 ? summary.cachedTokens / summary.inputTokens : 0)}`,
-      `${t('monitoring.cache_creation_tokens_short')} ${formatCompactNumber(summary.cacheCreationTokens)}`,
-      `${t('monitoring.cache_read_tokens_short')} ${formatCompactNumber(summary.cacheReadTokens)}`,
-    ].join(' · '),
-    variant: 'secondary',
-    icon: 'cache',
-    accent: 'teal',
-  },
-];
+): SummaryCardProps[] => {
+  const totalCacheTokens =
+    summary.cachedTokens + summary.cacheCreationTokens + summary.cacheReadTokens;
+  const fallbackCacheInputTokens =
+    Math.max(summary.inputTokens, summary.cachedTokens) +
+    summary.cacheReadTokens +
+    summary.cacheCreationTokens;
+  const cacheHitRate =
+    summary.cacheHitRate === undefined
+      ? calculateCacheHitRateFromTotals(
+          summary.cachedTokens + summary.cacheReadTokens,
+          fallbackCacheInputTokens
+        )
+      : calculateCacheHitRateFromTotals(summary.cacheHitRate, 1);
+
+  return [
+    {
+      label: shortLabel(t, 'monitoring.total_tokens_short', 'monitoring.total_tokens'),
+      fullLabel: t('monitoring.total_tokens'),
+      value: formatCompactNumber(summary.totalTokens),
+      valueTitle: formatFullNumber(summary.totalTokens, locale),
+      meta: `${t('monitoring.reasoning_tokens')} ${formatCompactNumber(summary.reasoningTokens)}`,
+      variant: 'secondary',
+      icon: 'tokens',
+      accent: 'indigo',
+    },
+    {
+      label: shortLabel(t, 'monitoring.input_tokens_short', 'monitoring.input_tokens'),
+      fullLabel: t('monitoring.input_tokens'),
+      value: formatCompactNumber(summary.inputTokens),
+      valueTitle: formatFullNumber(summary.inputTokens, locale),
+      meta: `${t('monitoring.of_token_mix')} ${formatPercent(summary.totalTokens > 0 ? summary.inputTokens / summary.totalTokens : 0)}`,
+      variant: 'secondary',
+      icon: 'input',
+      accent: 'cyan',
+    },
+    {
+      label: shortLabel(t, 'monitoring.output_tokens_short', 'monitoring.output_tokens'),
+      fullLabel: t('monitoring.output_tokens'),
+      value: formatCompactNumber(summary.outputTokens),
+      valueTitle: formatFullNumber(summary.outputTokens, locale),
+      meta: `${t('monitoring.of_token_mix')} ${formatPercent(summary.totalTokens > 0 ? summary.outputTokens / summary.totalTokens : 0)}`,
+      variant: 'secondary',
+      icon: 'output',
+      accent: 'violet',
+    },
+    {
+      label: shortLabel(t, 'monitoring.cached_tokens_short', 'monitoring.cached_tokens'),
+      fullLabel: t('monitoring.cached_tokens'),
+      value: formatCompactNumber(totalCacheTokens),
+      valueTitle: formatFullNumber(totalCacheTokens, locale),
+      meta: `${t('monitoring.cache_hit_rate')} ${formatPercent(cacheHitRate)}`,
+      variant: 'secondary',
+      icon: 'cache',
+      accent: 'teal',
+    },
+  ];
+};
 
 export const isUsageImportFile = (file: File) => {
   const normalizedName = file.name.toLowerCase();
@@ -484,11 +731,15 @@ export const parsePriceValue = (value: string) => {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 };
 
-export const buildAccountOptionLabel = (row: MonitoringAccountRow) => {
-  if (!row.displayAccount || row.displayAccount === row.account) {
-    return row.account;
+export const buildAccountOptionLabel = (
+  row: MonitoringAccountRow,
+  accountDisplayMode: AccountDisplayMode = 'masked'
+) => {
+  const display = resolveAccountDisplayText(row, accountDisplayMode);
+  if (!display.secondary || display.secondary === display.primary) {
+    return display.primary;
   }
-  return `${row.displayAccount} / ${row.account}`;
+  return `${display.primary} / ${display.secondary}`;
 };
 
 const clampRemainingPercent = (value: number | null | undefined): number | null =>
@@ -544,6 +795,211 @@ const buildCodexAccountQuotaWindows = (
     };
   });
 
+const hasKnownAccountQuotaResetLabel = (value: unknown): value is string => {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  return trimmed !== '' && trimmed !== '-';
+};
+
+const readFiniteTimestamp = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isFinite(value) ? value : null;
+
+const mergeAccountQuotaWindow = (
+  activeWindow: AccountQuotaWindow,
+  observedWindow: AccountQuotaWindow
+): AccountQuotaWindow => ({
+  ...activeWindow,
+  ...(observedWindow.label.trim() ? { label: observedWindow.label } : {}),
+  ...(observedWindow.remainingPercent !== null &&
+  observedWindow.remainingPercent !== undefined &&
+  Number.isFinite(observedWindow.remainingPercent)
+    ? { remainingPercent: observedWindow.remainingPercent }
+    : {}),
+  ...(hasKnownAccountQuotaResetLabel(observedWindow.resetLabel)
+    ? { resetLabel: observedWindow.resetLabel }
+    : {}),
+  ...(observedWindow.usageLabel && observedWindow.usageLabel.trim()
+    ? { usageLabel: observedWindow.usageLabel }
+    : {}),
+});
+
+const mergeAccountQuotaWindows = (
+  activeWindows: AccountQuotaWindow[],
+  observedWindows: AccountQuotaWindow[]
+): AccountQuotaWindow[] => {
+  if (observedWindows.length === 0) return activeWindows;
+  if (activeWindows.length === 0) return observedWindows;
+
+  const observedById = new Map(observedWindows.map((window) => [window.id, window]));
+  const mergedWindows = activeWindows.map((window) => {
+    const observedWindow = observedById.get(window.id);
+    if (!observedWindow) return window;
+    observedById.delete(window.id);
+    return mergeAccountQuotaWindow(window, observedWindow);
+  });
+
+  return [...mergedWindows, ...observedById.values()];
+};
+
+const mergeAccountQuotaMetaLabels = (
+  activeLabels: string[] | undefined,
+  observedLabels: string[] | undefined
+) => {
+  const labels: string[] = [];
+  [...(activeLabels ?? []), ...(observedLabels ?? [])].forEach((label) => {
+    const trimmed = label.trim();
+    if (!trimmed || labels.includes(trimmed)) return;
+    labels.push(trimmed);
+  });
+  return labels.length > 0 ? labels : undefined;
+};
+
+const mergeAccountQuotaEntryMetaLabels = (
+  activeEntry: AccountQuotaEntry,
+  observedEntry: AccountQuotaEntry
+) => {
+  if (
+    observedEntry.planType &&
+    observedEntry.planType !== activeEntry.planType &&
+    observedEntry.metaLabels &&
+    observedEntry.metaLabels.length > 0
+  ) {
+    return mergeAccountQuotaMetaLabels(undefined, observedEntry.metaLabels);
+  }
+
+  return mergeAccountQuotaMetaLabels(activeEntry.metaLabels, observedEntry.metaLabels);
+};
+
+const getMergeableAccountQuotaEntry = (
+  entry: AccountQuotaEntry | undefined
+): AccountQuotaEntry | undefined => {
+  if (!entry?.error) return entry;
+  const mergeableEntry = { ...entry };
+  delete mergeableEntry.error;
+  return mergeableEntry;
+};
+
+export const mergeObservedAccountQuotaEntry = (
+  activeEntry: AccountQuotaEntry | undefined,
+  observedEntry: AccountQuotaEntry | null
+): AccountQuotaEntry | null => {
+  const mergeableActiveEntry = getMergeableAccountQuotaEntry(activeEntry);
+  if (!mergeableActiveEntry) return observedEntry;
+  if (!observedEntry || observedEntry.error) return mergeableActiveEntry;
+
+  return {
+    ...mergeableActiveEntry,
+    planType: observedEntry.planType ?? mergeableActiveEntry.planType,
+    metaLabels: mergeAccountQuotaEntryMetaLabels(mergeableActiveEntry, observedEntry),
+    windows: mergeAccountQuotaWindows(mergeableActiveEntry.windows, observedEntry.windows),
+    fetchedAtMs: mergeableActiveEntry.fetchedAtMs,
+    observedAtMs: observedEntry.observedAtMs ?? mergeableActiveEntry.observedAtMs,
+    observedFromUsageHeaders:
+      observedEntry.observedFromUsageHeaders ?? mergeableActiveEntry.observedFromUsageHeaders,
+  };
+};
+
+const isObservedAccountQuotaNewerThanFailure = (
+  failedAtMs: number | undefined,
+  observedEntry: AccountQuotaEntry | null | undefined
+) => {
+  const failureTime = readFiniteTimestamp(failedAtMs);
+  const observedTime = readFiniteTimestamp(observedEntry?.observedAtMs);
+  return failureTime !== null && observedTime !== null && observedTime > failureTime;
+};
+
+const clearAccountQuotaEntryFailure = (entry: AccountQuotaEntry): AccountQuotaEntry => {
+  const recovered = { ...entry };
+  delete recovered.error;
+  delete recovered.failedAtMs;
+  return recovered;
+};
+
+export const buildAccountQuotaRefreshFailureEntry = (
+  target: MonitoringAccountQuotaTarget,
+  error: string,
+  t: TFunction,
+  activeEntry?: AccountQuotaEntry,
+  observedEntry?: AccountQuotaEntry | null,
+  failedAtMs = Date.now()
+): AccountQuotaEntry => {
+  const mergeableActiveEntry = getMergeableAccountQuotaEntry(activeEntry);
+  const mergedEntry =
+    mergeObservedAccountQuotaEntry(mergeableActiveEntry, observedEntry ?? null) ??
+    observedEntry ??
+    mergeableActiveEntry ??
+    null;
+
+  if (!mergedEntry) {
+    return {
+      ...buildAccountQuotaErrorEntry(target, error, t),
+      failedAtMs,
+    };
+  }
+
+  return {
+    ...mergedEntry,
+    error,
+    failedAtMs,
+  };
+};
+
+export const mergeObservedAccountQuotaState = (
+  state: AccountQuotaState | undefined,
+  targets: MonitoringAccountQuotaTarget[],
+  observedEntries: AccountQuotaEntry[]
+): AccountQuotaState | undefined => {
+  if (!state || state.status === 'loading' || observedEntries.length === 0) return state;
+
+  const targetKey = targets.map((target) => target.key).join('|');
+  if (state.targetKey !== targetKey) return state;
+
+  const observedByKey = new Map(observedEntries.map((entry) => [entry.key, entry]));
+  const activeKeys = new Set(state.entries.map((entry) => entry.key));
+  let changed = false;
+
+  const entries = state.entries.map((entry) => {
+    const observedEntry = observedByKey.get(entry.key);
+    if (!observedEntry) return entry;
+
+    const mergedEntry = mergeObservedAccountQuotaEntry(entry, observedEntry) ?? entry;
+    const nextEntry = entry.error
+      ? isObservedAccountQuotaNewerThanFailure(entry.failedAtMs, observedEntry)
+        ? clearAccountQuotaEntryFailure(mergedEntry)
+        : { ...mergedEntry, error: entry.error, failedAtMs: entry.failedAtMs }
+      : mergedEntry;
+    changed = changed || nextEntry !== entry;
+    return nextEntry;
+  });
+
+  const targetKeys = new Set(targets.map((target) => target.key));
+  observedEntries.forEach((observedEntry) => {
+    if (!targetKeys.has(observedEntry.key) || activeKeys.has(observedEntry.key)) return;
+
+    if (
+      state.status === 'error' &&
+      !isObservedAccountQuotaNewerThanFailure(state.failedAtMs, observedEntry)
+    ) {
+      if (!state.error) return;
+      entries.push({ ...observedEntry, error: state.error, failedAtMs: state.failedAtMs });
+    } else {
+      entries.push(observedEntry);
+    }
+    changed = true;
+  });
+
+  if (!changed) return state;
+
+  const firstError = entries.find((entry) => entry.error)?.error;
+  return {
+    ...state,
+    status: firstError ? 'error' : 'success',
+    entries,
+    error: firstError || '',
+    failedAtMs: firstError ? state.failedAtMs : undefined,
+  };
+};
+
 const buildClaudeAccountQuotaWindows = (
   windows: ClaudeQuotaWindow[],
   t: TFunction
@@ -559,38 +1015,31 @@ const buildClaudeAccountQuotaWindows = (
 const buildAntigravityAccountQuotaWindows = (
   groups: AntigravityQuotaGroup[]
 ): AccountQuotaWindow[] =>
-  groups.map((group) => ({
-    id: group.id,
-    label: group.label,
-    remainingPercent: clampRemainingPercent(group.remainingFraction * 100),
-    resetLabel: formatQuotaResetTime(group.resetTime),
-    usageLabel: null,
-  }));
+  groups
+    .map((group): AccountQuotaWindow | null => {
+      if (group.buckets.length === 0) return null;
+      const remainingFraction = Math.min(
+        ...group.buckets.map((bucket) => bucket.remainingFraction)
+      );
+      const resetTime = group.buckets.reduce<string | undefined>((current, bucket) => {
+        if (!current) return bucket.resetTime;
+        if (!bucket.resetTime) return current;
+        const currentTime = new Date(current).getTime();
+        const nextTime = new Date(bucket.resetTime).getTime();
+        if (Number.isNaN(currentTime)) return bucket.resetTime;
+        if (Number.isNaN(nextTime)) return current;
+        return currentTime <= nextTime ? current : bucket.resetTime;
+      }, undefined);
 
-const buildGeminiCliAccountQuotaWindows = (
-  buckets: GeminiCliQuotaBucketState[],
-  t: TFunction
-): AccountQuotaWindow[] =>
-  buckets.map((bucket) => {
-    const remainingPercent =
-      bucket.remainingFraction === null
-        ? null
-        : clampRemainingPercent(bucket.remainingFraction * 100);
-    const usageLabelParts = [
-      bucket.remainingAmount === null || bucket.remainingAmount === undefined
-        ? ''
-        : t('gemini_cli_quota.remaining_amount', { count: bucket.remainingAmount }),
-      bucket.tokenType ?? '',
-    ].filter(Boolean);
-
-    return {
-      id: bucket.id,
-      label: bucket.label,
-      remainingPercent,
-      resetLabel: formatQuotaResetTime(bucket.resetTime),
-      usageLabel: usageLabelParts.length > 0 ? usageLabelParts.join(' · ') : null,
-    };
-  });
+      return {
+        id: group.id,
+        label: group.label,
+        remainingPercent: clampRemainingPercent(remainingFraction * 100),
+        resetLabel: formatQuotaResetTime(resetTime),
+        usageLabel: null,
+      };
+    })
+    .filter((window): window is AccountQuotaWindow => window !== null);
 
 const buildKimiAccountQuotaWindows = (rows: KimiQuotaRow[], t: TFunction): AccountQuotaWindow[] =>
   rows.map((row) => {
@@ -612,7 +1061,7 @@ const buildKimiAccountQuotaWindows = (rows: KimiQuotaRow[], t: TFunction): Accou
       label: rowLabel,
       remainingPercent,
       resetLabel: resetLabel || '-',
-      usageLabel: limit > 0 ? `${used} / ${limit}` : null,
+      usageLabel: null,
     };
   });
 
@@ -624,18 +1073,78 @@ const formatXaiCurrency = (value: number | null): string => {
 const buildXaiAccountQuotaWindows = (
   billing: XaiBillingSummary,
   t: TFunction
-): AccountQuotaWindow[] => [
-  {
-    id: 'monthly-limit',
-    label: t('xai_quota.monthly_limit'),
-    remainingPercent: buildRemainingFromUsedPercent(billing.usedPercent),
-    resetLabel: billing.billingPeriodEnd ? formatQuotaResetTime(billing.billingPeriodEnd) : '-',
-    usageLabel: t('xai_quota.usage_amount', {
-      used: formatXaiCurrency(billing.usedCents),
-      limit: formatXaiCurrency(billing.monthlyLimitCents),
-    }),
-  },
-];
+): AccountQuotaWindow[] => {
+  const remainingCents =
+    billing.monthlyLimitCents !== null && billing.includedUsedCents !== null
+      ? Math.max(0, billing.monthlyLimitCents - billing.includedUsedCents)
+      : null;
+  const windows: AccountQuotaWindow[] = [];
+  const hasWeeklyData =
+    billing.periodType === 'weekly' &&
+    (billing.usagePercent !== null ||
+      Boolean(billing.periodEnd) ||
+      billing.productUsage.length > 0);
+  const hasMonthlyData =
+    billing.monthlyLimitCents !== null ||
+    billing.usedCents !== null ||
+    Boolean(billing.billingPeriodEnd);
+
+  if (hasWeeklyData) {
+    windows.push({
+      id: 'weekly-limit',
+      label: t('xai_quota.weekly_limit'),
+      remainingPercent: buildRemainingFromUsedPercent(billing.usagePercent),
+      resetLabel: billing.periodEnd ? formatQuotaResetTime(billing.periodEnd) : '-',
+      usageLabel: t('xai_quota.used_percent', {
+        percent: billing.usagePercent === null ? '--' : `${Math.round(billing.usagePercent)}%`,
+      }),
+    });
+  }
+
+  billing.productUsage.forEach((item, index) => {
+    windows.push({
+      id: `product-${index}-${item.product}`,
+      label: t('xai_quota.product_usage', { product: item.product }),
+      remainingPercent: buildRemainingFromUsedPercent(item.usagePercent),
+      resetLabel: '-',
+      usageLabel: t('xai_quota.used_percent', {
+        percent: item.usagePercent === null ? '--' : `${Math.round(item.usagePercent)}%`,
+      }),
+    });
+  });
+
+  if (hasMonthlyData) {
+    windows.push({
+      id: 'monthly-limit',
+      label: t('xai_quota.monthly_credits'),
+      remainingPercent: buildRemainingFromUsedPercent(billing.usedPercent),
+      resetLabel: billing.billingPeriodEnd ? formatQuotaResetTime(billing.billingPeriodEnd) : '-',
+      usageLabel: t('xai_quota.usage_amount', {
+        remaining: formatXaiCurrency(remainingCents),
+        limit: formatXaiCurrency(billing.monthlyLimitCents),
+      }),
+    });
+  }
+
+  if (billing.onDemandCapCents !== null && billing.onDemandCapCents > 0) {
+    const onDemandRemainingCents =
+      billing.onDemandUsedCents !== null
+        ? Math.max(0, billing.onDemandCapCents - billing.onDemandUsedCents)
+        : null;
+    windows.push({
+      id: 'pay-as-you-go',
+      label: t('xai_quota.pay_as_you_go_label'),
+      remainingPercent: buildRemainingFromUsedPercent(billing.onDemandUsedPercent),
+      resetLabel: '-',
+      usageLabel: t('xai_quota.usage_amount', {
+        remaining: formatXaiCurrency(onDemandRemainingCents),
+        limit: formatXaiCurrency(billing.onDemandCapCents),
+      }),
+    });
+  }
+
+  return windows;
+};
 
 export const getAccountQuotaProviderLabel = (
   provider: MonitoringAccountQuotaProvider,
@@ -646,8 +1155,6 @@ export const getAccountQuotaProviderLabel = (
       return t('antigravity_quota.title');
     case 'claude':
       return t('claude_quota.title');
-    case 'gemini-cli':
-      return t('gemini_cli_quota.title');
     case 'kimi':
       return t('kimi_quota.title');
     case 'xai':
@@ -664,8 +1171,6 @@ const getAccountQuotaEmptyMessage = (provider: MonitoringAccountQuotaProvider, t
       return t('antigravity_quota.empty_models');
     case 'claude':
       return t('claude_quota.empty_windows');
-    case 'gemini-cli':
-      return t('gemini_cli_quota.empty_buckets');
     case 'kimi':
       return t('kimi_quota.empty_data');
     case 'xai':
@@ -694,6 +1199,11 @@ const buildBaseAccountQuotaEntry = (
   };
 };
 
+const stampAccountQuotaFetchTime = <T extends AccountQuotaEntry>(entry: T): T => ({
+  ...entry,
+  fetchedAtMs: Date.now(),
+});
+
 export const buildAccountQuotaErrorEntry = (
   target: MonitoringAccountQuotaTarget,
   error: string,
@@ -704,17 +1214,88 @@ export const buildAccountQuotaErrorEntry = (
   error,
 });
 
+export const buildObservedCodexAccountQuotaEntry = (
+  target: MonitoringAccountQuotaTarget,
+  snapshot: UsageHeaderSnapshot | undefined,
+  t: TFunction
+): AccountQuotaEntry | null => {
+  if (target.provider !== 'codex' || !hasUsageHeaderQuotaSignal(snapshot)) return null;
+  const planType = target.planType ?? getHeaderSnapshotPlanType(snapshot) ?? null;
+  const observedQuota = buildObservedCodexQuotaFromHeaderSnapshot(snapshot);
+  const planLabel = getCodexPlanLabel(planType, t);
+  const observedAtMs = readFiniteTimestamp(snapshot?.timestamp_ms) ?? undefined;
+  const observedAt = observedAtMs ? new Date(observedAtMs).toLocaleString() : '';
+  const usedPercent = getHeaderSnapshotUsedPercent(snapshot);
+  const recoverAtMS = getHeaderSnapshotRecoverAtMs(snapshot);
+  const errorKind = getHeaderSnapshotErrorKind(snapshot);
+  const errorCode = getHeaderSnapshotErrorCode(snapshot);
+  const traceID = getHeaderSnapshotTraceId(snapshot);
+  const metaLabels = [
+    planLabel ? `${t('codex_quota.plan_label')}: ${planLabel}` : '',
+    observedAt
+      ? t('quota_management.observed_from_usage_headers_at', {
+          time: observedAt,
+          defaultValue: `Observed from latest usage response headers · ${observedAt}`,
+        })
+      : t('quota_management.observed_from_usage_headers', {
+          defaultValue: 'Observed from latest usage response headers',
+        }),
+    [errorKind, errorCode].filter(Boolean).join(' / '),
+    traceID ? `Trace: ${traceID}` : '',
+  ].filter(Boolean);
+
+  const observedWindows: CodexQuotaWindow[] = observedQuota?.payload
+    ? buildCodexQuotaWindowInfos(observedQuota.payload, { planType }).map((window) => ({
+        id: window.id,
+        label: t(window.labelKey, window.labelParams),
+        labelKey: window.labelKey,
+        labelParams: window.labelParams,
+        usedPercent: window.usedPercent,
+        resetLabel: window.resetLabel,
+        limitWindowSeconds: window.limitWindowSeconds,
+      }))
+    : [];
+  const windows: AccountQuotaWindow[] =
+    observedWindows.length > 0
+      ? buildCodexAccountQuotaWindows(observedWindows, t)
+      : usedPercent !== null || recoverAtMS
+        ? [
+            {
+              id: 'usage-header-observed',
+              label: t('codex_quota.observed_window', { defaultValue: 'Latest request' }),
+              remainingPercent: buildRemainingFromUsedPercent(usedPercent),
+              resetLabel: recoverAtMS ? new Date(recoverAtMS).toLocaleString() : '-',
+              usageLabel:
+                usedPercent !== null
+                  ? t('monitoring.account_quota_observed_used', {
+                      percent: `${Math.round(usedPercent)}%`,
+                      defaultValue: `Observed used ${Math.round(usedPercent)}%`,
+                    })
+                  : null,
+            },
+          ]
+        : [];
+
+  return {
+    ...buildBaseAccountQuotaEntry({ ...target, planType }, t, metaLabels),
+    planType,
+    windows,
+    observedAtMs,
+    observedFromUsageHeaders: true,
+  };
+};
+
 export const requestAccountQuota = async (
   target: MonitoringAccountQuotaTarget,
   t: TFunction
 ): Promise<AccountQuotaEntry> => {
   switch (target.provider) {
     case 'antigravity': {
-      const groups = await fetchAntigravityQuota(target.file, t);
-      return {
+      const { groups } = await fetchAntigravityQuota(target.file, t);
+      return stampAccountQuotaFetchTime({
         ...buildBaseAccountQuotaEntry(target, t),
         windows: buildAntigravityAccountQuotaWindows(groups),
-      };
+      });
     }
     case 'claude': {
       const quota = await fetchClaudeQuota(target.file, t);
@@ -727,53 +1308,46 @@ export const requestAccountQuota = async (
           `${t('claude_quota.extra_usage_label')}: $${(quota.extraUsage.used_credits / 100).toFixed(2)} / $${(quota.extraUsage.monthly_limit / 100).toFixed(2)}`
         );
       }
-      return {
+      return stampAccountQuotaFetchTime({
         ...buildBaseAccountQuotaEntry(target, t, metaLabels),
         planType: quota.planType ?? target.planType,
         windows: buildClaudeAccountQuotaWindows(quota.windows, t),
-      };
-    }
-    case 'gemini-cli': {
-      const quota = await fetchGeminiCliQuotaBuckets(target.file, t);
-      const supplementary = await fetchGeminiCliCodeAssist(quota.authIndex, quota.projectId, t);
-      const metaLabels = [
-        supplementary.tierLabel
-          ? `${t('gemini_cli_quota.tier_label')}: ${supplementary.tierLabel}`
-          : '',
-        supplementary.creditBalance !== null
-          ? `${t('gemini_cli_quota.credit_label')}: ${t('gemini_cli_quota.credit_amount', {
-              count: supplementary.creditBalance,
-            })}`
-          : '',
-      ].filter(Boolean);
-      return {
-        ...buildBaseAccountQuotaEntry(target, t, metaLabels),
-        windows: buildGeminiCliAccountQuotaWindows(quota.buckets, t),
-      };
+      });
     }
     case 'kimi': {
       const rows = await fetchKimiQuota(target.file, t);
-      return {
+      return stampAccountQuotaFetchTime({
         ...buildBaseAccountQuotaEntry(target, t),
         windows: buildKimiAccountQuotaWindows(rows, t),
-      };
+      });
     }
     case 'xai': {
       const billing = await fetchXaiQuota(target.file, t);
-      const metaLabels =
-        billing.onDemandCapCents !== null
-          ? [`${t('xai_quota.on_demand_cap')}: ${formatXaiCurrency(billing.onDemandCapCents)}`]
-          : [];
-      return {
+      const metaLabels: string[] = [];
+      if (billing.officialApiHealth) {
+        metaLabels.push(t('xai_quota.official_api_health'));
+      } else if (billing.onDemandCapCents !== null) {
+        metaLabels.push(
+          `${t('xai_quota.on_demand_cap')}: ${formatXaiCurrency(billing.onDemandCapCents)}`
+        );
+      }
+      if (billing.partial) {
+        metaLabels.push(
+          t('xai_quota.partial_data', {
+            details: formatXaiBillingDiagnostics(billing.diagnostics, t),
+          })
+        );
+      }
+      return stampAccountQuotaFetchTime({
         ...buildBaseAccountQuotaEntry(target, t, metaLabels),
-        windows: buildXaiAccountQuotaWindows(billing, t),
-      };
+        windows: billing.officialApiHealth ? [] : buildXaiAccountQuotaWindows(billing, t),
+      });
     }
     case 'codex':
     default: {
       const quota = await fetchCodexQuota(target.file, t);
       const planLabel = getCodexPlanLabel(quota.planType ?? target.planType, t);
-      return {
+      return stampAccountQuotaFetchTime({
         ...buildBaseAccountQuotaEntry(
           {
             ...target,
@@ -784,7 +1358,7 @@ export const requestAccountQuota = async (
         ),
         planType: quota.planType ?? target.planType,
         windows: buildCodexAccountQuotaWindows(quota.windows, t),
-      };
+      });
     }
   }
 };

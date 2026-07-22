@@ -1,4 +1,5 @@
 import type { ApiKeyAlias } from '@/services/api/usageService';
+import type { ResponseHeaderMetadata } from '@/services/api/usageService';
 import type { AuthFileItem } from '@/types/authFile';
 import type { Config } from '@/types/config';
 import type { ModelPrice } from '@/utils/usage';
@@ -182,9 +183,18 @@ export type MonitoringEventRow = {
   totalCost: number;
   reasoningEffort?: string;
   serviceTier?: string;
+  requestServiceTier?: string;
+  responseServiceTier?: string;
   executorType?: string;
   failStatusCode?: number | null;
   failSummary?: string;
+  responseMetadata?: ResponseHeaderMetadata;
+  headerQuotaRecoverAtMs?: number | null;
+  headerQuotaUsedPercent?: number | null;
+  headerQuotaPlanType?: string;
+  headerErrorKind?: string;
+  headerErrorCode?: string;
+  headerTraceId?: string;
   taskKey: string;
   searchText: string;
 };
@@ -200,6 +210,7 @@ export type MonitoringSummary = {
   cachedTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  cacheHitRate?: number;
   totalTokens: number;
   totalCost: number;
   averageLatencyMs: number | null;
@@ -238,6 +249,7 @@ export type MonitoringAccountRow = {
   accountMasked: string;
   authLabels: string[];
   authIndices: string[];
+  sourceKeys?: string[];
   channels: string[];
   totalCalls: number;
   successCalls: number;
@@ -263,6 +275,7 @@ export type MonitoringApiKeyRow = {
   apiKeyHash: string;
   apiKeyLabel: string;
   apiKeyMasked: string;
+  apiKeyCopyValue?: string;
   isUnknown: boolean;
   authLabels: string[];
   sourceLabels: string[];
@@ -289,6 +302,7 @@ export type MonitoringFilterOptions = {
   providers: string[];
   models: string[];
   channels: string[];
+  headerTraceIds: string[];
 };
 
 export type MonitoringRealtimeRow = {
@@ -333,10 +347,16 @@ export type MonitoringMetadata = {
 export interface MonitoringScopeFilters {
   account?: string;
   provider?: string;
+  authFile?: string;
+  projectId?: string;
+  requestType?: string;
   model?: string;
   channel?: string;
   apiKeyHash?: string;
   status?: 'all' | 'success' | 'failed';
+  minLatencyMs?: number;
+  cacheStatus?: string;
+  headerTraceId?: string;
 }
 
 export interface UseMonitoringDataParams {
@@ -374,6 +394,9 @@ export interface UseMonitoringDataReturn {
   filteredRows: MonitoringEventRow[];
   eventsHasMore: boolean;
   eventsLoadingMore: boolean;
+  eventsRetentionLimited: boolean;
+  eventsTotalCount: number;
+  eventsLoadedCount: number;
   lastRefreshedAt: Date | null;
   isTransitioningScope: boolean;
   hasPresentationSnapshot: boolean;

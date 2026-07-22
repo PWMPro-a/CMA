@@ -8,6 +8,11 @@ export interface ModelAlias {
   alias?: string;
   priority?: number;
   testModel?: string;
+  image?: boolean;
+  forceMapping?: boolean;
+  inputModalities?: string[];
+  outputModalities?: string[];
+  thinking?: Record<string, unknown>;
 }
 
 export interface ApiKeyEntry {
@@ -21,6 +26,7 @@ export interface CloakConfig {
   mode?: string;
   strictMode?: boolean;
   sensitiveWords?: string[];
+  cacheUserId?: boolean;
 }
 
 export interface GeminiKeyConfig {
@@ -33,6 +39,7 @@ export interface GeminiKeyConfig {
   headers?: Record<string, string>;
   excludedModels?: string[];
   authIndex?: string;
+  disableCooling?: boolean;
 }
 
 export interface ProviderKeyConfig {
@@ -47,6 +54,9 @@ export interface ProviderKeyConfig {
   excludedModels?: string[];
   cloak?: CloakConfig;
   authIndex?: string;
+  disableCooling?: boolean;
+  experimentalCchSigning?: boolean;
+  rebuildMidSystemMessage?: boolean;
 }
 
 export interface OpenAIProviderConfig {
@@ -60,5 +70,6 @@ export interface OpenAIProviderConfig {
   priority?: number;
   testModel?: string;
   authIndex?: string;
+  disableCooling?: boolean;
   [key: string]: unknown;
 }

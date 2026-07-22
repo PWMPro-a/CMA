@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import styles from '../CodexInspectionPage.module.scss';
 
@@ -29,17 +30,19 @@ const MODES: ReadonlyArray<{
 export function CodexInspectionModeTabs({ activeMode }: CodexInspectionModeTabsProps) {
   const { t } = useTranslation();
   const availability = usePanelFeatureAvailability();
-  const activeLabel = t(
-    activeMode === 'local'
-      ? 'monitoring.codex_inspection_mode_local'
-      : 'monitoring.codex_inspection_mode_server'
-  );
   const visibleModes = MODES.filter(
     (item) =>
       item.mode === 'local' ||
       item.mode === activeMode ||
       availability.checking ||
       availability.serverCodexInspectionAvailable
+  );
+  const modeTabs: ReadonlyArray<SegmentedTabItem<CodexInspectionMode>> = visibleModes.map(
+    (item) => ({
+      id: item.mode,
+      label: t(item.labelKey),
+      to: item.path,
+    })
   );
 
   return (
@@ -48,39 +51,14 @@ export function CodexInspectionModeTabs({ activeMode }: CodexInspectionModeTabsP
       aria-label={t('monitoring.codex_inspection_mode_label')}
     >
       <div className={styles.modeSwitchMain}>
-        <div
-          className={styles.modeSwitchTabs}
-          role="tablist"
-          aria-label={t('monitoring.codex_inspection_mode_label')}
-        >
-          {visibleModes.map((item) => {
-            const active = activeMode === item.mode;
-            return (
-              <Link
-                key={item.mode}
-                to={item.path}
-                role="tab"
-                aria-selected={active}
-                className={`${styles.modeSwitchTab} ${active ? styles.modeSwitchTabActive : ''}`}
-              >
-                {t(item.labelKey)}
-              </Link>
-            );
-          })}
-        </div>
+        <SegmentedTabs
+          items={modeTabs}
+          activeTab={activeMode}
+          ariaLabel={t('monitoring.codex_inspection_mode_label')}
+          equalWidth
+          linkComponent={Link}
+        />
 
-        <div className={styles.modeSwitchCopy}>
-          <span className={styles.modeSwitchEyebrow}>
-            {t('monitoring.codex_inspection_mode_current', { mode: activeLabel })}
-          </span>
-          <p>
-            {t(
-              activeMode === 'local'
-                ? 'monitoring.codex_inspection_mode_local_desc'
-                : 'monitoring.codex_inspection_mode_server_desc'
-            )}
-          </p>
-        </div>
       </div>
     </section>
   );

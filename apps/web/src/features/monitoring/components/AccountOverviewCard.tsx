@@ -1,7 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import type { TFunction } from 'i18next';
 import { Card } from '@/components/ui/Card';
-import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import {
   IconChartLine,
   IconChevronDown,
@@ -15,7 +14,11 @@ import {
   IconTrendingUp,
 } from '@/components/ui/icons';
 import { sortAccountOverviewCardMetrics } from '@/features/monitoring/accountOverviewCardMetrics';
-import type { MonitoringAccountAuthState } from '@/features/monitoring/accountOverviewState';
+import {
+  resolveAccountDisplayText,
+  type AccountDisplayMode,
+  type MonitoringAccountAuthState,
+} from '@/features/monitoring/accountOverviewState';
 import type {
   MonitoringAccountModelSpendRow,
   MonitoringAccountRow,
@@ -26,11 +29,13 @@ import { MonitoringHealthStatusBar } from './MonitoringHealthStatusBar';
 import {
   buildAccountSecondaryText,
   buildAccountSummaryMetrics,
+  buildCacheTokenPresentation,
   formatPercent,
   getAccountStatusDotClassName,
   getAccountStatusLabel,
   getAccountStatusTone,
   getSuccessRateClassName,
+  type AccountQuotaEntry,
   type AccountQuotaState,
   type AccountQuotaWindow,
   type AccountSummaryMetric,
@@ -65,21 +70,30 @@ export function AccountStatusBadge({
   );
 }
 
+const shortLabel = (t: TFunction, shortKey: string, fallbackKey: string) => {
+  const fallback = t(fallbackKey);
+  const label = t(shortKey, { defaultValue: fallback });
+  return label === shortKey ? fallback : label;
+};
+
 export function AccountSummaryPrimary({
   row,
   expanded,
   onToggle,
+  accountDisplayMode,
   statusTone = 'enabled',
   showSecondary = true,
 }: {
   row: MonitoringAccountRow;
   expanded: boolean;
   onToggle: () => void;
+  accountDisplayMode: AccountDisplayMode;
   statusTone?: string;
   showSecondary?: boolean;
 }) {
+  const accountDisplay = resolveAccountDisplayText(row, accountDisplayMode);
   const secondaryText = buildAccountSecondaryText(row);
-  const accountLabel = row.displayAccount || row.account;
+  const accountSecondaryText = accountDisplay.secondary || secondaryText;
 
   return (
     <button
@@ -93,7 +107,7 @@ export function AccountSummaryPrimary({
         .join(' ')}
       onClick={onToggle}
       aria-expanded={expanded}
-      title={accountLabel}
+      title={accountDisplay.title}
     >
       <span className={styles.accountExpandGlyph} aria-hidden="true">
         {expanded ? <IconChevronUp size={15} /> : <IconChevronDown size={15} />}
@@ -105,9 +119,9 @@ export function AccountSummaryPrimary({
             .join(' ')}
           aria-hidden="true"
         />
-        <span className={styles.accountButtonLabel}>{accountLabel}</span>
+        <span className={styles.accountButtonLabel}>{accountDisplay.primary}</span>
       </span>
-      {showSecondary && secondaryText ? <small>{secondaryText}</small> : null}
+      {showSecondary && accountSecondaryText ? <small>{accountSecondaryText}</small> : null}
     </button>
   );
 }
@@ -125,19 +139,66 @@ function AccountQuotaPanel({
 }) {
   const quotaEntries = quotaState?.entries ?? [];
   const quotaLoading = quotaState?.status === 'loading';
-  const lastQuotaSync =
+  const lastQuotaSyncMs =
     quotaState?.lastRefreshedAt && Number.isFinite(quotaState.lastRefreshedAt)
-      ? new Date(quotaState.lastRefreshedAt).toLocaleString(locale)
-      : '';
+      ? quotaState.lastRefreshedAt
+      : undefined;
   const singleQuotaEntry = quotaEntries.length === 1 ? quotaEntries[0] : null;
-  const quotaMetaText = [
-    ...(singleQuotaEntry?.metaLabels ?? []),
-    lastQuotaSync ? `${t('monitoring.last_sync')}: ${lastQuotaSync}` : '',
-  ]
-    .filter(Boolean)
-    .join(' · ');
 
-  const renderQuotaWindows = (windows: AccountQuotaWindow[]) => (
+  const buildQuotaInfoRows = (entry: AccountQuotaEntry) => {
+    const fromUsageHeaders = entry.observedFromUsageHeaders === true;
+    const timestampMs = fromUsageHeaders
+      ? entry.observedAtMs
+      : (entry.fetchedAtMs ?? lastQuotaSyncMs);
+    const formattedTime =
+      timestampMs && Number.isFinite(timestampMs)
+        ? new Date(timestampMs).toLocaleString(locale)
+        : '--';
+
+    return [
+      {
+        key: 'source',
+        label: t('codex_quota.tooltip_source_label'),
+        value: fromUsageHeaders
+          ? t('codex_quota.tooltip_source_header')
+          : t('codex_quota.tooltip_source_api'),
+      },
+      {
+        key: 'fetched-at',
+        label: t('codex_quota.tooltip_fetched_at_label'),
+        value: formattedTime,
+      },
+    ];
+  };
+
+  const renderQuotaInfo = (entry: AccountQuotaEntry, windowLabel: string) => {
+    const rows = buildQuotaInfoRows(entry);
+
+    return (
+      <span
+        className={styles.quotaInfoTrigger}
+        tabIndex={0}
+        aria-label={t('codex_quota.tooltip_label', { label: windowLabel })}
+      >
+        <IconInfo
+          size={14}
+          className={styles.quotaInfoIcon}
+          aria-hidden="true"
+          focusable={false}
+        />
+        <span className={styles.quotaInfoTooltip} role="tooltip">
+          {rows.map((row) => (
+            <span key={row.key} className={styles.quotaInfoTooltipRow}>
+              <span className={styles.quotaInfoTooltipLabel}>{row.label}</span>
+              <span className={styles.quotaInfoTooltipValue}>{row.value}</span>
+            </span>
+          ))}
+        </span>
+      </span>
+    );
+  };
+
+  const renderQuotaWindows = (windows: AccountQuotaWindow[], entry: AccountQuotaEntry) => (
     <div className={styles.quotaWindowList}>
       {windows.map((window) => {
         const percentLabel =
@@ -150,7 +211,10 @@ function AccountQuotaPanel({
         return (
           <div key={window.id} className={styles.quotaWindowRow}>
             <div className={styles.quotaWindowHeader}>
-              <span>{window.label}</span>
+              <span className={styles.quotaWindowLabel}>
+                <span>{window.label}</span>
+                {renderQuotaInfo(entry, window.label)}
+              </span>
               <strong>{percentLabel}</strong>
             </div>
             <div className={styles.quotaProgressTrack}>
@@ -207,7 +271,6 @@ function AccountQuotaPanel({
       <div className={styles.quotaSectionHeader}>
         <div className={styles.quotaSectionTitleGroup}>
           <strong>{t('monitoring.account_quota_title')}</strong>
-          {quotaMetaText ? <span>{quotaMetaText}</span> : null}
         </div>
         {renderRefreshButton()}
       </div>
@@ -248,7 +311,7 @@ function AccountQuotaPanel({
             true
           )
         ) : singleQuotaEntry.windows.length > 0 ? (
-          renderQuotaWindows(singleQuotaEntry.windows)
+          renderQuotaWindows(singleQuotaEntry.windows, singleQuotaEntry)
         ) : (
           renderStateMessage(
             singleQuotaEntry.emptyMessage ?? t('monitoring.account_quota_empty'),
@@ -258,10 +321,7 @@ function AccountQuotaPanel({
       ) : quotaEntries.length > 0 ? (
         <div className={styles.quotaEntryGrid}>
           {quotaEntries.map((entry) => {
-            const entryMetaText =
-              entry.metaLabels && entry.metaLabels.length > 0
-                ? entry.metaLabels.join(' · ')
-                : `${entry.providerLabel} · ${entry.fileName}`;
+            const entryMetaText = `${entry.providerLabel} · ${entry.fileName}`;
             return (
               <div key={entry.key} className={styles.quotaEntryCard}>
                 <div className={styles.quotaEntryHeader}>
@@ -278,7 +338,7 @@ function AccountQuotaPanel({
                       true
                     )
                   : entry.windows.length > 0
-                    ? renderQuotaWindows(entry.windows)
+                    ? renderQuotaWindows(entry.windows, entry)
                     : renderStateMessage(
                         entry.emptyMessage ?? t('monitoring.account_quota_empty'),
                         t('monitoring.account_quota_idle')
@@ -304,13 +364,17 @@ export function AccountTokenMetricGrid({
   const getTokenMetricIcon = (key: string) => {
     if (key === 'input-tokens') return <IconInbox size={13} />;
     if (key === 'output-tokens') return <IconTrendingUp size={13} />;
-    if (key === 'cached-tokens') return <IconTimer size={13} />;
+    if (key === 'cached-tokens' || key === 'cache-creation-tokens' || key === 'cache-read-tokens') {
+      return <IconTimer size={13} />;
+    }
     return <IconChartLine size={13} />;
   };
   const getTokenMetricToneClassName = (key: string) => {
     if (key === 'input-tokens') return styles.accountMetricIconInput;
     if (key === 'output-tokens') return styles.accountMetricIconOutput;
-    if (key === 'cached-tokens') return styles.accountMetricIconCached;
+    if (key === 'cached-tokens' || key === 'cache-creation-tokens' || key === 'cache-read-tokens') {
+      return styles.accountMetricIconCached;
+    }
     return styles.accountMetricIconTotal;
   };
 
@@ -321,7 +385,13 @@ export function AccountTokenMetricGrid({
     const getTokenStructureRowToneClassName = (key: string) => {
       if (key === 'input-tokens') return styles.tokenStructureRowInput;
       if (key === 'output-tokens') return styles.tokenStructureRowOutput;
-      if (key === 'cached-tokens') return styles.tokenStructureRowCached;
+      if (
+        key === 'cached-tokens' ||
+        key === 'cache-creation-tokens' ||
+        key === 'cache-read-tokens'
+      ) {
+        return styles.tokenStructureRowCached;
+      }
       return '';
     };
 
@@ -342,7 +412,12 @@ export function AccountTokenMetricGrid({
                 <span className={styles.tokenStructureRowIcon} aria-hidden="true">
                   {getTokenMetricIcon(metric.key)}
                 </span>
-                <span className={styles.tokenStructureRowLabel}>{metric.label}</span>
+                <span
+                  className={styles.tokenStructureRowLabel}
+                  title={metric.fullLabel ?? metric.label}
+                >
+                  {metric.label}
+                </span>
               </span>
               <strong
                 className={[styles.tokenStructureRowValue, metric.valueClassName]
@@ -366,7 +441,10 @@ export function AccountTokenMetricGrid({
       <div className={styles.accountOverviewMetricGrid}>
         {metrics.map((metric) => (
           <div key={metric.key} className={styles.accountOverviewMetricCard}>
-            <span className={styles.accountOverviewMetricLabel}>
+            <span
+              className={styles.accountOverviewMetricLabel}
+              title={metric.fullLabel ?? metric.label}
+            >
               <span
                 className={[styles.accountMetricIcon, getTokenMetricToneClassName(metric.key)]
                   .filter(Boolean)
@@ -409,30 +487,39 @@ function AccountHealthStatusPanel({
   const healthMetrics = [
     {
       key: 'total-calls',
-      label: t('monitoring.total_calls'),
+      label: shortLabel(t, 'monitoring.total_calls_short', 'monitoring.total_calls'),
+      fullLabel: t('monitoring.total_calls'),
       value: formatCompactNumber(row.totalCalls),
     },
     {
       key: 'success-calls',
       label: t('stats.success'),
+      fullLabel: t('monitoring.success_calls'),
       value: formatCompactNumber(row.successCalls),
       className: styles.goodText,
     },
     {
       key: 'failure-calls',
       label: t('stats.failure'),
+      fullLabel: t('monitoring.failure_calls'),
       value: formatCompactNumber(row.failureCalls),
       className: row.failureCalls > 0 ? styles.badText : undefined,
     },
     {
       key: 'estimated-cost',
-      label: t('monitoring.estimated_cost'),
+      label: shortLabel(t, 'monitoring.estimated_cost_short', 'monitoring.estimated_cost'),
+      fullLabel: t('monitoring.estimated_cost'),
       value: hasPrices ? formatUsd(row.totalCost) : '--',
       className: styles.primaryText,
     },
     {
       key: 'success-rate',
-      label: t('monitoring.column_success_rate'),
+      label: shortLabel(
+        t,
+        'monitoring.column_success_rate_short',
+        'monitoring.column_success_rate'
+      ),
+      fullLabel: t('monitoring.column_success_rate'),
       value: formatPercent(row.successRate),
       className: getSuccessRateClassName(row.successRate),
     },
@@ -452,7 +539,7 @@ function AccountHealthStatusPanel({
       <div className={styles.healthMetricGrid}>
         {healthMetrics.map((metric) => (
           <div key={metric.key} className={styles.healthMetricItem}>
-            <span>{metric.label}</span>
+            <span title={metric.fullLabel}>{metric.label}</span>
             <strong className={metric.className}>{metric.value}</strong>
           </div>
         ))}
@@ -509,6 +596,7 @@ function AccountModelUsageList({
           {visibleModels.map((model) => {
             const modelKey = `${row.id}-${model.model}`;
             const isModelExpanded = Boolean(expandedModels[modelKey]);
+            const cacheMetric = buildCacheTokenPresentation(model, t);
             return (
               <div key={modelKey} className={styles.accountModelItem}>
                 <button
@@ -551,19 +639,33 @@ function AccountModelUsageList({
                 {isModelExpanded ? (
                   <div className={styles.accountModelExpanded}>
                     <div className={styles.accountModelExpandedItem}>
-                      <small>{t('monitoring.input_tokens')}</small>
+                      <small>
+                        {shortLabel(t, 'monitoring.input_tokens_short', 'monitoring.input_tokens')}
+                      </small>
                       <strong>{formatCompactNumber(model.inputTokens)}</strong>
                     </div>
                     <div className={styles.accountModelExpandedItem}>
-                      <small>{t('monitoring.output_tokens')}</small>
+                      <small>
+                        {shortLabel(
+                          t,
+                          'monitoring.output_tokens_short',
+                          'monitoring.output_tokens'
+                        )}
+                      </small>
                       <strong>{formatCompactNumber(model.outputTokens)}</strong>
                     </div>
                     <div className={styles.accountModelExpandedItem}>
-                      <small>{t('monitoring.cached_tokens')}</small>
-                      <strong>{formatCompactNumber(model.cachedTokens)}</strong>
+                      <small title={cacheMetric.fullLabel}>{cacheMetric.label}</small>
+                      <strong>{cacheMetric.value}</strong>
                     </div>
                     <div className={styles.accountModelExpandedItem}>
-                      <small>{t('monitoring.latest_request_time')}</small>
+                      <small>
+                        {shortLabel(
+                          t,
+                          'monitoring.latest_request_time_short',
+                          'monitoring.latest_request_time'
+                        )}
+                      </small>
                       <strong>{new Date(model.lastSeenAt).toLocaleString(locale)}</strong>
                     </div>
                   </div>
@@ -596,6 +698,11 @@ export function AccountModelUsageTable({
   const hasExtraModels = row.models.length > limit;
   const visibleModels = showAll ? row.models : row.models.slice(0, limit);
   const modelCountForTitle = Math.min(limit, row.models.length || limit);
+  const latestRequestLabel = shortLabel(
+    t,
+    'monitoring.latest_request_time_short',
+    'monitoring.latest_request_time'
+  );
 
   return (
     <section className={styles.accountModelTablePanel}>
@@ -628,29 +735,39 @@ export function AccountModelUsageTable({
               <th>{t('monitoring.account_overview_model_cached_tokens_short')}</th>
               <th>{t('monitoring.account_overview_model_total_tokens_short')}</th>
               <th>{t('monitoring.account_overview_model_total_cost_short')}</th>
-              <th>{t('monitoring.latest_request_time')}</th>
+              <th>{latestRequestLabel}</th>
             </tr>
           </thead>
           <tbody>
-            {visibleModels.map((model) => (
-              <tr key={`${row.id}-${model.model}`}>
-                <td>
-                  <span className={styles.accountModelName} title={model.model}>
-                    {model.model}
-                  </span>
-                </td>
-                <td>{formatCompactNumber(model.totalCalls)}</td>
-                <td className={getSuccessRateClassName(model.successRate)}>
-                  {formatPercent(model.successRate)}
-                </td>
-                <td>{formatCompactNumber(model.inputTokens)}</td>
-                <td>{formatCompactNumber(model.outputTokens)}</td>
-                <td>{formatCompactNumber(model.cachedTokens)}</td>
-                <td>{formatCompactNumber(model.totalTokens)}</td>
-                <td>{hasPrices ? formatUsd(model.totalCost) : '--'}</td>
-                <td>{new Date(model.lastSeenAt).toLocaleString(locale)}</td>
-              </tr>
-            ))}
+            {visibleModels.map((model) => {
+              const cacheMetric = buildCacheTokenPresentation(model, t);
+              return (
+                <tr key={`${row.id}-${model.model}`}>
+                  <td>
+                    <span className={styles.accountModelName} title={model.model}>
+                      {model.model}
+                    </span>
+                  </td>
+                  <td>{formatCompactNumber(model.totalCalls)}</td>
+                  <td className={getSuccessRateClassName(model.successRate)}>
+                    {formatPercent(model.successRate)}
+                  </td>
+                  <td>{formatCompactNumber(model.inputTokens)}</td>
+                  <td>{formatCompactNumber(model.outputTokens)}</td>
+                  <td>
+                    <span title={cacheMetric.fullLabel}>
+                      {cacheMetric.label ===
+                      shortLabel(t, 'monitoring.cached_tokens_short', 'monitoring.cached_tokens')
+                        ? cacheMetric.value
+                        : `${cacheMetric.label} ${cacheMetric.value}`}
+                    </span>
+                  </td>
+                  <td>{formatCompactNumber(model.totalTokens)}</td>
+                  <td>{hasPrices ? formatUsd(model.totalCost) : '--'}</td>
+                  <td>{new Date(model.lastSeenAt).toLocaleString(locale)}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       ) : (
@@ -717,15 +834,14 @@ export function AccountOverviewCard({
   hasPrices,
   locale,
   t,
+  accountDisplayMode,
   isExpanded,
   isFocused,
   statusData,
   scopeText,
   quotaState,
-  statusUpdating,
   onToggle,
   onFocus,
-  onToggleEnabled,
   onRefreshQuota,
 }: {
   row: MonitoringAccountRow;
@@ -733,24 +849,27 @@ export function AccountOverviewCard({
   hasPrices: boolean;
   locale: string;
   t: TFunction;
+  accountDisplayMode: AccountDisplayMode;
   isExpanded: boolean;
   isFocused: boolean;
   statusData: StatusBarData;
   scopeText: string;
   quotaState?: AccountQuotaState;
-  statusUpdating: boolean;
   onToggle: () => void;
   onFocus: () => void;
-  onToggleEnabled: (enabled: boolean) => void;
   onRefreshQuota: () => void;
 }) {
   const summaryMetrics = buildAccountSummaryMetrics(row, hasPrices, locale, t);
   const cardMetrics = sortAccountOverviewCardMetrics(summaryMetrics);
-  const canToggleEnabled = authState.enabledState !== 'unavailable';
-  const toggleChecked = authState.enabledState === 'enabled';
   const statusTone = getAccountStatusTone(authState);
-  const secondaryText = buildAccountSecondaryText(row);
+  const accountDisplay = resolveAccountDisplayText(row, accountDisplayMode);
+  const secondaryText = accountDisplay.secondary || buildAccountSecondaryText(row);
   const latestRequestText = new Date(row.lastSeenAt).toLocaleString(locale);
+  const latestRequestLabel = shortLabel(
+    t,
+    'monitoring.latest_request_time_short',
+    'monitoring.latest_request_time'
+  );
 
   return (
     <Card
@@ -769,41 +888,10 @@ export function AccountOverviewCard({
             row={row}
             expanded={isExpanded}
             onToggle={onToggle}
+            accountDisplayMode={accountDisplayMode}
             statusTone={statusTone}
             showSecondary={false}
           />
-          <div className={styles.accountEnabledControl}>
-            <span className={styles.accountEnabledLabel}>
-              {t('monitoring.account_overview_enabled_label_short')}
-            </span>
-            {authState.enabledState === 'mixed' ? (
-              <div className={styles.accountOverviewToggleActions}>
-                <button
-                  type="button"
-                  className={styles.inlineActionButton}
-                  onClick={() => onToggleEnabled(true)}
-                  disabled={statusUpdating}
-                >
-                  {t('monitoring.account_overview_enable_all')}
-                </button>
-                <button
-                  type="button"
-                  className={styles.inlineActionButton}
-                  onClick={() => onToggleEnabled(false)}
-                  disabled={statusUpdating}
-                >
-                  {t('monitoring.account_overview_disable_all')}
-                </button>
-              </div>
-            ) : (
-              <ToggleSwitch
-                ariaLabel={t('monitoring.account_overview_enabled_label')}
-                checked={toggleChecked}
-                disabled={!canToggleEnabled || statusUpdating}
-                onChange={onToggleEnabled}
-              />
-            )}
-          </div>
         </div>
         <div className={styles.accountMetaRow}>
           {secondaryText ? (
@@ -812,8 +900,11 @@ export function AccountOverviewCard({
             </span>
           ) : null}
           {secondaryText ? <span className={styles.accountMetaSeparator}>·</span> : null}
-          <span className={styles.accountOverviewCardTimestamp}>
-            {`${t('monitoring.latest_request_time')}: ${latestRequestText}`}
+          <span
+            className={styles.accountOverviewCardTimestamp}
+            title={t('monitoring.latest_request_time')}
+          >
+            {`${latestRequestLabel}: ${latestRequestText}`}
           </span>
           <button
             type="button"

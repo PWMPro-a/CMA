@@ -3,7 +3,7 @@
 @mixin styles {
   .summarySection {
     display: grid;
-    gap: 14px;
+    gap: 12px;
     min-width: 0;
   }
 
@@ -11,8 +11,13 @@
   .summarySub,
   .summaryGrid {
     display: grid;
-    grid-auto-rows: 1fr;
-    gap: 12px;
+    grid-auto-rows: minmax(112px, auto);
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .summaryGrid {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
   }
 
   .summaryHero {
@@ -35,13 +40,14 @@
     --summary-accent: var(--monitor-accent);
 
     isolation: isolate;
+    overflow: visible;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 10px;
     min-width: 0;
-    height: 136px;
-    min-height: 136px;
-    padding: 16px;
+    height: auto;
+    min-height: 112px;
+    padding: 12px;
     border-radius: var(--app-radius-md);
     background: var(--glass-bg);
     backdrop-filter: var(--glass-backdrop-filter);
@@ -54,14 +60,19 @@
 
   .summaryCardPrimary,
   .summaryCardSecondary {
-    height: 136px;
-    min-height: 136px;
-    padding: 16px;
+    height: auto;
+    min-height: 112px;
+    padding: 12px;
     box-shadow: var(--shadow);
   }
 
   .summaryCard:hover {
+    z-index: 5;
     transform: translateY(-1px);
+  }
+
+  .summaryCard:focus-within {
+    z-index: 5;
   }
 
   .summaryCard:hover {
@@ -74,7 +85,7 @@
     z-index: 1;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     min-width: 0;
   }
 
@@ -82,12 +93,17 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
-    flex: 0 0 32px;
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
     border-radius: 8px;
     background: color-mix(in srgb, var(--summary-accent) 12%, transparent);
     color: var(--summary-accent);
+  }
+
+  .summaryIcon svg {
+    width: 16px;
+    height: 16px;
   }
 
   .summaryCardBody {
@@ -119,41 +135,120 @@
   .summaryValue {
     min-width: 0;
     max-width: 100%;
-    overflow: hidden;
     color: var(--monitor-ink);
-    font-size: 28px;
+    font-size: 24px;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
-    line-height: 1;
+    line-height: 1.05;
     letter-spacing: 0;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  .summaryValueWrap {
+    position: relative;
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .summaryValueWrap .summaryValue {
+    cursor: default;
+    outline: 0;
+  }
+
+  .summaryValueWrap .summaryValue[tabindex='0'] {
+    cursor: help;
+  }
+
+  .summaryValueWrap .summaryValue[tabindex='0']:focus-visible {
+    border-radius: 6px;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--summary-accent) 28%, transparent);
+  }
+
+  .summaryValueTooltip {
+    position: absolute;
+    left: 0;
+    bottom: calc(100% + 8px);
+    z-index: 4;
+    display: grid;
+    gap: 3px;
+    width: max-content;
+    min-width: min(160px, 100%);
+    max-width: min(280px, calc(100vw - 32px));
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--monitor-accent) 78%, var(--monitor-line));
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--monitor-accent) 92%, var(--monitor-accent-strong));
+    color: var(--primary-contrast, #fff);
+    box-shadow: 0 14px 30px color-mix(in srgb, var(--monitor-accent) 28%, transparent);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(4px);
+    transition:
+      opacity 0.14s ease,
+      transform 0.14s ease;
+  }
+
+  .summaryValueTooltip::after {
+    content: '';
+    position: absolute;
+    left: 16px;
+    bottom: -5px;
+    width: 9px;
+    height: 9px;
+    border-right: 1px solid color-mix(in srgb, var(--monitor-accent) 78%, var(--monitor-line));
+    border-bottom: 1px solid color-mix(in srgb, var(--monitor-accent) 78%, var(--monitor-line));
+    background: inherit;
+    transform: rotate(45deg);
+  }
+
+  .summaryValueWrap:hover .summaryValueTooltip,
+  .summaryValueWrap:focus-within .summaryValueTooltip {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .summaryValueTooltipLabel {
+    color: color-mix(in srgb, var(--primary-contrast, #fff) 72%, transparent);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1.2;
     white-space: nowrap;
   }
 
+  .summaryValueTooltipValue {
+    color: var(--primary-contrast, #fff);
+    font-size: 13px;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+  }
+
   .summaryCardSecondary .summaryValue {
-    font-size: 28px;
+    font-size: 24px;
   }
 
   .summaryMeta {
-    margin-top: 6px;
+    margin-top: 5px;
     color: var(--monitor-muted);
-    display: -webkit-box;
-    overflow: hidden;
-    font-size: 12px;
+    display: block;
+    font-size: 11px;
     font-weight: 500;
-    line-height: 1.45;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
   }
 
   .summaryCardChart {
     position: absolute;
-    right: 0;
-    bottom: -5px;
+    right: 8px;
+    bottom: 8px;
     z-index: 0;
-    width: 46%;
-    min-width: 96px;
-    height: 34px;
+    width: calc(46% - 8px);
+    min-width: 72px;
+    height: 28px;
     color: var(--summary-accent);
     opacity: 0.5;
     pointer-events: none;
@@ -614,10 +709,72 @@
   }
 
   .realtimeTable {
-    min-width: 1210px;
+    --realtime-col-source: 21%;
+    --realtime-col-model: 12%;
+    --realtime-col-effort: 7%;
+    --realtime-col-recent: 6%;
+    --realtime-col-status: 7%;
+    --realtime-col-success-rate: 7%;
+    --realtime-col-total-calls: 5%;
+    --realtime-col-tps: 5%;
+    --realtime-col-latency: 10%;
+    --realtime-col-time: 8%;
+    --realtime-col-usage: 7%;
+    --realtime-col-cost: 5%;
+
+    min-width: 1260px;
     border-collapse: separate;
     border-spacing: 0 8px;
     background: transparent;
+    table-layout: fixed;
+  }
+
+  .realtimeTable col:nth-child(1) {
+    width: var(--realtime-col-source);
+  }
+
+  .realtimeTable col:nth-child(2) {
+    width: var(--realtime-col-model);
+  }
+
+  .realtimeTable col:nth-child(3) {
+    width: var(--realtime-col-effort);
+  }
+
+  .realtimeTable col:nth-child(4) {
+    width: var(--realtime-col-recent);
+  }
+
+  .realtimeTable col:nth-child(5) {
+    width: var(--realtime-col-status);
+  }
+
+  .realtimeTable col:nth-child(6) {
+    width: var(--realtime-col-success-rate);
+  }
+
+  .realtimeTable col:nth-child(7) {
+    width: var(--realtime-col-total-calls);
+  }
+
+  .realtimeTable col:nth-child(8) {
+    width: var(--realtime-col-tps);
+  }
+
+  .realtimeTable col:nth-child(9) {
+    width: var(--realtime-col-latency);
+  }
+
+  .realtimeTable col:nth-child(10) {
+    width: var(--realtime-col-time);
+  }
+
+  .realtimeTable col:nth-child(11) {
+    width: var(--realtime-col-usage);
+  }
+
+  .realtimeTable col:nth-child(12) {
+    width: var(--realtime-col-cost);
   }
 
   .table thead th {
@@ -935,30 +1092,6 @@
     color: var(--monitor-muted);
   }
 
-  .realtimeFailureStatus {
-    position: relative;
-    display: inline-flex;
-    width: fit-content;
-    max-width: 100%;
-    align-items: center;
-    outline: none;
-  }
-
-  .realtimeFailureStatus::after {
-    content: '';
-    position: absolute;
-    left: 0;
-    top: 100%;
-    z-index: 19;
-    width: min(420px, calc(100vw - 48px));
-    height: 10px;
-  }
-
-  .realtimeFailureStatus:focus-visible .realtimeRequestStatus {
-    text-decoration: underline;
-    text-underline-offset: 3px;
-  }
-
   .realtimeRequestStatus {
     display: inline-flex;
     align-items: center;
@@ -988,10 +1121,19 @@
   }
 
   .realtimeFailureTooltip {
-    position: absolute;
-    left: 0;
-    top: calc(100% + 4px);
-    z-index: 20;
+    --monitor-surface: var(--bg-primary);
+    --monitor-surface-elevated: color-mix(in srgb, var(--bg-primary) 82%, var(--surface-subtle));
+    --monitor-surface-hover: color-mix(in srgb, var(--surface-subtle-hover) 74%, var(--bg-primary));
+    --monitor-ink: var(--text-primary);
+    --monitor-muted: var(--text-secondary);
+    --monitor-line: var(--border-color);
+    --monitor-accent: var(--primary-color);
+    --monitor-accent-strong: var(--primary-active);
+    --monitor-red: var(--error-color);
+    --monitor-diagnostic-color: var(--monitor-red);
+
+    position: fixed;
+    z-index: 2030;
     display: grid;
     gap: 8px;
     width: max-content;
@@ -1001,7 +1143,7 @@
     overflow: auto;
     padding: 10px 12px;
     padding-right: 42px;
-    border: 1px solid color-mix(in srgb, var(--monitor-red) 26%, var(--monitor-line));
+    border: 1px solid color-mix(in srgb, var(--monitor-diagnostic-color) 26%, var(--monitor-line));
     border-radius: 8px;
     background: var(--monitor-surface-elevated);
     box-shadow: var(--shadow-lg);
@@ -1014,8 +1156,13 @@
     transition:
       opacity 0.12s ease,
       transform 0.12s ease;
+    visibility: hidden;
     white-space: normal;
     user-select: text;
+  }
+
+  .realtimeSuccessDiagnosticTooltip {
+    --monitor-diagnostic-color: var(--monitor-green);
   }
 
   .realtimeFailureTooltip::before {
@@ -1025,18 +1172,33 @@
     top: -5px;
     width: 8px;
     height: 8px;
-    border-left: 1px solid color-mix(in srgb, var(--monitor-red) 26%, var(--monitor-line));
-    border-top: 1px solid color-mix(in srgb, var(--monitor-red) 26%, var(--monitor-line));
     background: var(--monitor-surface-elevated);
     transform: rotate(45deg);
   }
 
-  .realtimeFailureStatus:hover .realtimeFailureTooltip,
-  .realtimeFailureStatus:focus-visible .realtimeFailureTooltip,
-  .realtimeFailureStatus:focus-within .realtimeFailureTooltip {
+  .realtimeFailureTooltipBelow::before {
+    top: -5px;
+    bottom: auto;
+    border-left: 1px solid
+      color-mix(in srgb, var(--monitor-diagnostic-color) 26%, var(--monitor-line));
+    border-top: 1px solid
+      color-mix(in srgb, var(--monitor-diagnostic-color) 26%, var(--monitor-line));
+  }
+
+  .realtimeFailureTooltipAbove::before {
+    top: auto;
+    bottom: -5px;
+    border-right: 1px solid
+      color-mix(in srgb, var(--monitor-diagnostic-color) 26%, var(--monitor-line));
+    border-bottom: 1px solid
+      color-mix(in srgb, var(--monitor-diagnostic-color) 26%, var(--monitor-line));
+  }
+
+  .realtimeFailureTooltipOpen {
     opacity: 1;
     pointer-events: auto;
     transform: translateY(0);
+    visibility: visible;
   }
 
   .realtimeFailureCopyButton {
@@ -1064,7 +1226,7 @@
   }
 
   .realtimeFailureTooltipStatus {
-    color: var(--monitor-red);
+    color: var(--monitor-diagnostic-color);
     font-size: 11px;
     font-weight: 750;
     line-height: 1.2;

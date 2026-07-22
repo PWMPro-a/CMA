@@ -12,7 +12,39 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
+
+type recordingUsageHandler struct {
+	events []usage.Event
+}
+
+func (h *recordingUsageHandler) HandleUsageEvents(_ context.Context, _ RuntimeConfig, events []usage.Event) {
+	h.events = append(h.events, events...)
+}
+
+func TestAuthSnapshotResolverStreamsAuthFiles(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/auth-files" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"files":[{"auth_index":"auth-1","account":"alice@example.com","name":"alice.json","provider":"codex","padding":"`))
+		_, _ = w.Write([]byte(strings.Repeat("x", 1024*1024)))
+		_, _ = w.Write([]byte(`"}]}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	resolver := newAuthSnapshotResolver()
+	resolver.client = upstream.Client()
+	snapshots, err := resolver.fetch(context.Background(), upstream.URL, "management-key")
+	if err != nil {
+		t.Fatalf("fetch snapshots: %v", err)
+	}
+	if snapshot := snapshots["auth-1"]; snapshot.Account != "alice@example.com" || snapshot.FileName != "alice.json" {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
 
 func TestManagerConsumesHTTPUsageQueue(t *testing.T) {
 	var calls int32
@@ -178,6 +210,62 @@ func TestManagerFallsBackToRESPWhenHTTPQueueUnsupported(t *testing.T) {
 		status := manager.Status()
 		return status.Transport == "resp" && strings.Contains(status.LastError, "unsupported RESP prefix")
 	})
+}
+
+func TestManagerOnlyPassesInsertedEventsToHandler(t *testing.T) {
+	db := newTestStore(t)
+	cfg := testConfig(t, "http")
+	manager := NewManager(cfg, db)
+	handler := &recordingUsageHandler{}
+	manager.SetUsageEventHandler(handler)
+
+	duplicateQuotaPayload := `{
+		"request_id":"duplicate-quota",
+		"timestamp":"2026-05-06T00:00:00Z",
+		"provider":"codex",
+		"model":"gpt-test",
+		"endpoint":"POST /v1/chat/completions",
+		"auth_file_snapshot":"codex-auth.json",
+		"auth_index":"auth-1",
+		"failed":true,
+		"fail_status_code":429,
+		"fail_body":"{\"error\":{\"type\":\"usage_limit_reached\",\"resets_in_seconds\":60}}"
+	}`
+	duplicateEvent, err := usage.NormalizeRaw([]byte(duplicateQuotaPayload))
+	if err != nil {
+		t.Fatalf("normalize duplicate payload: %v", err)
+	}
+	if _, err := db.InsertEvents(context.Background(), []usage.Event{duplicateEvent}); err != nil {
+		t.Fatalf("seed duplicate event: %v", err)
+	}
+
+	newNormalPayload := `{
+		"request_id":"new-normal",
+		"timestamp":"2026-05-06T00:00:01Z",
+		"provider":"codex",
+		"model":"gpt-test",
+		"endpoint":"POST /v1/chat/completions",
+		"input_tokens":1,
+		"output_tokens":2
+	}`
+	newEvent, err := usage.NormalizeRaw([]byte(newNormalPayload))
+	if err != nil {
+		t.Fatalf("normalize new payload: %v", err)
+	}
+
+	if err := manager.processItems(context.Background(), RuntimeConfig{}, []string{duplicateQuotaPayload, newNormalPayload}); err != nil {
+		t.Fatalf("process items: %v", err)
+	}
+
+	if len(handler.events) != 1 {
+		t.Fatalf("handler events = %#v, want only newly inserted normal event", handler.events)
+	}
+	if handler.events[0].EventHash != newEvent.EventHash {
+		t.Fatalf("handler event hash = %q, want %q", handler.events[0].EventHash, newEvent.EventHash)
+	}
+	if handler.events[0].EventHash == duplicateEvent.EventHash || handler.events[0].FailStatusCode == http.StatusTooManyRequests {
+		t.Fatalf("duplicate quota event was passed to handler: %#v", handler.events[0])
+	}
 }
 
 func TestManagerSkipsUsageControlPayloadsAndRefreshesSnapshots(t *testing.T) {

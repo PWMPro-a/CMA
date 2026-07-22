@@ -1,5 +1,6 @@
 import type {
   CodexInspectionLastRunState,
+  CodexInspectionQuotaWindow,
   CodexInspectionResultItem,
   CodexInspectionRunResult,
   CodexInspectionSettings,
@@ -23,8 +24,7 @@ import {
   readString,
 } from './codexInspectionSettings';
 
-export const CODEX_INSPECTION_LAST_RUN_STORAGE_KEY =
-  'cli-proxy-codex-inspection-last-run-v1';
+export const CODEX_INSPECTION_LAST_RUN_STORAGE_KEY = 'cli-proxy-codex-inspection-last-run-v1';
 
 const CODEX_INSPECTION_LAST_RUN_STORAGE_VERSION = 1;
 
@@ -41,6 +41,10 @@ const sanitizeInspectionSettingsForStorage = (
 ): CodexInspectionSettings => ({
   baseUrl: '',
   token: '',
+  targetTypes: normalizeConfigurableSettings({
+    targetTypes: settings.targetTypes,
+    targetType: settings.targetType,
+  }).targetTypes,
   targetType: readString(settings.targetType) || DEFAULT_CODEX_INSPECTION_SETTINGS.targetType,
   workers: clampPositiveInteger(settings.workers, DEFAULT_CODEX_INSPECTION_SETTINGS.workers),
   deleteWorkers: clampPositiveInteger(
@@ -50,6 +54,14 @@ const sanitizeInspectionSettingsForStorage = (
   timeout: clampPositiveInteger(settings.timeout, DEFAULT_CODEX_INSPECTION_SETTINGS.timeout),
   retries: Math.max(0, Math.floor(normalizeNumberValue(settings.retries) ?? 0)),
   userAgent: readString(settings.userAgent) || DEFAULT_CODEX_INSPECTION_SETTINGS.userAgent,
+  xaiInferenceUserAgent:
+    readString(settings.xaiInferenceUserAgent) ||
+    DEFAULT_CODEX_INSPECTION_SETTINGS.xaiInferenceUserAgent,
+  xaiInferenceEnabled: readBoolean(settings.xaiInferenceEnabled, false),
+  xaiInferenceModel:
+    readString(settings.xaiInferenceModel) || DEFAULT_CODEX_INSPECTION_SETTINGS.xaiInferenceModel,
+  xaiInferencePrompt:
+    readString(settings.xaiInferencePrompt) || DEFAULT_CODEX_INSPECTION_SETTINGS.xaiInferencePrompt,
   usedPercentThreshold:
     normalizeNumberValue(settings.usedPercentThreshold) ??
     DEFAULT_CODEX_INSPECTION_SETTINGS.usedPercentThreshold,
@@ -59,12 +71,17 @@ const sanitizeInspectionSettingsForStorage = (
 const normalizeStoredSettings = (value: unknown): CodexInspectionSettings => {
   const input = isRecord(value) ? value : {};
   const configurable = normalizeConfigurableSettings({
+    targetTypes: input.targetTypes,
     targetType: input.targetType,
     workers: input.workers,
     deleteWorkers: input.deleteWorkers,
     timeout: input.timeout,
     retries: input.retries,
     userAgent: input.userAgent,
+    xaiInferenceUserAgent: input.xaiInferenceUserAgent,
+    xaiInferenceEnabled: input.xaiInferenceEnabled,
+    xaiInferenceModel: input.xaiInferenceModel,
+    xaiInferencePrompt: input.xaiInferencePrompt,
     usedPercentThreshold: input.usedPercentThreshold,
     sampleSize: input.sampleSize,
   });
@@ -72,18 +89,66 @@ const normalizeStoredSettings = (value: unknown): CodexInspectionSettings => {
   return {
     baseUrl: '',
     token: '',
+    targetTypes: configurable.targetTypes,
     targetType: configurable.targetType,
     workers: configurable.workers,
     deleteWorkers: configurable.deleteWorkers,
     timeout: configurable.timeout,
     retries: configurable.retries,
     userAgent: configurable.userAgent,
+    xaiInferenceUserAgent: configurable.xaiInferenceUserAgent,
+    xaiInferenceEnabled: configurable.xaiInferenceEnabled,
+    xaiInferenceModel: configurable.xaiInferenceModel,
+    xaiInferencePrompt: configurable.xaiInferencePrompt,
     usedPercentThreshold: configurable.usedPercentThreshold,
     sampleSize: configurable.sampleSize,
   };
 };
 
 type StoredCodexInspectionResultItem = Omit<CodexInspectionResultItem, 'raw'>;
+
+const normalizeQuotaWindowLabelParams = (
+  value: unknown
+): Record<string, string | number> | undefined => {
+  if (!isRecord(value)) return undefined;
+  const params: Record<string, string | number> = {};
+  Object.entries(value).forEach(([key, raw]) => {
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      params[key] = raw;
+      return;
+    }
+    const text = readString(raw);
+    if (text) {
+      params[key] = text;
+    }
+  });
+  return Object.keys(params).length > 0 ? params : undefined;
+};
+
+const serializeQuotaWindow = (window: CodexInspectionQuotaWindow): CodexInspectionQuotaWindow => ({
+  id: readString(window.id),
+  labelKey: readString(window.labelKey),
+  labelParams: normalizeQuotaWindowLabelParams(window.labelParams),
+  usedPercent: readNullableNumber(window.usedPercent),
+  resetLabel: readString(window.resetLabel),
+  limitWindowSeconds: readNullableNumber(window.limitWindowSeconds),
+});
+
+const hydrateQuotaWindow = (value: unknown): CodexInspectionQuotaWindow | null => {
+  if (!isRecord(value)) return null;
+  const id = readString(value.id);
+  const labelKey = readString(value.labelKey);
+  if (!id || !labelKey) return null;
+
+  return {
+    id,
+    labelKey,
+    labelParams: normalizeQuotaWindowLabelParams(value.labelParams),
+    usedPercent: readNullableNumber(value.usedPercent),
+    resetLabel: readString(value.resetLabel),
+    limitWindowSeconds: readNullableNumber(value.limitWindowSeconds),
+  };
+};
 
 const serializeResultItemForStorage = (
   item: CodexInspectionResultItem
@@ -95,6 +160,7 @@ const serializeResultItemForStorage = (
   accountId: null,
   provider: item.provider,
   disabled: item.disabled,
+  autoRecoverOwned: item.autoRecoverOwned,
   status: item.status,
   state: item.state,
   action: item.action,
@@ -102,7 +168,12 @@ const serializeResultItemForStorage = (
   statusCode: item.statusCode,
   usedPercent: item.usedPercent,
   isQuota: item.isQuota,
+  autoRecoverEligible: item.autoRecoverEligible,
   error: item.error,
+  planType: readNullableString(item.planType),
+  quotaWindows: (item.quotaWindows ?? []).map(serializeQuotaWindow),
+  errorKind: readString(item.errorKind),
+  errorDetail: readString(item.errorDetail),
 });
 
 const hydrateStoredResultItem = (
@@ -126,6 +197,7 @@ const hydrateStoredResultItem = (
     accountId: readNullableString(value.accountId),
     provider,
     disabled,
+    autoRecoverOwned: readBoolean(value.autoRecoverOwned, false),
     status: readString(value.status),
     state: readString(value.state),
     raw: {
@@ -139,7 +211,16 @@ const hydrateStoredResultItem = (
     statusCode: readNullableNumber(value.statusCode),
     usedPercent: readNullableNumber(value.usedPercent),
     isQuota: readBoolean(value.isQuota, false),
+    autoRecoverEligible: readBoolean(value.autoRecoverEligible, false),
     error: readString(value.error),
+    planType: readNullableString(value.planType),
+    quotaWindows: Array.isArray(value.quotaWindows)
+      ? value.quotaWindows
+          .map(hydrateQuotaWindow)
+          .filter((item): item is CodexInspectionQuotaWindow => item !== null)
+      : [],
+    errorKind: readString(value.errorKind),
+    errorDetail: readString(value.errorDetail),
   };
 };
 

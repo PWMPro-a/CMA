@@ -44,7 +44,6 @@ export function CodexInspectionLogsPanel({
   return (
     <Panel
       title={t('monitoring.codex_inspection_logs_title')}
-      subtitle={t('monitoring.codex_inspection_logs_desc')}
       extra={
         <div className={styles.logActions}>
           <button

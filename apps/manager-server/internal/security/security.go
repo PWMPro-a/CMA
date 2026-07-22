@@ -21,15 +21,17 @@ import (
 )
 
 const encryptedPrefix = "enc:v1:"
-const adminKeyPrefix = "cmp_admin_"
+const adminKeyPrefix = "cpamp_"
+const generatedAdminKeyLength = 32
+const generatedSecretAlphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 const adminHashIterations = 1
 
 func GenerateAdminKey() (string, error) {
-	random, err := randomBytes(32)
+	random, err := randomAlnum(generatedAdminKeyLength)
 	if err != nil {
 		return "", err
 	}
-	return adminKeyPrefix + base64.RawURLEncoding.EncodeToString(random), nil
+	return adminKeyPrefix + random, nil
 }
 
 func NewAdminCredential(adminKey string, source string) (model.AdminCredential, error) {
@@ -238,6 +240,31 @@ func randomBytes(size int) ([]byte, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+func randomAlnum(length int) (string, error) {
+	if length <= 0 {
+		return "", errors.New("random alphanumeric length must be positive")
+	}
+	out := make([]byte, length)
+	buf := make([]byte, length*2)
+	limit := byte(len(generatedSecretAlphabet) * (256 / len(generatedSecretAlphabet)))
+	for i := 0; i < length; {
+		if _, err := rand.Read(buf); err != nil {
+			return "", err
+		}
+		for _, b := range buf {
+			if b >= limit {
+				continue
+			}
+			out[i] = generatedSecretAlphabet[int(b)%len(generatedSecretAlphabet)]
+			i++
+			if i == length {
+				break
+			}
+		}
+	}
+	return string(out), nil
 }
 
 func EqualHMAC(left string, right string) bool {
