@@ -3,7 +3,7 @@
  */
 
 import { apiClient } from './client';
-import type { AuthFilesResponse } from '@/types/authFile';
+import type { AgentIdentityRegistrationStatus, AuthFilesResponse } from '@/types/authFile';
 import type { OAuthModelAliasEntry } from '@/types';
 import { parseTimestampMs } from '@/utils/timestamp';
 
@@ -46,6 +46,22 @@ type AuthFileBatchDeleteResult = {
   deleted: number;
   files: string[];
   failed: AuthFileBatchFailure[];
+};
+export type AgentIdentityRegistrationResult = {
+  name: string;
+  queued: boolean;
+  registration: AgentIdentityRegistrationStatus;
+};
+export type AgentIdentityRegistrationBatchResult = {
+  status: string;
+  queued: number;
+  skipped?: number;
+  results: AgentIdentityRegistrationResult[];
+  failed: AuthFileBatchFailure[];
+};
+export type AgentIdentityRegistrationListResult = {
+  active: number;
+  registrations: AgentIdentityRegistrationResult[];
 };
 
 export const AUTH_FILE_INVALID_JSON_OBJECT_ERROR = 'AUTH_FILE_INVALID_JSON_OBJECT';
@@ -424,6 +440,20 @@ export const authFilesApi = {
 
   setStatus: (name: string, disabled: boolean) =>
     apiClient.patch<AuthFileStatusResponse>('/auth-files/status', { name, disabled }),
+
+  retryAgentIdentityRegistration: (name: string) =>
+    apiClient.post<AgentIdentityRegistrationResult>('/auth-files/agent-identity/register', {
+      name,
+    }),
+
+  listAgentIdentityRegistrations: () =>
+    apiClient.get<AgentIdentityRegistrationListResult>('/auth-files/agent-identity/registrations'),
+
+  retryAgentIdentityRegistrations: (names: string[]) =>
+    apiClient.post<AgentIdentityRegistrationBatchResult>(
+      '/auth-files/agent-identity/register-batch',
+      { names: normalizeRequestedAuthFileNames(names) }
+    ),
 
   setStatusWithFallback: async (name: string, disabled: boolean) => {
     try {

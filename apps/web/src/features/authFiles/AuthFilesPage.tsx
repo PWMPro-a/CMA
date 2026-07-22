@@ -19,7 +19,12 @@ import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer'
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
-import { IconFilterAll, IconSearch, IconSlidersHorizontal } from '@/components/ui/icons';
+import {
+  IconFilterAll,
+  IconRefreshCw,
+  IconSearch,
+  IconSlidersHorizontal,
+} from '@/components/ui/icons';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { copyToClipboard } from '@/utils/clipboard';
@@ -151,6 +156,8 @@ export function AuthFilesPage() {
     deletingAll,
     statusUpdating,
     batchStatusUpdating,
+    registrationRetrying,
+    batchRegistrationRetrying,
     fileInputRef,
     loadFiles,
     handleUploadClick,
@@ -166,6 +173,8 @@ export function AuthFilesPage() {
     deselectAll,
     batchDownload,
     batchSetStatus,
+    retryAgentIdentityRegistration,
+    batchRetryAgentIdentityRegistration,
     batchDelete,
   } = useAuthFilesData({ importDefaults });
 
@@ -600,6 +609,17 @@ export function AuthFilesPage() {
     [sorted]
   );
   const selectedNames = useMemo(() => Array.from(selectedFiles), [selectedFiles]);
+  const retryableAgentRegistrationNames = useMemo(
+    () =>
+      files
+        .filter((file) => {
+          if (!selectedFiles.has(file.name)) return false;
+          const registration = file.agent_identity_registration ?? file.agentIdentityRegistration;
+          return registration?.can_retry === true;
+        })
+        .map((file) => file.name),
+    [files, selectedFiles]
+  );
   const selectedHasStatusUpdating = useMemo(
     () => selectedNames.some((name) => statusUpdating[name] === true),
     [selectedNames, statusUpdating]
@@ -1052,15 +1072,15 @@ export function AuthFilesPage() {
                       disableControls={disableControls}
                       deleting={deleting}
                       statusUpdating={statusUpdating}
+                      registrationRetrying={registrationRetrying[file.name] === true}
                       statusBarCache={statusBarCache}
-                      codexStatusBadges={
-                        codexStatusByAuthFileKey.get(authFileKey)?.badges ?? []
-                      }
+                      codexStatusBadges={codexStatusByAuthFileKey.get(authFileKey)?.badges ?? []}
                       onShowModels={showModels}
                       onDownload={handleDownload}
                       onOpenPrefixProxyEditor={openPrefixProxyEditor}
                       onDelete={handleDelete}
                       onToggleStatus={handleStatusToggle}
+                      onRetryAgentIdentityRegistration={retryAgentIdentityRegistration}
                       onToggleSelect={toggleSelect}
                     />
                   );
@@ -1202,6 +1222,22 @@ export function AuthFilesPage() {
                     disabled={disableControls || selectedNames.length === 0}
                   >
                     {t('auth_files.batch_download')}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() =>
+                      void batchRetryAgentIdentityRegistration(retryableAgentRegistrationNames)
+                    }
+                    disabled={
+                      disableControls ||
+                      retryableAgentRegistrationNames.length === 0 ||
+                      batchRegistrationRetrying
+                    }
+                    loading={batchRegistrationRetrying}
+                  >
+                    {!batchRegistrationRetrying && <IconRefreshCw size={14} />}
+                    {t('auth_files.agent_registration_batch_retry_button')}
                   </Button>
                   <Button
                     size="sm"

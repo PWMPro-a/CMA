@@ -7,11 +7,12 @@ import {
   IconDownload,
   IconInfo,
   IconModelCluster,
+  IconRefreshCw,
   IconSettings,
   IconTrash2,
 } from '@/components/ui/icons';
 import { ProviderStatusBar } from '@/components/providers/ProviderStatusBar';
-import type { AuthFileItem } from '@/types';
+import type { AgentIdentityRegistrationStatus, AuthFileItem } from '@/types';
 import { resolveAuthProvider } from '@/utils/quota';
 import {
   normalizeRecentRequestAuthIndex,
@@ -47,6 +48,7 @@ export type AuthFileCardProps = {
   disableControls: boolean;
   deleting: string | null;
   statusUpdating: Record<string, boolean>;
+  registrationRetrying: boolean;
   statusBarCache: Map<string, AuthFileStatusBarData>;
   codexStatusBadges?: AuthFileCodexStatusBadge[];
   onShowModels: (file: AuthFileItem) => void;
@@ -54,6 +56,7 @@ export type AuthFileCardProps = {
   onOpenPrefixProxyEditor: (file: AuthFileItem) => void;
   onDelete: (name: string) => void;
   onToggleStatus: (file: AuthFileItem, enabled: boolean) => void;
+  onRetryAgentIdentityRegistration: (name: string) => void;
   onToggleSelect: (name: string) => void;
 };
 
@@ -69,6 +72,21 @@ const getProjectIdValue = (file: AuthFileItem): string => {
   return typeof raw === 'string' ? raw.trim() : '';
 };
 
+const getAgentIdentityRegistration = (
+  file: AuthFileItem
+): AgentIdentityRegistrationStatus | null => {
+  const registration = file.agent_identity_registration ?? file.agentIdentityRegistration;
+  if (!registration || typeof registration !== 'object' || !registration.state) return null;
+  return registration;
+};
+
+const formatRegistrationTime = (value?: string): string => {
+  if (!value) return '';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+};
+
 export function AuthFileCard(props: AuthFileCardProps) {
   const { t } = useTranslation();
   const {
@@ -79,6 +97,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
     disableControls,
     deleting,
     statusUpdating,
+    registrationRetrying,
     statusBarCache,
     codexStatusBadges = [],
     onShowModels,
@@ -86,6 +105,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
     onOpenPrefixProxyEditor,
     onDelete,
     onToggleStatus,
+    onRetryAgentIdentityRegistration,
     onToggleSelect,
   } = props;
 
@@ -127,6 +147,20 @@ export function AuthFileCard(props: AuthFileCardProps) {
     Boolean(rawStatusMessage) && !HEALTHY_STATUS_MESSAGES.has(rawStatusMessage.toLowerCase());
 
   const priorityValue = parsePriorityValue(file.priority ?? file['priority']);
+  const agentRegistration = getAgentIdentityRegistration(file);
+  const agentRegistrationState = agentRegistration?.state ?? '';
+  const agentRegistrationLabel = agentRegistrationState
+    ? t(`auth_files.agent_registration_state_${agentRegistrationState}`)
+    : '';
+  const agentRegistrationToneClass =
+    agentRegistrationState === 'ready'
+      ? styles.agentRegistrationReady
+      : agentRegistrationState === 'runtime_deleted' || agentRegistrationState === 'failed'
+        ? styles.agentRegistrationFailed
+        : agentRegistrationState === 'retry_wait'
+          ? styles.agentRegistrationWaiting
+          : styles.agentRegistrationActive;
+  const agentRegistrationNextRetry = formatRegistrationTime(agentRegistration?.next_retry_at);
   const projectIdValue = getProjectIdValue(file);
   const noteValue = typeof file.note === 'string' ? file.note.trim() : '';
   const stateLabel = isRuntimeOnly
@@ -248,6 +282,50 @@ export function AuthFileCard(props: AuthFileCardProps) {
             <div className={styles.healthStatusMessage} title={rawStatusMessage}>
               <IconInfo className={styles.messageIcon} size={14} />
               <span>{rawStatusMessage}</span>
+            </div>
+          )}
+
+          {agentRegistration && (
+            <div className={`${styles.agentRegistrationPanel} ${agentRegistrationToneClass}`}>
+              <div className={styles.agentRegistrationHeader}>
+                <span className={styles.agentRegistrationState}>
+                  <IconRefreshCw
+                    size={14}
+                    className={agentRegistration.active ? styles.agentRegistrationSpin : ''}
+                  />
+                  {agentRegistrationLabel}
+                </span>
+                <span className={styles.agentRegistrationAttempts}>
+                  {t('auth_files.agent_registration_attempts', {
+                    count: agentRegistration.attempts ?? 0,
+                  })}
+                </span>
+              </div>
+              {agentRegistrationNextRetry && (
+                <div className={styles.agentRegistrationDetail}>
+                  {t('auth_files.agent_registration_next_retry', {
+                    time: agentRegistrationNextRetry,
+                  })}
+                </div>
+              )}
+              {agentRegistration.error && (
+                <div className={styles.agentRegistrationError} title={agentRegistration.error}>
+                  {agentRegistration.error}
+                </div>
+              )}
+              {agentRegistration.can_retry && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => onRetryAgentIdentityRegistration(file.name)}
+                  disabled={disableControls || registrationRetrying}
+                  loading={registrationRetrying}
+                  className={styles.agentRegistrationRetryButton}
+                >
+                  {!registrationRetrying && <IconRefreshCw size={14} />}
+                  {t('auth_files.agent_registration_retry_button')}
+                </Button>
+              )}
             </div>
           )}
 

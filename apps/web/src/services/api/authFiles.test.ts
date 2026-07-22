@@ -2,12 +2,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { mocks } = vi.hoisted(() => ({
   mocks: {
+    get: vi.fn(),
+    post: vi.fn(),
     postForm: vi.fn(),
   },
 }));
 
 vi.mock('./client', () => ({
   apiClient: {
+    get: mocks.get,
+    post: mocks.post,
     postForm: mocks.postForm,
   },
 }));
@@ -15,7 +19,48 @@ vi.mock('./client', () => ({
 import { authFilesApi } from './authFiles';
 
 beforeEach(() => {
+  mocks.get.mockReset();
+  mocks.post.mockReset();
   mocks.postForm.mockReset();
+});
+
+describe('authFilesApi Agent Identity registration contracts', () => {
+  it('loads the lightweight registration progress endpoint', async () => {
+    mocks.get.mockResolvedValue({ active: 1, registrations: [] });
+
+    await authFilesApi.listAgentIdentityRegistrations();
+
+    expect(mocks.get).toHaveBeenCalledWith('/auth-files/agent-identity/registrations');
+  });
+
+  it('queues one account registration', async () => {
+    mocks.post.mockResolvedValue({
+      name: 'agent.json',
+      queued: true,
+      registration: { state: 'queued', attempts: 0, active: true, can_retry: false },
+    });
+
+    await authFilesApi.retryAgentIdentityRegistration('agent.json');
+
+    expect(mocks.post).toHaveBeenCalledWith('/auth-files/agent-identity/register', {
+      name: 'agent.json',
+    });
+  });
+
+  it('deduplicates batch registration names', async () => {
+    mocks.post.mockResolvedValue({ status: 'ok', queued: 0, results: [], failed: [] });
+
+    await authFilesApi.retryAgentIdentityRegistrations([
+      'agent-a.json',
+      'agent-a.json',
+      ' ',
+      'agent-b.json',
+    ]);
+
+    expect(mocks.post).toHaveBeenCalledWith('/auth-files/agent-identity/register-batch', {
+      names: ['agent-a.json', 'agent-b.json'],
+    });
+  });
 });
 
 describe('authFilesApi save auth file upload contracts', () => {
@@ -151,7 +196,7 @@ describe('authFilesApi save auth file upload contracts', () => {
         type: 'codex',
         access_token: 'token',
       })
-      ).rejects.toThrow('Invalid auth payload');
+    ).rejects.toThrow('Invalid auth payload');
   });
 
   it('saveJsonObject throws when backend reports explicit error status without upload counters', async () => {

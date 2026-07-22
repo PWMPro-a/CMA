@@ -20,6 +20,27 @@ export type AuthFileType =
   | 'empty'
   | 'unknown';
 
+export type AgentIdentityRegistrationState =
+  | 'ready'
+  | 'queued'
+  | 'registering'
+  | 'retry_wait'
+  | 'runtime_deleted'
+  | 'failed';
+
+export interface AgentIdentityRegistrationStatus {
+  state: AgentIdentityRegistrationState;
+  attempts: number;
+  queued_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  next_retry_at?: string;
+  error_code?: string;
+  error?: string;
+  active: boolean;
+  can_retry: boolean;
+}
+
 export interface AuthFileItem {
   name: string;
   type?: AuthFileType | string;
@@ -41,6 +62,8 @@ export interface AuthFileItem {
   geminiVirtualProject?: string;
   recent_requests?: RecentRequestBucket[];
   recentRequests?: RecentRequestBucket[];
+  agent_identity_registration?: AgentIdentityRegistrationStatus;
+  agentIdentityRegistration?: AgentIdentityRegistrationStatus;
   [key: string]: unknown;
 }
 
