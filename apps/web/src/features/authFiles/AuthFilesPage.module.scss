@@ -29,6 +29,12 @@
     border-radius: 12px;
   }
 
+	:global(.btn > span) {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+	}
+
   @include mobile {
     width: 100%;
     justify-content: flex-start;

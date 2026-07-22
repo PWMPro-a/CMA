@@ -67,6 +67,7 @@ export type UseAuthFilesDataResult = {
   batchDownload: (names: string[]) => Promise<void>;
   batchSetStatus: (names: string[], enabled: boolean) => Promise<void>;
   retryAgentIdentityRegistration: (name: string) => Promise<void>;
+  rebuildAgentIdentityRegistration: (name: string) => Promise<void>;
   batchRetryAgentIdentityRegistration: (names: string[]) => Promise<void>;
   batchDelete: (names: string[]) => void;
 };
@@ -742,6 +743,34 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
     [registrationRetrying, showNotification, t]
   );
 
+  const rebuildAgentIdentityRegistration = useCallback(
+    async (name: string) => {
+      if (!name || registrationRetrying[name]) return;
+      setRegistrationRetrying((prev) => ({ ...prev, [name]: true }));
+      try {
+        const result = await authFilesApi.rebuildAgentIdentityRegistration(name);
+        setFiles((prev) =>
+          prev.map((file) =>
+            file.name === name
+              ? { ...file, agent_identity_registration: result.registration }
+              : file
+          )
+        );
+        showNotification(t('agent_recovery.rebuild_queued'), 'success');
+      } catch (err: unknown) {
+        const errorMessage = err instanceof Error ? err.message : '';
+        showNotification(`${t('agent_recovery.rebuild_failed')}: ${errorMessage}`, 'error');
+      } finally {
+        setRegistrationRetrying((prev) => {
+          const next = { ...prev };
+          delete next[name];
+          return next;
+        });
+      }
+    },
+    [registrationRetrying, showNotification, t]
+  );
+
   const batchRetryAgentIdentityRegistration = useCallback(
     async (names: string[]) => {
       if (batchRegistrationRetrying) return;
@@ -896,6 +925,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
     batchDownload,
     batchSetStatus,
     retryAgentIdentityRegistration,
+    rebuildAgentIdentityRegistration,
     batchRetryAgentIdentityRegistration,
     batchDelete,
   };

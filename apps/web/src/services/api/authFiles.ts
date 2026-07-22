@@ -3,7 +3,14 @@
  */
 
 import { apiClient } from './client';
-import type { AgentIdentityRegistrationStatus, AuthFilesResponse } from '@/types/authFile';
+import type {
+  AgentIdentityRecoveryConfig,
+  AgentIdentityRecoveryCoordinator,
+  AgentIdentityRecoveryHistoryEntry,
+  AgentIdentityRecoverySummary,
+  AgentIdentityRegistrationStatus,
+  AuthFilesResponse,
+} from '@/types/authFile';
 import type { OAuthModelAliasEntry } from '@/types';
 import { parseTimestampMs } from '@/utils/timestamp';
 
@@ -61,7 +68,15 @@ export type AgentIdentityRegistrationBatchResult = {
 };
 export type AgentIdentityRegistrationListResult = {
   active: number;
+  coordinator?: AgentIdentityRecoveryCoordinator;
   registrations: AgentIdentityRegistrationResult[];
+};
+export type AgentIdentityRecoveryResult = {
+  summary: AgentIdentityRecoverySummary;
+  coordinator: AgentIdentityRecoveryCoordinator;
+  config: AgentIdentityRecoveryConfig;
+  registrations: AgentIdentityRegistrationResult[];
+  history: AgentIdentityRecoveryHistoryEntry[];
 };
 
 export const AUTH_FILE_INVALID_JSON_OBJECT_ERROR = 'AUTH_FILE_INVALID_JSON_OBJECT';
@@ -452,6 +467,29 @@ export const authFilesApi = {
   retryAgentIdentityRegistrations: (names: string[]) =>
     apiClient.post<AgentIdentityRegistrationBatchResult>(
       '/auth-files/agent-identity/register-batch',
+      { names: normalizeRequestedAuthFileNames(names) }
+    ),
+
+  getAgentIdentityRecovery: (historyLimit = 200) =>
+    apiClient.get<AgentIdentityRecoveryResult>('/auth-files/agent-identity/recovery', {
+      params: { history_limit: historyLimit },
+    }),
+
+  updateAgentIdentityRecoveryConfig: (config: Partial<AgentIdentityRecoveryConfig>) =>
+    apiClient.put<{
+      status: string;
+      config: AgentIdentityRecoveryConfig;
+      coordinator: AgentIdentityRecoveryCoordinator;
+    }>('/auth-files/agent-identity/recovery/config', config),
+
+  rebuildAgentIdentityRegistration: (name: string) =>
+    apiClient.post<AgentIdentityRegistrationResult>('/auth-files/agent-identity/rebuild', {
+      name,
+    }),
+
+  rebuildAgentIdentityRegistrations: (names: string[]) =>
+    apiClient.post<AgentIdentityRegistrationBatchResult>(
+      '/auth-files/agent-identity/rebuild-batch',
       { names: normalizeRequestedAuthFileNames(names) }
     ),
 

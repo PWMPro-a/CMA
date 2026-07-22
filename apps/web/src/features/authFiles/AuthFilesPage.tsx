@@ -174,6 +174,7 @@ export function AuthFilesPage() {
     batchDownload,
     batchSetStatus,
     retryAgentIdentityRegistration,
+    rebuildAgentIdentityRegistration,
     batchRetryAgentIdentityRegistration,
     batchDelete,
   } = useAuthFilesData({ importDefaults });
@@ -842,6 +843,14 @@ export function AuthFilesPage() {
                 <Button
                   variant="secondary"
                   size="sm"
+                  onClick={() => navigate('/auth-files/agent-identity-recovery')}
+                >
+                  <IconRefreshCw size={15} />
+                  {t('agent_recovery.entry_button')}
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={handleHeaderRefresh}
                   disabled={loading}
                 >
@@ -1081,6 +1090,7 @@ export function AuthFilesPage() {
                       onDelete={handleDelete}
                       onToggleStatus={handleStatusToggle}
                       onRetryAgentIdentityRegistration={retryAgentIdentityRegistration}
+                      onRebuildAgentIdentityRegistration={rebuildAgentIdentityRegistration}
                       onToggleSelect={toggleSelect}
                     />
                   );

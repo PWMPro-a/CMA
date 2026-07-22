@@ -19,6 +19,92 @@ const buildSignedJwt = (
 ) => `${encodeBase64UrlJson(header)}.${encodeBase64UrlJson(payload)}.${signature}`;
 
 describe('convertAuthJsonInput', () => {
+  it('keeps a Sub2API Agent Identity bundle unchanged for both paste modes', () => {
+    const bundle = {
+      type: 'sub2api-data',
+      version: 1,
+      proxies: [],
+      accounts: [
+        {
+          name: 'agent@example.com',
+          credentials: {
+            auth_mode: 'agentIdentity',
+            agent_runtime_id: 'runtime-value',
+            agent_private_key: 'private-key-value',
+            task_id: 'task-value',
+          },
+        },
+      ],
+    };
+
+    expect(convertAuthJsonInput(JSON.stringify(bundle), 'cpa')).toEqual(bundle);
+    expect(convertAuthJsonInput(JSON.stringify(bundle), 'session')).toEqual(bundle);
+  });
+
+  it('removes synthetic id_token values from Agent Identity accounts without losing credentials', () => {
+    const syntheticIdToken = buildSignedJwt(
+      { email: 'agent@example.com' },
+      { alg: 'none', typ: 'JWT', cpa_synthetic: true },
+      'synthetic'
+    );
+    const signedIdToken = buildSignedJwt({ sub: 'signed-agent' });
+    const bundle = {
+      type: 'sub2api-data',
+      version: 1,
+      exported_at: '2026-07-22T00:00:00Z',
+      proxies: [],
+      accounts: [
+        {
+          name: 'agent@example.com',
+          platform: 'openai',
+          type: 'oauth',
+          credentials: {
+            auth_mode: 'agentIdentity',
+            agent_runtime_id: 'runtime-value',
+            agent_private_key: 'private-key-value',
+            task_id: 'task-value',
+            account_id: 'shared-account-value',
+            id_token: syntheticIdToken,
+            nested: { idToken: syntheticIdToken },
+          },
+          concurrency: 1,
+          priority: 1,
+        },
+        {
+          name: 'signed-agent@example.com',
+          platform: 'openai',
+          type: 'oauth',
+          credentials: {
+            auth_mode: 'agentIdentity',
+            agent_runtime_id: 'signed-runtime-value',
+            agent_private_key: 'signed-private-key-value',
+            task_id: 'signed-task-value',
+            id_token: signedIdToken,
+          },
+          concurrency: 1,
+          priority: 1,
+        },
+      ],
+    };
+
+    const result = convertAuthJsonInput(JSON.stringify(bundle), 'cpa');
+    const accounts = result.accounts as Record<string, unknown>[];
+    const firstCredentials = accounts[0].credentials as Record<string, unknown>;
+    const secondCredentials = accounts[1].credentials as Record<string, unknown>;
+
+    expect(firstCredentials).toMatchObject({
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'runtime-value',
+      agent_private_key: 'private-key-value',
+      task_id: 'task-value',
+      account_id: 'shared-account-value',
+      nested: {},
+    });
+    expect(firstCredentials).not.toHaveProperty('id_token');
+    expect(firstCredentials.nested).not.toHaveProperty('idToken');
+    expect(secondCredentials.id_token).toBe(signedIdToken);
+  });
+
   it('keeps a CPA auth JSON object unchanged', () => {
     const input = {
       type: 'codex',
@@ -122,7 +208,7 @@ describe('convertAuthJsonInput', () => {
     expect(result).not.toHaveProperty('chatgpt_plan_type');
   });
 
-    it('omits unsigned idToken values and does not treat forged idToken payload claims as canonical metadata', () => {
+  it('omits unsigned idToken values and does not treat forged idToken payload claims as canonical metadata', () => {
     const forgedIdToken = buildJwt(
       {
         email: 'attacker-id@example.com',
@@ -143,68 +229,68 @@ describe('convertAuthJsonInput', () => {
       'session'
     );
 
-      expect(result).toMatchObject({
-        type: 'codex',
-        access_token: 'access-token',
-        name: 'ChatGPT Account',
-      });
-      expect(result).not.toHaveProperty('id_token');
-      expect(result).not.toHaveProperty('email');
-      expect(result).not.toHaveProperty('account_id');
-      expect(result).not.toHaveProperty('chatgpt_account_id');
-      expect(result).not.toHaveProperty('plan_type');
-      expect(result).not.toHaveProperty('chatgpt_plan_type');
+    expect(result).toMatchObject({
+      type: 'codex',
+      access_token: 'access-token',
+      name: 'ChatGPT Account',
     });
+    expect(result).not.toHaveProperty('id_token');
+    expect(result).not.toHaveProperty('email');
+    expect(result).not.toHaveProperty('account_id');
+    expect(result).not.toHaveProperty('chatgpt_account_id');
+    expect(result).not.toHaveProperty('plan_type');
+    expect(result).not.toHaveProperty('chatgpt_plan_type');
+  });
 
-    it('omits JWT-shaped idToken values when the signature segment is empty', () => {
-      const emptySignatureIdToken = buildJwt(
-        {
-          email: 'untrusted-id@example.com',
-        },
-        { alg: 'HS256', typ: 'JWT' }
-      );
+  it('omits JWT-shaped idToken values when the signature segment is empty', () => {
+    const emptySignatureIdToken = buildJwt(
+      {
+        email: 'untrusted-id@example.com',
+      },
+      { alg: 'HS256', typ: 'JWT' }
+    );
 
-      const result = convertAuthJsonInput(
-        JSON.stringify({
-          user: {},
-          accessToken: 'access-token',
-          idToken: emptySignatureIdToken,
-        }),
-        'session'
-      );
+    const result = convertAuthJsonInput(
+      JSON.stringify({
+        user: {},
+        accessToken: 'access-token',
+        idToken: emptySignatureIdToken,
+      }),
+      'session'
+    );
 
-      expect(result).toMatchObject({
-        type: 'codex',
-        access_token: 'access-token',
-      });
-      expect(result).not.toHaveProperty('id_token');
+    expect(result).toMatchObject({
+      type: 'codex',
+      access_token: 'access-token',
     });
+    expect(result).not.toHaveProperty('id_token');
+  });
 
-    it('preserves a non-none idToken JWT string when the signature segment is present', () => {
-      const signedLikeIdToken = buildSignedJwt(
-        {
-          email: 'trusted-id@example.com',
-        },
-        { alg: 'HS256', typ: 'JWT' }
-      );
+  it('preserves a non-none idToken JWT string when the signature segment is present', () => {
+    const signedLikeIdToken = buildSignedJwt(
+      {
+        email: 'trusted-id@example.com',
+      },
+      { alg: 'HS256', typ: 'JWT' }
+    );
 
-      const result = convertAuthJsonInput(
-        JSON.stringify({
-          user: {},
-          accessToken: 'access-token',
-          idToken: signedLikeIdToken,
-        }),
-        'session'
-      );
+    const result = convertAuthJsonInput(
+      JSON.stringify({
+        user: {},
+        accessToken: 'access-token',
+        idToken: signedLikeIdToken,
+      }),
+      'session'
+    );
 
-      expect(result).toMatchObject({
-        type: 'codex',
-        access_token: 'access-token',
-        id_token: signedLikeIdToken,
-      });
+    expect(result).toMatchObject({
+      type: 'codex',
+      access_token: 'access-token',
+      id_token: signedLikeIdToken,
     });
+  });
 
-    it.each([
+  it.each([
     {
       alias: 'expires',
       sessionValue: '2026-06-01T00:00:00.000Z',
@@ -239,17 +325,17 @@ describe('convertAuthJsonInput', () => {
   );
 
   it('converts session JSON with token and user data split across nested objects', () => {
-      const idToken = buildSignedJwt(
-        {
-          email: 'id-token@example.com',
-          'https://api.openai.com/auth': {
-            chatgpt_account_id: 'account-from-id-token',
-            chatgpt_plan_type: 'team',
-            chatgpt_user_id: 'user-from-id-token',
-          },
+    const idToken = buildSignedJwt(
+      {
+        email: 'id-token@example.com',
+        'https://api.openai.com/auth': {
+          chatgpt_account_id: 'account-from-id-token',
+          chatgpt_plan_type: 'team',
+          chatgpt_user_id: 'user-from-id-token',
         },
-        { alg: 'HS256', typ: 'JWT' }
-      );
+      },
+      { alg: 'HS256', typ: 'JWT' }
+    );
 
     const result = convertAuthJsonInput(
       JSON.stringify({
@@ -333,10 +419,10 @@ describe('convertAuthJsonInput', () => {
     );
   });
 
-    it('preserves nested explicit expiration when split-session data is aggregated', () => {
-      const nestedExpiry = '2026-08-01T00:00:00.000Z';
-      const result = convertAuthJsonInput(
-        JSON.stringify({
+  it('preserves nested explicit expiration when split-session data is aggregated', () => {
+    const nestedExpiry = '2026-08-01T00:00:00.000Z';
+    const result = convertAuthJsonInput(
+      JSON.stringify({
         session: {
           tokens: {
             accessToken: 'access-token',
@@ -351,59 +437,59 @@ describe('convertAuthJsonInput', () => {
       'session'
     );
 
-      expect(result).toMatchObject({
-        access_token: 'access-token',
-        expired: nestedExpiry,
-      });
+    expect(result).toMatchObject({
+      access_token: 'access-token',
+      expired: nestedExpiry,
     });
+  });
 
-    it('prefers explicit session expires_at over nested token-container expires_at during aggregation', () => {
-      const explicitSessionExpiry = '2026-08-01T00:00:00.000Z';
-      const nestedTokenExpiry = '2026-01-01T00:00:00.000Z';
-      const result = convertAuthJsonInput(
-        JSON.stringify({
-          session: {
-            tokens: {
-              accessToken: 'access-token',
-              expires_at: nestedTokenExpiry,
-            },
-            expires_at: explicitSessionExpiry,
+  it('prefers explicit session expires_at over nested token-container expires_at during aggregation', () => {
+    const explicitSessionExpiry = '2026-08-01T00:00:00.000Z';
+    const nestedTokenExpiry = '2026-01-01T00:00:00.000Z';
+    const result = convertAuthJsonInput(
+      JSON.stringify({
+        session: {
+          tokens: {
+            accessToken: 'access-token',
+            expires_at: nestedTokenExpiry,
           },
-          profile: {
-            user: { email: 'profile@example.com' },
-            account: { id: 'profile-account' },
-          },
-        }),
-        'session'
-      );
-
-      expect(result).toMatchObject({
-        access_token: 'access-token',
-        expired: explicitSessionExpiry,
-      });
-    });
-
-    it('prefers numeric-string expires_at over access-token exp fallback', () => {
-      const accessToken = buildJwt({ exp: 1_700_000_000 });
-      const result = convertAuthJsonInput(
-        JSON.stringify({
+          expires_at: explicitSessionExpiry,
+        },
+        profile: {
           user: { email: 'profile@example.com' },
           account: { id: 'profile-account' },
-          accessToken,
-          expires_at: '1800000000',
-        }),
-        'session'
-      );
+        },
+      }),
+      'session'
+    );
 
-      expect(result).toMatchObject({
-        access_token: accessToken,
-        expired: '2027-01-15T08:00:00.000Z',
-      });
+    expect(result).toMatchObject({
+      access_token: 'access-token',
+      expired: explicitSessionExpiry,
     });
+  });
+
+  it('prefers numeric-string expires_at over access-token exp fallback', () => {
+    const accessToken = buildJwt({ exp: 1_700_000_000 });
+    const result = convertAuthJsonInput(
+      JSON.stringify({
+        user: { email: 'profile@example.com' },
+        account: { id: 'profile-account' },
+        accessToken,
+        expires_at: '1800000000',
+      }),
+      'session'
+    );
+
+    expect(result).toMatchObject({
+      access_token: accessToken,
+      expired: '2027-01-15T08:00:00.000Z',
+    });
+  });
 
   it('uses a nested access token even when a parent session object has only session metadata', () => {
-        const result = convertAuthJsonInput(
-          JSON.stringify({
+    const result = convertAuthJsonInput(
+      JSON.stringify({
         session: {
           sessionToken: 'parent-session-token',
           token: {
@@ -424,8 +510,8 @@ describe('convertAuthJsonInput', () => {
       account_id: 'profile-account',
       access_token: 'nested-access-token',
       session_token: 'parent-session-token',
-        });
-      });
+    });
+  });
 
   it('preserves nested user identity when aggregated data.session provides accessToken directly', () => {
     const result = convertAuthJsonInput(
@@ -474,8 +560,34 @@ describe('convertAuthJsonInput', () => {
   });
 
   it('merges sibling profile account data when a nested session already has token and user fields', () => {
-      const result = convertAuthJsonInput(
-        JSON.stringify({
+    const result = convertAuthJsonInput(
+      JSON.stringify({
+        session: {
+          accessToken: 'nested-access-token',
+          user: { email: 'nested@example.com' },
+        },
+        profile: {
+          account: { id: 'profile-account', planType: 'pro' },
+        },
+      }),
+      'session'
+    );
+
+    expect(result).toMatchObject({
+      type: 'codex',
+      email: 'nested@example.com',
+      account_id: 'profile-account',
+      chatgpt_account_id: 'profile-account',
+      plan_type: 'pro',
+      chatgpt_plan_type: 'pro',
+      access_token: 'nested-access-token',
+    });
+  });
+
+  it('merges sibling profile account data for one-item array-wrapped direct session inputs', () => {
+    const result = convertAuthJsonInput(
+      JSON.stringify([
+        {
           session: {
             accessToken: 'nested-access-token',
             user: { email: 'nested@example.com' },
@@ -483,51 +595,25 @@ describe('convertAuthJsonInput', () => {
           profile: {
             account: { id: 'profile-account', planType: 'pro' },
           },
-        }),
-        'session'
-      );
+        },
+      ]),
+      'session'
+    );
 
-      expect(result).toMatchObject({
-        type: 'codex',
-        email: 'nested@example.com',
-        account_id: 'profile-account',
-        chatgpt_account_id: 'profile-account',
-        plan_type: 'pro',
-        chatgpt_plan_type: 'pro',
-        access_token: 'nested-access-token',
-      });
+    expect(result).toMatchObject({
+      type: 'codex',
+      email: 'nested@example.com',
+      account_id: 'profile-account',
+      chatgpt_account_id: 'profile-account',
+      plan_type: 'pro',
+      chatgpt_plan_type: 'pro',
+      access_token: 'nested-access-token',
     });
+  });
 
-    it('merges sibling profile account data for one-item array-wrapped direct session inputs', () => {
-      const result = convertAuthJsonInput(
-        JSON.stringify([
-          {
-            session: {
-              accessToken: 'nested-access-token',
-              user: { email: 'nested@example.com' },
-            },
-            profile: {
-              account: { id: 'profile-account', planType: 'pro' },
-            },
-          },
-        ]),
-        'session'
-      );
-
-      expect(result).toMatchObject({
-        type: 'codex',
-        email: 'nested@example.com',
-        account_id: 'profile-account',
-        chatgpt_account_id: 'profile-account',
-        plan_type: 'pro',
-        chatgpt_plan_type: 'pro',
-        access_token: 'nested-access-token',
-      });
-    });
-
-    it('merges nested profile account data when root user and token fields are present', () => {
-      const result = convertAuthJsonInput(
-        JSON.stringify({
+  it('merges nested profile account data when root user and token fields are present', () => {
+    const result = convertAuthJsonInput(
+      JSON.stringify({
         user: { email: 'root@example.com' },
         token: { accessToken: 'root-access-token' },
         profile: {
@@ -537,81 +623,81 @@ describe('convertAuthJsonInput', () => {
       'session'
     );
 
-      expect(result).toMatchObject({
-        type: 'codex',
-        email: 'root@example.com',
-        account_id: 'profile-account',
-        chatgpt_account_id: 'profile-account',
-        plan_type: 'pro',
-        chatgpt_plan_type: 'pro',
-        access_token: 'root-access-token',
-      });
+    expect(result).toMatchObject({
+      type: 'codex',
+      email: 'root@example.com',
+      account_id: 'profile-account',
+      chatgpt_account_id: 'profile-account',
+      plan_type: 'pro',
+      chatgpt_plan_type: 'pro',
+      access_token: 'root-access-token',
     });
+  });
 
-    it('preserves nested account.account_id and account.chatgpt_plan_type aliases', () => {
-      const result = convertAuthJsonInput(
-        JSON.stringify({
-          session: {
-            token: {
-              accessToken: 'root-access-token',
-            },
+  it('preserves nested account.account_id and account.chatgpt_plan_type aliases', () => {
+    const result = convertAuthJsonInput(
+      JSON.stringify({
+        session: {
+          token: {
+            accessToken: 'root-access-token',
           },
-          user: { email: 'root@example.com' },
+        },
+        user: { email: 'root@example.com' },
+        account: {
+          account_id: 'root-account-id-alias',
+          chatgpt_plan_type: 'team',
+        },
+      }),
+      'session'
+    );
+
+    expect(result).toMatchObject({
+      type: 'codex',
+      email: 'root@example.com',
+      account_id: 'root-account-id-alias',
+      chatgpt_account_id: 'root-account-id-alias',
+      plan_type: 'team',
+      chatgpt_plan_type: 'team',
+      access_token: 'root-access-token',
+    });
+  });
+
+  it('preserves nested account and profile.account chatgpt aliases when id fields are absent', () => {
+    const result = convertAuthJsonInput(
+      JSON.stringify({
+        session: {
+          tokens: {
+            accessToken: 'profile-access-token',
+          },
+        },
+        profile: {
+          user: { email: 'profile@example.com' },
           account: {
-            account_id: 'root-account-id-alias',
-            chatgpt_plan_type: 'team',
+            chatgpt_account_id: 'profile-account-alias',
+            chatgpt_plan_type: 'pro',
           },
-        }),
-        'session'
-      );
+        },
+        account: {
+          chatgpt_account_id: 'root-account-alias',
+          chatgpt_plan_type: 'team',
+        },
+      }),
+      'session'
+    );
 
-      expect(result).toMatchObject({
-        type: 'codex',
-        email: 'root@example.com',
-        account_id: 'root-account-id-alias',
-        chatgpt_account_id: 'root-account-id-alias',
-        plan_type: 'team',
-        chatgpt_plan_type: 'team',
-        access_token: 'root-access-token',
-      });
+    expect(result).toMatchObject({
+      type: 'codex',
+      email: 'profile@example.com',
+      account_id: 'root-account-alias',
+      chatgpt_account_id: 'root-account-alias',
+      plan_type: 'team',
+      chatgpt_plan_type: 'team',
+      access_token: 'profile-access-token',
     });
+  });
 
-    it('preserves nested account and profile.account chatgpt aliases when id fields are absent', () => {
-      const result = convertAuthJsonInput(
-        JSON.stringify({
-          session: {
-            tokens: {
-              accessToken: 'profile-access-token',
-            },
-          },
-          profile: {
-            user: { email: 'profile@example.com' },
-            account: {
-              chatgpt_account_id: 'profile-account-alias',
-              chatgpt_plan_type: 'pro',
-            },
-          },
-          account: {
-            chatgpt_account_id: 'root-account-alias',
-            chatgpt_plan_type: 'team',
-          },
-        }),
-        'session'
-      );
-
-      expect(result).toMatchObject({
-        type: 'codex',
-        email: 'profile@example.com',
-        account_id: 'root-account-alias',
-        chatgpt_account_id: 'root-account-alias',
-        plan_type: 'team',
-        chatgpt_plan_type: 'team',
-        access_token: 'profile-access-token',
-      });
-    });
-
-    it('rejects split session JSON when multiple token branches could be aggregated', () => {
-      const input = {
+  it('rejects split session JSON when multiple token branches could be aggregated', () => {
+    const input = {
       profile: {
         user: { email: 'profile@example.com' },
         account: { id: 'profile-account' },
@@ -633,7 +719,7 @@ describe('convertAuthJsonInput', () => {
     const oversized = JSON.stringify({
       type: 'codex',
       access_token: 'existing-access-token',
-      padding: 'x'.repeat(3_000_000),
+      padding: 'x'.repeat(11 * 1024 * 1024),
     });
 
     expect(() => convertAuthJsonInput(oversized, 'cpa')).toThrow(
