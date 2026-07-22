@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
-import { authFilesApi } from '@/services/api';
+import { authFilesApi, type AuthFileImportDefaults } from '@/services/api';
 import { apiClient } from '@/services/api/client';
 import { useNotificationStore } from '@/stores';
 import type { AuthFileItem } from '@/types';
@@ -45,8 +45,10 @@ export type UseAuthFilesDataResult = {
   deletingAll: boolean;
   statusUpdating: Record<string, boolean>;
   batchStatusUpdating: boolean;
+  registrationRetrying: Record<string, boolean>;
+  batchRegistrationRetrying: boolean;
   fileInputRef: RefObject<HTMLInputElement | null>;
-  loadFiles: (options?: { throwOnError?: boolean }) => Promise<void>;
+  loadFiles: (options?: { throwOnError?: boolean; silent?: boolean }) => Promise<void>;
   handleUploadClick: () => void;
   handleFileChange: (event: ChangeEvent<HTMLInputElement>) => Promise<void>;
   savePastedAuthJson: (
@@ -64,6 +66,8 @@ export type UseAuthFilesDataResult = {
   deselectAll: () => void;
   batchDownload: (names: string[]) => Promise<void>;
   batchSetStatus: (names: string[], enabled: boolean) => Promise<void>;
+  retryAgentIdentityRegistration: (name: string) => Promise<void>;
+  batchRetryAgentIdentityRegistration: (names: string[]) => Promise<void>;
   batchDelete: (names: string[]) => void;
 };
 
@@ -88,7 +92,20 @@ export const buildPastedAuthJsonPayload = (
   };
 };
 
-export function useAuthFilesData(): UseAuthFilesDataResult {
+type UseAuthFilesDataOptions = {
+  importDefaults?: AuthFileImportDefaults;
+};
+
+const ACTIVE_AGENT_REGISTRATION_STATES = new Set(['queued', 'registering', 'retry_wait']);
+
+const hasActiveAgentIdentityRegistration = (file: AuthFileItem): boolean => {
+  const registration = file.agent_identity_registration ?? file.agentIdentityRegistration;
+  if (!registration || typeof registration !== 'object') return false;
+  const state = String(registration.state ?? '').trim();
+  return ACTIVE_AGENT_REGISTRATION_STATES.has(state);
+};
+
+export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuthFilesDataResult {
   const { t } = useTranslation();
   const { showNotification, showConfirmation } = useNotificationStore();
 
@@ -102,10 +119,13 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
   const [deletingAll, setDeletingAll] = useState(false);
   const [statusUpdating, setStatusUpdating] = useState<Record<string, boolean>>({});
   const [batchStatusUpdating, setBatchStatusUpdating] = useState(false);
+  const [registrationRetrying, setRegistrationRetrying] = useState<Record<string, boolean>>({});
+  const [batchRegistrationRetrying, setBatchRegistrationRetrying] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const batchStatusPendingRef = useRef(false);
+  const registrationPollPendingRef = useRef(false);
   const selectionCount = selectedFiles.size;
   const toggleSelect = useCallback((name: string) => {
     setSelectedFiles((prev) => {
@@ -193,24 +213,61 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
   }, [files, selectedFiles.size]);
 
   const loadFiles = useCallback(
-    async (options?: { throwOnError?: boolean }) => {
-      setLoading(true);
-      setError('');
+    async (options?: { throwOnError?: boolean; silent?: boolean }) => {
+      if (!options?.silent) {
+        setLoading(true);
+        setError('');
+      }
       try {
         const data = await authFilesApi.list();
         setFiles(data?.files || []);
       } catch (err: unknown) {
         const errorMessage = err instanceof Error ? err.message : t('notification.refresh_failed');
-        setError(errorMessage);
+        if (!options?.silent) {
+          setError(errorMessage);
+        }
         if (options?.throwOnError) {
           throw err instanceof Error ? err : new Error(errorMessage);
         }
       } finally {
-        setLoading(false);
+        if (!options?.silent) {
+          setLoading(false);
+        }
       }
     },
     [t]
   );
+
+  const hasActiveRegistration = files.some(hasActiveAgentIdentityRegistration);
+
+  const refreshAgentIdentityRegistrations = useCallback(async () => {
+    const result = await authFilesApi.listAgentIdentityRegistrations();
+    const registrations = new Map(
+      result.registrations.map((item) => [item.name, item.registration] as const)
+    );
+    setFiles((prev) =>
+      prev.map((file) => {
+        const registration = registrations.get(file.name);
+        return registration ? { ...file, agent_identity_registration: registration } : file;
+      })
+    );
+  }, []);
+
+  useEffect(() => {
+    if (!hasActiveRegistration) return;
+
+    const timer = window.setInterval(() => {
+      if (registrationPollPendingRef.current) return;
+      registrationPollPendingRef.current = true;
+      void refreshAgentIdentityRegistrations()
+        .catch(() => {})
+        .finally(() => {
+          registrationPollPendingRef.current = false;
+        });
+    }, 2000);
+
+    return () => window.clearInterval(timer);
+  }, [hasActiveRegistration, refreshAgentIdentityRegistrations]);
 
   const handleUploadClick = useCallback(() => {
     fileInputRef.current?.click();
@@ -255,7 +312,9 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
 
       setUploading(true);
       try {
-        const result = await authFilesApi.uploadFiles(validFiles);
+        const result = options.importDefaults
+          ? await authFilesApi.uploadFiles(validFiles, options.importDefaults)
+          : await authFilesApi.uploadFiles(validFiles);
         const successCount = result.uploaded;
 
         if (successCount > 0) {
@@ -279,7 +338,7 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
         event.target.value = '';
       }
     },
-    [loadFiles, showNotification, t]
+    [loadFiles, options.importDefaults, showNotification, t]
   );
 
   const savePastedAuthJson = useCallback(
@@ -292,7 +351,11 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
       try {
         const { authJson, resolvedFileName } = buildPastedAuthJsonPayload(type, fileName, jsonText);
         try {
-          await authFilesApi.saveJsonObject(resolvedFileName, authJson);
+          if (options.importDefaults) {
+            await authFilesApi.saveJsonObject(resolvedFileName, authJson, options.importDefaults);
+          } else {
+            await authFilesApi.saveJsonObject(resolvedFileName, authJson);
+          }
         } catch {
           throw new Error(t('notification.save_failed'));
         }
@@ -314,7 +377,7 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
         setAuthJsonPasteSaving(false);
       }
     },
-    [loadFiles, showNotification, t]
+    [loadFiles, options.importDefaults, showNotification, t]
   );
 
   const handleDelete = useCallback(
@@ -655,6 +718,86 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
     [deselectAll, files, showNotification, statusUpdating, t]
   );
 
+  const retryAgentIdentityRegistration = useCallback(
+    async (name: string) => {
+      if (!name || registrationRetrying[name]) return;
+      setRegistrationRetrying((prev) => ({ ...prev, [name]: true }));
+      try {
+        const result = await authFilesApi.retryAgentIdentityRegistration(name);
+        setFiles((prev) =>
+          prev.map((file) =>
+            file.name === name
+              ? { ...file, agent_identity_registration: result.registration }
+              : file
+          )
+        );
+        showNotification(t('auth_files.agent_registration_retry_queued'), 'success');
+      } catch (err: unknown) {
+        const errorMessage = err instanceof Error ? err.message : '';
+        showNotification(
+          `${t('auth_files.agent_registration_retry_failed')}: ${errorMessage}`,
+          'error'
+        );
+      } finally {
+        setRegistrationRetrying((prev) => {
+          const next = { ...prev };
+          delete next[name];
+          return next;
+        });
+      }
+    },
+    [registrationRetrying, showNotification, t]
+  );
+
+  const batchRetryAgentIdentityRegistration = useCallback(
+    async (names: string[]) => {
+      if (batchRegistrationRetrying) return;
+      const uniqueNames = Array.from(new Set(names.map((name) => name.trim()).filter(Boolean)));
+      if (uniqueNames.length === 0) return;
+
+      setBatchRegistrationRetrying(true);
+      try {
+        const result = await authFilesApi.retryAgentIdentityRegistrations(uniqueNames);
+        const registrations = new Map(
+          result.results.map((item) => [item.name, item.registration] as const)
+        );
+        setFiles((prev) =>
+          prev.map((file) => {
+            const registration = registrations.get(file.name);
+            return registration
+              ? { ...file, agent_identity_registration: registration }
+              : file;
+          })
+        );
+        const skipped = result.skipped ?? 0;
+        if (result.failed.length === 0 && skipped === 0) {
+          showNotification(
+            t('auth_files.agent_registration_batch_queued', { count: result.queued }),
+            'success'
+          );
+        } else {
+          showNotification(
+            t('auth_files.agent_registration_batch_partial', {
+              queued: result.queued,
+              skipped,
+              failed: result.failed.length,
+            }),
+            'warning'
+          );
+        }
+      } catch (err: unknown) {
+        const errorMessage = err instanceof Error ? err.message : '';
+        showNotification(
+          `${t('auth_files.agent_registration_retry_failed')}: ${errorMessage}`,
+          'error'
+        );
+      } finally {
+        setBatchRegistrationRetrying(false);
+      }
+    },
+    [batchRegistrationRetrying, showNotification, t]
+  );
+
   const batchDownload = useCallback(
     async (names: string[]) => {
       const uniqueNames = Array.from(new Set(names));
@@ -744,6 +887,8 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
     deletingAll,
     statusUpdating,
     batchStatusUpdating,
+    registrationRetrying,
+    batchRegistrationRetrying,
     fileInputRef,
     loadFiles,
     handleUploadClick,
@@ -759,6 +904,8 @@ export function useAuthFilesData(): UseAuthFilesDataResult {
     deselectAll,
     batchDownload,
     batchSetStatus,
+    retryAgentIdentityRegistration,
+    batchRetryAgentIdentityRegistration,
     batchDelete,
   };
 }

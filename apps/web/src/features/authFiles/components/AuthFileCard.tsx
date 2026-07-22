@@ -7,11 +7,12 @@ import {
   IconDownload,
   IconInfo,
   IconModelCluster,
+  IconRefreshCw,
   IconSettings,
   IconTrash2,
 } from '@/components/ui/icons';
 import { ProviderStatusBar } from '@/components/providers/ProviderStatusBar';
-import type { AuthFileItem } from '@/types';
+import type { AgentIdentityRegistrationStatus, AuthFileItem } from '@/types';
 import { resolveAuthProvider } from '@/utils/quota';
 import {
   normalizeRecentRequestAuthIndex,
@@ -29,6 +30,7 @@ import {
   isRuntimeOnlyAuthFile,
   normalizeProviderKey,
   parsePriorityValue,
+  readAuthFileIntegerField,
   type QuotaProviderType,
   type ResolvedTheme,
 } from '@/features/authFiles/constants';
@@ -47,6 +49,7 @@ export type AuthFileCardProps = {
   disableControls: boolean;
   deleting: string | null;
   statusUpdating: Record<string, boolean>;
+  registrationRetrying: boolean;
   statusBarCache: Map<string, AuthFileStatusBarData>;
   codexStatusBadges?: AuthFileCodexStatusBadge[];
   onShowModels: (file: AuthFileItem) => void;
@@ -54,6 +57,7 @@ export type AuthFileCardProps = {
   onOpenPrefixProxyEditor: (file: AuthFileItem) => void;
   onDelete: (name: string) => void;
   onToggleStatus: (file: AuthFileItem, enabled: boolean) => void;
+  onRetryAgentIdentityRegistration: (name: string) => void;
   onToggleSelect: (name: string) => void;
 };
 
@@ -69,6 +73,29 @@ const getProjectIdValue = (file: AuthFileItem): string => {
   return typeof raw === 'string' ? raw.trim() : '';
 };
 
+const readRuntimeText = (file: AuthFileItem, snakeKey: string, camelKey: string): string => {
+  const raw = file[snakeKey] ?? file[camelKey];
+  if (raw === undefined || raw === null) return '';
+  return String(raw).trim();
+};
+
+const getAgentIdentityRegistration = (
+  file: AuthFileItem
+): AgentIdentityRegistrationStatus | null => {
+  const raw = file.agent_identity_registration ?? file.agentIdentityRegistration;
+  if (!raw || typeof raw !== 'object') return null;
+  const state = String(raw.state ?? '').trim();
+  if (!state) return null;
+  return raw as AgentIdentityRegistrationStatus;
+};
+
+const formatRegistrationTime = (value?: string): string => {
+  if (!value) return '';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+};
+
 export function AuthFileCard(props: AuthFileCardProps) {
   const { t } = useTranslation();
   const {
@@ -79,6 +106,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
     disableControls,
     deleting,
     statusUpdating,
+    registrationRetrying,
     statusBarCache,
     codexStatusBadges = [],
     onShowModels,
@@ -86,6 +114,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
     onOpenPrefixProxyEditor,
     onDelete,
     onToggleStatus,
+    onRetryAgentIdentityRegistration,
     onToggleSelect,
   } = props;
 
@@ -127,6 +156,55 @@ export function AuthFileCard(props: AuthFileCardProps) {
     Boolean(rawStatusMessage) && !HEALTHY_STATUS_MESSAGES.has(rawStatusMessage.toLowerCase());
 
   const priorityValue = parsePriorityValue(file.priority ?? file['priority']);
+  const maxConcurrency = readAuthFileIntegerField(file, 'max_concurrency', 'maxConcurrency');
+  const rateLimitMaxRequests = readAuthFileIntegerField(
+    file,
+    'rate_limit_max_requests',
+    'rateLimitMaxRequests'
+  );
+  const rateLimitWindowSeconds = readAuthFileIntegerField(
+    file,
+    'rate_limit_window_seconds',
+    'rateLimitWindowSeconds'
+  );
+  const selectionErrorFreezeSeconds = readAuthFileIntegerField(
+    file,
+    'selection_error_freeze_seconds',
+    'selectionErrorFreezeSeconds'
+  );
+  const runtimeCurrentConcurrency = readAuthFileIntegerField(
+    file,
+    'runtime_current_concurrency',
+    'runtimeCurrentConcurrency'
+  );
+  const runtimeFrozenUntil = readRuntimeText(file, 'runtime_frozen_until', 'runtimeFrozenUntil');
+  const runtimeRateLimitedUntil = readRuntimeText(
+    file,
+    'runtime_rate_limited_until',
+    'runtimeRateLimitedUntil'
+  );
+  const runtimeLastSkipReason = readRuntimeText(
+    file,
+    'runtime_last_skip_reason',
+    'runtimeLastSkipReason'
+  );
+  const hasRuntimeStateSummary =
+    runtimeCurrentConcurrency !== undefined ||
+    Boolean(runtimeFrozenUntil || runtimeRateLimitedUntil || runtimeLastSkipReason);
+  const agentRegistration = getAgentIdentityRegistration(file);
+  const agentRegistrationState = agentRegistration?.state ?? '';
+  const agentRegistrationLabel = agentRegistrationState
+    ? t(`auth_files.agent_registration_state_${agentRegistrationState}`)
+    : '';
+  const agentRegistrationToneClass =
+    agentRegistrationState === 'ready'
+      ? styles.agentRegistrationReady
+      : agentRegistrationState === 'runtime_deleted' || agentRegistrationState === 'failed'
+        ? styles.agentRegistrationFailed
+        : agentRegistrationState === 'retry_wait'
+          ? styles.agentRegistrationWaiting
+          : styles.agentRegistrationActive;
+  const agentRegistrationNextRetry = formatRegistrationTime(agentRegistration?.next_retry_at);
   const projectIdValue = getProjectIdValue(file);
   const noteValue = typeof file.note === 'string' ? file.note.trim() : '';
   const stateLabel = isRuntimeOnly
@@ -236,6 +314,35 @@ export function AuthFileCard(props: AuthFileCardProps) {
                 </span>
               </div>
             )}
+            {maxConcurrency !== undefined && (
+              <div className={`${styles.metaItem} ${styles.runtimeLimitBadge}`}>
+                <span className={styles.metaLabel}>{t('auth_files.max_concurrency_short')}</span>
+                <span className={styles.metaValue}>
+                  {maxConcurrency === 0 ? t('auth_files.runtime_unlimited') : maxConcurrency}
+                </span>
+              </div>
+            )}
+            {rateLimitMaxRequests !== undefined && (
+              <div className={`${styles.metaItem} ${styles.runtimeLimitBadge}`}>
+                <span className={styles.metaLabel}>{t('auth_files.rate_limit_short')}</span>
+                <span className={styles.metaValue}>
+                  {rateLimitMaxRequests === 0
+                    ? t('auth_files.runtime_unlimited')
+                    : t('auth_files.rate_limit_display', {
+                        count: rateLimitMaxRequests,
+                        seconds: rateLimitWindowSeconds ?? 60,
+                      })}
+                </span>
+              </div>
+            )}
+            {selectionErrorFreezeSeconds !== undefined && selectionErrorFreezeSeconds > 0 && (
+              <div className={`${styles.metaItem} ${styles.runtimeLimitBadge}`}>
+                <span className={styles.metaLabel}>{t('auth_files.freeze_short')}</span>
+                <span className={styles.metaValue}>
+                  {t('auth_files.seconds_value', { seconds: selectionErrorFreezeSeconds })}
+                </span>
+              </div>
+            )}
             {projectIdValue && (
               <div className={styles.metaItem} title={projectIdValue}>
                 <span className={styles.metaLabel}>{t('auth_files.project_id_display')}</span>
@@ -248,6 +355,77 @@ export function AuthFileCard(props: AuthFileCardProps) {
             <div className={styles.healthStatusMessage} title={rawStatusMessage}>
               <IconInfo className={styles.messageIcon} size={14} />
               <span>{rawStatusMessage}</span>
+            </div>
+          )}
+
+          {hasRuntimeStateSummary && (
+            <div className={styles.runtimeLimitSummary}>
+              {runtimeCurrentConcurrency !== undefined && (
+                <span className={styles.runtimeLimitChip}>
+                  {t('auth_files.runtime_current_concurrency', {
+                    count: runtimeCurrentConcurrency,
+                  })}
+                </span>
+              )}
+              {runtimeFrozenUntil && (
+                <span className={styles.runtimeLimitChip}>
+                  {t('auth_files.runtime_frozen_until', { value: runtimeFrozenUntil })}
+                </span>
+              )}
+              {runtimeRateLimitedUntil && (
+                <span className={styles.runtimeLimitChip}>
+                  {t('auth_files.runtime_rate_limited_until', { value: runtimeRateLimitedUntil })}
+                </span>
+              )}
+              {runtimeLastSkipReason && (
+                <span className={styles.runtimeLimitChip}>
+                  {t('auth_files.runtime_last_skip_reason', { value: runtimeLastSkipReason })}
+                </span>
+              )}
+            </div>
+          )}
+
+          {agentRegistration && (
+            <div className={`${styles.agentRegistrationPanel} ${agentRegistrationToneClass}`}>
+              <div className={styles.agentRegistrationHeader}>
+                <span className={styles.agentRegistrationState}>
+                  <IconRefreshCw
+                    size={14}
+                    className={agentRegistration.active ? styles.agentRegistrationSpin : ''}
+                  />
+                  {agentRegistrationLabel}
+                </span>
+                <span className={styles.agentRegistrationAttempts}>
+                  {t('auth_files.agent_registration_attempts', {
+                    count: agentRegistration.attempts ?? 0,
+                  })}
+                </span>
+              </div>
+              {agentRegistrationNextRetry && (
+                <div className={styles.agentRegistrationDetail}>
+                  {t('auth_files.agent_registration_next_retry', {
+                    time: agentRegistrationNextRetry,
+                  })}
+                </div>
+              )}
+              {agentRegistration.error && (
+                <div className={styles.agentRegistrationError} title={agentRegistration.error}>
+                  {agentRegistration.error}
+                </div>
+              )}
+              {agentRegistration.can_retry && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => onRetryAgentIdentityRegistration(file.name)}
+                  disabled={disableControls || registrationRetrying}
+                  loading={registrationRetrying}
+                  className={styles.agentRegistrationRetryButton}
+                >
+                  {!registrationRetrying && <IconRefreshCw size={14} />}
+                  {t('auth_files.agent_registration_retry_button')}
+                </Button>
+              )}
             </div>
           )}
 

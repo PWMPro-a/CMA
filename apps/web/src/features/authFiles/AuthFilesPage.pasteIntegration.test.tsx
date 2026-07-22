@@ -6,8 +6,9 @@ import { Select } from '@/components/ui/Select';
 import { AuthFilesPage } from './AuthFilesPage';
 
 const { mocks } = vi.hoisted(() => {
-  (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
-    true;
+  (
+    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
   return {
     mocks: {
       connectionStatus: 'connected' as 'connected' | 'disconnected',
@@ -31,20 +32,18 @@ const { mocks } = vi.hoisted(() => {
       closePrefixProxyEditor: vi.fn(),
       handlePrefixProxyChange: vi.fn(),
       handlePrefixProxySave: vi.fn(async () => undefined),
-      lastCodexInspectionLastRun: null as
-        | {
-            result: {
-              results: Array<{
-                fileName: string;
-                authIndex?: string | number | null;
-                statusCode?: number | null;
-                action?: string | null;
-                usedPercent?: number | null;
-                isQuota?: boolean | null;
-              }>;
-            };
-          }
-        | null,
+      lastCodexInspectionLastRun: null as {
+        result: {
+          results: Array<{
+            fileName: string;
+            authIndex?: string | number | null;
+            statusCode?: number | null;
+            action?: string | null;
+            usedPercent?: number | null;
+            isQuota?: boolean | null;
+          }>;
+        };
+      } | null,
       t: (key: string, options?: Record<string, unknown>) => {
         if (options && typeof options.name === 'string') {
           return `${key}:${options.name}`;
@@ -94,14 +93,25 @@ vi.mock('@/services/api', () => ({
 }));
 
 vi.mock('@/stores', () => ({
-  useNotificationStore: (selector?: (state: { showNotification: typeof mocks.showNotification; showConfirmation: typeof mocks.showConfirmation }) => unknown) => {
+  useNotificationStore: (
+    selector?: (state: {
+      showNotification: typeof mocks.showNotification;
+      showConfirmation: typeof mocks.showConfirmation;
+    }) => unknown
+  ) => {
     const state = {
       showNotification: mocks.showNotification,
       showConfirmation: mocks.showConfirmation,
     };
     return selector ? selector(state) : state;
   },
-  useAuthStore: (selector: (state: { connectionStatus: 'connected' | 'disconnected'; apiBase: string; managementKey: string }) => unknown) =>
+  useAuthStore: (
+    selector: (state: {
+      connectionStatus: 'connected' | 'disconnected';
+      apiBase: string;
+      managementKey: string;
+    }) => unknown
+  ) =>
     selector({
       connectionStatus: mocks.connectionStatus,
       apiBase: 'http://manager.local:18317',
@@ -287,8 +297,12 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
     });
 
     await vi.waitFor(() => {
-      expect(renderer!.root.findAllByProps({ 'data-auth-card': 'shared-codex.json::0' })).toHaveLength(1);
-      expect(renderer!.root.findAllByProps({ 'data-auth-card': 'shared-codex.json::1' })).toHaveLength(1);
+      expect(
+        renderer!.root.findAllByProps({ 'data-auth-card': 'shared-codex.json::0' })
+      ).toHaveLength(1);
+      expect(
+        renderer!.root.findAllByProps({ 'data-auth-card': 'shared-codex.json::1' })
+      ).toHaveLength(1);
     });
 
     expect(
@@ -359,7 +373,8 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
           email: 'Session.User+tag@example.com',
           account_id: 'session-account',
           access_token: 'plain-access-token',
-        })
+        }),
+        { websockets: true }
       );
     });
     await vi.waitFor(() => {

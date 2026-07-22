@@ -1,0 +1,105 @@
+name: cpamp-cpa
+
+services:
+  cli-proxy-api:
+    image: seakee/cli-proxy-api:pool-20260713
+    pull_policy: never
+    container_name: cli-proxy-api
+    restart: unless-stopped
+    command: ["./CLIProxyAPI", "-config", "/app/data/config.yaml"]
+    labels:
+      com.cpamp.managed: "true"
+      com.cpamp.stack: "cpa"
+      com.cpamp.role: "cpa"
+    networks:
+      - cpamp-cpa_default
+    ports:
+      - "8317:8317"
+    volumes:
+      - /opt/cpamp/data/cpa:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8317'"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  cpamp-agent:
+    image: local/cpa-manager-plus:pool-20260713
+    pull_policy: never
+    container_name: cpamp-agent
+    entrypoint: ["cpamp-agent"]
+    restart: unless-stopped
+    labels:
+      com.cpamp.managed: "true"
+      com.cpamp.stack: "cpa"
+      com.cpamp.role: "agent"
+    environment:
+      TZ: "Asia/Shanghai"
+      CPAMP_AGENT_ADDR: "0.0.0.0:18417"
+      CPAMP_STACK_ROOT: "/opt/cpamp/stacks/cpa"
+      CPAMP_BACKUP_ROOT: "/opt/cpamp/backups"
+      CPAMP_AGENT_TOKEN: "${CPAMP_AGENT_TOKEN:?set CPAMP_AGENT_TOKEN}"
+      DOCKER_HOST: "unix:///var/run/docker.sock"
+    networks:
+      - cpamp-cpa_default
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/cpamp/stacks/cpa:/opt/cpamp/stacks/cpa
+      - /opt/cpamp/backups:/opt/cpamp/backups
+    healthcheck:
+      test: ["CMD-SHELL", "wget --header='Authorization: Bearer '$$CPAMP_AGENT_TOKEN -qO- http://127.0.0.1:18417/agent/info >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
+  cpa-manager-plus:
+    image: local/cpa-manager-plus:pool-20260713
+    pull_policy: never
+    container_name: cpa-manager-plus
+    restart: unless-stopped
+    depends_on:
+      cli-proxy-api:
+        condition: service_healthy
+      cpamp-agent:
+        condition: service_healthy
+    labels:
+      com.cpamp.managed: "true"
+      com.cpamp.stack: "cpa"
+      com.cpamp.role: "cpamp"
+    environment:
+      TZ: "Asia/Shanghai"
+      HTTP_ADDR: "0.0.0.0:18317"
+      USAGE_DB_PATH: "/data/usage.sqlite"
+      CPA_MANAGER_DATA_KEY_PATH: "/data/data.key"
+      CPA_UPSTREAM_URL: "http://cli-proxy-api:8317"
+      CPA_MANAGEMENT_KEY: "${CPA_MANAGEMENT_KEY:?set CPA_MANAGEMENT_KEY}"
+      CPA_MANAGER_ADMIN_KEY: "${CPA_MANAGER_ADMIN_KEY:?set CPA_MANAGER_ADMIN_KEY}"
+      CPAMP_AGENT_URL: "http://cpamp-agent:18417"
+      CPAMP_AGENT_TOKEN: "${CPAMP_AGENT_TOKEN:?set CPAMP_AGENT_TOKEN}"
+      USAGE_COLLECTOR_MODE: "http"
+      USAGE_BATCH_SIZE: "100"
+      USAGE_POLL_INTERVAL_MS: "500"
+      USAGE_QUERY_LIMIT: "50000"
+      USAGE_CORS_ORIGINS: "*"
+    networks:
+      - cpamp-cpa_default
+    ports:
+      - "18317:18317"
+    volumes:
+      - /opt/cpamp/data/manager:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18317/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+networks:
+  cpamp-cpa_default:
+    name: cpamp-cpa_default
+    driver: bridge
+    labels:
+      com.cpamp.managed: "true"
+      com.cpamp.stack: "cpa"

@@ -19,6 +19,9 @@ export type AuthFilesUiState = {
   problemOnly?: boolean;
   disabledOnly?: boolean;
   healthyOnly?: boolean;
+  rateLimitedOnly?: boolean;
+  runtimeUnlimitedOnly?: boolean;
+  freezeConfiguredOnly?: boolean;
   codexStatusFilter?: AuthFilesCodexStatusFilter;
   compactMode?: boolean;
   search?: string;

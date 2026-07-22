@@ -97,6 +97,73 @@
   }
 }
 
+.importDefaultsBar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 22%, var(--border-color));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
+
+  @include mobile {
+    grid-template-columns: auto minmax(0, 1fr);
+
+    :global(label) {
+      grid-column: 1 / -1;
+      justify-content: space-between;
+    }
+  }
+}
+
+.importDefaultsIcon {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--primary-color);
+  color: #fff;
+}
+
+.importDefaultsCopy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.importDefaultsTitleRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+
+  strong {
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 700;
+  }
+}
+
+.importDefaultsScope {
+  display: inline-flex;
+  align-items: center;
+  min-height: 19px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--primary-color) 14%, var(--bg-primary));
+  color: var(--primary-color);
+  font-size: 10px;
+  font-weight: 700;
+}
+
 .filterPanelTags {
   flex: 1 1 auto;
   min-width: 0;
@@ -1065,6 +1132,115 @@
   font-variant-numeric: tabular-nums;
 }
 
+.runtimeLimitBadge {
+  min-width: 0;
+}
+
+.runtimeLimitSummary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.runtimeLimitChip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 18%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--surface-subtle));
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+  word-break: break-word;
+}
+
+.agentRegistrationPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.agentRegistrationReady {
+  border-color: color-mix(in srgb, var(--success-color) 34%, var(--border-color));
+  background: color-mix(in srgb, var(--success-color) 8%, var(--surface-subtle));
+}
+
+.agentRegistrationActive {
+  border-color: color-mix(in srgb, var(--primary-color) 30%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--surface-subtle));
+}
+
+.agentRegistrationWaiting {
+  border-color: color-mix(in srgb, var(--warning-color) 34%, var(--border-color));
+  background: color-mix(in srgb, var(--warning-bg) 54%, var(--surface-subtle));
+}
+
+.agentRegistrationFailed {
+  border-color: color-mix(in srgb, var(--danger-color) 34%, var(--border-color));
+  background: color-mix(in srgb, var(--danger-color) 7%, var(--surface-subtle));
+}
+
+.agentRegistrationHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.agentRegistrationState,
+.agentRegistrationAttempts {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-weight: 700;
+}
+
+.agentRegistrationAttempts {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.agentRegistrationDetail {
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.agentRegistrationError {
+  color: var(--danger-color);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.agentRegistrationRetryButton:global(.btn.btn-sm) {
+  align-self: flex-start;
+  min-height: 28px;
+}
+
+.agentRegistrationSpin {
+  animation: agent-registration-spin 1s linear infinite;
+}
+
+@keyframes agent-registration-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .noteText {
   font-size: 12px;
   color: var(--text-secondary);
@@ -1488,6 +1664,12 @@
   :global(.form-group) {
     margin: 0;
   }
+}
+
+.runtimeLimitBatchForm {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: $spacing-sm;
 }
 
 .prefixProxyTextareaInvalid {

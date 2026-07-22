@@ -1,0 +1,28 @@
+host: ""
+port: 8317
+
+tls:
+  enable: false
+  cert: ""
+  key: ""
+
+remote-management:
+  allow-remote: true
+  secret-key: "__CPA_MANAGEMENT_KEY__"
+  disable-control-panel: true
+  panel-github-repository: "https://github.com/seakee/CPA-Manager-Plus"
+
+auth-dir: "/app/data/auths"
+
+api-keys:
+  - "__CPA_API_KEY__"
+
+debug: false
+commercial-mode: false
+logging-to-file: false
+usage-statistics-enabled: true
+redis-usage-queue-retention-seconds: 3600
+proxy-url: ""
+request-retry: 3
+max-retry-credentials: 0
+max-retry-interval: 30

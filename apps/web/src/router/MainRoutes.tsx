@@ -21,6 +21,7 @@ import { MonitoringCenterPage } from '@/pages/MonitoringCenterPage';
 import { ModelPricesPage } from '@/pages/ModelPricesPage';
 import { CodexInspectionPage } from '@/pages/CodexInspectionPage';
 import { ServerCodexInspectionPage } from '@/pages/ServerCodexInspectionPage';
+import { ContainerOpsPage } from '@/pages/ContainerOpsPage';
 import { ConfigPage } from '@/pages/ConfigPage';
 import { LogsPage } from '@/pages/LogsPage';
 import { SystemPage } from '@/pages/SystemPage';
@@ -223,6 +224,7 @@ const mainRoutes = [
       </FeatureGate>
     ),
   },
+  { path: '/container-ops', element: <ContainerOpsPage /> },
   { path: '/config', element: <ConfigPage /> },
   {
     path: '/logs',

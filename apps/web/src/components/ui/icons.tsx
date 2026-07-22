@@ -194,6 +194,14 @@ export function IconDownload({ size = 20, ...props }: IconProps) {
   );
 }
 
+export function IconPlay({ size = 20, ...props }: IconProps) {
+  return (
+    <svg {...baseSvgProps} width={size} height={size} {...props}>
+      <polygon points="6 3 20 12 6 21 6 3" />
+    </svg>
+  );
+}
+
 export function IconTrash2({ size = 20, ...props }: IconProps) {
   return (
     <svg {...baseSvgProps} width={size} height={size} {...props}>
@@ -617,6 +625,17 @@ export function IconSidebarLogs({ size = 20, ...props }: IconProps) {
       <circle cx="7.8" cy="6.2" r="0.8" fill="currentColor" fillOpacity="0.4" stroke="none" />
       <path d="M7 12l3 2.5-3 2.5" />
       <path d="M13 17h4" />
+    </svg>
+  );
+}
+
+export function IconSidebarContainerOps({ size = 20, ...props }: IconProps) {
+  return (
+    <svg {...sidebarSvgProps} width={size} height={size} {...props}>
+      <path d="M12 3 4.5 7.2 12 11.4l7.5-4.2Z" fill="currentColor" fillOpacity="0.1" />
+      <path d="M4.5 7.2v8.4L12 20l7.5-4.4V7.2" />
+      <path d="M12 11.4V20" />
+      <path d="m4.5 11.5 7.5 4.2 7.5-4.2" />
     </svg>
   );
 }

@@ -150,6 +150,48 @@ func Migrate(db *sql.DB) error {
 			foreign key(run_id) references codex_inspection_runs(id) on delete cascade
 		)`,
 		`create index if not exists idx_codex_inspection_logs_run on codex_inspection_logs(run_id, created_at_ms)`,
+		`create table if not exists container_ops_audits (
+			id integer primary key autoincrement,
+			operation_id text not null unique,
+			operation text not null,
+			phase text,
+			status text not null,
+			backup_id text,
+			agent_base_url text,
+			message text,
+			error text,
+			request_json text,
+			result_json text,
+			started_at_ms integer not null,
+			finished_at_ms integer,
+			duration_ms integer,
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		)`,
+		`create index if not exists idx_container_ops_audits_started_at on container_ops_audits(started_at_ms)`,
+		`create index if not exists idx_container_ops_audits_operation on container_ops_audits(operation, status)`,
+		`create table if not exists container_ops_upgrade_tasks (
+			id integer primary key autoincrement,
+			task_id text not null unique,
+			operation_id text,
+			status text not null,
+			phase text,
+			cpa_image text,
+			cpamp_image text,
+			rollback_backup_id text,
+			agent_base_url text,
+			message text,
+			error text,
+			next_action text,
+			request_json text,
+			result_json text,
+			started_at_ms integer not null,
+			finished_at_ms integer,
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		)`,
+		`create index if not exists idx_container_ops_upgrade_tasks_created_at on container_ops_upgrade_tasks(created_at_ms)`,
+		`create index if not exists idx_container_ops_upgrade_tasks_status on container_ops_upgrade_tasks(status, phase)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {

@@ -6,7 +6,10 @@ import { useNotificationStore } from '@/stores';
 import {
   applyCodexAuthFileWebsockets,
   normalizeProviderKey,
+  parseNonNegativeIntegerValue,
   parsePriorityValue,
+  readAuthFileBooleanField,
+  readAuthFileIntegerField,
   readCodexAuthFileWebsockets,
 } from '@/features/authFiles/constants';
 
@@ -23,6 +26,11 @@ export type PrefixProxyEditorField =
   | 'prefix'
   | 'proxyUrl'
   | 'priority'
+  | 'maxConcurrency'
+  | 'rateLimitMaxRequests'
+  | 'rateLimitWindowSeconds'
+  | 'selectionErrorFreezeSeconds'
+  | 'disableStickyOnNextRequest'
   | 'websockets'
   | 'note'
   | 'headersText';
@@ -43,6 +51,12 @@ export type PrefixProxyEditorState = {
   prefix: string;
   proxyUrl: string;
   priority: string;
+  maxConcurrency: string;
+  rateLimitMaxRequests: string;
+  rateLimitWindowSeconds: string;
+  selectionErrorFreezeSeconds: string;
+  disableStickyOnNextRequest: boolean;
+  disableStickyOnNextRequestTouched: boolean;
   websockets: boolean;
   websocketsTouched: boolean;
   note: string;
@@ -248,6 +262,66 @@ const buildAuthFileFieldsPatch = (
     }
   }
 
+  const maybeSetIntegerPatch = (
+    field: keyof Pick<
+      AuthFileFieldsPatch,
+      | 'max_concurrency'
+      | 'rate_limit_max_requests'
+      | 'rate_limit_window_seconds'
+      | 'selection_error_freeze_seconds'
+    >,
+    originalKey: string,
+    originalCamelKey: string,
+    nextText: string
+  ) => {
+    const trimmed = nextText.trim();
+    if (!trimmed) return;
+    const nextValue = parseNonNegativeIntegerValue(trimmed);
+    if (nextValue === undefined) return;
+    const originalValue = readAuthFileIntegerField(original, originalKey, originalCamelKey);
+    if (nextValue !== originalValue) {
+      patch[field] = nextValue;
+    }
+  };
+
+  maybeSetIntegerPatch(
+    'max_concurrency',
+    'max_concurrency',
+    'maxConcurrency',
+    editor.maxConcurrency
+  );
+  maybeSetIntegerPatch(
+    'rate_limit_max_requests',
+    'rate_limit_max_requests',
+    'rateLimitMaxRequests',
+    editor.rateLimitMaxRequests
+  );
+  maybeSetIntegerPatch(
+    'rate_limit_window_seconds',
+    'rate_limit_window_seconds',
+    'rateLimitWindowSeconds',
+    editor.rateLimitWindowSeconds
+  );
+  maybeSetIntegerPatch(
+    'selection_error_freeze_seconds',
+    'selection_error_freeze_seconds',
+    'selectionErrorFreezeSeconds',
+    editor.selectionErrorFreezeSeconds
+  );
+
+  if (editor.disableStickyOnNextRequestTouched) {
+    const originalDisableSticky =
+      readAuthFileBooleanField(
+        original,
+        'disable_sticky_on_next_request',
+        'disableStickyOnNextRequest'
+      ) ?? false;
+    const nextDisableSticky = Boolean(editor.disableStickyOnNextRequest);
+    if (nextDisableSticky !== originalDisableSticky) {
+      patch.disable_sticky_on_next_request = nextDisableSticky;
+    }
+  }
+
   if (editor.noteTouched) {
     const originalNote = normalizeTextField(original.note);
     const nextNote = editor.note.trim();
@@ -309,6 +383,26 @@ const buildPrefixProxyUpdatedText = (
     } else {
       next.priority = patch.priority;
     }
+  }
+
+  if (patch.max_concurrency !== undefined) {
+    next.max_concurrency = patch.max_concurrency;
+  }
+
+  if (patch.rate_limit_max_requests !== undefined) {
+    next.rate_limit_max_requests = patch.rate_limit_max_requests;
+  }
+
+  if (patch.rate_limit_window_seconds !== undefined) {
+    next.rate_limit_window_seconds = patch.rate_limit_window_seconds;
+  }
+
+  if (patch.selection_error_freeze_seconds !== undefined) {
+    next.selection_error_freeze_seconds = patch.selection_error_freeze_seconds;
+  }
+
+  if (patch.disable_sticky_on_next_request !== undefined) {
+    next.disable_sticky_on_next_request = patch.disable_sticky_on_next_request;
   }
 
   if (patch.note !== undefined) {
@@ -380,6 +474,12 @@ export function useAuthFilesPrefixProxyEditor(
       prefix: '',
       proxyUrl: '',
       priority: '',
+      maxConcurrency: '',
+      rateLimitMaxRequests: '',
+      rateLimitWindowSeconds: '',
+      selectionErrorFreezeSeconds: '',
+      disableStickyOnNextRequest: false,
+      disableStickyOnNextRequestTouched: false,
       websockets: false,
       websocketsTouched: false,
       note: '',
@@ -423,6 +523,28 @@ export function useAuthFilesPrefixProxyEditor(
       const prefix = typeof json.prefix === 'string' ? json.prefix : '';
       const proxyUrl = typeof json.proxy_url === 'string' ? json.proxy_url : '';
       const priority = parsePriorityValue(json.priority);
+      const maxConcurrency = readAuthFileIntegerField(json, 'max_concurrency', 'maxConcurrency');
+      const rateLimitMaxRequests = readAuthFileIntegerField(
+        json,
+        'rate_limit_max_requests',
+        'rateLimitMaxRequests'
+      );
+      const rateLimitWindowSeconds = readAuthFileIntegerField(
+        json,
+        'rate_limit_window_seconds',
+        'rateLimitWindowSeconds'
+      );
+      const selectionErrorFreezeSeconds = readAuthFileIntegerField(
+        json,
+        'selection_error_freeze_seconds',
+        'selectionErrorFreezeSeconds'
+      );
+      const disableStickyOnNextRequest =
+        readAuthFileBooleanField(
+          json,
+          'disable_sticky_on_next_request',
+          'disableStickyOnNextRequest'
+        ) ?? false;
       const providerKey = normalizeProviderKey(
         String(json.type ?? json.provider ?? file.type ?? file.provider ?? '')
       );
@@ -450,6 +572,15 @@ export function useAuthFilesPrefixProxyEditor(
           prefix,
           proxyUrl,
           priority: priority !== undefined ? String(priority) : '',
+          maxConcurrency: maxConcurrency !== undefined ? String(maxConcurrency) : '',
+          rateLimitMaxRequests:
+            rateLimitMaxRequests !== undefined ? String(rateLimitMaxRequests) : '',
+          rateLimitWindowSeconds:
+            rateLimitWindowSeconds !== undefined ? String(rateLimitWindowSeconds) : '',
+          selectionErrorFreezeSeconds:
+            selectionErrorFreezeSeconds !== undefined ? String(selectionErrorFreezeSeconds) : '',
+          disableStickyOnNextRequest,
+          disableStickyOnNextRequestTouched: false,
           websockets,
           websocketsTouched: false,
           note,
@@ -479,6 +610,23 @@ export function useAuthFilesPrefixProxyEditor(
       if (field === 'prefix') return { ...prev, prefix: String(value) };
       if (field === 'proxyUrl') return { ...prev, proxyUrl: String(value) };
       if (field === 'priority') return { ...prev, priority: String(value) };
+      if (field === 'maxConcurrency') return { ...prev, maxConcurrency: String(value) };
+      if (field === 'rateLimitMaxRequests') {
+        return { ...prev, rateLimitMaxRequests: String(value) };
+      }
+      if (field === 'rateLimitWindowSeconds') {
+        return { ...prev, rateLimitWindowSeconds: String(value) };
+      }
+      if (field === 'selectionErrorFreezeSeconds') {
+        return { ...prev, selectionErrorFreezeSeconds: String(value) };
+      }
+      if (field === 'disableStickyOnNextRequest') {
+        return {
+          ...prev,
+          disableStickyOnNextRequest: Boolean(value),
+          disableStickyOnNextRequestTouched: true,
+        };
+      }
       if (field === 'websockets') {
         return { ...prev, websockets: Boolean(value), websocketsTouched: true };
       }

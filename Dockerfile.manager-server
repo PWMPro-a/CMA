@@ -17,11 +17,13 @@ COPY --from=web-build /app/apps/web/dist/index.html ./apps/manager-server/intern
 WORKDIR /src/apps/manager-server
 RUN go mod download
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/cpa-manager-plus ./cmd/cpa-manager-plus
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/cpamp-agent ./cmd/cpamp-agent
 
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates wget tzdata
 WORKDIR /app
 COPY --from=service-build /out/cpa-manager-plus /usr/local/bin/cpa-manager-plus
+COPY --from=service-build /out/cpamp-agent /usr/local/bin/cpamp-agent
 ENV HTTP_ADDR=0.0.0.0:18317
 ENV USAGE_DATA_DIR=/data
 ENV USAGE_DB_PATH=/data/usage.sqlite

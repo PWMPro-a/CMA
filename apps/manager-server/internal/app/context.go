@@ -10,6 +10,7 @@ import (
 	bootstrapsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
 	codexinspectionsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/codexinspection"
 	collectorsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
+	containeropssvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/containerops"
 	dashboardsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/dashboard"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	modelpricesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/modelprice"
@@ -37,6 +38,7 @@ type Context struct {
 	UsageService           *usagesvc.Service
 	DashboardService       *dashboardsvc.Service
 	CodexInspectionService *codexinspectionsvc.Service
+	ContainerOpsService    *containeropssvc.Service
 	MonitoringService      *monitoringsvc.Service
 	ModelPriceService      *modelpricesvc.Service
 	APIKeyAliasService     *apikeyaliassvc.Service
@@ -69,10 +71,15 @@ func FromExisting(
 		UsageService:           usagesvc.New(st),
 		DashboardService:       dashboardsvc.New(st),
 		CodexInspectionService: codexinspectionsvc.New(st, managerConfigService),
-		MonitoringService:      monitoringsvc.New(st),
-		ModelPriceService:      modelpricesvc.NewMultiSource(st, modelPriceSyncURL, openRouterModelPriceSyncURL, managerConfigService),
-		APIKeyAliasService:     apikeyaliassvc.New(st),
-		ProxyService:           proxysvc.New(managerConfigService),
-		PanelService:           panelsvc.New(cfg.PanelPath, embeddedPanel),
+		ContainerOpsService: containeropssvc.New(containeropssvc.Options{
+			AgentURL:   cfg.ContainerOpsAgentURL,
+			AgentToken: cfg.ContainerOpsAgentToken,
+			AuditStore: st,
+		}),
+		MonitoringService:  monitoringsvc.New(st),
+		ModelPriceService:  modelpricesvc.NewMultiSource(st, modelPriceSyncURL, openRouterModelPriceSyncURL, managerConfigService),
+		APIKeyAliasService: apikeyaliassvc.New(st),
+		ProxyService:       proxysvc.New(managerConfigService),
+		PanelService:       panelsvc.New(cfg.PanelPath, embeddedPanel),
 	}
 }

@@ -15,6 +15,7 @@ import { MainRoutes } from '@/router/MainRoutes';
 import {
   IconSidebarAuthFiles,
   IconSidebarConfig,
+  IconSidebarContainerOps,
   IconSidebarDashboard,
   IconSidebarInspection,
   IconSidebarLogs,
@@ -49,6 +50,7 @@ const sidebarIcons: Record<string, ReactNode> = {
   quota: <IconSidebarQuota size={SIDEBAR_ICON_SIZE} />,
   codexInspection: <IconSidebarInspection size={SIDEBAR_ICON_SIZE} />,
   monitoring: <IconSidebarMonitor size={SIDEBAR_ICON_SIZE} />,
+  containerOps: <IconSidebarContainerOps size={SIDEBAR_ICON_SIZE} />,
   config: <IconSidebarConfig size={SIDEBAR_ICON_SIZE} />,
   logs: <IconSidebarLogs size={SIDEBAR_ICON_SIZE} />,
   system: <IconSidebarSystem size={SIDEBAR_ICON_SIZE} />,
@@ -363,6 +365,15 @@ export function MainLayout() {
     ...(fileLogsAvailable
       ? [{ path: '/logs', label: t('nav.logs'), icon: sidebarIcons.logs }]
       : []),
+    ...(featureAvailability.dockerSetupAvailable
+      ? [
+          {
+            path: '/container-ops',
+            label: t('nav.container_ops'),
+            icon: sidebarIcons.containerOps,
+          },
+        ]
+      : []),
   ];
   const navSections: NavItem[][] = [
     [{ path: '/', label: t('nav.dashboard'), icon: sidebarIcons.dashboard }],
@@ -656,9 +667,7 @@ export function MainLayout() {
                     to={item.path}
                     end={item.path === '/' || item.exact}
                     className={({ isActive }) =>
-                      `nav-item ${
-                        isActive || matchesNavPath(item, currentPath) ? 'active' : ''
-                      }`
+                      `nav-item ${isActive || matchesNavPath(item, currentPath) ? 'active' : ''}`
                     }
                     onClick={() => setSidebarOpen(false)}
                     title={showSidebarLabels ? undefined : item.label}

@@ -7,6 +7,8 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/apikeyalias"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/codexinspection"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/containeropsaudit"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/containeropsupgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/deadletter"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/modelprice"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
@@ -28,6 +30,8 @@ type ManagerExternalUsageServiceConfig = model.ManagerExternalUsageServiceConfig
 type CodexInspectionRun = model.CodexInspectionRun
 type CodexInspectionResult = model.CodexInspectionResult
 type CodexInspectionLog = model.CodexInspectionLog
+type ContainerOpsAuditEntry = model.ContainerOpsAuditEntry
+type ContainerOpsUpgradeTask = model.ContainerOpsUpgradeTask
 type InsertResult = model.InsertResult
 type ModelPrice = model.ModelPrice
 type ModelPriceSyncResult = model.ModelPriceSyncResult
@@ -54,12 +58,14 @@ type EventsPage = usageevent.EventsPage
 type Store struct {
 	db *sql.DB
 
-	Settings         setting.Repository
-	UsageEvents      usageevent.Repository
-	DeadLetters      deadletter.Repository
-	ModelPrices      modelprice.Repository
-	APIKeyAliases    apikeyalias.Repository
-	CodexInspections codexinspection.Repository
+	Settings             setting.Repository
+	UsageEvents          usageevent.Repository
+	DeadLetters          deadletter.Repository
+	ModelPrices          modelprice.Repository
+	APIKeyAliases        apikeyalias.Repository
+	CodexInspections     codexinspection.Repository
+	ContainerOpsAudits   containeropsaudit.Repository
+	ContainerOpsUpgrades containeropsupgrade.Repository
 }
 
 func Open(path string, protector ...*security.Protector) (*Store, error) {
@@ -72,13 +78,15 @@ func Open(path string, protector ...*security.Protector) (*Store, error) {
 
 func New(db *sql.DB, protector ...*security.Protector) *Store {
 	return &Store{
-		db:               db,
-		Settings:         setting.New(db, protector...),
-		UsageEvents:      usageevent.New(db),
-		DeadLetters:      deadletter.New(db),
-		ModelPrices:      modelprice.New(db),
-		APIKeyAliases:    apikeyalias.New(db),
-		CodexInspections: codexinspection.New(db),
+		db:                   db,
+		Settings:             setting.New(db, protector...),
+		UsageEvents:          usageevent.New(db),
+		DeadLetters:          deadletter.New(db),
+		ModelPrices:          modelprice.New(db),
+		APIKeyAliases:        apikeyalias.New(db),
+		CodexInspections:     codexinspection.New(db),
+		ContainerOpsAudits:   containeropsaudit.New(db),
+		ContainerOpsUpgrades: containeropsupgrade.New(db),
 	}
 }
 
@@ -187,6 +195,34 @@ func (s *Store) ListCodexInspectionResults(ctx context.Context, runID int64) ([]
 
 func (s *Store) ListCodexInspectionLogs(ctx context.Context, runID int64) ([]CodexInspectionLog, error) {
 	return s.CodexInspections.ListLogs(ctx, runID)
+}
+
+func (s *Store) CreateContainerOpsAudit(ctx context.Context, entry ContainerOpsAuditEntry) (ContainerOpsAuditEntry, error) {
+	return s.ContainerOpsAudits.Create(ctx, entry)
+}
+
+func (s *Store) UpdateContainerOpsAudit(ctx context.Context, entry ContainerOpsAuditEntry) error {
+	return s.ContainerOpsAudits.Update(ctx, entry)
+}
+
+func (s *Store) ListContainerOpsAudits(ctx context.Context, limit int) ([]ContainerOpsAuditEntry, error) {
+	return s.ContainerOpsAudits.List(ctx, limit)
+}
+
+func (s *Store) CreateContainerOpsUpgradeTask(ctx context.Context, task ContainerOpsUpgradeTask) (ContainerOpsUpgradeTask, error) {
+	return s.ContainerOpsUpgrades.Create(ctx, task)
+}
+
+func (s *Store) GetContainerOpsUpgradeTask(ctx context.Context, taskID string) (ContainerOpsUpgradeTask, bool, error) {
+	return s.ContainerOpsUpgrades.Get(ctx, taskID)
+}
+
+func (s *Store) UpdateContainerOpsUpgradeTask(ctx context.Context, task ContainerOpsUpgradeTask) error {
+	return s.ContainerOpsUpgrades.Update(ctx, task)
+}
+
+func (s *Store) ListContainerOpsUpgradeTasks(ctx context.Context, limit int) ([]ContainerOpsUpgradeTask, error) {
+	return s.ContainerOpsUpgrades.List(ctx, limit)
 }
 
 func (s *Store) InsertEvents(ctx context.Context, events []usage.Event) (InsertResult, error) {

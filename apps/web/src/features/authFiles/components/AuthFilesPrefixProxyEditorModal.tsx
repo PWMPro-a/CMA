@@ -142,6 +142,50 @@ export function AuthFilesPrefixProxyEditorModal(props: AuthFilesPrefixProxyEdito
                     disabled={disableControls || editor.saving || !editor.json}
                     onChange={(e) => onChange('priority', e.target.value)}
                   />
+                  <Input
+                    label={t('auth_files.max_concurrency_label')}
+                    value={editor.maxConcurrency}
+                    placeholder={t('auth_files.runtime_limit_unlimited_placeholder')}
+                    hint={t('auth_files.max_concurrency_hint')}
+                    disabled={disableControls || editor.saving || !editor.json}
+                    onChange={(e) => onChange('maxConcurrency', e.target.value)}
+                  />
+                  <Input
+                    label={t('auth_files.rate_limit_max_requests_label')}
+                    value={editor.rateLimitMaxRequests}
+                    placeholder={t('auth_files.runtime_limit_unlimited_placeholder')}
+                    hint={t('auth_files.rate_limit_max_requests_hint')}
+                    disabled={disableControls || editor.saving || !editor.json}
+                    onChange={(e) => onChange('rateLimitMaxRequests', e.target.value)}
+                  />
+                  <Input
+                    label={t('auth_files.rate_limit_window_seconds_label')}
+                    value={editor.rateLimitWindowSeconds}
+                    placeholder="60"
+                    hint={t('auth_files.rate_limit_window_seconds_hint')}
+                    disabled={disableControls || editor.saving || !editor.json}
+                    onChange={(e) => onChange('rateLimitWindowSeconds', e.target.value)}
+                  />
+                  <Input
+                    label={t('auth_files.selection_error_freeze_seconds_label')}
+                    value={editor.selectionErrorFreezeSeconds}
+                    placeholder="30"
+                    hint={t('auth_files.selection_error_freeze_seconds_hint')}
+                    disabled={disableControls || editor.saving || !editor.json}
+                    onChange={(e) => onChange('selectionErrorFreezeSeconds', e.target.value)}
+                  />
+                  <div className="form-group">
+                    <label>{t('auth_files.disable_sticky_on_next_request_label')}</label>
+                    <ToggleSwitch
+                      checked={Boolean(editor.disableStickyOnNextRequest)}
+                      onChange={(value) => onChange('disableStickyOnNextRequest', value)}
+                      disabled={disableControls || editor.saving || !editor.json}
+                      ariaLabel={t('auth_files.disable_sticky_on_next_request_label')}
+                    />
+                    <div className="hint">
+                      {t('auth_files.disable_sticky_on_next_request_hint')}
+                    </div>
+                  </div>
                   {editor.providerKey === 'codex' && (
                     <div className="form-group">
                       <label>{t('ai_providers.codex_websockets_label')}</label>

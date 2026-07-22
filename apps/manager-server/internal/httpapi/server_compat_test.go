@@ -113,6 +113,538 @@ func TestServerCompatPanelPathOverridesEmbeddedPanel(t *testing.T) {
 	}
 }
 
+func TestServerCompatContainerOpsInfoRequiresPanelAuth(t *testing.T) {
+	cfg := testutil.NewConfig(t)
+	handler, _ := newCompatHandler(t, cfg, nil)
+
+	unauthorizedRR := testutil.Request(t, handler, http.MethodGet, "/v0/management/container-ops/info", "", "")
+	testutil.RequireStatus(t, unauthorizedRR, http.StatusUnauthorized)
+
+	infoRR := testutil.Request(t, handler, http.MethodGet, "/v0/management/container-ops/info", "", testutil.AdminKey)
+	testutil.RequireStatus(t, infoRR, http.StatusOK)
+	var info struct {
+		Enabled bool   `json:"enabled"`
+		Mode    string `json:"mode"`
+		Agent   struct {
+			Configured bool `json:"configured"`
+			Reachable  bool `json:"reachable"`
+		} `json:"agent"`
+		NewAPI struct {
+			RecommendedBaseURL string `json:"recommendedBaseUrl"`
+		} `json:"newApi"`
+	}
+	testutil.DecodeJSON(t, infoRR, &info)
+	if !info.Enabled || info.Mode != "read_only" || info.Agent.Configured || info.Agent.Reachable {
+		t.Fatalf("container ops info = %#v", info)
+	}
+	if info.NewAPI.RecommendedBaseURL != "http://cli-proxy-api:8317/v1" {
+		t.Fatalf("recommended base url = %q", info.NewAPI.RecommendedBaseURL)
+	}
+}
+
+func TestServerCompatContainerOpsUpgradeTasksRequiresPanelAuth(t *testing.T) {
+	cfg := testutil.NewConfig(t)
+	handler, db := newCompatHandler(t, cfg, nil)
+	created, err := db.CreateContainerOpsUpgradeTask(context.Background(), store.ContainerOpsUpgradeTask{
+		TaskID:           "upgrade-cpa-prepare-1",
+		OperationID:      "upgrade-cpa-prepare-1",
+		Status:           "prepared",
+		Phase:            "prepare_completed",
+		CPAImage:         "seakee/cli-proxy-api:v2",
+		CPAMPImage:       "seakee/cpa-manager-plus:v2",
+		RollbackBackupID: "upgrade-cpa-20260610T010203Z",
+		NextAction:       "start_async_recreate",
+		StartedAtMS:      1781053323000,
+		FinishedAtMS:     1781053333000,
+		CreatedAtMS:      1781053323000,
+	})
+	if err != nil {
+		t.Fatalf("create upgrade task: %v", err)
+	}
+
+	unauthorizedRR := testutil.Request(t, handler, http.MethodGet, "/v0/management/container-ops/upgrade-tasks", "", "")
+	testutil.RequireStatus(t, unauthorizedRR, http.StatusUnauthorized)
+
+	tasksRR := testutil.Request(t, handler, http.MethodGet, "/v0/management/container-ops/upgrade-tasks?limit=5", "", testutil.AdminKey)
+	testutil.RequireStatus(t, tasksRR, http.StatusOK)
+	var response struct {
+		Items []struct {
+			ID               int64  `json:"id"`
+			TaskID           string `json:"taskId"`
+			Status           string `json:"status"`
+			Phase            string `json:"phase"`
+			RollbackBackupID string `json:"rollbackBackupId"`
+			NextAction       string `json:"nextAction"`
+		} `json:"items"`
+	}
+	testutil.DecodeJSON(t, tasksRR, &response)
+	if len(response.Items) != 1 {
+		t.Fatalf("items = %#v", response.Items)
+	}
+	item := response.Items[0]
+	if item.ID != created.ID ||
+		item.TaskID != "upgrade-cpa-prepare-1" ||
+		item.Status != "prepared" ||
+		item.Phase != "prepare_completed" ||
+		item.RollbackBackupID != "upgrade-cpa-20260610T010203Z" ||
+		item.NextAction != "start_async_recreate" {
+		t.Fatalf("upgrade task response = %#v", item)
+	}
+}
+
+func TestServerCompatContainerOpsUpgradeTaskStartRequiresPanelAuth(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/agent/info":
+			_, _ = w.Write([]byte(`{"service":"cpamp-agent","version":"test","mode":"agent","readOnly":false}`))
+		case "/upgrades/cpa/jobs":
+			if r.Method != http.MethodPost {
+				t.Fatalf("upgrade job method = %s", r.Method)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"jobId":"agent-job-compat-1","taskId":"upgrade-cpa-prepare-2","status":"queued","phase":"queued","cpaImage":"seakee/cli-proxy-api:v2","cpampImage":"seakee/cpa-manager-plus:v2","rollbackBackupId":"upgrade-cpa-20260610T010203Z","nextAction":"wait_for_agent_job"}`))
+		case "/upgrades/cpa/jobs/agent-job-compat-1":
+			if r.Method != http.MethodGet {
+				t.Fatalf("upgrade job poll method = %s", r.Method)
+			}
+			_, _ = w.Write([]byte(`{"jobId":"agent-job-compat-1","taskId":"upgrade-cpa-prepare-2","status":"recreate_deferred","phase":"async_recreate_deferred","cpaImage":"seakee/cli-proxy-api:v2","cpampImage":"seakee/cpa-manager-plus:v2","rollbackBackupId":"upgrade-cpa-20260610T010203Z","nextAction":"implement_agent_recreate","checks":[{"severity":"info","code":"upgrade_target_ready","message":"ok"}],"actions":[{"order":1,"code":"recreate_cpa_container","target":"cli-proxy-api","status":"skipped"}],"plan":{"status":"recreate_deferred","cpaImage":"seakee/cli-proxy-api:v2","cpampImage":"seakee/cpa-manager-plus:v2","checks":[{"severity":"info","code":"upgrade_target_ready","message":"ok"}],"actions":[{"order":1,"code":"recreate_cpa_container","target":"cli-proxy-api","status":"skipped"}],"applied":false,"destructive":true,"readOnly":false}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(agent.Close)
+
+	cfg := testutil.NewConfig(t)
+	cfg.ContainerOpsAgentURL = agent.URL
+	handler, db := newCompatHandler(t, cfg, nil)
+	if _, err := db.CreateContainerOpsUpgradeTask(context.Background(), store.ContainerOpsUpgradeTask{
+		TaskID:           "upgrade-cpa-prepare-2",
+		OperationID:      "upgrade-cpa-prepare-2",
+		Status:           "prepared",
+		Phase:            "prepare_completed",
+		CPAImage:         "seakee/cli-proxy-api:v2",
+		CPAMPImage:       "seakee/cpa-manager-plus:v2",
+		RollbackBackupID: "upgrade-cpa-20260610T010203Z",
+		NextAction:       "start_async_recreate",
+		StartedAtMS:      1781053323000,
+		FinishedAtMS:     1781053333000,
+		CreatedAtMS:      1781053323000,
+	}); err != nil {
+		t.Fatalf("create upgrade task: %v", err)
+	}
+
+	body := `{"taskId":"upgrade-cpa-prepare-2"}`
+	unauthorizedRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/upgrade-tasks/start", body, "")
+	testutil.RequireStatus(t, unauthorizedRR, http.StatusUnauthorized)
+
+	startRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/upgrade-tasks/start", body, testutil.AdminKey)
+	testutil.RequireStatus(t, startRR, http.StatusOK)
+	var response struct {
+		TaskID     string `json:"taskId"`
+		Status     string `json:"status"`
+		Phase      string `json:"phase"`
+		NextAction string `json:"nextAction"`
+	}
+	testutil.DecodeJSON(t, startRR, &response)
+	if response.TaskID != "upgrade-cpa-prepare-2" ||
+		response.Status != "running" ||
+		response.Phase != "async_recreate" ||
+		response.NextAction != "wait_for_async_result" {
+		t.Fatalf("start response = %#v", response)
+	}
+
+	var task store.ContainerOpsUpgradeTask
+	for attempt := 0; attempt < 20; attempt++ {
+		loaded, ok, err := db.GetContainerOpsUpgradeTask(context.Background(), "upgrade-cpa-prepare-2")
+		if err != nil {
+			t.Fatalf("get upgrade task: %v", err)
+		}
+		if !ok {
+			t.Fatalf("upgrade task not found")
+		}
+		task = loaded
+		if task.Status == "recreate_deferred" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if task.Status != "recreate_deferred" ||
+		task.Phase != "async_recreate_deferred" ||
+		task.NextAction != "implement_agent_recreate" {
+		t.Fatalf("deferred task = %#v", task)
+	}
+}
+
+func TestServerCompatContainerOpsImportRequiresPanelAuth(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/agent/info":
+			_, _ = w.Write([]byte(`{"service":"cpamp-agent","version":"test","mode":"agent","readOnly":true}`))
+		case "/docker/overview":
+			_, _ = w.Write([]byte(`{"summary":{"containerCount":1,"runningCount":1,"cpaCount":1},"containers":[{"id":"cpa123","name":"cli-proxy-api","image":"seakee/cli-proxy-api:latest","state":"running","role":"cpa","managed":true,"networks":[{"name":"cpamp-cpa_default"}]}],"networks":[{"name":"cpamp-cpa_default","driver":"bridge","managed":true,"containers":1}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(agent.Close)
+
+	cfg := testutil.NewConfig(t)
+	cfg.ContainerOpsAgentURL = agent.URL
+	handler, _ := newCompatHandler(t, cfg, nil)
+
+	unauthorizedRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/import", "", "")
+	testutil.RequireStatus(t, unauthorizedRR, http.StatusUnauthorized)
+
+	importRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/import", "", testutil.AdminKey)
+	testutil.RequireStatus(t, importRR, http.StatusOK)
+	var plan struct {
+		Summary struct {
+			Ready    bool `json:"ready"`
+			CPAFound bool `json:"cpaFound"`
+		} `json:"summary"`
+		ReadOnly bool `json:"readOnly"`
+	}
+	testutil.DecodeJSON(t, importRR, &plan)
+	if !plan.Summary.Ready || !plan.Summary.CPAFound || !plan.ReadOnly {
+		t.Fatalf("import plan = %#v", plan)
+	}
+}
+
+func TestServerCompatContainerOpsDeployRequiresPanelAuth(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/agent/info":
+			_, _ = w.Write([]byte(`{"service":"cpamp-agent","version":"test","mode":"agent","readOnly":false}`))
+		case "/docker/overview":
+			_, _ = w.Write([]byte(`{"summary":{},"containers":[],"networks":[],"images":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(agent.Close)
+
+	cfg := testutil.NewConfig(t)
+	cfg.ContainerOpsAgentURL = agent.URL
+	handler, _ := newCompatHandler(t, cfg, nil)
+
+	body := `{"apply":false}`
+	unauthorizedRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/deploy", body, "")
+	testutil.RequireStatus(t, unauthorizedRR, http.StatusUnauthorized)
+
+	deployRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/deploy", body, testutil.AdminKey)
+	testutil.RequireStatus(t, deployRR, http.StatusOK)
+	var plan struct {
+		Status   string `json:"status"`
+		ReadOnly bool   `json:"readOnly"`
+		Compose  struct {
+			FileName string `json:"fileName"`
+			Content  string `json:"content"`
+		} `json:"compose"`
+		Checks []struct {
+			Code string `json:"code"`
+		} `json:"checks"`
+	}
+	testutil.DecodeJSON(t, deployRR, &plan)
+	if plan.Status != "ready" || !plan.ReadOnly || plan.Compose.FileName != "compose.deploy-preview.yml" || len(plan.Checks) == 0 {
+		t.Fatalf("deploy plan = %#v", plan)
+	}
+	if !strings.Contains(plan.Compose.Content, "CPA_MANAGER_ADMIN_KEY") {
+		t.Fatalf("deploy compose = %s", plan.Compose.Content)
+	}
+}
+
+func TestServerCompatContainerOpsBackupRequiresPanelAuth(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/agent/info":
+			_, _ = w.Write([]byte(`{"service":"cpamp-agent","version":"test","mode":"agent","readOnly":true}`))
+		case "/backups/cpa":
+			if r.Method != http.MethodPost {
+				t.Fatalf("backup method = %s", r.Method)
+			}
+			_, _ = w.Write([]byte(`{"backupId":"cpa-20260610T010203Z","status":"completed","backupRoot":"/opt/cpamp/backups","createdAt":1781053323,"archives":[{"role":"cpa","service":"cli-proxy-api","container":"cli-proxy-api","path":"/app/data","fileName":"cpa-cli-proxy-api.tar","size":128}],"readOnly":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(agent.Close)
+
+	cfg := testutil.NewConfig(t)
+	cfg.ContainerOpsAgentURL = agent.URL
+	handler, _ := newCompatHandler(t, cfg, nil)
+
+	unauthorizedRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/backup", "", "")
+	testutil.RequireStatus(t, unauthorizedRR, http.StatusUnauthorized)
+
+	backupRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/backup", "", testutil.AdminKey)
+	testutil.RequireStatus(t, backupRR, http.StatusOK)
+	var result struct {
+		BackupID string `json:"backupId"`
+		Archives []struct {
+			FileName string `json:"fileName"`
+		} `json:"archives"`
+		ReadOnly bool `json:"readOnly"`
+	}
+	testutil.DecodeJSON(t, backupRR, &result)
+	if result.BackupID != "cpa-20260610T010203Z" || len(result.Archives) != 1 || !result.ReadOnly {
+		t.Fatalf("backup result = %#v", result)
+	}
+
+	auditUnauthorizedRR := testutil.Request(t, handler, http.MethodGet, "/v0/management/container-ops/audits", "", "")
+	testutil.RequireStatus(t, auditUnauthorizedRR, http.StatusUnauthorized)
+
+	auditRR := testutil.Request(t, handler, http.MethodGet, "/v0/management/container-ops/audits?limit=5", "", testutil.AdminKey)
+	testutil.RequireStatus(t, auditRR, http.StatusOK)
+	var auditList struct {
+		Items []struct {
+			Operation string `json:"operation"`
+			Status    string `json:"status"`
+			BackupID  string `json:"backupId"`
+		} `json:"items"`
+	}
+	testutil.DecodeJSON(t, auditRR, &auditList)
+	if len(auditList.Items) != 1 ||
+		auditList.Items[0].Operation != "backup" ||
+		auditList.Items[0].Status != "completed" ||
+		auditList.Items[0].BackupID != "cpa-20260610T010203Z" {
+		t.Fatalf("audit list = %#v", auditList)
+	}
+}
+
+func TestServerCompatContainerOpsLifecycleBusyReturnsConflict(t *testing.T) {
+	backupStarted := make(chan struct{})
+	releaseBackup := make(chan struct{})
+
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/agent/info":
+			_, _ = w.Write([]byte(`{"service":"cpamp-agent","version":"test","mode":"agent","readOnly":false}`))
+		case "/backups/cpa":
+			select {
+			case <-backupStarted:
+			default:
+				close(backupStarted)
+			}
+			<-releaseBackup
+			_, _ = w.Write([]byte(`{"backupId":"cpa-20260610T010203Z","status":"completed","backupRoot":"/opt/cpamp/backups","createdAt":1781053323,"archives":[{"role":"cpa","service":"cli-proxy-api","container":"cli-proxy-api","path":"/app/data","fileName":"cpa-cli-proxy-api.tar","size":128}],"readOnly":false}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(agent.Close)
+
+	cfg := testutil.NewConfig(t)
+	cfg.ContainerOpsAgentURL = agent.URL
+	handler, _ := newCompatHandler(t, cfg, nil)
+
+	backupDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/v0/management/container-ops/backup", nil)
+		req.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		backupDone <- rr
+	}()
+
+	select {
+	case <-backupStarted:
+	case <-time.After(2 * time.Second):
+		close(releaseBackup)
+		t.Fatal("backup request did not enter agent")
+	}
+
+	restoreRR := testutil.Request(
+		t,
+		handler,
+		http.MethodPost,
+		"/v0/management/container-ops/restore",
+		`{"backupId":"cpa-20260610T010203Z","apply":true}`,
+		testutil.AdminKey,
+	)
+	testutil.RequireStatus(t, restoreRR, http.StatusConflict)
+
+	close(releaseBackup)
+	select {
+	case backupRR := <-backupDone:
+		testutil.RequireStatus(t, backupRR, http.StatusOK)
+	case <-time.After(2 * time.Second):
+		t.Fatal("backup request did not finish")
+	}
+}
+
+func TestServerCompatContainerOpsRestoreRequiresPanelAuth(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/agent/info":
+			_, _ = w.Write([]byte(`{"service":"cpamp-agent","version":"test","mode":"agent","readOnly":true}`))
+		case "/restores/cpa/plan":
+			if r.Method != http.MethodPost {
+				t.Fatalf("restore method = %s", r.Method)
+			}
+			_, _ = w.Write([]byte(`{"backupId":"cpa-20260610T010203Z","status":"ready","backupRoot":"/opt/cpamp/backups","createdAt":1781053323,"archives":[{"role":"cpa","service":"cli-proxy-api","container":"cli-proxy-api","path":"/app/data","fileName":"cpa-cli-proxy-api.tar","size":128}],"checks":[{"severity":"info","code":"manifest_loaded","message":"ok","blocking":false}],"steps":[{"order":1,"code":"create_rollback_backup","title":"Create rollback backup","destructive":false}],"readOnly":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(agent.Close)
+
+	cfg := testutil.NewConfig(t)
+	cfg.ContainerOpsAgentURL = agent.URL
+	handler, _ := newCompatHandler(t, cfg, nil)
+
+	body := `{"backupId":"cpa-20260610T010203Z"}`
+	unauthorizedRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/restore", body, "")
+	testutil.RequireStatus(t, unauthorizedRR, http.StatusUnauthorized)
+
+	restoreRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/restore", body, testutil.AdminKey)
+	testutil.RequireStatus(t, restoreRR, http.StatusOK)
+	var plan struct {
+		BackupID string `json:"backupId"`
+		Status   string `json:"status"`
+		Checks   []struct {
+			Code string `json:"code"`
+		} `json:"checks"`
+		ReadOnly bool `json:"readOnly"`
+	}
+	testutil.DecodeJSON(t, restoreRR, &plan)
+	if plan.BackupID != "cpa-20260610T010203Z" || plan.Status != "ready" || len(plan.Checks) != 1 || !plan.ReadOnly {
+		t.Fatalf("restore plan = %#v", plan)
+	}
+}
+
+func TestServerCompatContainerOpsRollbackRequiresPanelAuth(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/agent/info":
+			_, _ = w.Write([]byte(`{"service":"cpamp-agent","version":"test","mode":"agent","readOnly":false}`))
+		case "/rollbacks/cpa/apply":
+			if r.Method != http.MethodPost {
+				t.Fatalf("rollback method = %s", r.Method)
+			}
+			_, _ = w.Write([]byte(`{"backupId":"rollback-cpa-20260610T010203Z","status":"rolled_back","backupRoot":"/opt/cpamp/backups","createdAt":1781053323,"archives":[{"role":"cpa","service":"cli-proxy-api","container":"cli-proxy-api","path":"/app/data","fileName":"cpa-cli-proxy-api.tar","size":128}],"checks":[{"severity":"info","code":"rollback_completed","message":"ok","blocking":false}],"steps":[{"order":1,"code":"create_rollback_backup","title":"Create safety backup","destructive":false}],"actions":[{"order":1,"code":"commit_rollback","target":"cpa","status":"applied"}],"rollbackBackup":{"backupId":"pre-rollback-cpa-20260610T010204Z","status":"completed"},"applied":true,"destructive":true,"readOnly":false}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(agent.Close)
+
+	cfg := testutil.NewConfig(t)
+	cfg.ContainerOpsAgentURL = agent.URL
+	handler, _ := newCompatHandler(t, cfg, nil)
+
+	body := `{"backupId":"rollback-cpa-20260610T010203Z"}`
+	unauthorizedRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/rollback", body, "")
+	testutil.RequireStatus(t, unauthorizedRR, http.StatusUnauthorized)
+
+	rollbackRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/rollback", body, testutil.AdminKey)
+	testutil.RequireStatus(t, rollbackRR, http.StatusOK)
+	var plan struct {
+		BackupID string `json:"backupId"`
+		Status   string `json:"status"`
+		Actions  []struct {
+			Code string `json:"code"`
+		} `json:"actions"`
+		Applied bool `json:"applied"`
+	}
+	testutil.DecodeJSON(t, rollbackRR, &plan)
+	if plan.BackupID != "rollback-cpa-20260610T010203Z" || plan.Status != "rolled_back" || len(plan.Actions) != 1 || !plan.Applied {
+		t.Fatalf("rollback result = %#v", plan)
+	}
+}
+
+func TestServerCompatContainerOpsNetworkStandardizeRequiresPanelAuth(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/agent/info":
+			_, _ = w.Write([]byte(`{"service":"cpamp-agent","version":"test","mode":"agent","readOnly":false}`))
+		case "/networks/cpa/standardize":
+			if r.Method != http.MethodPost {
+				t.Fatalf("network method = %s", r.Method)
+			}
+			_, _ = w.Write([]byte(`{"backupId":"cpa-20260610T010203Z","status":"applied","network":"cpamp-cpa_default","checks":[{"severity":"info","code":"backup_ready","message":"ok","blocking":false}],"actions":[{"order":1,"code":"create_standard_network","target":"cpamp-cpa_default","status":"applied"}],"applied":true,"destructive":false}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(agent.Close)
+
+	cfg := testutil.NewConfig(t)
+	cfg.ContainerOpsAgentURL = agent.URL
+	handler, _ := newCompatHandler(t, cfg, nil)
+
+	body := `{"backupId":"cpa-20260610T010203Z","apply":true}`
+	unauthorizedRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/network-standardize", body, "")
+	testutil.RequireStatus(t, unauthorizedRR, http.StatusUnauthorized)
+
+	networkRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/network-standardize", body, testutil.AdminKey)
+	testutil.RequireStatus(t, networkRR, http.StatusOK)
+	var result struct {
+		BackupID    string `json:"backupId"`
+		Status      string `json:"status"`
+		Applied     bool   `json:"applied"`
+		Destructive bool   `json:"destructive"`
+		Actions     []struct {
+			Code string `json:"code"`
+		} `json:"actions"`
+	}
+	testutil.DecodeJSON(t, networkRR, &result)
+	if result.BackupID != "cpa-20260610T010203Z" || result.Status != "applied" || !result.Applied || result.Destructive || len(result.Actions) != 1 {
+		t.Fatalf("network result = %#v", result)
+	}
+}
+
+func TestServerCompatContainerOpsUpgradeRequiresPanelAuth(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/agent/info":
+			_, _ = w.Write([]byte(`{"service":"cpamp-agent","version":"test","mode":"agent","readOnly":false}`))
+		case "/upgrades/cpa/prepare":
+			if r.Method != http.MethodPost {
+				t.Fatalf("upgrade method = %s", r.Method)
+			}
+			_, _ = w.Write([]byte(`{"status":"prepared","cpaImage":"seakee/cli-proxy-api:v2","cpampImage":"seakee/cpa-manager-plus:v2","checks":[{"severity":"info","code":"upgrade_target_ready","message":"ok","blocking":false}],"steps":[{"order":1,"code":"precheck","title":"Precheck","destructive":false}],"actions":[{"order":1,"code":"create_upgrade_backup","target":"cpa","status":"applied"},{"order":2,"code":"pull_upgrade_images","target":"images","status":"applied"},{"order":3,"code":"prepare_recreate","target":"cpa","status":"skipped"}],"imagePulls":[{"image":"seakee/cli-proxy-api:v2","status":"pulled"},{"image":"seakee/cpa-manager-plus:v2","status":"pulled"}],"rollbackBackup":{"backupId":"upgrade-cpa-20260610T010203Z","status":"completed"},"applied":true,"destructive":true,"readOnly":false}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(agent.Close)
+
+	cfg := testutil.NewConfig(t)
+	cfg.ContainerOpsAgentURL = agent.URL
+	handler, _ := newCompatHandler(t, cfg, nil)
+
+	body := `{"cpaImage":"seakee/cli-proxy-api:v2","cpampImage":"seakee/cpa-manager-plus:v2","apply":true}`
+	unauthorizedRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/upgrade", body, "")
+	testutil.RequireStatus(t, unauthorizedRR, http.StatusUnauthorized)
+
+	upgradeRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/container-ops/upgrade", body, testutil.AdminKey)
+	testutil.RequireStatus(t, upgradeRR, http.StatusOK)
+	var result struct {
+		Status         string `json:"status"`
+		Applied        bool   `json:"applied"`
+		Destructive    bool   `json:"destructive"`
+		RollbackBackup struct {
+			BackupID string `json:"backupId"`
+		} `json:"rollbackBackup"`
+		ImagePulls []struct {
+			Image string `json:"image"`
+		} `json:"imagePulls"`
+	}
+	testutil.DecodeJSON(t, upgradeRR, &result)
+	if result.Status != "prepared" || !result.Applied || !result.Destructive || result.RollbackBackup.BackupID != "upgrade-cpa-20260610T010203Z" || len(result.ImagePulls) != 2 {
+		t.Fatalf("upgrade result = %#v", result)
+	}
+}
+
 func TestServerCompatSetupConfigAndEnvLock(t *testing.T) {
 	cpa := testutil.NewCPAMock(t)
 	cfg := testutil.NewConfig(t)

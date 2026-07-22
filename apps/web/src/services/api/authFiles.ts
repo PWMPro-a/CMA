@@ -3,7 +3,7 @@
  */
 
 import { apiClient } from './client';
-import type { AuthFilesResponse } from '@/types/authFile';
+import type { AgentIdentityRegistrationStatus, AuthFilesResponse } from '@/types/authFile';
 import type { OAuthModelAliasEntry } from '@/types';
 import { parseTimestampMs } from '@/utils/timestamp';
 
@@ -18,6 +18,14 @@ export type AuthFileFieldsPatch = {
   headers?: Record<string, string>;
   priority?: number;
   note?: string;
+  max_concurrency?: number;
+  rate_limit_max_requests?: number;
+  rate_limit_window_seconds?: number;
+  selection_error_freeze_seconds?: number;
+  disable_sticky_on_next_request?: boolean;
+};
+export type AuthFileImportDefaults = {
+  websockets?: boolean;
 };
 type AuthFileBatchFailure = { name: string; error: string };
 type AuthFileBatchUploadResponse = {
@@ -43,6 +51,22 @@ type AuthFileBatchDeleteResult = {
   deleted: number;
   files: string[];
   failed: AuthFileBatchFailure[];
+};
+export type AgentIdentityRegistrationResult = {
+  name: string;
+  queued: boolean;
+  registration: AgentIdentityRegistrationStatus;
+};
+export type AgentIdentityRegistrationBatchResult = {
+  status: string;
+  queued: number;
+  skipped?: number;
+  results: AgentIdentityRegistrationResult[];
+  failed: AuthFileBatchFailure[];
+};
+export type AgentIdentityRegistrationListResult = {
+  active: number;
+  registrations: AgentIdentityRegistrationResult[];
 };
 
 export const AUTH_FILE_INVALID_JSON_OBJECT_ERROR = 'AUTH_FILE_INVALID_JSON_OBJECT';
@@ -310,9 +334,13 @@ const parseAuthFileJsonObject = (rawText: string): Record<string, unknown> => {
   return { ...(parsed as Record<string, unknown>) };
 };
 
-const saveAuthFileText = async (name: string, text: string) => {
+const saveAuthFileText = async (
+  name: string,
+  text: string,
+  importDefaults?: AuthFileImportDefaults
+) => {
   const file = new File([text], name, { type: 'application/json' });
-  const result = await authFilesApi.upload(file);
+  const result = await authFilesApi.upload(file, importDefaults);
   const normalizedStatus = result.status.trim().toLowerCase();
   const hasExplicitFailureStatus =
     normalizedStatus === 'error' || normalizedStatus === 'failed' || normalizedStatus === 'partial';
@@ -418,6 +446,22 @@ export const authFilesApi = {
   setStatus: (name: string, disabled: boolean) =>
     apiClient.patch<AuthFileStatusResponse>('/auth-files/status', { name, disabled }),
 
+  retryAgentIdentityRegistration: (name: string) =>
+    apiClient.post<AgentIdentityRegistrationResult>('/auth-files/agent-identity/register', {
+      name,
+    }),
+
+  listAgentIdentityRegistrations: () =>
+    apiClient.get<AgentIdentityRegistrationListResult>(
+      '/auth-files/agent-identity/registrations'
+    ),
+
+  retryAgentIdentityRegistrations: (names: string[]) =>
+    apiClient.post<AgentIdentityRegistrationBatchResult>(
+      '/auth-files/agent-identity/register-batch',
+      { names: normalizeRequestedAuthFileNames(names) }
+    ),
+
   setStatusWithFallback: async (name: string, disabled: boolean) => {
     try {
       return await authFilesApi.patchFile({ name, disabled });
@@ -429,7 +473,10 @@ export const authFilesApi = {
   patchFields: (name: string, fields: AuthFileFieldsPatch) =>
     apiClient.patch('/auth-files/fields', { name, ...fields }),
 
-  uploadFiles: async (files: File[]): Promise<AuthFileBatchUploadResult> => {
+  uploadFiles: async (
+    files: File[],
+    importDefaults?: AuthFileImportDefaults
+  ): Promise<AuthFileBatchUploadResult> => {
     const requestedNames = files.map((file) => file.name);
     if (requestedNames.length === 0) {
       return { status: 'ok', uploaded: 0, files: [], failed: [] };
@@ -439,11 +486,15 @@ export const authFilesApi = {
     files.forEach((file) => {
       formData.append('file', file, file.name);
     });
+    if (typeof importDefaults?.websockets === 'boolean') {
+      formData.append('default_websockets', String(importDefaults.websockets));
+    }
     const payload = await apiClient.postForm<AuthFileBatchUploadResponse>('/auth-files', formData);
     return normalizeBatchUploadResponse(payload, requestedNames);
   },
 
-  upload: (file: File) => authFilesApi.uploadFiles([file]),
+  upload: (file: File, importDefaults?: AuthFileImportDefaults) =>
+    authFilesApi.uploadFiles([file], importDefaults),
 
   deleteFiles: async (names: string[]): Promise<AuthFileBatchDeleteResult> => {
     const requestedNames = normalizeRequestedAuthFileNames(names);
@@ -489,10 +540,14 @@ export const authFilesApi = {
     return parseAuthFileJsonObject(rawText);
   },
 
-  saveText: (name: string, text: string) => saveAuthFileText(name, text),
+  saveText: (name: string, text: string, importDefaults?: AuthFileImportDefaults) =>
+    saveAuthFileText(name, text, importDefaults),
 
-  saveJsonObject: (name: string, json: Record<string, unknown>) =>
-    saveAuthFileText(name, JSON.stringify(json)),
+  saveJsonObject: (
+    name: string,
+    json: Record<string, unknown>,
+    importDefaults?: AuthFileImportDefaults
+  ) => saveAuthFileText(name, JSON.stringify(json), importDefaults),
 
   // OAuth 排除模型
   async getOauthExcludedModels(): Promise<Record<string, string[]>> {

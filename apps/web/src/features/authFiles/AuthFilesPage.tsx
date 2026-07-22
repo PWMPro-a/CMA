@@ -18,8 +18,14 @@ import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
+import { Modal } from '@/components/ui/Modal';
 import { Select } from '@/components/ui/Select';
-import { IconFilterAll, IconSearch } from '@/components/ui/icons';
+import {
+  IconFilterAll,
+  IconRefreshCw,
+  IconSearch,
+  IconSlidersHorizontal,
+} from '@/components/ui/icons';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { copyToClipboard } from '@/utils/clipboard';
@@ -32,10 +38,14 @@ import {
   getAuthFileIcon,
   getTypeColor,
   getTypeLabel,
+  hasAuthFileFreezeConfig,
+  hasAuthFileRateLimitConfig,
+  isAuthFileRuntimeUnlimited,
   hasAuthFileStatusMessage,
   isHealthyAuthFile,
   isRuntimeOnlyAuthFile,
   normalizeProviderKey,
+  parseNonNegativeIntegerValue,
   type QuotaProviderType,
   type ResolvedTheme,
 } from '@/features/authFiles/constants';
@@ -43,6 +53,10 @@ import { AuthFileCard } from '@/features/authFiles/components/AuthFileCard';
 import { AuthJsonPasteModal } from '@/features/authFiles/components/AuthJsonPasteModal';
 import { AuthFileModelsModal } from '@/features/authFiles/components/AuthFileModelsModal';
 import { AuthFilesPrefixProxyEditorModal } from '@/features/authFiles/components/AuthFilesPrefixProxyEditorModal';
+import {
+  readAuthFileImportDefaults,
+  writeAuthFileImportDefaults,
+} from '@/features/authFiles/importDefaults';
 import { OAuthExcludedCard } from '@/features/authFiles/components/OAuthExcludedCard';
 import { OAuthModelAliasCard } from '@/features/authFiles/components/OAuthModelAliasCard';
 import { useAuthFilesData } from '@/features/authFiles/hooks/useAuthFilesData';
@@ -86,6 +100,7 @@ import {
   type AuthFilesSortMode,
 } from '@/features/authFiles/uiState';
 import type { AuthJsonInputType } from '@/features/authFiles/sessionAuthConverter';
+import { authFilesApi, type AuthFileFieldsPatch } from '@/services/api';
 import type { AuthFileItem } from '@/types';
 import { useAuthStore, useNotificationStore, useQuotaStore, useThemeStore } from '@/stores';
 import styles from './AuthFilesPage.module.scss';
@@ -94,6 +109,36 @@ const hasInlineQuotaLayout = (file: AuthFileItem): boolean => {
   if (isRuntimeOnlyAuthFile(file)) return false;
   const provider = resolveAuthProvider(file);
   return QUOTA_PROVIDER_TYPES.has(provider as QuotaProviderType);
+};
+
+type RuntimeLimitBatchDraft = {
+  maxConcurrency: string;
+  rateLimitMaxRequests: string;
+  rateLimitWindowSeconds: string;
+  selectionErrorFreezeSeconds: string;
+};
+
+type RuntimeLimitBatchNumberField =
+  | 'max_concurrency'
+  | 'rate_limit_max_requests'
+  | 'rate_limit_window_seconds'
+  | 'selection_error_freeze_seconds';
+
+const buildRuntimeLimitBatchPatch = (draft: RuntimeLimitBatchDraft): AuthFileFieldsPatch => {
+  const patch: AuthFileFieldsPatch = {};
+  const setIntegerField = (field: RuntimeLimitBatchNumberField, value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    const parsed = parseNonNegativeIntegerValue(trimmed);
+    if (parsed === undefined) return;
+    patch[field] = parsed;
+  };
+
+  setIntegerField('max_concurrency', draft.maxConcurrency);
+  setIntegerField('rate_limit_max_requests', draft.rateLimitMaxRequests);
+  setIntegerField('rate_limit_window_seconds', draft.rateLimitWindowSeconds);
+  setIntegerField('selection_error_freeze_seconds', draft.selectionErrorFreezeSeconds);
+  return patch;
 };
 
 export function AuthFilesPage() {
@@ -112,6 +157,9 @@ export function AuthFilesPage() {
   const [problemOnly, setProblemOnly] = useState(false);
   const [disabledOnly, setDisabledOnly] = useState(false);
   const [healthyOnly, setHealthyOnly] = useState(false);
+  const [rateLimitedOnly, setRateLimitedOnly] = useState(false);
+  const [runtimeUnlimitedOnly, setRuntimeUnlimitedOnly] = useState(false);
+  const [freezeConfiguredOnly, setFreezeConfiguredOnly] = useState(false);
   const [codexStatusFilter, setCodexStatusFilter] = useState<AuthFilesCodexStatusFilter>('all');
   const [compactMode, setCompactMode] = useState(false);
   const [search, setSearch] = useState('');
@@ -126,6 +174,15 @@ export function AuthFilesPage() {
   const [batchActionBarVisible, setBatchActionBarVisible] = useState(false);
   const [uiStateHydrated, setUiStateHydrated] = useState(false);
   const [authJsonPasteOpen, setAuthJsonPasteOpen] = useState(false);
+  const [importDefaults, setImportDefaults] = useState(readAuthFileImportDefaults);
+  const [runtimeLimitBatchOpen, setRuntimeLimitBatchOpen] = useState(false);
+  const [runtimeLimitBatchSaving, setRuntimeLimitBatchSaving] = useState(false);
+  const [runtimeLimitBatchDraft, setRuntimeLimitBatchDraft] = useState<RuntimeLimitBatchDraft>({
+    maxConcurrency: '',
+    rateLimitMaxRequests: '',
+    rateLimitWindowSeconds: '',
+    selectionErrorFreezeSeconds: '',
+  });
   const [lastCodexInspectionResults, setLastCodexInspectionResults] = useState<
     AuthFileCodexInspectionSnapshot[]
   >([]);
@@ -146,6 +203,8 @@ export function AuthFilesPage() {
     deletingAll,
     statusUpdating,
     batchStatusUpdating,
+    registrationRetrying,
+    batchRegistrationRetrying,
     fileInputRef,
     loadFiles,
     handleUploadClick,
@@ -161,8 +220,18 @@ export function AuthFilesPage() {
     deselectAll,
     batchDownload,
     batchSetStatus,
+    retryAgentIdentityRegistration,
+    batchRetryAgentIdentityRegistration,
     batchDelete,
-  } = useAuthFilesData();
+  } = useAuthFilesData({ importDefaults });
+
+  const handleDefaultWebsocketsChange = useCallback((websockets: boolean) => {
+    setImportDefaults((current) => {
+      const next = { ...current, websockets };
+      writeAuthFileImportDefaults(next);
+      return next;
+    });
+  }, []);
 
   const statusBarCache = useAuthFilesStatusBarCache(files);
 
@@ -235,6 +304,15 @@ export function AuthFilesPage() {
       if (typeof persisted.healthyOnly === 'boolean') {
         setHealthyOnly(persisted.healthyOnly);
       }
+      if (typeof persisted.rateLimitedOnly === 'boolean') {
+        setRateLimitedOnly(persisted.rateLimitedOnly);
+      }
+      if (typeof persisted.runtimeUnlimitedOnly === 'boolean') {
+        setRuntimeUnlimitedOnly(persisted.runtimeUnlimitedOnly);
+      }
+      if (typeof persisted.freezeConfiguredOnly === 'boolean') {
+        setFreezeConfiguredOnly(persisted.freezeConfiguredOnly);
+      }
       const persistedCodexStatusFilter = normalizeAuthFilesCodexStatusFilter(
         persisted.codexStatusFilter
       );
@@ -287,6 +365,9 @@ export function AuthFilesPage() {
       problemOnly,
       disabledOnly,
       healthyOnly,
+      rateLimitedOnly,
+      runtimeUnlimitedOnly,
+      freezeConfiguredOnly,
       codexStatusFilter,
       compactMode,
       search,
@@ -303,14 +384,17 @@ export function AuthFilesPage() {
     compactMode,
     disabledOnly,
     filter,
+    freezeConfiguredOnly,
     healthyOnly,
     page,
     pageSize,
     pageSizeByMode,
     problemOnly,
+    rateLimitedOnly,
     search,
     sortMode,
     uiStateHydrated,
+    runtimeUnlimitedOnly,
     viewMode,
   ]);
 
@@ -446,6 +530,9 @@ export function AuthFilesPage() {
         if (problemOnly && !hasAuthFileStatusMessage(file)) return false;
         if (disabledOnly && file.disabled !== true) return false;
         if (healthyOnly && !isHealthyAuthFile(file)) return false;
+        if (rateLimitedOnly && !hasAuthFileRateLimitConfig(file)) return false;
+        if (runtimeUnlimitedOnly && !isAuthFileRuntimeUnlimited(file)) return false;
+        if (freezeConfiguredOnly && !hasAuthFileFreezeConfig(file)) return false;
         const codexStatus = codexStatusByAuthFileKey.get(
           getAuthFileCodexInspectionKeyForFile(file)
         );
@@ -454,7 +541,17 @@ export function AuthFilesPage() {
         }
         return true;
       }),
-    [codexStatusByAuthFileKey, codexStatusFilter, disabledOnly, files, healthyOnly, problemOnly]
+    [
+      codexStatusByAuthFileKey,
+      codexStatusFilter,
+      disabledOnly,
+      files,
+      freezeConfiguredOnly,
+      healthyOnly,
+      problemOnly,
+      rateLimitedOnly,
+      runtimeUnlimitedOnly,
+    ]
   );
 
   const sortOptions = useMemo(
@@ -587,6 +684,18 @@ export function AuthFilesPage() {
     [sorted]
   );
   const selectedNames = useMemo(() => Array.from(selectedFiles), [selectedFiles]);
+  const retryableAgentRegistrationNames = useMemo(
+    () =>
+      files
+        .filter((file) => {
+          if (!selectedFiles.has(file.name)) return false;
+          const registration =
+            file.agent_identity_registration ?? file.agentIdentityRegistration;
+          return registration?.can_retry === true;
+        })
+        .map((file) => file.name),
+    [files, selectedFiles]
+  );
   const selectedHasStatusUpdating = useMemo(
     () => selectedNames.some((name) => statusUpdating[name] === true),
     [selectedNames, statusUpdating]
@@ -596,6 +705,55 @@ export function AuthFilesPage() {
     selectedNames.length === 0 ||
     batchStatusUpdating ||
     selectedHasStatusUpdating;
+
+  const openRuntimeLimitBatchEditor = useCallback(() => {
+    setRuntimeLimitBatchDraft({
+      maxConcurrency: '',
+      rateLimitMaxRequests: '',
+      rateLimitWindowSeconds: '',
+      selectionErrorFreezeSeconds: '',
+    });
+    setRuntimeLimitBatchOpen(true);
+  }, []);
+
+  const handleRuntimeLimitBatchSave = useCallback(async () => {
+    const patch = buildRuntimeLimitBatchPatch(runtimeLimitBatchDraft);
+    if (Object.keys(patch).length === 0) {
+      showNotification(t('auth_files.batch_runtime_limits_empty'), 'warning');
+      return;
+    }
+
+    const targetNames = Array.from(new Set(selectedNames));
+    if (targetNames.length === 0) return;
+
+    setRuntimeLimitBatchSaving(true);
+    try {
+      const results = await Promise.allSettled(
+        targetNames.map((name) => authFilesApi.patchFields(name, patch))
+      );
+      const successCount = results.filter((result) => result.status === 'fulfilled').length;
+      const failCount = results.length - successCount;
+      if (failCount === 0) {
+        showNotification(
+          t('auth_files.batch_runtime_limits_success', { count: successCount }),
+          'success'
+        );
+      } else {
+        showNotification(
+          t('auth_files.batch_runtime_limits_partial', {
+            success: successCount,
+            failed: failCount,
+          }),
+          'warning'
+        );
+      }
+      await loadFiles();
+      setRuntimeLimitBatchOpen(false);
+      deselectAll();
+    } finally {
+      setRuntimeLimitBatchSaving(false);
+    }
+  }, [deselectAll, loadFiles, runtimeLimitBatchDraft, selectedNames, showNotification, t]);
 
   const copyTextWithNotification = useCallback(
     async (text: string) => {
@@ -863,6 +1021,26 @@ export function AuthFilesPage() {
                 />
               </div>
             </div>
+            <div className={styles.importDefaultsBar}>
+              <span className={styles.importDefaultsIcon} aria-hidden="true">
+                <IconSlidersHorizontal size={17} />
+              </span>
+              <div className={styles.importDefaultsCopy}>
+                <div className={styles.importDefaultsTitleRow}>
+                  <strong>{t('auth_files.import_defaults_title')}</strong>
+                  <span className={styles.importDefaultsScope}>Codex</span>
+                </div>
+                <span>{t('auth_files.import_defaults_hint')}</span>
+              </div>
+              <ToggleSwitch
+                checked={importDefaults.websockets}
+                onChange={handleDefaultWebsocketsChange}
+                disabled={disableControls || uploading || authJsonPasteSaving}
+                ariaLabel={t('auth_files.import_default_websockets_label')}
+                label={t('auth_files.import_default_websockets_label')}
+                labelPosition="left"
+              />
+            </div>
             <div className={styles.filterControlsPanel}>
               <div className={styles.filterControls}>
                 <div className={styles.filterItem}>
@@ -979,6 +1157,53 @@ export function AuthFilesPage() {
                     </div>
                     <div className={styles.filterToggleCard}>
                       <ToggleSwitch
+                        checked={rateLimitedOnly}
+                        onChange={(value) => {
+                          setRateLimitedOnly(value);
+                          if (value) setRuntimeUnlimitedOnly(false);
+                          setPage(1);
+                        }}
+                        ariaLabel={t('auth_files.rate_limited_filter_only')}
+                        label={
+                          <span className={styles.filterToggleLabel}>
+                            {t('auth_files.rate_limited_filter_only')}
+                          </span>
+                        }
+                      />
+                    </div>
+                    <div className={styles.filterToggleCard}>
+                      <ToggleSwitch
+                        checked={runtimeUnlimitedOnly}
+                        onChange={(value) => {
+                          setRuntimeUnlimitedOnly(value);
+                          if (value) setRateLimitedOnly(false);
+                          setPage(1);
+                        }}
+                        ariaLabel={t('auth_files.runtime_unlimited_filter_only')}
+                        label={
+                          <span className={styles.filterToggleLabel}>
+                            {t('auth_files.runtime_unlimited_filter_only')}
+                          </span>
+                        }
+                      />
+                    </div>
+                    <div className={styles.filterToggleCard}>
+                      <ToggleSwitch
+                        checked={freezeConfiguredOnly}
+                        onChange={(value) => {
+                          setFreezeConfiguredOnly(value);
+                          setPage(1);
+                        }}
+                        ariaLabel={t('auth_files.freeze_configured_filter_only')}
+                        label={
+                          <span className={styles.filterToggleLabel}>
+                            {t('auth_files.freeze_configured_filter_only')}
+                          </span>
+                        }
+                      />
+                    </div>
+                    <div className={styles.filterToggleCard}>
+                      <ToggleSwitch
                         checked={compactMode}
                         onChange={(value) => setCompactMode(value)}
                         ariaLabel={t('auth_files.compact_mode_label')}
@@ -1019,15 +1244,15 @@ export function AuthFilesPage() {
                       disableControls={disableControls}
                       deleting={deleting}
                       statusUpdating={statusUpdating}
+                      registrationRetrying={registrationRetrying[file.name] === true}
                       statusBarCache={statusBarCache}
-                      codexStatusBadges={
-                        codexStatusByAuthFileKey.get(authFileKey)?.badges ?? []
-                      }
+                      codexStatusBadges={codexStatusByAuthFileKey.get(authFileKey)?.badges ?? []}
                       onShowModels={showModels}
                       onDownload={handleDownload}
                       onOpenPrefixProxyEditor={openPrefixProxyEditor}
                       onDelete={handleDelete}
                       onToggleStatus={handleStatusToggle}
+                      onRetryAgentIdentityRegistration={retryAgentIdentityRegistration}
                       onToggleSelect={toggleSelect}
                     />
                   );
@@ -1125,6 +1350,89 @@ export function AuthFilesPage() {
         onSave={handleSavePastedAuthJson}
       />
 
+      <Modal
+        open={runtimeLimitBatchOpen}
+        onClose={() => {
+          if (!runtimeLimitBatchSaving) setRuntimeLimitBatchOpen(false);
+        }}
+        closeDisabled={runtimeLimitBatchSaving}
+        width={560}
+        title={t('auth_files.batch_runtime_limits_title', { count: selectedNames.length })}
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              onClick={() => setRuntimeLimitBatchOpen(false)}
+              disabled={runtimeLimitBatchSaving}
+            >
+              {t('common.cancel')}
+            </Button>
+            <Button
+              onClick={() => void handleRuntimeLimitBatchSave()}
+              loading={runtimeLimitBatchSaving}
+              disabled={disableControls || runtimeLimitBatchSaving || selectedNames.length === 0}
+            >
+              {t('common.save')}
+            </Button>
+          </>
+        }
+      >
+        <div className={styles.runtimeLimitBatchForm}>
+          <Input
+            label={t('auth_files.max_concurrency_label')}
+            value={runtimeLimitBatchDraft.maxConcurrency}
+            placeholder={t('auth_files.batch_runtime_limits_empty_placeholder')}
+            hint={t('auth_files.max_concurrency_hint')}
+            disabled={runtimeLimitBatchSaving}
+            onChange={(e) =>
+              setRuntimeLimitBatchDraft((prev) => ({
+                ...prev,
+                maxConcurrency: e.target.value,
+              }))
+            }
+          />
+          <Input
+            label={t('auth_files.rate_limit_max_requests_label')}
+            value={runtimeLimitBatchDraft.rateLimitMaxRequests}
+            placeholder={t('auth_files.batch_runtime_limits_empty_placeholder')}
+            hint={t('auth_files.rate_limit_max_requests_hint')}
+            disabled={runtimeLimitBatchSaving}
+            onChange={(e) =>
+              setRuntimeLimitBatchDraft((prev) => ({
+                ...prev,
+                rateLimitMaxRequests: e.target.value,
+              }))
+            }
+          />
+          <Input
+            label={t('auth_files.rate_limit_window_seconds_label')}
+            value={runtimeLimitBatchDraft.rateLimitWindowSeconds}
+            placeholder={t('auth_files.batch_runtime_limits_empty_placeholder')}
+            hint={t('auth_files.rate_limit_window_seconds_hint')}
+            disabled={runtimeLimitBatchSaving}
+            onChange={(e) =>
+              setRuntimeLimitBatchDraft((prev) => ({
+                ...prev,
+                rateLimitWindowSeconds: e.target.value,
+              }))
+            }
+          />
+          <Input
+            label={t('auth_files.selection_error_freeze_seconds_label')}
+            value={runtimeLimitBatchDraft.selectionErrorFreezeSeconds}
+            placeholder={t('auth_files.batch_runtime_limits_empty_placeholder')}
+            hint={t('auth_files.selection_error_freeze_seconds_hint')}
+            disabled={runtimeLimitBatchSaving}
+            onChange={(e) =>
+              setRuntimeLimitBatchDraft((prev) => ({
+                ...prev,
+                selectionErrorFreezeSeconds: e.target.value,
+              }))
+            }
+          />
+        </div>
+      </Modal>
+
       {batchActionBarVisible && typeof document !== 'undefined'
         ? createPortal(
             <div className={styles.batchActionContainer} ref={floatingBatchActionsRef}>
@@ -1169,6 +1477,30 @@ export function AuthFilesPage() {
                     disabled={disableControls || selectedNames.length === 0}
                   >
                     {t('auth_files.batch_download')}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={openRuntimeLimitBatchEditor}
+                    disabled={disableControls || selectedNames.length === 0}
+                  >
+                    {t('auth_files.batch_runtime_limits_button')}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() =>
+                      void batchRetryAgentIdentityRegistration(retryableAgentRegistrationNames)
+                    }
+                    disabled={
+                      disableControls ||
+                      retryableAgentRegistrationNames.length === 0 ||
+                      batchRegistrationRetrying
+                    }
+                    loading={batchRegistrationRetrying}
+                  >
+                    {!batchRegistrationRetrying && <IconRefreshCw size={14} />}
+                    {t('auth_files.agent_registration_batch_retry_button')}
                   </Button>
                   <Button
                     size="sm"

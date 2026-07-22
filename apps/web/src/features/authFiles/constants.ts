@@ -192,6 +192,61 @@ export const parsePriorityValue = (value: unknown): number | undefined => {
   return Number.isSafeInteger(parsed) ? parsed : undefined;
 };
 
+export const parseNonNegativeIntegerValue = (value: unknown): number | undefined => {
+  const parsed = parsePriorityValue(value);
+  return parsed !== undefined && parsed >= 0 ? parsed : undefined;
+};
+
+export const readAuthFileIntegerField = (
+  file: AuthFileItem | Record<string, unknown>,
+  snakeKey: string,
+  camelKey?: string
+): number | undefined =>
+  parseNonNegativeIntegerValue(file[snakeKey] ?? (camelKey ? file[camelKey] : undefined));
+
+export const readAuthFileBooleanField = (
+  file: AuthFileItem | Record<string, unknown>,
+  snakeKey: string,
+  camelKey?: string
+): boolean | undefined => {
+  const value = file[snakeKey] ?? (camelKey ? file[camelKey] : undefined);
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return value !== 0;
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (TRUTHY_TEXT_VALUES.has(normalized)) return true;
+  if (FALSY_TEXT_VALUES.has(normalized)) return false;
+  return undefined;
+};
+
+export const hasAuthFileRateLimitConfig = (file: AuthFileItem): boolean =>
+  (readAuthFileIntegerField(file, 'rate_limit_max_requests', 'rateLimitMaxRequests') ?? 0) > 0;
+
+export const hasAuthFileFreezeConfig = (file: AuthFileItem): boolean =>
+  (readAuthFileIntegerField(
+    file,
+    'selection_error_freeze_seconds',
+    'selectionErrorFreezeSeconds'
+  ) ?? 0) > 0;
+
+export const hasAuthFileRuntimeLimitConfig = (file: AuthFileItem): boolean =>
+  (readAuthFileIntegerField(file, 'max_concurrency', 'maxConcurrency') ?? 0) > 0 ||
+  hasAuthFileRateLimitConfig(file) ||
+  hasAuthFileFreezeConfig(file);
+
+export const isAuthFileRuntimeUnlimited = (file: AuthFileItem): boolean => {
+  const maxConcurrency = readAuthFileIntegerField(file, 'max_concurrency', 'maxConcurrency');
+  const rateLimitMaxRequests = readAuthFileIntegerField(
+    file,
+    'rate_limit_max_requests',
+    'rateLimitMaxRequests'
+  );
+  return (
+    (maxConcurrency === undefined || maxConcurrency === 0) &&
+    (rateLimitMaxRequests === undefined || rateLimitMaxRequests === 0)
+  );
+};
+
 export const normalizeExcludedModels = (value: unknown): string[] => {
   if (!Array.isArray(value)) return [];
 
@@ -251,7 +306,7 @@ export const formatModified = (item: AuthFileItem): string => {
   const date =
     Number.isFinite(asNumber) && !Number.isNaN(asNumber)
       ? new Date(asNumber < 1e12 ? asNumber * 1000 : asNumber)
-      : parseTimestamp(raw) ?? new Date(String(raw));
+      : (parseTimestamp(raw) ?? new Date(String(raw)));
   return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
 };
 

@@ -312,6 +312,88 @@ func TestRecentEventsPreservesRawCachedTokens(t *testing.T) {
 	}
 }
 
+func TestStoreCompatContainerOpsUpgradeTasks(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	older, err := db.CreateContainerOpsUpgradeTask(context.Background(), ContainerOpsUpgradeTask{
+		TaskID:      "upgrade-old",
+		OperationID: "upgrade-old",
+		Status:      "preparing",
+		Phase:       "prepare",
+		CPAImage:    "seakee/cli-proxy-api:v1",
+		Request:     map[string]any{"apply": true},
+		StartedAtMS: 1000,
+		CreatedAtMS: 1000,
+	})
+	if err != nil {
+		t.Fatalf("create older task: %v", err)
+	}
+	if older.ID <= 0 || older.UpdatedAtMS <= 0 {
+		t.Fatalf("older task metadata = %#v", older)
+	}
+
+	newer, err := db.CreateContainerOpsUpgradeTask(context.Background(), ContainerOpsUpgradeTask{
+		TaskID:      "upgrade-new",
+		OperationID: "upgrade-new",
+		Status:      "preparing",
+		Phase:       "prepare",
+		CPAMPImage:  "seakee/cpa-manager-plus:v2",
+		StartedAtMS: 2000,
+		CreatedAtMS: 2000,
+	})
+	if err != nil {
+		t.Fatalf("create newer task: %v", err)
+	}
+
+	newer.Status = "prepared"
+	newer.Phase = "prepare_completed"
+	newer.RollbackBackupID = "upgrade-cpa-20260610T010203Z"
+	newer.NextAction = "start_async_recreate"
+	newer.Result = map[string]any{"rollbackBackupId": newer.RollbackBackupID}
+	newer.FinishedAtMS = 3000
+	if err := db.UpdateContainerOpsUpgradeTask(context.Background(), newer); err != nil {
+		t.Fatalf("update task: %v", err)
+	}
+
+	loaded, ok, err := db.GetContainerOpsUpgradeTask(context.Background(), "upgrade-new")
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if !ok {
+		t.Fatalf("get task ok = false")
+	}
+	if loaded.TaskID != "upgrade-new" || loaded.Status != "prepared" || loaded.RollbackBackupID != "upgrade-cpa-20260610T010203Z" {
+		t.Fatalf("loaded task = %#v", loaded)
+	}
+
+	tasks, err := db.ListContainerOpsUpgradeTasks(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("len(tasks) = %d, want 2: %#v", len(tasks), tasks)
+	}
+	if tasks[0].TaskID != "upgrade-new" || tasks[0].Status != "prepared" ||
+		tasks[0].RollbackBackupID != "upgrade-cpa-20260610T010203Z" ||
+		tasks[0].NextAction != "start_async_recreate" ||
+		tasks[0].FinishedAtMS != 3000 {
+		t.Fatalf("newer task = %#v", tasks[0])
+	}
+	result, ok := tasks[0].Result.(map[string]any)
+	if !ok || result["rollbackBackupId"] != "upgrade-cpa-20260610T010203Z" {
+		t.Fatalf("newer task result = %#v", tasks[0].Result)
+	}
+	if tasks[1].TaskID != "upgrade-old" {
+		t.Fatalf("task order = %#v", tasks)
+	}
+}
+
 func TestInsertEventsSanitizesImportedFailSummary(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
