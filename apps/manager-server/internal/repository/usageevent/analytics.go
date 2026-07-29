@@ -2189,6 +2189,13 @@ func (r *repository) LatestHeaderSnapshots(ctx context.Context, sinceMS int64, l
 	if limit <= 0 {
 		return nil, nil
 	}
+	scanLimit := limit * 100
+	if scanLimit < 50000 {
+		scanLimit = 50000
+	}
+	if scanLimit > 250000 {
+		scanLimit = 250000
+	}
 	rows, err := r.db.QueryContext(ctx, `with candidates as (
 	select
 		id,
@@ -2234,6 +2241,8 @@ func (r *repository) LatestHeaderSnapshots(ctx context.Context, sinceMS int64, l
 		or coalesce(account_snapshot, '') <> ''
 		or coalesce(source_hash, '') <> ''
 	)
+	order by timestamp_ms desc, id desc
+	limit ?
 ), ranked as (
 	select *, row_number() over (partition by snapshot_key order by timestamp_ms desc, id desc) as rn
 	from candidates
@@ -2260,7 +2269,7 @@ select
 from ranked
 where rn = 1
 order by timestamp_ms desc, id desc
-limit ?`, sinceMS, limit)
+limit ?`, sinceMS, scanLimit, limit)
 	if err != nil {
 		return nil, err
 	}
