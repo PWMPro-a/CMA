@@ -363,6 +363,9 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	if total > imported {
 		return s.importItems(ctx, cfg, &order)
 	}
+	if released, err := s.releaseAutomaticOrderIfCPASatisfied(ctx, cfg, &order); released || err != nil {
+		return err
+	}
 
 	remote, err := s.supplyClient.GetOrder(ctx, credentials, order.OrderID, order.StatusURL)
 	if err != nil {
@@ -380,6 +383,9 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	if !isReadyForTake(remote.Status) {
 		order.Status = "waiting_inventory"
 		return s.store.UpdateSupplyOrder(ctx, order)
+	}
+	if released, err := s.releaseAutomaticOrderIfCPASatisfied(ctx, cfg, &order); released || err != nil {
+		return err
 	}
 
 	order.Status = "taking"
@@ -424,6 +430,51 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		return err
 	}
 	return s.importItems(ctx, cfg, &order)
+}
+
+func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg store.ManagerConfig, order *store.SupplyOrder) (bool, error) {
+	if order == nil || !order.Automatic || cfg.Supply.TargetAvailableAccounts <= 0 {
+		return false, nil
+	}
+	switch order.Status {
+	case "creating", "create_uncertain", "taking", "importing", "partial":
+		return false, nil
+	}
+	available, err := s.countAvailableAccounts(ctx, cfg)
+	if err != nil {
+		return false, err
+	}
+	s.updateCPAOverview(available, cfg.Supply.TargetAvailableAccounts)
+	if available < cfg.Supply.TargetAvailableAccounts {
+		return false, nil
+	}
+	return true, s.releaseAutomaticOrder(ctx, cfg, order, available)
+}
+
+func (s *Service) releaseAutomaticOrder(ctx context.Context, cfg store.ManagerConfig, order *store.SupplyOrder, available int) error {
+	released, err := s.supplyClient.ReleaseOrder(ctx, credentialsFromConfig(cfg.Supply), order.OrderID)
+	if err != nil && !errors.Is(err, supplyclient.ErrReleaseUnsupported) {
+		return s.updateOrderError(ctx, order, fmt.Errorf("release satisfied supply order: %w", err), cfg.Supply)
+	}
+	if err == nil {
+		applyRemoteOrder(order, released, cfg.Supply)
+	} else {
+		order.RemoteStatus = "release_unsupported"
+		order.LastError = "CPA available accounts already satisfy target; supply release endpoint is unsupported, skipped pickup locally"
+	}
+	order.Status = "released"
+	order.ItemCount = 0
+	order.ImportedCount = 0
+	order.NextPollAtMS = 0
+	order.CompletedAtMS = time.Now().UnixMilli()
+	if order.RemoteStatus == "" {
+		order.RemoteStatus = "released"
+	}
+	if err == nil {
+		order.LastError = ""
+	}
+	s.updateCPAOverview(available, cfg.Supply.TargetAvailableAccounts)
+	return s.store.UpdateSupplyOrder(ctx, *order)
 }
 
 func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, order *store.SupplyOrder) error {

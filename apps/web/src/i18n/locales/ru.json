@@ -4393,6 +4393,7 @@
     "dismiss_uncertain_title": "Снять блокировку неизвестного заказа?",
     "dismiss_uncertain_confirm": "Подтвердите в консоли Supply, что заказ {{orderId}} не был создан. После снятия блокировки сервис сможет отправить новый заказ.",
     "dismiss_uncertain_action": "Заказа нет — снять блокировку",
-    "dismiss_uncertain_success": "Блокировка неизвестного заказа снята"
+    "dismiss_uncertain_success": "Блокировка неизвестного заказа снята",
+    "status_released": "Освобожден"
   }
 }

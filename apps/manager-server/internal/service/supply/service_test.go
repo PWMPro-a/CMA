@@ -357,6 +357,97 @@ func TestImportVerificationFailureBlocksDuplicateAutomaticOrders(t *testing.T) {
 	}
 }
 
+func TestAutomaticOrderReleasesInsteadOfTakingWhenCPATargetIsAlreadySatisfied(t *testing.T) {
+	var createCalls atomic.Int32
+	var releaseCalls atomic.Int32
+	var takeCalls atomic.Int32
+	var authListCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":10,"missing":0,"estimated_total_fen":1000}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":10000,"balance_fen":10000}`))
+		case r.URL.Path == "/api/customer/pickup/orders" && r.Method == http.MethodPost:
+			createCalls.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"order":{"id":"order-release","status":"waiting_inventory","quantity":1}}`))
+		case r.URL.Path == "/api/customer/pickup/orders/order-release" && r.Method == http.MethodDelete:
+			releaseCalls.Add(1)
+			_, _ = w.Write([]byte(`{"order":{"id":"order-release","status":"cancelled","released_fen":1000}}`))
+		case r.URL.Path == "/api/customer/pickup/orders/order-release" && r.Method == http.MethodGet:
+			t.Fatal("order status should not be polled after CPA target is already satisfied")
+		case r.URL.Path == "/api/customer/pickup/orders/order-release/take":
+			takeCalls.Add(1)
+			t.Fatal("ready order should be released instead of taken when CPA target is already satisfied")
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			call := authListCalls.Add(1)
+			if call == 1 {
+				_, _ = w.Write([]byte(`{"files":[]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"files":[{"name":"existing.json","provider":"codex","disabled":false,"status":"ready"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled:                 &enabled,
+			BaseURL:                 server.URL,
+			Username:                "customer",
+			Password:                "password",
+			Product:                 "oauth_30d",
+			TargetAvailableAccounts: 1,
+			ReplenishBatchSize:      1,
+			CheckIntervalSeconds:    60,
+			PollIntervalSeconds:     1,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("create automatic order: %v", err)
+	}
+	order, found, err := st.GetSupplyOrder(context.Background(), "order-release")
+	if err != nil || !found {
+		t.Fatalf("load created order found=%v err=%v", found, err)
+	}
+	order.NextPollAtMS = 0
+	if err := st.UpdateSupplyOrder(context.Background(), order); err != nil {
+		t.Fatalf("make order due: %v", err)
+	}
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("release satisfied order: %v", err)
+	}
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	if status.ActiveOrder != nil {
+		t.Fatalf("active order should be cleared: %#v", status.ActiveOrder)
+	}
+	if len(status.Orders) != 1 || status.Orders[0].Status != "released" || status.Orders[0].ReleasedFen != 1000 {
+		t.Fatalf("orders = %#v", status.Orders)
+	}
+	if createCalls.Load() != 1 || releaseCalls.Load() != 1 || takeCalls.Load() != 0 {
+		t.Fatalf("calls create=%d release=%d take=%d", createCalls.Load(), releaseCalls.Load(), takeCalls.Load())
+	}
+}
+
 func TestLegacySupplyImportRepairConvertsAndVerifiesCPAFile(t *testing.T) {
 	var uploadCalls atomic.Int32
 	var uploadedName string

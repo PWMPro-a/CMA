@@ -35,7 +35,7 @@ const formatTime = (value?: number) =>
   value && value > 0 ? new Date(value).toLocaleString() : '-';
 
 const orderTone = (status: string) => {
-  if (status === 'completed') return styles.success;
+  if (status === 'completed' || status === 'released') return styles.success;
   if (status === 'failed' || status === 'cancelled' || status === 'dismissed') return styles.error;
   if (status === 'partial' || status === 'create_uncertain') return styles.warning;
   return styles.active;

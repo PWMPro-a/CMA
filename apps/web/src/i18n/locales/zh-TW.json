@@ -4393,6 +4393,7 @@
     "dismiss_uncertain_title": "解除未知訂單阻塞？",
     "dismiss_uncertain_confirm": "請先在 Supply 客戶控制台確認訂單 {{orderId}} 未建立。解除後補貨服務可能重新提交訂單。",
     "dismiss_uncertain_action": "確認未建立並解除",
-    "dismiss_uncertain_success": "未知訂單阻塞已解除"
+    "dismiss_uncertain_success": "未知訂單阻塞已解除",
+    "status_released": "已釋放"
   }
 }
