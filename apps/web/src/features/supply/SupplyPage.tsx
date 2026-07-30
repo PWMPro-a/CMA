@@ -417,6 +417,14 @@ export function SupplyPage() {
               <span>{t('supply.usage_sample')}</span>
               <strong>{smart?.usageSampleMinutes ?? 0}m</strong>
             </div>
+            <div>
+              <span>{t('supply.supply_pressure')}</span>
+              <strong>
+                {t(`supply.supply_pressure_${smart?.supplyPressureLevel || 'unknown'}`, {
+                  defaultValue: smart?.supplyPressureLevel || '-',
+                })}
+              </strong>
+            </div>
           </div>
           <div className={styles.capacityBox}>
             <div className={styles.capacityTop}>

@@ -51,7 +51,7 @@ func TestSmartResourceRecommendsPrelockFromUsageCapacity(t *testing.T) {
 		},
 	}, now)
 
-	if resource.HealthLevel != smartHealthCritical || resource.SuggestedQuantity < 1 {
+	if resource.HealthLevel != smartHealthWarning || resource.SuggestedQuantity < 1 {
 		t.Fatalf("resource = %#v", resource)
 	}
 	if resource.RPM30M <= 0 || resource.CurrentCapacityRCU <= 0 || resource.CapacityGapRCU <= 0 {
@@ -364,6 +364,248 @@ func TestSmartAutomaticDoesNotCreateWhenCapacityHealthy(t *testing.T) {
 	}
 	if status.SmartResource.HealthLevel != smartHealthHealthy || status.ActiveOrder != nil {
 		t.Fatalf("status = %#v", status)
+	}
+}
+
+func TestSmartAutomaticUsesSmallBatchWhenSupplyIsPlenty(t *testing.T) {
+	var createQuantity atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":100,"missing":0,"needs_production":false,"estimated_total_fen":100}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
+		case r.URL.Path == "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		case r.URL.Path == "/api/customer/pickup/orders":
+			var payload struct {
+				Quantity int `json:"quantity"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode create payload: %v", err)
+			}
+			createQuantity.Store(int32(payload.Quantity))
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"order":{"id":"order-plenty","status":"waiting_inventory","quantity":1},"status_url":"/api/customer/pickup/orders/order-plenty"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "smart-plenty-small.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password",
+			Product: "oauth_30d", TargetAvailableAccounts: 1, ReplenishBatchSize: 10,
+			PrelockMinQuantity: 1, PrelockMaxQuantity: 10,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	now := time.Now()
+	events := make([]usage.Event, 0, 30)
+	for minute := 0; minute < 30; minute++ {
+		events = append(events, usage.Event{
+			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+			Provider:    "codex",
+			AuthIndex:   "load-source",
+			TotalTokens: 10_000_000,
+		})
+	}
+	service.recordSmartUsageEvents(events, now)
+
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("run automatic: %v", err)
+	}
+	if createQuantity.Load() != 1 {
+		t.Fatalf("plenty supply should create a one-account batch, quantity=%d", createQuantity.Load())
+	}
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	if status.SmartResource.SupplyPressureLevel != smartSupplyPressurePlenty || status.SmartResource.DecisionReason != "supply_plenty_small_batch" {
+		t.Fatalf("smart resource = %#v", status.SmartResource)
+	}
+}
+
+func TestSmartAutomaticKeepsFullBatchWhenSupplyIsScarce(t *testing.T) {
+	var createQuantity atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":0,"missing":10,"needs_production":true,"estimated_total_fen":100}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
+		case r.URL.Path == "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		case r.URL.Path == "/api/customer/pickup/orders":
+			var payload struct {
+				Quantity int `json:"quantity"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode create payload: %v", err)
+			}
+			createQuantity.Store(int32(payload.Quantity))
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"order":{"id":"order-scarce","status":"waiting_inventory","quantity":3},"status_url":"/api/customer/pickup/orders/order-scarce"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "smart-scarce-full.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password",
+			Product: "oauth_30d", TargetAvailableAccounts: 1, ReplenishBatchSize: 10,
+			PrelockMinQuantity: 1, PrelockMaxQuantity: 10,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	now := time.Now()
+	events := make([]usage.Event, 0, 30)
+	for minute := 0; minute < 30; minute++ {
+		events = append(events, usage.Event{
+			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+			Provider:    "codex",
+			AuthIndex:   "load-source",
+			TotalTokens: 10_000_000,
+		})
+	}
+	service.recordSmartUsageEvents(events, now)
+
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("run automatic: %v", err)
+	}
+	if createQuantity.Load() <= 1 {
+		t.Fatalf("scarce supply should keep the recommended batch, quantity=%d", createQuantity.Load())
+	}
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	if status.SmartResource.SupplyPressureLevel != smartSupplyPressureScarce || status.SmartResource.DecisionReason != "supply_scarce_full_batch" {
+		t.Fatalf("smart resource = %#v", status.SmartResource)
+	}
+}
+
+func TestSmartReadySmallOrderTakesWhenSupplyIsPlentyBeforeCritical(t *testing.T) {
+	var takeCalls atomic.Int32
+	var uploadCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":100,"missing":0,"needs_production":false,"estimated_total_fen":100}`))
+		case r.URL.Path == "/api/customer/pickup/orders/order-small":
+			_, _ = w.Write([]byte(`{"id":"order-small","status":"ready","ready_quantity":1,"progress":100,"take_url":"/custom/take-small"}`))
+		case r.URL.Path == "/custom/take-small":
+			takeCalls.Add(1)
+			_, _ = w.Write([]byte(`{"payload":{"accounts":[{"type":"codex","account":"small@example.com","access_token":"secret"}]},"status":"completed"}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			if name := r.URL.Query().Get("name"); name != "" && uploadCalls.Load() > 0 {
+				_, _ = w.Write([]byte(`{"files":[{"name":"` + name + `","provider":"codex","status":"ready"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex","status":"ready","remaining_rcu":80},{"name":"b.json","provider":"codex","status":"ready","remaining_rcu":80}]}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodPost:
+			uploadCalls.Add(1)
+			part, err := r.MultipartReader()
+			if err != nil {
+				t.Fatalf("multipart reader: %v", err)
+			}
+			for {
+				item, err := part.NextPart()
+				if err != nil {
+					break
+				}
+				if item.FormName() == "file" {
+					data, _ := io.ReadAll(item)
+					var payload map[string]any
+					if err := json.Unmarshal(data, &payload); err != nil || payload["type"] != "codex" {
+						t.Fatalf("uploaded payload = %s err=%v", data, err)
+					}
+				}
+			}
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "smart-small-take.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password",
+			Product: "oauth_30d", TargetAvailableAccounts: 1, ReplenishBatchSize: 10,
+			PollIntervalSeconds: 1, PrelockMinQuantity: 1, PrelockMaxQuantity: 10,
+			CriticalMinutes: 30, WarningMinutes: 60, HealthyMinutesTarget: 120,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "order-small", Product: "oauth_30d", RequestedQuantity: 1, Automatic: true, Status: "ready", TakeURL: "/custom/take-small",
+	}); err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	now := time.Now()
+	events := make([]usage.Event, 0, 120)
+	for minute := 0; minute < 30; minute++ {
+		for index := 0; index < 4; index++ {
+			events = append(events, usage.Event{
+				TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+				Provider:    "codex",
+				AuthIndex:   "a.json",
+				TotalTokens: 100,
+			})
+		}
+	}
+	service.recordSmartUsageEvents(events, now)
+
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("run automatic: %v", err)
+	}
+	if takeCalls.Load() != 1 || uploadCalls.Load() != 1 {
+		t.Fatalf("small plenty order should be taken once, take=%d upload=%d", takeCalls.Load(), uploadCalls.Load())
+	}
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	if len(status.Orders) == 0 || status.Orders[0].Status != "completed" {
+		t.Fatalf("orders = %#v", status.Orders)
 	}
 }
 

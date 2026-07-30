@@ -42,6 +42,12 @@ const (
 	smartConfidenceHigh   = "high"
 	smartConfidenceMedium = "medium"
 	smartConfidenceLow    = "low"
+
+	smartSupplyPressurePlenty  = "plenty"
+	smartSupplyPressureNormal  = "normal"
+	smartSupplyPressureTight   = "tight"
+	smartSupplyPressureScarce  = "scarce"
+	smartSupplyPressureUnknown = "unknown"
 )
 
 type SmartResource struct {
@@ -78,6 +84,13 @@ type SmartResource struct {
 	UnitCapacityRCU          float64 `json:"unitCapacityRcu"`
 	RecommendedCapacityRCU   float64 `json:"recommendedCapacityRcu"`
 	PrelockedCapacityRCU     float64 `json:"prelockedCapacityRcu,omitempty"`
+	SupplyPressureLevel      string  `json:"supplyPressureLevel,omitempty"`
+	SupplyPressureReason     string  `json:"supplyPressureReason,omitempty"`
+	SupplyInventoryAvailable int     `json:"supplyInventoryAvailable,omitempty"`
+	SupplyInventoryMissing   int     `json:"supplyInventoryMissing,omitempty"`
+	SupplyNeedsProduction    bool    `json:"supplyNeedsProduction,omitempty"`
+	SupplyAvgFulfillSeconds  int     `json:"supplyAvgFulfillSeconds,omitempty"`
+	SupplyRecentWaiting      int     `json:"supplyRecentWaiting,omitempty"`
 	UsageSampleMinutes       int     `json:"usageSampleMinutes"`
 	AccountCacheAgeSeconds   int     `json:"accountCacheAgeSeconds"`
 	LockedOrderID            string  `json:"lockedOrderId,omitempty"`
@@ -317,7 +330,7 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		resource.SuggestedAction = smartActionTakeLocked
 		resource.DecisionReason = "capacity_critical"
 	} else if resource.EstimatedSustainMinutes < float64(resource.WarningMinutes) {
-		resource.HealthLevel = smartHealthCritical
+		resource.HealthLevel = smartHealthWarning
 		resource.SuggestedAction = smartActionPrelock
 		resource.DecisionReason = "capacity_below_warning"
 	} else {

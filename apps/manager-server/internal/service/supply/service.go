@@ -382,6 +382,23 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	if err != nil {
 		return err
 	}
+	if useSmart {
+		pressure := s.smartSupplyPressure(ctx, supplyCfg, inventory, quantity)
+		applySmartSupplyPressure(&resource, pressure)
+		adjustedQuantity, pressureReason := smartPrelockQuantityForSupplyPressure(supplyCfg, resource, pressure, quantity)
+		if adjustedQuantity > 0 && adjustedQuantity != quantity {
+			quantity = adjustedQuantity
+			inventory, balance, err = s.fetchSupplyOverview(ctx, supplyCfg, quantity)
+			if err != nil {
+				return err
+			}
+			pressure = s.smartSupplyPressure(ctx, supplyCfg, inventory, quantity)
+			applySmartSupplyPressure(&resource, pressure)
+		}
+		if pressureReason != "" {
+			resource.DecisionReason = pressureReason
+		}
+	}
 	s.setOverview(Overview{
 		CheckedAtMS:  time.Now().UnixMilli(),
 		CPAAvailable: available,
@@ -616,9 +633,20 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 		if err != nil {
 			return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionSnapshotStale, "smart_snapshot_unavailable")
 		}
+		currentCapacityGapRCU := resource.CapacityGapRCU
+		neededQuantity := s.smartSuggestedCreateQuantity(cfg.Supply, resource)
+		pressure := smartSupplyPressure{level: smartSupplyPressureUnknown, reason: "supply_pressure_unknown"}
+		if order.Status == "ready" {
+			inventory, inventoryErr := s.supplyClient.Inventory(ctx, credentialsFromConfig(cfg.Supply), cfg.Supply.Product, max(1, order.RequestedQuantity))
+			if inventoryErr == nil {
+				pressure = s.smartSupplyPressure(ctx, cfg.Supply, inventory, max(1, order.RequestedQuantity))
+				applySmartSupplyPressure(&resource, pressure)
+			}
+		}
 		resource.LockedOrderID = order.OrderID
+		resource.SuggestedQuantity = neededQuantity
 		resource.PrelockedCapacityRCU = estimatedSupplyOrderCapacityRCU(cfg.Supply, order.RequestedQuantity)
-		resource.CapacityGapRCU = round2(math.Max(0, resource.TargetCapacityRCU-resource.CurrentCapacityRCU-resource.PrelockedCapacityRCU))
+		resource.CapacityGapRCU = round2(math.Max(0, currentCapacityGapRCU-resource.PrelockedCapacityRCU))
 		if order.CreatedAtMS > 0 {
 			resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
 		}
@@ -635,6 +663,33 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 			}
 			resource.SuggestedAction = smartActionReleaseLocked
 			resource.DecisionReason = "capacity_recovered_before_take"
+			s.setSmartResource(resource)
+			return true, s.releaseAutomaticOrder(ctx, cfg, order, resource.AvailableAccounts)
+		case resource.HealthLevel != smartHealthCritical && pressure.level == smartSupplyPressurePlenty && currentCapacityGapRCU <= 0:
+			if !s.lockedOrderMinHoldElapsed(cfg.Supply, order) {
+				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "min_hold_before_release")
+			}
+			if s.automaticReleaseCooldownActive(cfg.Supply) {
+				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "release_cooldown")
+			}
+			resource.SuggestedAction = smartActionReleaseLocked
+			resource.DecisionReason = "supply_plenty_release_noncritical"
+			s.setSmartResource(resource)
+			return true, s.releaseAutomaticOrder(ctx, cfg, order, resource.AvailableAccounts)
+		case order.Status == "ready" && resource.HealthLevel != smartHealthCritical && pressure.level == smartSupplyPressurePlenty && neededQuantity > 0 && order.RequestedQuantity <= smartPlentySmallBatchQuantity(cfg.Supply):
+			resource.SuggestedAction = smartActionTakeLocked
+			resource.DecisionReason = "supply_plenty_small_take"
+			s.setSmartResource(resource)
+			return false, nil
+		case order.Status == "ready" && resource.HealthLevel != smartHealthCritical && pressure.level == smartSupplyPressurePlenty:
+			if !s.lockedOrderMinHoldElapsed(cfg.Supply, order) {
+				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "min_hold_before_release")
+			}
+			if s.automaticReleaseCooldownActive(cfg.Supply) {
+				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "release_cooldown")
+			}
+			resource.SuggestedAction = smartActionReleaseLocked
+			resource.DecisionReason = "supply_plenty_release_oversized"
 			s.setSmartResource(resource)
 			return true, s.releaseAutomaticOrder(ctx, cfg, order, resource.AvailableAccounts)
 		case order.Status == "ready" && resource.HealthLevel != smartHealthCritical:
@@ -831,6 +886,173 @@ func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerC
 	return count, err
 }
 
+type smartSupplyPressure struct {
+	level              string
+	reason             string
+	inventoryAvailable int
+	inventoryMissing   int
+	needsProduction    bool
+	avgFulfillSeconds  int
+	recentWaiting      int
+}
+
+func (s *Service) smartSupplyPressure(ctx context.Context, cfg store.ManagerSupplyConfig, inventory supplyclient.Inventory, requestedQuantity int) smartSupplyPressure {
+	quantity := max(1, requestedQuantity)
+	pressure := smartSupplyPressure{
+		level:              smartSupplyPressureUnknown,
+		reason:             "supply_pressure_unknown",
+		inventoryAvailable: max(0, inventory.Available),
+		inventoryMissing:   max(0, inventory.Missing),
+		needsProduction:    inventory.NeedsProduction,
+	}
+	switch {
+	case inventory.Available >= quantity && !inventory.NeedsProduction:
+		pressure.level = smartSupplyPressurePlenty
+		pressure.reason = "supply_inventory_plenty"
+	case inventory.Available >= quantity:
+		pressure.level = smartSupplyPressureNormal
+		pressure.reason = "supply_inventory_ready_with_production"
+	case inventory.Available > 0:
+		pressure.level = smartSupplyPressureTight
+		pressure.reason = "supply_inventory_partial"
+	case inventory.NeedsProduction || inventory.Missing > 0:
+		pressure.level = smartSupplyPressureScarce
+		pressure.reason = "supply_inventory_scarce"
+	default:
+		pressure.level = smartSupplyPressureUnknown
+		pressure.reason = "supply_inventory_unknown"
+	}
+
+	if s == nil || s.store == nil {
+		return pressure
+	}
+	orders, err := s.store.ListSupplyOrders(ctx, 200)
+	if err != nil {
+		return pressure
+	}
+	nowMS := time.Now().UnixMilli()
+	cutoffMS := nowMS - int64((24*time.Hour)/time.Millisecond)
+	fulfillSamples := 0
+	totalFulfillMS := int64(0)
+	for _, order := range orders {
+		if order.CreatedAtMS > 0 && order.CreatedAtMS < cutoffMS {
+			break
+		}
+		if !order.Automatic || !sameSupplyProduct(order.Product, cfg.Product) {
+			continue
+		}
+		switch order.Status {
+		case "completed":
+			if order.CompletedAtMS > order.CreatedAtMS {
+				totalFulfillMS += order.CompletedAtMS - order.CreatedAtMS
+				fulfillSamples++
+			}
+		case "released":
+			if order.CompletedAtMS > order.CreatedAtMS && (order.ReadyQuantity > 0 || order.Progress >= 100) {
+				totalFulfillMS += order.CompletedAtMS - order.CreatedAtMS
+				fulfillSamples++
+			}
+		case "created", "waiting_inventory":
+			if order.CreatedAtMS > 0 && nowMS-order.CreatedAtMS >= int64((60*time.Second)/time.Millisecond) {
+				pressure.recentWaiting++
+			}
+		}
+		if fulfillSamples >= 20 {
+			break
+		}
+	}
+	if fulfillSamples > 0 {
+		pressure.avgFulfillSeconds = int(math.Round(float64(totalFulfillMS) / float64(fulfillSamples) / 1000))
+	}
+	if pressure.level == smartSupplyPressurePlenty {
+		return pressure
+	}
+	switch {
+	case pressure.avgFulfillSeconds > 0 && pressure.avgFulfillSeconds <= 45 && inventory.Available > 0 && !inventory.NeedsProduction:
+		pressure.level = smartSupplyPressurePlenty
+		pressure.reason = "supply_history_fast"
+	case pressure.avgFulfillSeconds >= 180 || pressure.recentWaiting >= 2:
+		if inventory.Available <= 0 || inventory.NeedsProduction || inventory.Missing > 0 {
+			pressure.level = smartSupplyPressureScarce
+			pressure.reason = "supply_history_slow"
+		} else if pressure.level == smartSupplyPressureNormal {
+			pressure.level = smartSupplyPressureTight
+			pressure.reason = "supply_history_waiting"
+		}
+	case pressure.avgFulfillSeconds > 0 && pressure.avgFulfillSeconds <= 90 && pressure.level == smartSupplyPressureUnknown:
+		pressure.level = smartSupplyPressureNormal
+		pressure.reason = "supply_history_normal"
+	}
+	return pressure
+}
+
+func applySmartSupplyPressure(resource *SmartResource, pressure smartSupplyPressure) {
+	if resource == nil {
+		return
+	}
+	resource.SupplyPressureLevel = pressure.level
+	resource.SupplyPressureReason = pressure.reason
+	resource.SupplyInventoryAvailable = pressure.inventoryAvailable
+	resource.SupplyInventoryMissing = pressure.inventoryMissing
+	resource.SupplyNeedsProduction = pressure.needsProduction
+	resource.SupplyAvgFulfillSeconds = pressure.avgFulfillSeconds
+	resource.SupplyRecentWaiting = pressure.recentWaiting
+}
+
+func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resource SmartResource, pressure smartSupplyPressure, quantity int) (int, string) {
+	if quantity <= 0 || !smartPrelockEnabled(cfg) {
+		return quantity, ""
+	}
+	maxQuantity := smartPrelockMaxQuantity(cfg)
+	if cfg.ReplenishBatchSize > 0 {
+		maxQuantity = min(maxQuantity, cfg.ReplenishBatchSize)
+	}
+	quantity = clampInt(quantity, 1, maxQuantity)
+	minQuantity := min(smartPrelockMinQuantity(cfg), maxQuantity)
+	switch pressure.level {
+	case smartSupplyPressurePlenty:
+		smallBatch := minQuantity
+		if smallBatch <= 0 {
+			smallBatch = 1
+		}
+		if quantity > smallBatch {
+			return smallBatch, "supply_plenty_small_batch"
+		}
+		return quantity, "supply_plenty_small_batch"
+	case smartSupplyPressureNormal:
+		moderateBatch := clampInt(int(math.Ceil(float64(quantity)/2)), minQuantity, maxQuantity)
+		if quantity > moderateBatch {
+			return moderateBatch, "supply_normal_moderate_batch"
+		}
+		return quantity, "supply_normal_moderate_batch"
+	case smartSupplyPressureTight:
+		return quantity, "supply_tight_full_batch"
+	case smartSupplyPressureScarce:
+		return quantity, "supply_scarce_full_batch"
+	default:
+		if resource.HealthLevel == smartHealthCritical {
+			return quantity, ""
+		}
+		conservativeBatch := clampInt(2, minQuantity, maxQuantity)
+		if quantity > conservativeBatch {
+			return conservativeBatch, "supply_unknown_conservative_batch"
+		}
+		return quantity, ""
+	}
+}
+
+func smartPlentySmallBatchQuantity(cfg store.ManagerSupplyConfig) int {
+	maxQuantity := smartPrelockMaxQuantity(cfg)
+	if cfg.ReplenishBatchSize > 0 {
+		maxQuantity = min(maxQuantity, cfg.ReplenishBatchSize)
+	}
+	return clampInt(smartPrelockMinQuantity(cfg), 1, maxQuantity)
+}
+
+func sameSupplyProduct(a string, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
 func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, resource SmartResource) int {
 	quantity := resource.SuggestedQuantity
 	if quantity <= 0 && resource.CapacityGapRCU > 0 && resource.UnitCapacityRCU > 0 {
@@ -976,8 +1198,11 @@ func (s *Service) smartCriticalTakeConfirmed(cfg store.ManagerSupplyConfig, orde
 
 func (s *Service) smartTakeAllowed(cfg store.ManagerSupplyConfig, orderID string) bool {
 	resource := s.currentSmartResource(cfg)
-	if resource.SuggestedAction == smartActionTakeLocked && resource.DecisionReason == "critical_take_confirmed" {
-		return true
+	if resource.SuggestedAction == smartActionTakeLocked {
+		switch resource.DecisionReason {
+		case "critical_take_confirmed", "supply_plenty_small_take":
+			return true
+		}
 	}
 	return s.smartCriticalTakeConfirmed(cfg, orderID)
 }

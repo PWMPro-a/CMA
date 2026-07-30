@@ -118,6 +118,13 @@ export interface SupplySmartResource {
   unitCapacityRcu: number;
   recommendedCapacityRcu: number;
   prelockedCapacityRcu?: number;
+  supplyPressureLevel?: 'plenty' | 'normal' | 'tight' | 'scarce' | 'unknown' | string;
+  supplyPressureReason?: string;
+  supplyInventoryAvailable?: number;
+  supplyInventoryMissing?: number;
+  supplyNeedsProduction?: boolean;
+  supplyAvgFulfillSeconds?: number;
+  supplyRecentWaiting?: number;
   usageSampleMinutes: number;
   accountCacheAgeSeconds: number;
   lockedOrderId?: string;
