@@ -46,12 +46,12 @@ func TestSmartResourceRecommendsPrelockFromUsageCapacity(t *testing.T) {
 	}, authFileSnapshot{
 		generatedAt: now,
 		files: []cpaauthfiles.File{
-			{Name: "a.json", Provider: "codex"},
-			{Name: "b.json", Provider: "codex"},
+			{Name: "a.json", Provider: "codex", Raw: map[string]any{"remaining_rcu": 80}},
+			{Name: "b.json", Provider: "codex", Raw: map[string]any{"remaining_rcu": 80}},
 		},
 	}, now)
 
-	if resource.HealthLevel != smartHealthCritical || resource.SuggestedQuantity < 2 {
+	if resource.HealthLevel != smartHealthCritical || resource.SuggestedQuantity < 1 {
 		t.Fatalf("resource = %#v", resource)
 	}
 	if resource.RPM30M <= 0 || resource.CurrentCapacityRCU <= 0 || resource.CapacityGapRCU <= 0 {
@@ -148,6 +148,50 @@ func TestSmartResourceWeightsHealthByUsabilityAndRemainingCapacity(t *testing.T)
 	}
 	if resource.ConsumeRCUPerMinute <= 0 || resource.CapacityGapRCU <= 0 {
 		t.Fatalf("burn rate and capacity gap were not computed: %#v", resource)
+	}
+}
+
+func TestSmartResourceUsesLifetimeCapacityForFallbackAccounts(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now()
+	events := make([]usage.Event, 0, 30)
+	for minute := 0; minute < 30; minute++ {
+		events = append(events, usage.Event{
+			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+			Provider:    "codex",
+			AuthIndex:   "steady-source",
+			TotalTokens: 100,
+		})
+	}
+	service.recordSmartUsageEvents(events, now)
+
+	files := make([]cpaauthfiles.File, 0, 10)
+	for index := 0; index < 10; index++ {
+		files = append(files, cpaauthfiles.File{
+			Name:     "fallback.json",
+			Provider: "codex",
+			Raw: map[string]any{
+				"status":            "ready",
+				"remaining_seconds": 3600,
+			},
+		})
+	}
+
+	resource := service.buildSmartResourceFromSnapshots(store.ManagerSupplyConfig{
+		Product:              "oauth_7d",
+		HealthyMinutesTarget: 20,
+		WarningMinutes:       10,
+		CriticalMinutes:      5,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   30,
+		NewAccountConfidence: 0.7,
+	}, authFileSnapshot{generatedAt: now, files: files}, now)
+
+	if resource.RawCapacityRCU != 12000 {
+		t.Fatalf("fallback capacity should include the one-hour lifetime, got %#v", resource)
+	}
+	if resource.HealthLevel != smartHealthHealthy || resource.SuggestedQuantity != 0 {
+		t.Fatalf("steady low burn should not recommend excessive replenishment, got %#v", resource)
 	}
 }
 
@@ -340,7 +384,7 @@ func TestSmartReadyOrderWaitsForCriticalConfirmRoundsBeforeTake(t *testing.T) {
 				_, _ = w.Write([]byte(`{"files":[{"name":"` + name + `","provider":"codex","status":"ready"}]}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex","status":"ready"}]}`))
+			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex","status":"ready","remaining_rcu":1}]}`))
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodPost:
 			uploadCalls.Add(1)
 			part, err := r.MultipartReader()

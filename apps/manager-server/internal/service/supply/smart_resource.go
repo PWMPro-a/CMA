@@ -253,17 +253,18 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		}
 		resource.SchedulableAccounts++
 		weight := smartAccountHealthWeight(file, accountUsage)
-		rawCapacity, ok := smartAccountCapacityRCU(file.Raw, unit)
+		remainingMinutes := smartAccountRemainingMinutes(file.Raw, now, smartAccountLifetimeMinutes())
+		rawCapacity, ok := smartAccountCapacityRCU(file.Raw, unit, remainingMinutes)
 		if ok {
 			rawCapacity *= weight
 		} else {
-			rawCapacity = unit * weight
+			rawCapacity = smartEstimatedAccountCapacityRCU(unit, remainingMinutes) * weight
 		}
 		weightedCapacity += rawCapacity
 		if rawCapacity > 0 {
 			capacityItems = append(capacityItems, smartCapacityItem{
 				capacityRCU:      rawCapacity,
-				remainingMinutes: smartAccountRemainingMinutes(file.Raw, now, smartAccountLifetimeMinutes()),
+				remainingMinutes: remainingMinutes,
 			})
 		}
 		effectiveAvailable += weight
@@ -324,9 +325,9 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		resource.SuggestedAction = smartActionPrelock
 		resource.DecisionReason = "capacity_below_target"
 	}
-	unitForNew := unit * smartNewAccountConfidence(cfg)
+	unitForNew := smartEstimatedNewAccountCapacityRCU(cfg)
 	if unitForNew <= 0 {
-		unitForNew = unit
+		unitForNew = smartEstimatedAccountCapacityRCU(unit, float64(smartUsefulAccountLifetimeMinutes()))
 	}
 	maxUsefulNewCapacity := math.Max(0, consumeRCUPerMinute*float64(smartUsefulAccountLifetimeMinutes())-resource.CurrentCapacityRCU-resource.PrelockedCapacityRCU)
 	gapForOrder := math.Min(resource.CapacityGapRCU, maxUsefulNewCapacity)
@@ -571,6 +572,24 @@ func smartProductUnitCapacity(product string) float64 {
 	}
 }
 
+func smartEstimatedAccountCapacityRCU(unitPerMinute float64, remainingMinutes float64) float64 {
+	if unitPerMinute <= 0 {
+		unitPerMinute = 1
+	}
+	remainingMinutes = clampFloat(remainingMinutes, 0, float64(smartAccountLifetimeMinutes()))
+	return unitPerMinute * remainingMinutes
+}
+
+func smartEstimatedNewAccountCapacityRCU(cfg store.ManagerSupplyConfig) float64 {
+	unit := smartProductUnitCapacity(cfg.Product)
+	capacity := smartEstimatedAccountCapacityRCU(unit, float64(smartUsefulAccountLifetimeMinutes()))
+	confidence := smartNewAccountConfidence(cfg)
+	if confidence <= 0 {
+		confidence = 1
+	}
+	return capacity * confidence
+}
+
 func smartConsumeRCUPerMinute(rpm30 float64, rpm5Peak float64, tpm30 float64, unit float64) float64 {
 	requestRate := math.Max(rpm30, rpm5Peak*0.7)
 	requestRCU := requestRate
@@ -714,7 +733,7 @@ func smartHealthWeight(success int64, failed int64, zeroTokens int64) float64 {
 	return weight
 }
 
-func smartAccountCapacityRCU(values map[string]any, unit float64) (float64, bool) {
+func smartAccountCapacityRCU(values map[string]any, unit float64, remainingMinutes float64) (float64, bool) {
 	if unit <= 0 {
 		unit = 1
 	}
@@ -748,7 +767,7 @@ func smartAccountCapacityRCU(values map[string]any, unit float64) (float64, bool
 		if remaining < 0 {
 			remaining = 0
 		}
-		return unit * remaining, true
+		return smartEstimatedAccountCapacityRCU(unit, remainingMinutes) * remaining, true
 	}
 	return 0, false
 }

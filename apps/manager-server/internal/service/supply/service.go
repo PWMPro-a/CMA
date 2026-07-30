@@ -834,9 +834,9 @@ func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerC
 func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, resource SmartResource) int {
 	quantity := resource.SuggestedQuantity
 	if quantity <= 0 && resource.CapacityGapRCU > 0 && resource.UnitCapacityRCU > 0 {
-		unit := resource.UnitCapacityRCU * smartNewAccountConfidence(cfg)
+		unit := smartEstimatedNewAccountCapacityRCU(cfg)
 		if unit <= 0 {
-			unit = resource.UnitCapacityRCU
+			unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
 		}
 		quantity = int(math.Ceil(resource.CapacityGapRCU / unit))
 	}
@@ -860,10 +860,7 @@ func estimatedSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, quantity int
 	if quantity <= 0 {
 		return 0
 	}
-	unit := smartProductUnitCapacity(cfg.Product) * smartNewAccountConfidence(cfg)
-	if unit <= 0 {
-		unit = smartProductUnitCapacity(cfg.Product)
-	}
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
 	return round2(float64(quantity) * unit)
 }
 
