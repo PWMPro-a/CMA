@@ -57,6 +57,12 @@ const formatMoney = (fen?: number) => `¥${((fen ?? 0) / 100).toFixed(2)}`;
 const formatNumber = (value?: number, digits = 1) =>
   typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '-';
 
+const formatRcu = (value?: number, digits = 1) =>
+  typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(digits)} RCU` : '-';
+
+const formatRcuRate = (value?: number) =>
+  typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)} RCU/min` : '-';
+
 const formatMinutes = (value?: number) => {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return '-';
   if (value >= 1440) return `${(value / 1440).toFixed(1)}d`;
@@ -210,41 +216,94 @@ export function SupplyPage() {
   const balance = overview?.balance;
   const smart = status?.smartResource;
   const metrics = useMemo(
-    () => [
-      {
-        label: t('supply.cpa_available'),
-        value: overview?.cpaAvailable ?? '-',
-        detail: t('supply.target_value', {
-          value: overview?.cpaTarget ?? draft.targetAvailableAccounts,
-        }),
-        icon: <IconDatabaseZap size={18} />,
-        tone: 'teal',
-      },
-      {
-        label: t('supply.deficit'),
-        value: overview?.cpaDeficit ?? '-',
-        detail: t('supply.auto_order_hint'),
-        icon: <IconInbox size={18} />,
-        tone: 'orange',
-      },
-      {
-        label: t('supply.supply_inventory'),
-        value: inventory?.available ?? '-',
-        detail: inventory?.needsProduction
-          ? t('supply.production_required', { value: inventory.missing })
-          : t('supply.ready_delivery'),
-        icon: <IconInbox size={18} />,
-        tone: 'blue',
-      },
-      {
-        label: t('supply.available_balance'),
-        value: balance ? formatMoney(balance.availableFen) : '-',
-        detail: balance ? t('supply.held_value', { value: formatMoney(balance.heldFen) }) : '-',
-        icon: <IconDollarSign size={18} />,
-        tone: 'violet',
-      },
-    ],
-    [balance, draft.targetAvailableAccounts, inventory, overview, t]
+    () => {
+      if (smart?.enabled ?? draft.smartEnabled !== false) {
+        return [
+          {
+            label: t('supply.available_capacity_total'),
+            value: formatRcu(smart?.currentCapacityRcu),
+            detail: t('supply.capacity_account_aux', {
+              effective: smart?.availableAccounts ?? 0,
+              schedulable: smart?.schedulableAccounts ?? 0,
+            }),
+            icon: <IconDatabaseZap size={18} />,
+            tone: 'teal',
+          },
+          {
+            label: t('supply.consume_rate'),
+            value: formatRcuRate(smart?.consumeRcuPerMinute),
+            detail: t('supply.consume_rate_detail', {
+              rpm: formatNumber(smart?.rpm30m),
+              tpm: formatNumber(smart?.tpm30m, 0),
+            }),
+            icon: <IconTrendingUp size={18} />,
+            tone: 'orange',
+          },
+          {
+            label: t('supply.estimated_depletion'),
+            value: formatMinutes(smart?.estimatedSustainMinutes),
+            detail: t('supply.health_target_minutes', {
+              value: smart?.healthyMinutesTarget ?? draft.healthyMinutesTarget,
+            }),
+            icon: <IconTimer size={18} />,
+            tone: 'blue',
+          },
+          {
+            label: t('supply.available_balance'),
+            value: balance ? formatMoney(balance.availableFen) : '-',
+            detail: balance
+              ? t('supply.held_value', { value: formatMoney(balance.heldFen) })
+              : t('supply.supply_inventory_value', { value: inventory?.available ?? '-' }),
+            icon: <IconDollarSign size={18} />,
+            tone: 'violet',
+          },
+        ];
+      }
+      return [
+        {
+          label: t('supply.cpa_available'),
+          value: overview?.cpaAvailable ?? '-',
+          detail: t('supply.target_value', {
+            value: overview?.cpaTarget ?? draft.targetAvailableAccounts,
+          }),
+          icon: <IconDatabaseZap size={18} />,
+          tone: 'teal',
+        },
+        {
+          label: t('supply.deficit'),
+          value: overview?.cpaDeficit ?? '-',
+          detail: t('supply.auto_order_hint'),
+          icon: <IconInbox size={18} />,
+          tone: 'orange',
+        },
+        {
+          label: t('supply.supply_inventory'),
+          value: inventory?.available ?? '-',
+          detail: inventory?.needsProduction
+            ? t('supply.production_required', { value: inventory.missing })
+            : t('supply.ready_delivery'),
+          icon: <IconInbox size={18} />,
+          tone: 'blue',
+        },
+        {
+          label: t('supply.available_balance'),
+          value: balance ? formatMoney(balance.availableFen) : '-',
+          detail: balance ? t('supply.held_value', { value: formatMoney(balance.heldFen) }) : '-',
+          icon: <IconDollarSign size={18} />,
+          tone: 'violet',
+        },
+      ];
+    },
+    [
+      balance,
+      draft.healthyMinutesTarget,
+      draft.smartEnabled,
+      draft.targetAvailableAccounts,
+      inventory,
+      overview,
+      smart,
+      t,
+    ]
   );
 
   if (loading && !status) {
@@ -324,6 +383,10 @@ export function SupplyPage() {
           </div>
           <div className={styles.smartMiniMetrics}>
             <div>
+              <span>{t('supply.consume_rcu_per_min')}</span>
+              <strong>{formatNumber(smart?.consumeRcuPerMinute)}</strong>
+            </div>
+            <div>
               <span>{t('supply.rpm30m')}</span>
               <strong>{formatNumber(smart?.rpm30m)}</strong>
             </div>
@@ -360,6 +423,8 @@ export function SupplyPage() {
               </span>
               <span>
                 {t('supply.account_health_counts', {
+                  effective: smart?.availableAccounts ?? 0,
+                  schedulable: smart?.schedulableAccounts ?? 0,
                   healthy: smart?.healthyAccounts ?? 0,
                   weak: smart?.weakAccounts ?? 0,
                 })}
@@ -434,7 +499,11 @@ export function SupplyPage() {
               />
             </div>
             <Input
-              label={t('supply.target_accounts')}
+              label={
+                draft.smartEnabled !== false
+                  ? t('supply.legacy_target_accounts')
+                  : t('supply.target_accounts')
+              }
               type="number"
               min={1}
               max={10000}

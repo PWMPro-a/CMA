@@ -94,6 +94,7 @@ export interface SupplySmartResource {
   snapshotFresh: boolean;
   generatedAtMs: number;
   availableAccounts: number;
+  schedulableAccounts: number;
   healthyAccounts: number;
   weakAccounts: number;
   targetAvailableAccounts: number;
@@ -104,6 +105,7 @@ export interface SupplySmartResource {
   rpm30m: number;
   rpm5mPeak: number;
   tpm30m: number;
+  consumeRcuPerMinute: number;
   currentCapacityRcu: number;
   targetCapacityRcu: number;
   capacityGapRcu: number;

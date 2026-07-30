@@ -15,6 +15,14 @@ import (
 )
 
 const (
+	smartHealthMinRecentSamples          int64   = 5
+	smartHealthMinRawSamples             int64   = 10
+	smartHealthyAccountWeightThreshold   float64 = 0.75
+	smartNewAccountConfidenceFromHistory float64 = 0.5
+	smartEffectiveAccountEpsilon         float64 = 0.000001
+)
+
+const (
 	smartActionHealthy          = "healthy"
 	smartActionPrelock          = "prelock"
 	smartActionWaitLocked       = "wait_locked"
@@ -46,6 +54,7 @@ type SmartResource struct {
 	SnapshotFresh           bool    `json:"snapshotFresh"`
 	GeneratedAtMS           int64   `json:"generatedAtMs"`
 	AvailableAccounts       int     `json:"availableAccounts"`
+	SchedulableAccounts     int     `json:"schedulableAccounts"`
 	HealthyAccounts         int     `json:"healthyAccounts"`
 	WeakAccounts            int     `json:"weakAccounts"`
 	TargetAvailableAccounts int     `json:"targetAvailableAccounts"`
@@ -56,6 +65,7 @@ type SmartResource struct {
 	RPM30M                  float64 `json:"rpm30m"`
 	RPM5MPeak               float64 `json:"rpm5mPeak"`
 	TPM30M                  float64 `json:"tpm30m"`
+	ConsumeRCUPerMinute     float64 `json:"consumeRcuPerMinute"`
 	CurrentCapacityRCU      float64 `json:"currentCapacityRcu"`
 	TargetCapacityRCU       float64 `json:"targetCapacityRcu"`
 	CapacityGapRCU          float64 `json:"capacityGapRcu"`
@@ -219,44 +229,43 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 	unit := smartProductUnitCapacity(cfg.Product)
 	resource.UnitCapacityRCU = unit
 	var weightedCapacity float64
+	var effectiveAvailable float64
 	for _, file := range authSnapshot.files {
-		if !isAvailableCodexFile(file) {
+		if !isSmartCapacityCodexFile(file) {
 			continue
 		}
-		resource.AvailableAccounts++
+		resource.SchedulableAccounts++
 		weight := smartAccountHealthWeight(file, accountUsage)
-		weightedCapacity += unit * weight
-		if weight >= 0.75 {
+		if rawCapacity, ok := smartAccountCapacityRCU(file.Raw, unit); ok {
+			weightedCapacity += rawCapacity * weight
+		} else {
+			weightedCapacity += unit * weight
+		}
+		effectiveAvailable += weight
+		if weight >= smartHealthyAccountWeightThreshold {
 			resource.HealthyAccounts++
 		} else {
 			resource.WeakAccounts++
 		}
 	}
+	resource.AvailableAccounts = int(math.Floor(effectiveAvailable + smartEffectiveAccountEpsilon))
 	resource.CurrentCapacityRCU = round2(weightedCapacity)
-	consumeRPM := math.Max(resource.RPM30M, resource.RPM5MPeak*0.7)
-	resource.TargetCapacityRCU = round2(consumeRPM * float64(resource.HealthyMinutesTarget))
+	consumeRCUPerMinute := smartConsumeRCUPerMinute(resource.RPM30M, resource.RPM5MPeak, resource.TPM30M, unit)
+	resource.ConsumeRCUPerMinute = round2(consumeRCUPerMinute)
+	resource.TargetCapacityRCU = round2(consumeRCUPerMinute * float64(resource.HealthyMinutesTarget))
 	resource.RecommendedCapacityRCU = resource.TargetCapacityRCU
 
-	if usageStats.requests30 <= 0 || consumeRPM <= 0 {
+	if usageStats.requests30 <= 0 || consumeRCUPerMinute <= 0 {
 		resource.Confidence = smartConfidenceLow
-		if resource.AvailableAccounts >= cfg.TargetAvailableAccounts {
-			resource.HealthLevel = smartHealthHealthy
-			resource.SuggestedAction = smartActionHealthy
-			resource.DecisionReason = "fallback_account_count_healthy"
-			resource.EstimatedSustainMinutes = float64(resource.HealthyMinutesTarget)
-			return resource
-		}
-		gapAccounts := max(0, cfg.TargetAvailableAccounts-resource.AvailableAccounts)
-		resource.HealthLevel = smartHealthCritical
-		resource.SuggestedAction = smartActionPrelock
-		resource.DecisionReason = "fallback_account_deficit"
-		resource.CapacityGapRCU = float64(gapAccounts) * unit
-		resource.SuggestedQuantity = clampInt(gapAccounts, smartPrelockMinQuantity(cfg), smartPrelockMaxQuantity(cfg))
+		resource.HealthLevel = smartHealthUnknown
+		resource.SuggestedAction = smartActionSnapshotStale
+		resource.DecisionReason = "usage_rate_not_ready"
+		resource.EstimatedSustainMinutes = 0
 		return resource
 	}
 
-	resource.EstimatedSustainMinutes = round1(resource.CurrentCapacityRCU / consumeRPM)
-	resource.CapacityGapRCU = round2(math.Max(0, resource.TargetCapacityRCU-resource.CurrentCapacityRCU))
+	resource.EstimatedSustainMinutes = round1(resource.CurrentCapacityRCU / consumeRCUPerMinute)
+	resource.CapacityGapRCU = round2(math.Max(0, resource.TargetCapacityRCU-resource.CurrentCapacityRCU-resource.PrelockedCapacityRCU))
 	if usageStats.sampleMinutes >= 20 && resource.SnapshotFresh {
 		resource.Confidence = smartConfidenceHigh
 	} else if usageStats.sampleMinutes >= 5 {
@@ -503,68 +512,138 @@ func smartProductUnitCapacity(product string) float64 {
 	}
 }
 
+func smartConsumeRCUPerMinute(rpm30 float64, rpm5Peak float64, tpm30 float64, unit float64) float64 {
+	requestRate := math.Max(rpm30, rpm5Peak*0.7)
+	requestRCU := requestRate
+	tokenRCU := 0.0
+	if unit > 0 && tpm30 > 0 {
+		// 40k TPM ~= one 7D account-minute; 80k TPM ~= one 30D account-minute.
+		tokenRCU = tpm30 / 1000 / unit
+	}
+	return math.Max(requestRCU, tokenRCU)
+}
+
 func smartAccountHealthWeight(file cpaauthfiles.File, usageStats map[string]smartAccountUsage) float64 {
-	if !isAvailableCodexFile(file) {
+	if !isSmartCapacityCodexFile(file) {
 		return 0
 	}
-	weight := 1.0
-	if runtimeReason := strings.ToLower(textField(file.Raw, "runtime_last_skip_reason", "last_skip_reason", "error_kind", "header_error_kind")); runtimeReason != "" {
-		if strings.Contains(runtimeReason, "rate") || strings.Contains(runtimeReason, "quota") || strings.Contains(runtimeReason, "frozen") {
-			weight *= 0.45
-		}
-		if strings.Contains(runtimeReason, "stability_budget_exhausted") {
-			weight *= 0.35
-		}
+	if weight, ok := smartUsageHealthWeightForFile(file, usageStats); ok {
+		return weight
 	}
-	if usedPercent := numberField(file.Raw, "header_quota_used_percent", "quota_used_percent", "used_percent", "usage_percent"); usedPercent > 0 {
-		if usedPercent > 1 {
-			usedPercent = usedPercent / 100
-		}
-		remaining := 1 - usedPercent
-		switch {
-		case remaining <= 0.05:
-			weight *= 0.2
-		case remaining <= 0.15:
-			weight *= 0.45
-		case remaining <= 0.30:
-			weight *= 0.7
-		}
+	if weight, ok := smartRawHealthWeight(file.Raw); ok {
+		return weight
 	}
-	recoverAt := int64(numberField(file.Raw, "header_quota_recover_at_ms", "quota_recover_at_ms", "quotaRecoverAtMs"))
-	if recoverAt > time.Now().UnixMilli() {
-		weight *= 0.35
+	if weight, ok := smartStatusHealthWeight(file.Raw); ok {
+		return weight
 	}
-	success := int64(numberField(file.Raw, "success", "success_count", "successCalls"))
-	failed := int64(numberField(file.Raw, "failed", "failure_count", "failureCalls"))
-	if total := success + failed; total >= 10 {
-		rate := float64(success) / float64(total)
-		switch {
-		case rate < 0.60:
-			weight *= 0.2
-		case rate < 0.80:
-			weight *= 0.5
-		case rate < 0.92:
-			weight *= 0.8
-		}
-	}
+	return smartNewAccountConfidenceFromHistory
+}
+
+func smartUsageHealthWeightForFile(file cpaauthfiles.File, usageStats map[string]smartAccountUsage) (float64, bool) {
 	for _, key := range smartFileAccountKeys(file) {
-		if stats, ok := usageStats[key]; ok && stats.requests > 0 {
-			rate := float64(stats.success) / float64(stats.requests)
-			zeroRate := float64(stats.zeroTokens) / float64(stats.requests)
-			switch {
-			case rate < 0.60:
-				weight *= 0.2
-			case rate < 0.80:
-				weight *= 0.5
-			case rate < 0.92:
-				weight *= 0.8
+		stats, ok := usageStats[key]
+		if !ok || stats.requests < smartHealthMinRecentSamples {
+			continue
+		}
+		return smartHealthWeight(stats.success, stats.failed, stats.zeroTokens), true
+	}
+	return 0, false
+}
+
+func smartRawHealthWeight(values map[string]any) (float64, bool) {
+	if weight, ok := smartRecentRequestHealthWeight(values); ok {
+		return weight, true
+	}
+	success := int64(numberField(values, "success", "success_count", "successCalls"))
+	failed := int64(numberField(values, "failed", "failure_count", "failureCalls"))
+	total := success + failed
+	if total < smartHealthMinRawSamples {
+		return 0, false
+	}
+	return smartHealthWeight(success, failed, 0), true
+}
+
+func smartStatusHealthWeight(values map[string]any) (float64, bool) {
+	status := strings.ToLower(textField(values, "status", "state", "runtime_status", "runtimeStatus"))
+	message := strings.ToLower(textField(values, "status_message", "statusMessage", "error_kind", "errorKind", "header_error_kind", "headerErrorKind", "last_error", "lastError"))
+	combined := strings.TrimSpace(status + " " + message)
+	if combined == "" {
+		return 0, false
+	}
+	switch {
+	case strings.Contains(combined, "invalid_grant"),
+		strings.Contains(combined, "unauthorized"),
+		strings.Contains(combined, "forbidden"),
+		strings.Contains(combined, "revoked"),
+		strings.Contains(combined, "expired"),
+		strings.Contains(combined, "login_required"),
+		strings.Contains(combined, "reauth"):
+		return 0.05, true
+	case status == "error" || status == "failed" || status == "unavailable",
+		strings.Contains(combined, "server overloaded"),
+		strings.Contains(combined, "stability_budget_exhausted"),
+		strings.Contains(combined, "rate_limit"),
+		strings.Contains(combined, "quota"):
+		return 0.25, true
+	default:
+		return 0, false
+	}
+}
+
+func smartRecentRequestHealthWeight(values map[string]any) (float64, bool) {
+	success, failed, zeroTokens := int64(0), int64(0), int64(0)
+	for _, key := range []string{"recent_requests", "recentRequests", "runtime_recent_requests", "runtimeRecentRequests"} {
+		raw, ok := values[key]
+		if !ok || raw == nil {
+			continue
+		}
+		items, ok := raw.([]any)
+		if !ok {
+			continue
+		}
+		for _, item := range items {
+			object, ok := item.(map[string]any)
+			if !ok {
+				continue
 			}
-			if zeroRate > 0.25 {
-				weight *= 0.3
-			} else if zeroRate > 0.10 {
-				weight *= 0.65
-			}
-			break
+			success += int64(numberField(object, "success", "success_count", "successful", "ok"))
+			failed += int64(numberField(object, "failed", "failure_count", "failures", "error", "errors"))
+			zeroTokens += int64(numberField(object, "zero_tokens", "zeroTokens", "empty_output", "emptyOutput"))
+		}
+	}
+	if success+failed < smartHealthMinRecentSamples {
+		return 0, false
+	}
+	return smartHealthWeight(success, failed, zeroTokens), true
+}
+
+func smartHealthWeight(success int64, failed int64, zeroTokens int64) float64 {
+	total := success + failed
+	if total <= 0 {
+		return smartNewAccountConfidenceFromHistory
+	}
+	rate := float64(success) / float64(total)
+	var weight float64
+	switch {
+	case rate >= 0.95:
+		weight = 1
+	case rate >= 0.90:
+		weight = 0.85
+	case rate >= 0.80:
+		weight = 0.6
+	case rate >= 0.65:
+		weight = 0.35
+	case rate >= 0.50:
+		weight = 0.2
+	default:
+		weight = 0.05
+	}
+	if zeroTokens > 0 {
+		zeroRate := float64(zeroTokens) / float64(total)
+		if zeroRate > 0.25 {
+			weight *= 0.3
+		} else if zeroRate > 0.10 {
+			weight *= 0.65
 		}
 	}
 	if weight < 0 {
@@ -574,6 +653,45 @@ func smartAccountHealthWeight(file cpaauthfiles.File, usageStats map[string]smar
 		return 1
 	}
 	return weight
+}
+
+func smartAccountCapacityRCU(values map[string]any, unit float64) (float64, bool) {
+	if unit <= 0 {
+		unit = 1
+	}
+	if capacity := numberField(
+		values,
+		"remaining_rcu", "remainingRcu", "quota_remaining_rcu", "quotaRemainingRcu",
+		"available_rcu", "availableRcu", "quota_balance_rcu", "quotaBalanceRcu",
+	); capacity > 0 {
+		return capacity, true
+	}
+	if capacity := numberField(
+		values,
+		"quota_remaining", "quotaRemaining", "remaining_quota", "remainingQuota",
+		"available_quota", "availableQuota", "quota_balance", "quotaBalance",
+		"remaining_budget", "remainingBudget",
+	); capacity > 0 {
+		return capacity, true
+	}
+	if tokens := numberField(
+		values,
+		"remaining_tokens", "remainingTokens", "quota_remaining_tokens", "quotaRemainingTokens",
+		"available_tokens", "availableTokens",
+	); tokens > 0 {
+		return tokens / 1000, true
+	}
+	if usedPercent := numberField(values, "header_quota_used_percent", "quota_used_percent", "quotaUsedPercent", "used_percent", "usage_percent"); usedPercent > 0 {
+		if usedPercent > 1 {
+			usedPercent = usedPercent / 100
+		}
+		remaining := 1 - usedPercent
+		if remaining < 0 {
+			remaining = 0
+		}
+		return unit * remaining, true
+	}
+	return 0, false
 }
 
 func smartFileAccountKeys(file cpaauthfiles.File) []string {

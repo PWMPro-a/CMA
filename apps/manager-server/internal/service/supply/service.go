@@ -333,6 +333,12 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			if !resource.SnapshotFresh {
 				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
 			}
+			if resource.DecisionReason == "usage_rate_not_ready" || resource.ConsumeRCUPerMinute <= 0 {
+				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
+			}
+			if resource.CapacityGapRCU <= 0 {
+				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
+			}
 			if resource.SuggestedAction == smartActionHealthy || resource.HealthLevel == smartHealthHealthy {
 				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
 			}
@@ -350,6 +356,9 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		}
 	}
 	if quantity <= 0 {
+		if useSmart {
+			return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
+		}
 		return ErrInvalidQuantity
 	}
 	if useSmart && supplyCfg.DailyMaxReplenishQuantity > 0 {
@@ -409,7 +418,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			return nil
 		}
 		resource.SuggestedQuantity = quantity
-		resource.PrelockedCapacityRCU = round2(float64(quantity) * resource.UnitCapacityRCU)
+		resource.PrelockedCapacityRCU = estimatedSupplyOrderCapacityRCU(supplyCfg, quantity)
 		s.setSmartResource(resource)
 	}
 
@@ -595,7 +604,7 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 }
 
 func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg store.ManagerConfig, order *store.SupplyOrder, forceSmartRefresh bool) (bool, error) {
-	if order == nil || !order.Automatic || cfg.Supply.TargetAvailableAccounts <= 0 {
+	if order == nil || !order.Automatic {
 		return false, nil
 	}
 	switch order.Status {
@@ -608,6 +617,8 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 			return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionSnapshotStale, "smart_snapshot_unavailable")
 		}
 		resource.LockedOrderID = order.OrderID
+		resource.PrelockedCapacityRCU = estimatedSupplyOrderCapacityRCU(cfg.Supply, order.RequestedQuantity)
+		resource.CapacityGapRCU = round2(math.Max(0, resource.TargetCapacityRCU-resource.CurrentCapacityRCU-resource.PrelockedCapacityRCU))
 		if order.CreatedAtMS > 0 {
 			resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
 		}
@@ -616,7 +627,7 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 		case !resource.SnapshotFresh:
 			return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionSnapshotStale, "smart_snapshot_stale")
 		case resource.HealthLevel == smartHealthHealthy || resource.SuggestedAction == smartActionHealthy:
-			if resource.DecisionReason != "fallback_account_count_healthy" && !s.lockedOrderMinHoldElapsed(cfg.Supply, order) {
+			if !s.lockedOrderMinHoldElapsed(cfg.Supply, order) {
 				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "min_hold_before_release")
 			}
 			if s.automaticReleaseCooldownActive(cfg.Supply) {
@@ -630,12 +641,6 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 			s.resetCriticalConfirm(order.OrderID)
 			return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "locked_but_not_critical")
 		case order.Status == "ready" && resource.HealthLevel == smartHealthCritical:
-			if resource.DecisionReason == "fallback_account_deficit" {
-				resource.SuggestedAction = smartActionTakeLocked
-				resource.DecisionReason = "fallback_account_deficit_take"
-				s.setSmartResource(resource)
-				return false, nil
-			}
 			rounds := s.incrementCriticalConfirm(order.OrderID)
 			resource.LockedConfirmRounds = rounds
 			if rounds < smartCriticalTakeConfirmRounds(cfg.Supply) {
@@ -648,6 +653,9 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 		default:
 			return false, nil
 		}
+	}
+	if cfg.Supply.TargetAvailableAccounts <= 0 {
+		return false, nil
 	}
 	available, err := s.countAvailableAccounts(ctx, cfg)
 	if err != nil {
@@ -669,7 +677,7 @@ func (s *Service) releaseAutomaticOrder(ctx context.Context, cfg store.ManagerCo
 		applyRemoteOrder(order, released, cfg.Supply)
 	} else {
 		order.RemoteStatus = "release_unsupported"
-		order.LastError = "CPA available accounts already satisfy target; supply release endpoint is unsupported, skipped pickup locally"
+		order.LastError = "CPA usable capacity already satisfies target; supply release endpoint is unsupported, skipped pickup locally"
 	}
 	order.Status = "released"
 	order.ItemCount = 0
@@ -825,12 +833,6 @@ func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerC
 
 func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, resource SmartResource) int {
 	quantity := resource.SuggestedQuantity
-	if quantity <= 0 {
-		deficit := cfg.TargetAvailableAccounts - resource.AvailableAccounts
-		if deficit > 0 {
-			quantity = deficit
-		}
-	}
 	if quantity <= 0 && resource.CapacityGapRCU > 0 && resource.UnitCapacityRCU > 0 {
 		unit := resource.UnitCapacityRCU * smartNewAccountConfidence(cfg)
 		if unit <= 0 {
@@ -852,6 +854,17 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 		quantity = min(quantity, cfg.DailyMaxReplenishQuantity)
 	}
 	return clampInt(quantity, 1, 100)
+}
+
+func estimatedSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, quantity int) float64 {
+	if quantity <= 0 {
+		return 0
+	}
+	unit := smartProductUnitCapacity(cfg.Product) * smartNewAccountConfidence(cfg)
+	if unit <= 0 {
+		unit = smartProductUnitCapacity(cfg.Product)
+	}
+	return round2(float64(quantity) * unit)
 }
 
 func (s *Service) remainingAutomaticDailyQuantity(ctx context.Context, cfg store.ManagerSupplyConfig) (int, error) {
@@ -966,11 +979,8 @@ func (s *Service) smartCriticalTakeConfirmed(cfg store.ManagerSupplyConfig, orde
 
 func (s *Service) smartTakeAllowed(cfg store.ManagerSupplyConfig, orderID string) bool {
 	resource := s.currentSmartResource(cfg)
-	if resource.SuggestedAction == smartActionTakeLocked {
-		switch resource.DecisionReason {
-		case "critical_take_confirmed", "fallback_account_deficit_take":
-			return true
-		}
+	if resource.SuggestedAction == smartActionTakeLocked && resource.DecisionReason == "critical_take_confirmed" {
+		return true
 	}
 	return s.smartCriticalTakeConfirmed(cfg, orderID)
 }
@@ -1605,6 +1615,18 @@ func isSupportedSupplyOAuth(account map[string]any, credentials map[string]any) 
 }
 
 func isAvailableCodexFile(file cpaauthfiles.File) bool {
+	if !isSmartCapacityCodexFile(file) {
+		return false
+	}
+	status := strings.ToLower(textField(file.Raw, "status", "state"))
+	switch status {
+	case "failed", "error", "unavailable":
+		return false
+	}
+	return true
+}
+
+func isSmartCapacityCodexFile(file cpaauthfiles.File) bool {
 	if file.Disabled {
 		return false
 	}
@@ -1617,7 +1639,7 @@ func isAvailableCodexFile(file cpaauthfiles.File) bool {
 	}
 	status := strings.ToLower(textField(file.Raw, "status", "state"))
 	switch status {
-	case "disabled", "inactive", "invalid", "expired", "revoked", "deleted", "failed", "error", "unavailable":
+	case "disabled", "inactive", "invalid", "expired", "revoked", "deleted":
 		return false
 	}
 	return true

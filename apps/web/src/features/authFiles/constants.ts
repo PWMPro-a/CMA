@@ -11,6 +11,7 @@ import iconKimiLight from '@/assets/icons/kimi-light.svg';
 import iconQwen from '@/assets/icons/qwen.svg';
 import iconVertex from '@/assets/icons/vertex.svg';
 import type { AuthFileItem } from '@/types';
+import { normalizeRecentRequestBuckets, normalizeUsageTotal } from '@/utils/recentRequests';
 import { parseTimestamp } from '@/utils/timestamp';
 
 export type ThemeColors = { bg: string; text: string; border?: string };
@@ -150,8 +151,70 @@ export const getAuthFileStatusMessage = (file: AuthFileItem): string => {
 export const hasAuthFileStatusMessage = (file: AuthFileItem): boolean =>
   getAuthFileStatusMessage(file).length > 0;
 
-export const isHealthyAuthFile = (file: AuthFileItem): boolean =>
-  file.disabled !== true && !hasAuthFileStatusMessage(file);
+const AUTH_FILE_HEALTH_MIN_RECENT_SAMPLES = 5;
+const AUTH_FILE_HEALTH_MIN_RAW_SAMPLES = 10;
+const AUTH_FILE_HEALTH_SUCCESS_RATE = 0.8;
+
+const getAuthFileSuccessRate = (file: AuthFileItem): number | null => {
+  const recent = normalizeRecentRequestBuckets(file.recent_requests ?? file.recentRequests);
+  const recentTotals = recent.reduce(
+    (acc, bucket) => {
+      acc.success += bucket.success;
+      acc.failed += bucket.failed;
+      return acc;
+    },
+    { success: 0, failed: 0 }
+  );
+  if (recentTotals.success + recentTotals.failed >= AUTH_FILE_HEALTH_MIN_RECENT_SAMPLES) {
+    return recentTotals.success / Math.max(1, recentTotals.success + recentTotals.failed);
+  }
+
+  const success = normalizeUsageTotal(file.success);
+  const failed = normalizeUsageTotal(file.failed);
+  if (success + failed >= AUTH_FILE_HEALTH_MIN_RAW_SAMPLES) {
+    return success / Math.max(1, success + failed);
+  }
+  return null;
+};
+
+const hasDefiniteAuthFileAvailabilityFailure = (file: AuthFileItem): boolean => {
+  const status = String(file.status ?? file['state'] ?? '')
+    .trim()
+    .toLowerCase();
+  if (['disabled', 'inactive', 'invalid', 'expired', 'revoked', 'deleted'].includes(status)) {
+    return true;
+  }
+  const message = getAuthFileStatusMessage(file).toLowerCase();
+  return [
+    'invalid_grant',
+    'unauthorized',
+    'forbidden',
+    'revoked',
+    'expired',
+    'login_required',
+    'reauth',
+    'server overloaded',
+  ].some((keyword) => message.includes(keyword));
+};
+
+const isCapacityOnlyRuntimeStatus = (file: AuthFileItem): boolean => {
+  const message = getAuthFileStatusMessage(file).toLowerCase();
+  return ['frozen', 'cooldown', 'rate_limit', 'quota', 'stability_budget_exhausted'].some(
+    (keyword) => message.includes(keyword)
+  );
+};
+
+export const isHealthyAuthFile = (file: AuthFileItem): boolean => {
+  if (file.disabled === true || file.unavailable === true) return false;
+  const successRate = getAuthFileSuccessRate(file);
+  if (successRate !== null) return successRate >= AUTH_FILE_HEALTH_SUCCESS_RATE;
+  if (hasDefiniteAuthFileAvailabilityFailure(file)) return false;
+  const provider = normalizeProviderKey(String(file.type ?? file.provider ?? ''));
+  if ((provider === 'codex' || provider === 'openai-codex') && isCapacityOnlyRuntimeStatus(file)) {
+    return true;
+  }
+  return !hasAuthFileStatusMessage(file);
+};
 
 export const getTypeLabel = (t: TFunction, type: string): string => {
   const providerKey = normalizeProviderKey(type);

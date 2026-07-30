@@ -92,6 +92,7 @@ func TestAutomaticReplenishmentCreatesTakesAndImportsOrder(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	enabled := true
+	smartDisabled := false
 	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
 		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
 		Supply: store.ManagerSupplyConfig{
@@ -105,6 +106,7 @@ func TestAutomaticReplenishmentCreatesTakesAndImportsOrder(t *testing.T) {
 			CheckIntervalSeconds:    60,
 			PollIntervalSeconds:     1,
 			DefaultWebsockets:       true,
+			SmartEnabled:            &smartDisabled,
 		},
 	}); err != nil {
 		t.Fatalf("save config: %v", err)
@@ -171,11 +173,13 @@ func TestCreateResultUncertainBlocksDuplicateOrdersUntilDismissed(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	enabled := true
+	smartDisabled := false
 	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
 		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
 		Supply: store.ManagerSupplyConfig{
 			Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password",
 			Product: "oauth_30d", TargetAvailableAccounts: 1, ReplenishBatchSize: 1,
+			SmartEnabled: &smartDisabled,
 		},
 	}); err != nil {
 		t.Fatalf("save config: %v", err)
@@ -590,6 +594,7 @@ func TestImportVerificationFailureBlocksDuplicateAutomaticOrders(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	enabled := true
+	smartDisabled := false
 	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
 		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
 		Supply: store.ManagerSupplyConfig{
@@ -602,6 +607,7 @@ func TestImportVerificationFailureBlocksDuplicateAutomaticOrders(t *testing.T) {
 			ReplenishBatchSize:      1,
 			CheckIntervalSeconds:    60,
 			PollIntervalSeconds:     1,
+			SmartEnabled:            &smartDisabled,
 		},
 	}); err != nil {
 		t.Fatalf("save config: %v", err)
@@ -667,6 +673,7 @@ func TestAutomaticOrderReleasesInsteadOfTakingWhenCPATargetIsAlreadySatisfied(t 
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	enabled := true
+	smartDisabled := false
 	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
 		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
 		Supply: store.ManagerSupplyConfig{
@@ -679,6 +686,7 @@ func TestAutomaticOrderReleasesInsteadOfTakingWhenCPATargetIsAlreadySatisfied(t 
 			ReplenishBatchSize:      1,
 			CheckIntervalSeconds:    60,
 			PollIntervalSeconds:     1,
+			SmartEnabled:            &smartDisabled,
 		},
 	}); err != nil {
 		t.Fatalf("save config: %v", err)

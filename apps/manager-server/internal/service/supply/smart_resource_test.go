@@ -59,6 +59,151 @@ func TestSmartResourceRecommendsPrelockFromUsageCapacity(t *testing.T) {
 	}
 }
 
+func TestSmartResourceDoesNotFallbackToAccountCountWithoutUsageRate(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now()
+	files := make([]cpaauthfiles.File, 0, 120)
+	for index := 0; index < 120; index++ {
+		files = append(files, cpaauthfiles.File{
+			Name:     "account.json",
+			Provider: "codex",
+			Raw:      map[string]any{"status": "ready", "success": 100, "failed": 0},
+		})
+	}
+
+	resource := service.buildSmartResourceFromSnapshots(store.ManagerSupplyConfig{
+		Product:                 "oauth_30d",
+		TargetAvailableAccounts: 1,
+		HealthyMinutesTarget:    120,
+		PrelockMinQuantity:      1,
+		PrelockMaxQuantity:      10,
+		NewAccountConfidence:    0.7,
+	}, authFileSnapshot{generatedAt: now, files: files}, now)
+
+	if resource.DecisionReason != "usage_rate_not_ready" || resource.SuggestedQuantity != 0 || resource.CapacityGapRCU != 0 {
+		t.Fatalf("smart resource should wait for burn-rate samples, got %#v", resource)
+	}
+	if resource.AvailableAccounts == 0 || resource.CurrentCapacityRCU == 0 {
+		t.Fatalf("capacity should still be reported for the dashboard: %#v", resource)
+	}
+}
+
+func TestSmartResourceWeightsHealthByUsabilityAndRemainingCapacity(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now()
+	events := make([]usage.Event, 0, 60)
+	for minute := 0; minute < 30; minute++ {
+		for index := 0; index < 2; index++ {
+			events = append(events, usage.Event{
+				TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+				Provider:    "codex",
+				AuthIndex:   "load-source",
+				TotalTokens: 100,
+			})
+		}
+	}
+	service.recordSmartUsageEvents(events, now)
+
+	resource := service.buildSmartResourceFromSnapshots(store.ManagerSupplyConfig{
+		Product:              "oauth_30d",
+		HealthyMinutesTarget: 120,
+		WarningMinutes:       60,
+		CriticalMinutes:      30,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   10,
+		NewAccountConfidence: 0.7,
+	}, authFileSnapshot{
+		generatedAt: now,
+		files: []cpaauthfiles.File{
+			{
+				Name:     "healthy.json",
+				Provider: "codex",
+				Raw: map[string]any{
+					"status":        "ready",
+					"remaining_rcu": 60,
+					"recent_requests": []any{
+						map[string]any{"success": 12, "failed": 0},
+					},
+				},
+			},
+			{
+				Name:     "weak.json",
+				Provider: "codex",
+				Raw: map[string]any{
+					"status":        "error",
+					"remaining_rcu": 100,
+					"recent_requests": []any{
+						map[string]any{"success": 1, "failed": 9},
+					},
+				},
+			},
+		},
+	}, now)
+
+	if resource.SchedulableAccounts != 2 || resource.HealthyAccounts != 1 || resource.WeakAccounts != 1 {
+		t.Fatalf("health counts should be based on request usability: %#v", resource)
+	}
+	if resource.CurrentCapacityRCU != 65 {
+		t.Fatalf("capacity should use remaining_rcu weighted by health, got %#v", resource)
+	}
+	if resource.ConsumeRCUPerMinute <= 0 || resource.CapacityGapRCU <= 0 {
+		t.Fatalf("burn rate and capacity gap were not computed: %#v", resource)
+	}
+}
+
+func TestSmartAutomaticSkipsCreateWhenUsageRateNotReady(t *testing.T) {
+	var createCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":10,"estimated_total_fen":100}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":10000}`))
+		case r.URL.Path == "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex","success":100,"failed":0},{"name":"b.json","provider":"codex","success":100,"failed":0}]}`))
+		case r.URL.Path == "/api/customer/pickup/orders":
+			createCalls.Add(1)
+			t.Fatal("smart mode must not create from account count when burn rate is unavailable")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "smart-no-usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password",
+			Product: "oauth_30d", TargetAvailableAccounts: 100, ReplenishBatchSize: 5,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("run automatic: %v", err)
+	}
+	if createCalls.Load() != 0 {
+		t.Fatalf("create calls = %d", createCalls.Load())
+	}
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	if status.ActiveOrder != nil || status.SmartResource.DecisionReason != "usage_rate_not_ready" {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
 func TestSmartAutomaticDoesNotCreateWhenCapacityHealthy(t *testing.T) {
 	var createCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
