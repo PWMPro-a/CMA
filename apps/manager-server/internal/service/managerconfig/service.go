@@ -3,6 +3,7 @@ package managerconfig
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
 	"time"
 
@@ -57,7 +58,7 @@ func (s *Service) Get(ctx context.Context) (Response, error) {
 		}
 	}
 	return Response{
-		Config:   cfg,
+		Config:   SanitizeManagerConfig(cfg),
 		Source:   string(source),
 		CPAUsage: cpaUsage,
 	}, nil
@@ -72,6 +73,9 @@ func (s *Service) Update(ctx context.Context, submitted store.ManagerConfig) (Re
 		return Response{}, err
 	}
 	next := s.MergeSubmittedManagerConfig(current, submitted)
+	if err := ValidateSupplyConfig(next.Supply); err != nil {
+		return Response{}, err
+	}
 	if source == SourceEnv && ManagerConfigConnectionDiffers(current, next) {
 		return Response{}, errors.New("connection setup is managed by environment variables")
 	}
@@ -113,7 +117,7 @@ func (s *Service) Update(ctx context.Context, submitted store.ManagerConfig) (Re
 		}
 		_ = s.collector.Stop(context.Background())
 		return Response{
-			Config: next,
+			Config: SanitizeManagerConfig(next),
 			Source: string(SourceDB),
 		}, nil
 	}
@@ -130,9 +134,28 @@ func (s *Service) Update(ctx context.Context, submitted store.ManagerConfig) (Re
 		_ = s.collector.Stop(context.Background())
 	}
 	return Response{
-		Config: next,
+		Config: SanitizeManagerConfig(next),
 		Source: string(SourceDB),
 	}, nil
+}
+
+func (s *Service) UpdateSupply(ctx context.Context, submitted store.ManagerSupplyConfig) (store.ManagerSupplyConfig, error) {
+	current, _, _, err := s.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		return store.ManagerSupplyConfig{}, err
+	}
+	next := current
+	next.Supply = NormalizeSupplyConfig(submitted, current.Supply)
+	if err := ValidateSupplyConfig(next.Supply); err != nil {
+		return store.ManagerSupplyConfig{}, err
+	}
+	if err := s.store.SaveManagerConfig(ctx, next); err != nil {
+		return store.ManagerSupplyConfig{}, err
+	}
+	result := next.Supply
+	result.PasswordConfigured = strings.TrimSpace(result.Password) != ""
+	result.Password = ""
+	return result, nil
 }
 
 func (s *Service) ResolveSetup(ctx context.Context) (store.Setup, bool, error) {
@@ -216,6 +239,15 @@ func (s *Service) DefaultManagerConfig() store.ManagerConfig {
 			TLSSkipVerify:  s.cfg.TLSSkipVerify,
 		},
 		CodexInspection: store.DefaultCodexInspectionConfig(),
+		Supply: store.ManagerSupplyConfig{
+			Enabled:                 BoolPtr(false),
+			BaseURL:                 "https://sogouedu.cc",
+			Product:                 "oauth_30d",
+			TargetAvailableAccounts: 100,
+			ReplenishBatchSize:      10,
+			CheckIntervalSeconds:    60,
+			PollIntervalSeconds:     3,
+		},
 	}
 }
 
@@ -239,11 +271,67 @@ func (s *Service) MergeSubmittedManagerConfig(base store.ManagerConfig, submitte
 	next.Collector.TLSSkipVerify = submitted.Collector.TLSSkipVerify
 
 	next.CodexInspection = store.NormalizeCodexInspectionConfig(submitted.CodexInspection, next.CodexInspection)
+	next.Supply = NormalizeSupplyConfig(submitted.Supply, next.Supply)
 
 	next.ExternalUsageService.Enabled = false
 	next.ExternalUsageService.ServiceBase = ""
 
 	return next
+}
+
+func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.ManagerSupplyConfig) store.ManagerSupplyConfig {
+	next := current
+	if submitted.Enabled != nil {
+		next.Enabled = BoolPtr(*submitted.Enabled)
+	}
+	if value := strings.TrimSpace(submitted.BaseURL); value != "" {
+		next.BaseURL = strings.TrimRight(value, "/")
+	}
+	if value := strings.TrimSpace(submitted.Username); value != "" {
+		next.Username = value
+	}
+	if value := strings.TrimSpace(submitted.Password); value != "" {
+		next.Password = value
+	}
+	if value := strings.ToLower(strings.TrimSpace(submitted.Product)); value != "" {
+		next.Product = value
+	}
+	next.TargetAvailableAccounts = BoundedPositiveOrDefault(submitted.TargetAvailableAccounts, next.TargetAvailableAccounts, 100, 10000)
+	next.ReplenishBatchSize = BoundedPositiveOrDefault(submitted.ReplenishBatchSize, next.ReplenishBatchSize, 10, 100)
+	next.CheckIntervalSeconds = BoundedPositiveOrDefault(submitted.CheckIntervalSeconds, next.CheckIntervalSeconds, 60, 3600)
+	next.PollIntervalSeconds = BoundedPositiveOrDefault(submitted.PollIntervalSeconds, next.PollIntervalSeconds, 3, 60)
+	next.DefaultWebsockets = submitted.DefaultWebsockets
+	next.PasswordConfigured = next.Password != ""
+	return next
+}
+
+func ValidateSupplyConfig(cfg store.ManagerSupplyConfig) error {
+	if !SupplyEnabled(cfg) {
+		return nil
+	}
+	if strings.TrimSpace(cfg.BaseURL) == "" || strings.TrimSpace(cfg.Username) == "" || strings.TrimSpace(cfg.Password) == "" {
+		return errors.New("supply baseUrl, username and password are required when automatic replenishment is enabled")
+	}
+	parsed, err := url.Parse(cfg.BaseURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return errors.New("supply baseUrl must be a valid HTTP or HTTPS URL")
+	}
+	switch cfg.Product {
+	case "oauth_30d", "oauth_7d":
+	default:
+		return errors.New("supply product must be oauth_30d or oauth_7d")
+	}
+	return nil
+}
+
+func SanitizeManagerConfig(cfg store.ManagerConfig) store.ManagerConfig {
+	cfg.Supply.PasswordConfigured = strings.TrimSpace(cfg.Supply.Password) != ""
+	cfg.Supply.Password = ""
+	return cfg
+}
+
+func SupplyEnabled(cfg store.ManagerSupplyConfig) bool {
+	return cfg.Enabled != nil && *cfg.Enabled
 }
 
 func SetupFromManagerConfig(cfg store.ManagerConfig) store.Setup {
@@ -284,6 +372,14 @@ func PositiveOrDefault(value int, fallback int, hardDefault int) int {
 		return fallback
 	}
 	return hardDefault
+}
+
+func BoundedPositiveOrDefault(value int, fallback int, hardDefault int, maximum int) int {
+	result := PositiveOrDefault(value, fallback, hardDefault)
+	if result > maximum {
+		return maximum
+	}
+	return result
 }
 
 func ValueOr(value string, fallback string) string {

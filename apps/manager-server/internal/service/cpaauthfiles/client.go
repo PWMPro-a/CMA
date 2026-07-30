@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -452,6 +453,54 @@ func (c *Client) Delete(ctx context.Context, baseURL string, managementKey strin
 	}
 	body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 	return fmt.Errorf("DELETE %s: HTTP %d %s", authFilesPath, res.StatusCode, strings.TrimSpace(string(body)))
+}
+
+func (c *Client) Upload(ctx context.Context, baseURL string, managementKey string, fileName string, data []byte, defaultWebsockets bool) error {
+	fileName = strings.TrimSpace(fileName)
+	if fileName == "" {
+		return errors.New("CPA auth file name is required")
+	}
+	if len(data) == 0 {
+		return errors.New("CPA auth file payload is required")
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", fileName)
+	if err != nil {
+		return fmt.Errorf("create auth file upload: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return fmt.Errorf("write auth file upload: %w", err)
+	}
+	if err := writer.WriteField("default_websockets", strconv.FormatBool(defaultWebsockets)); err != nil {
+		return fmt.Errorf("write auth file defaults: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("close auth file upload: %w", err)
+	}
+
+	base := cpa.NormalizeBaseURL(baseURL)
+	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+authFilesPath, &body)
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", authFilesPath, err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+managementKey)
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", authFilesPath, err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode >= 200 && res.StatusCode < 300 {
+		if err := ValidateActionResponse(res.Body); err != nil {
+			return fmt.Errorf("POST %s: %w", authFilesPath, err)
+		}
+		return nil
+	}
+	responseBody, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+	return fmt.Errorf("POST %s: HTTP %d %s", authFilesPath, res.StatusCode, strings.TrimSpace(string(responseBody)))
 }
 
 func filesFromJSON(value any) []File {

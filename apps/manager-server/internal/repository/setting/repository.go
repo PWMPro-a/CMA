@@ -290,6 +290,12 @@ func (r *repository) protectManagerConfig(cfg model.ManagerConfig) (model.Manage
 		return model.ManagerConfig{}, err
 	}
 	cfg.CPAConnection.ManagementKey = value
+	value, err = r.protector.ProtectString(cfg.Supply.Password)
+	if err != nil {
+		return model.ManagerConfig{}, err
+	}
+	cfg.Supply.Password = value
+	cfg.Supply.PasswordConfigured = false
 	return cfg, nil
 }
 
@@ -302,5 +308,11 @@ func (r *repository) unprotectManagerConfig(cfg model.ManagerConfig) (model.Mana
 		return model.ManagerConfig{}, err
 	}
 	cfg.CPAConnection.ManagementKey = value
+	value, err = r.protector.UnprotectString(cfg.Supply.Password)
+	if err != nil {
+		return model.ManagerConfig{}, err
+	}
+	cfg.Supply.Password = value
+	cfg.Supply.PasswordConfigured = value != ""
 	return cfg, nil
 }

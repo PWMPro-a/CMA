@@ -375,6 +375,46 @@ func Migrate(db *sql.DB) error {
 		)`,
 		`create index if not exists idx_quota_cooldowns_due on quota_cooldowns(status, recover_at_ms)`,
 		`create unique index if not exists idx_quota_cooldowns_active_owner on quota_cooldowns(auth_file_name, owner) where status = 'active'`,
+		`create table if not exists supply_orders (
+			id integer primary key autoincrement,
+			order_id text not null unique,
+			product text not null,
+			requested_quantity integer not null,
+			automatic integer not null default 0,
+			status text not null,
+			remote_status text,
+			ready_quantity integer not null default 0,
+			progress integer not null default 0,
+			status_url text,
+			take_url text,
+			charged_fen integer not null default 0,
+			released_fen integer not null default 0,
+			item_count integer not null default 0,
+			imported_count integer not null default 0,
+			last_error text,
+			next_poll_at_ms integer,
+			completed_at_ms integer,
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		)`,
+		`create index if not exists idx_supply_orders_status_updated on supply_orders(status, updated_at_ms)`,
+		`create table if not exists supply_import_items (
+			id integer primary key autoincrement,
+			order_id text not null,
+			item_key text not null,
+			file_name text not null,
+			status text not null,
+			payload_json text not null,
+			last_error text,
+			attempt_count integer not null default 0,
+			next_retry_at_ms integer,
+			imported_at_ms integer,
+			created_at_ms integer not null,
+			updated_at_ms integer not null,
+			foreign key(order_id) references supply_orders(order_id) on delete cascade
+		)`,
+		`create index if not exists idx_supply_import_items_pending on supply_import_items(order_id, status, next_retry_at_ms)`,
+		`create unique index if not exists idx_supply_import_items_order_key on supply_import_items(order_id, item_key)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
@@ -402,6 +442,9 @@ func Migrate(db *sql.DB) error {
 	if err := ensureQuotaCooldownColumns(db); err != nil {
 		return err
 	}
+	if err := ensureSupplyOrderColumns(db); err != nil {
+		return err
+	}
 	if err := ensureUsageRollupLongContextColumns(db); err != nil {
 		return err
 	}
@@ -409,6 +452,49 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	return ensureModelPriceColumns(db)
+}
+
+func ensureSupplyOrderColumns(db *sql.DB) error {
+	rows, err := db.Query(`pragma table_info(supply_orders)`)
+	if err != nil {
+		return err
+	}
+	existing := map[string]struct{}{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "ready_quantity", definition: "integer not null default 0"},
+		{name: "progress", definition: "integer not null default 0"},
+		{name: "status_url", definition: "text"},
+		{name: "take_url", definition: "text"},
+	} {
+		if _, ok := existing[column.name]; ok {
+			continue
+		}
+		if _, err := db.Exec(`alter table supply_orders add column ` + column.name + ` ` + column.definition); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ensureDashboardHourlyRollupFormatVersion(db *sql.DB) error {

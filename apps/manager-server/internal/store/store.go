@@ -19,6 +19,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotacooldown"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/supplyorder"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageevent"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagerollup"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
@@ -34,6 +35,9 @@ type ManagerCollectorConfig = model.ManagerCollectorConfig
 type ManagerCodexInspectionConfig = model.ManagerCodexInspectionConfig
 type ManagerCodexInspectionScheduleConfig = model.ManagerCodexInspectionScheduleConfig
 type ManagerExternalUsageServiceConfig = model.ManagerExternalUsageServiceConfig
+type ManagerSupplyConfig = model.ManagerSupplyConfig
+type SupplyOrder = model.SupplyOrder
+type SupplyImportItem = model.SupplyImportItem
 type CodexInspectionRun = model.CodexInspectionRun
 type CodexInspectionResult = model.CodexInspectionResult
 type CodexInspectionLog = model.CodexInspectionLog
@@ -100,6 +104,7 @@ type Store struct {
 	UsageRollups         usagerollup.Repository
 	ContainerOpsAudits   containeropsaudit.Repository
 	ContainerOpsUpgrades containeropsupgrade.Repository
+	SupplyOrders         supplyorder.Repository
 }
 
 func Open(path string, protector ...*security.Protector) (*Store, error) {
@@ -125,6 +130,7 @@ func New(db *sql.DB, protector ...*security.Protector) *Store {
 		UsageRollups:         usagerollup.New(db),
 		ContainerOpsAudits:   containeropsaudit.New(db),
 		ContainerOpsUpgrades: containeropsupgrade.New(db),
+		SupplyOrders:         supplyorder.New(db, protector...),
 	}
 }
 
@@ -305,6 +311,50 @@ func (s *Store) UpdateContainerOpsUpgradeTask(ctx context.Context, task Containe
 
 func (s *Store) ListContainerOpsUpgradeTasks(ctx context.Context, limit int) ([]ContainerOpsUpgradeTask, error) {
 	return s.ContainerOpsUpgrades.List(ctx, limit)
+}
+
+func (s *Store) CreateSupplyOrder(ctx context.Context, order SupplyOrder) (SupplyOrder, error) {
+	return s.SupplyOrders.Create(ctx, order)
+}
+
+func (s *Store) GetSupplyOrder(ctx context.Context, orderID string) (SupplyOrder, bool, error) {
+	return s.SupplyOrders.Get(ctx, orderID)
+}
+
+func (s *Store) GetOpenSupplyOrder(ctx context.Context) (SupplyOrder, bool, error) {
+	return s.SupplyOrders.GetOpen(ctx)
+}
+
+func (s *Store) PromoteSupplyCreateAttempt(ctx context.Context, localOrderID string, order SupplyOrder) error {
+	return s.SupplyOrders.PromoteCreateAttempt(ctx, localOrderID, order)
+}
+
+func (s *Store) UpdateSupplyOrder(ctx context.Context, order SupplyOrder) error {
+	return s.SupplyOrders.Update(ctx, order)
+}
+
+func (s *Store) ListSupplyOrders(ctx context.Context, limit int) ([]SupplyOrder, error) {
+	return s.SupplyOrders.List(ctx, limit)
+}
+
+func (s *Store) InsertSupplyImportItems(ctx context.Context, orderID string, items []SupplyImportItem) (int, error) {
+	return s.SupplyOrders.InsertItems(ctx, orderID, items)
+}
+
+func (s *Store) ListPendingSupplyImportItems(ctx context.Context, orderID string, nowMS int64, limit int) ([]SupplyImportItem, error) {
+	return s.SupplyOrders.ListPendingItems(ctx, orderID, nowMS, limit)
+}
+
+func (s *Store) MarkSupplyImportItemImported(ctx context.Context, id int64, importedAtMS int64) error {
+	return s.SupplyOrders.MarkItemImported(ctx, id, importedAtMS)
+}
+
+func (s *Store) MarkSupplyImportItemFailed(ctx context.Context, id int64, lastError string, nextRetryAtMS int64) error {
+	return s.SupplyOrders.MarkItemFailed(ctx, id, lastError, nextRetryAtMS)
+}
+
+func (s *Store) SupplyImportCounts(ctx context.Context, orderID string) (int, int, error) {
+	return s.SupplyOrders.Counts(ctx, orderID)
 }
 
 func (s *Store) ListCodexInspectionDisableOwnership(ctx context.Context) ([]CodexInspectionDisableOwnership, error) {

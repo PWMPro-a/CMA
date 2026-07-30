@@ -4,6 +4,7 @@ type ManagerConfig struct {
 	CPAConnection        ManagerCPAConnectionConfig        `json:"cpaConnection"`
 	Collector            ManagerCollectorConfig            `json:"collector"`
 	CodexInspection      ManagerCodexInspectionConfig      `json:"codexInspection"`
+	Supply               ManagerSupplyConfig               `json:"supply"`
 	ExternalUsageService ManagerExternalUsageServiceConfig `json:"externalUsageService"`
 	UpdatedAtMS          int64                             `json:"updatedAtMs,omitempty"`
 }
@@ -27,4 +28,18 @@ type ManagerCollectorConfig struct {
 type ManagerExternalUsageServiceConfig struct {
 	Enabled     bool   `json:"enabled"`
 	ServiceBase string `json:"serviceBase,omitempty"`
+}
+
+type ManagerSupplyConfig struct {
+	Enabled                 *bool  `json:"enabled,omitempty"`
+	BaseURL                 string `json:"baseUrl"`
+	Username                string `json:"username"`
+	Password                string `json:"password,omitempty"`
+	PasswordConfigured      bool   `json:"passwordConfigured,omitempty"`
+	Product                 string `json:"product"`
+	TargetAvailableAccounts int    `json:"targetAvailableAccounts"`
+	ReplenishBatchSize      int    `json:"replenishBatchSize"`
+	CheckIntervalSeconds    int    `json:"checkIntervalSeconds"`
+	PollIntervalSeconds     int    `json:"pollIntervalSeconds"`
+	DefaultWebsockets       bool   `json:"defaultWebsockets"`
 }

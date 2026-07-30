@@ -1,0 +1,320 @@
+package supplyorder
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"strings"
+	"time"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+)
+
+type Repository interface {
+	Create(ctx context.Context, order model.SupplyOrder) (model.SupplyOrder, error)
+	Get(ctx context.Context, orderID string) (model.SupplyOrder, bool, error)
+	GetOpen(ctx context.Context) (model.SupplyOrder, bool, error)
+	PromoteCreateAttempt(ctx context.Context, localOrderID string, order model.SupplyOrder) error
+	Update(ctx context.Context, order model.SupplyOrder) error
+	List(ctx context.Context, limit int) ([]model.SupplyOrder, error)
+	InsertItems(ctx context.Context, orderID string, items []model.SupplyImportItem) (int, error)
+	ListPendingItems(ctx context.Context, orderID string, nowMS int64, limit int) ([]model.SupplyImportItem, error)
+	MarkItemImported(ctx context.Context, id int64, importedAtMS int64) error
+	MarkItemFailed(ctx context.Context, id int64, lastError string, nextRetryAtMS int64) error
+	Counts(ctx context.Context, orderID string) (total int, imported int, err error)
+}
+
+type repository struct {
+	db        *sql.DB
+	protector *security.Protector
+}
+
+func New(db *sql.DB, protector ...*security.Protector) Repository {
+	var p *security.Protector
+	if len(protector) > 0 {
+		p = protector[0]
+	}
+	return &repository{db: db, protector: p}
+}
+
+func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model.SupplyOrder, error) {
+	order.OrderID = strings.TrimSpace(order.OrderID)
+	if order.OrderID == "" {
+		return model.SupplyOrder{}, errors.New("supply order id is required")
+	}
+	if order.Status == "" {
+		order.Status = "created"
+	}
+	now := time.Now().UnixMilli()
+	if order.CreatedAtMS <= 0 {
+		order.CreatedAtMS = now
+	}
+	order.UpdatedAtMS = now
+	result, err := r.db.ExecContext(ctx, `insert into supply_orders (
+		order_id, product, requested_quantity, automatic, status, remote_status,
+		ready_quantity, progress, status_url, take_url, charged_fen, released_fen,
+		item_count, imported_count, last_error, next_poll_at_ms, completed_at_ms,
+		created_at_ms, updated_at_ms
+	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		order.OrderID, order.Product, order.RequestedQuantity, boolInt(order.Automatic), order.Status,
+		nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress, nullString(order.StatusURL),
+		nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen, order.ItemCount,
+		order.ImportedCount, nullString(order.LastError), nullPositive(order.NextPollAtMS),
+		nullPositive(order.CompletedAtMS), order.CreatedAtMS, order.UpdatedAtMS,
+	)
+	if err != nil {
+		return model.SupplyOrder{}, err
+	}
+	order.ID, err = result.LastInsertId()
+	return order, err
+}
+
+func (r *repository) Get(ctx context.Context, orderID string) (model.SupplyOrder, bool, error) {
+	row := r.db.QueryRowContext(ctx, orderSelect+` where order_id = ?`, strings.TrimSpace(orderID))
+	order, err := scanOrder(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.SupplyOrder{}, false, nil
+	}
+	return order, err == nil, err
+}
+
+func (r *repository) GetOpen(ctx context.Context) (model.SupplyOrder, bool, error) {
+	row := r.db.QueryRowContext(ctx, orderSelect+` where status in ('creating','create_uncertain','created','waiting_inventory','ready','taking','importing','partial') order by created_at_ms asc limit 1`)
+	order, err := scanOrder(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.SupplyOrder{}, false, nil
+	}
+	return order, err == nil, err
+}
+
+func (r *repository) PromoteCreateAttempt(ctx context.Context, localOrderID string, order model.SupplyOrder) error {
+	localOrderID = strings.TrimSpace(localOrderID)
+	order.OrderID = strings.TrimSpace(order.OrderID)
+	if localOrderID == "" || order.OrderID == "" {
+		return errors.New("local and remote supply order ids are required")
+	}
+	order.UpdatedAtMS = time.Now().UnixMilli()
+	result, err := r.db.ExecContext(ctx, `update supply_orders set
+		order_id = ?, status = ?, remote_status = ?, ready_quantity = ?, progress = ?,
+		status_url = ?, take_url = ?, charged_fen = ?, released_fen = ?, last_error = null,
+		next_poll_at_ms = ?, completed_at_ms = ?, updated_at_ms = ?
+		where order_id = ? and status = 'creating'`,
+		order.OrderID, order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
+		nullString(order.StatusURL), nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen,
+		nullPositive(order.NextPollAtMS), nullPositive(order.CompletedAtMS), order.UpdatedAtMS, localOrderID,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return errors.New("supply create attempt is no longer pending")
+	}
+	return nil
+}
+
+func (r *repository) Update(ctx context.Context, order model.SupplyOrder) error {
+	if strings.TrimSpace(order.OrderID) == "" {
+		return errors.New("supply order id is required")
+	}
+	order.UpdatedAtMS = time.Now().UnixMilli()
+	_, err := r.db.ExecContext(ctx, `update supply_orders set
+		status = ?, remote_status = ?, ready_quantity = ?, progress = ?, status_url = ?,
+		take_url = ?, charged_fen = ?, released_fen = ?, item_count = ?, imported_count = ?,
+		last_error = ?, next_poll_at_ms = ?, completed_at_ms = ?, updated_at_ms = ? where order_id = ?`,
+		order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
+		nullString(order.StatusURL), nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen,
+		order.ItemCount, order.ImportedCount, nullString(order.LastError), nullPositive(order.NextPollAtMS),
+		nullPositive(order.CompletedAtMS), order.UpdatedAtMS, order.OrderID,
+	)
+	return err
+}
+
+func (r *repository) List(ctx context.Context, limit int) ([]model.SupplyOrder, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := r.db.QueryContext(ctx, orderSelect+` order by created_at_ms desc, id desc limit ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	orders := make([]model.SupplyOrder, 0)
+	for rows.Next() {
+		order, err := scanOrder(rows)
+		if err != nil {
+			return nil, err
+		}
+		orders = append(orders, order)
+	}
+	return orders, rows.Err()
+}
+
+func (r *repository) InsertItems(ctx context.Context, orderID string, items []model.SupplyImportItem) (int, error) {
+	if len(items) == 0 {
+		return 0, nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UnixMilli()
+	inserted := 0
+	for _, item := range items {
+		payload, err := r.protect(item.PayloadJSON)
+		if err != nil {
+			return 0, err
+		}
+		result, err := tx.ExecContext(ctx, `insert or ignore into supply_import_items (
+			order_id, item_key, file_name, status, payload_json, attempt_count, created_at_ms, updated_at_ms
+		) values (?, ?, ?, 'pending', ?, 0, ?, ?)`, orderID, item.ItemKey, item.FileName, payload, now, now)
+		if err != nil {
+			return 0, err
+		}
+		if affected, _ := result.RowsAffected(); affected > 0 {
+			inserted += int(affected)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return inserted, nil
+}
+
+func (r *repository) ListPendingItems(ctx context.Context, orderID string, nowMS int64, limit int) ([]model.SupplyImportItem, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := r.db.QueryContext(ctx, `select id, order_id, item_key, file_name, status,
+		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, created_at_ms, updated_at_ms
+		from supply_import_items
+		where order_id = ? and status in ('pending','failed') and coalesce(next_retry_at_ms, 0) <= ?
+		order by id asc limit ?`, orderID, nowMS, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]model.SupplyImportItem, 0)
+	for rows.Next() {
+		item, err := r.scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *repository) MarkItemImported(ctx context.Context, id int64, importedAtMS int64) error {
+	if importedAtMS <= 0 {
+		importedAtMS = time.Now().UnixMilli()
+	}
+	_, err := r.db.ExecContext(ctx, `update supply_import_items set status = 'imported', last_error = null,
+		attempt_count = attempt_count + 1, next_retry_at_ms = null, imported_at_ms = ?, updated_at_ms = ? where id = ?`,
+		importedAtMS, importedAtMS, id)
+	return err
+}
+
+func (r *repository) MarkItemFailed(ctx context.Context, id int64, lastError string, nextRetryAtMS int64) error {
+	_, err := r.db.ExecContext(ctx, `update supply_import_items set status = 'failed', last_error = ?,
+		attempt_count = attempt_count + 1, next_retry_at_ms = ?, updated_at_ms = ? where id = ?`,
+		strings.TrimSpace(lastError), nextRetryAtMS, time.Now().UnixMilli(), id)
+	return err
+}
+
+func (r *repository) Counts(ctx context.Context, orderID string) (int, int, error) {
+	var total, imported int
+	err := r.db.QueryRowContext(ctx, `select count(*), coalesce(sum(case when status = 'imported' then 1 else 0 end), 0)
+		from supply_import_items where order_id = ?`, orderID).Scan(&total, &imported)
+	return total, imported, err
+}
+
+const orderSelect = `select id, order_id, product, requested_quantity, automatic, status, remote_status,
+	ready_quantity, progress, status_url, take_url, charged_fen, released_fen, item_count,
+	imported_count, last_error, next_poll_at_ms, completed_at_ms, created_at_ms, updated_at_ms
+	from supply_orders`
+
+type scanner interface{ Scan(...any) error }
+
+func scanOrder(row scanner) (model.SupplyOrder, error) {
+	var order model.SupplyOrder
+	var automatic int
+	var remoteStatus, statusURL, takeURL, lastError sql.NullString
+	var nextPollAtMS, completedAtMS sql.NullInt64
+	err := row.Scan(&order.ID, &order.OrderID, &order.Product, &order.RequestedQuantity, &automatic,
+		&order.Status, &remoteStatus, &order.ReadyQuantity, &order.Progress, &statusURL, &takeURL,
+		&order.ChargedFen, &order.ReleasedFen, &order.ItemCount,
+		&order.ImportedCount, &lastError, &nextPollAtMS, &completedAtMS, &order.CreatedAtMS, &order.UpdatedAtMS)
+	if err != nil {
+		return model.SupplyOrder{}, err
+	}
+	order.Automatic = automatic != 0
+	order.RemoteStatus = remoteStatus.String
+	order.StatusURL = statusURL.String
+	order.TakeURL = takeURL.String
+	order.LastError = lastError.String
+	order.NextPollAtMS = nextPollAtMS.Int64
+	order.CompletedAtMS = completedAtMS.Int64
+	return order, nil
+}
+
+func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {
+	var item model.SupplyImportItem
+	var payload string
+	var lastError sql.NullString
+	var nextRetryAtMS, importedAtMS sql.NullInt64
+	if err := row.Scan(&item.ID, &item.OrderID, &item.ItemKey, &item.FileName, &item.Status,
+		&payload, &lastError, &item.AttemptCount, &nextRetryAtMS, &importedAtMS,
+		&item.CreatedAtMS, &item.UpdatedAtMS); err != nil {
+		return model.SupplyImportItem{}, err
+	}
+	unprotected, err := r.unprotect(payload)
+	if err != nil {
+		return model.SupplyImportItem{}, err
+	}
+	item.PayloadJSON = unprotected
+	item.LastError = lastError.String
+	item.NextRetryAtMS = nextRetryAtMS.Int64
+	item.ImportedAtMS = importedAtMS.Int64
+	return item, nil
+}
+
+func (r *repository) protect(value string) (string, error) {
+	if r.protector == nil {
+		return value, nil
+	}
+	return r.protector.ProtectString(value)
+}
+
+func (r *repository) unprotect(value string) (string, error) {
+	if r.protector == nil {
+		return value, nil
+	}
+	return r.protector.UnprotectString(value)
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func nullString(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
+}
+
+func nullPositive(value int64) any {
+	if value <= 0 {
+		return nil
+	}
+	return value
+}

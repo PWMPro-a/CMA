@@ -51,12 +51,16 @@ func TestStoreEncryptsSetupAndManagerConfigSecrets(t *testing.T) {
 			PollIntervalMS: 500,
 			QueryLimit:     50000,
 		},
+		Supply: ManagerSupplyConfig{
+			Username: "supply-user",
+			Password: "supply-password",
+		},
 	}
 	if err := db.SaveManagerConfig(context.Background(), managerCfg); err != nil {
 		t.Fatalf("save manager config: %v", err)
 	}
 	rawManagerConfig := rawSettingValue(t, db, "manager_config_v1")
-	if strings.Contains(rawManagerConfig, "management-key") || !strings.Contains(rawManagerConfig, "enc:v1:") {
+	if strings.Contains(rawManagerConfig, "management-key") || strings.Contains(rawManagerConfig, "supply-password") || !strings.Contains(rawManagerConfig, "enc:v1:") {
 		t.Fatalf("manager config was not encrypted at rest: %s", rawManagerConfig)
 	}
 	loadedManagerCfg, ok, err := db.LoadManagerConfig(context.Background())
@@ -65,6 +69,43 @@ func TestStoreEncryptsSetupAndManagerConfigSecrets(t *testing.T) {
 	}
 	if loadedManagerCfg.CPAConnection.ManagementKey != "management-key" {
 		t.Fatalf("loaded manager config management key = %q", loadedManagerCfg.CPAConnection.ManagementKey)
+	}
+	if loadedManagerCfg.Supply.Password != "supply-password" {
+		t.Fatalf("loaded manager config supply password = %q", loadedManagerCfg.Supply.Password)
+	}
+}
+
+func TestStoreEncryptsPendingSupplyAccountPayloads(t *testing.T) {
+	protector := newTestProtector(t)
+	db, err := Open(t.TempDir()+"/supply.sqlite", protector)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.CreateSupplyOrder(context.Background(), SupplyOrder{
+		OrderID: "order-1", Product: "oauth_30d", RequestedQuantity: 1, Status: "importing",
+	}); err != nil {
+		t.Fatalf("create supply order: %v", err)
+	}
+	payload := `{"type":"codex","access_token":"oauth-secret"}`
+	if _, err := db.InsertSupplyImportItems(context.Background(), "order-1", []SupplyImportItem{{
+		OrderID: "order-1", ItemKey: "item-1", FileName: "supply-item-1.json", PayloadJSON: payload,
+	}}); err != nil {
+		t.Fatalf("insert supply item: %v", err)
+	}
+	var raw string
+	if err := db.db.QueryRow(`select payload_json from supply_import_items where item_key = 'item-1'`).Scan(&raw); err != nil {
+		t.Fatalf("read raw supply payload: %v", err)
+	}
+	if strings.Contains(raw, "oauth-secret") || !strings.Contains(raw, "enc:v1:") {
+		t.Fatalf("supply payload was not encrypted at rest: %s", raw)
+	}
+	items, err := db.ListPendingSupplyImportItems(context.Background(), "order-1", 1, 10)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("load pending supply items=%#v err=%v", items, err)
+	}
+	if items[0].PayloadJSON != payload {
+		t.Fatalf("decrypted supply payload = %q", items[0].PayloadJSON)
 	}
 }
 

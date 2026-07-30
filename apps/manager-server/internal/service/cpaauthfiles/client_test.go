@@ -11,6 +11,43 @@ import (
 	"testing"
 )
 
+func TestClientUploadSendsMultipartAuthFileAndDefaults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != authFilesPath {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer management-key" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		reader, err := r.MultipartReader()
+		if err != nil {
+			t.Fatalf("multipart reader: %v", err)
+		}
+		values := map[string]string{}
+		for {
+			part, err := reader.NextPart()
+			if err != nil {
+				break
+			}
+			data, _ := io.ReadAll(part)
+			values[part.FormName()] = string(data)
+			if part.FormName() == "file" && part.FileName() != "supply-account.json" {
+				t.Fatalf("file name = %q", part.FileName())
+			}
+		}
+		if values["file"] != `{"type":"codex"}` || values["default_websockets"] != "true" {
+			t.Fatalf("multipart values = %#v", values)
+		}
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer server.Close()
+
+	err := New(server.Client()).Upload(context.Background(), server.URL, "management-key", "supply-account.json", []byte(`{"type":"codex"}`), true)
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+}
+
 func TestParseAndVerifyIdentity(t *testing.T) {
 	files, err := Parse([]byte(`{"auth_files":[{"name":"codex-auth.json","auth_index":"7","provider":"codex","account":"user@example.com","account_id":"acct-123","disabled":"true"}]}`))
 	if err != nil {

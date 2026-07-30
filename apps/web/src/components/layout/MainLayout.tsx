@@ -26,6 +26,7 @@ import {
   IconSidebarProviders,
   IconSidebarQuota,
   IconSidebarSystem,
+  IconSidebarStore,
   IconSidebarUsage,
 } from '@/components/ui/icons';
 import { INLINE_LOGO_JPEG } from '@/assets/logoInline';
@@ -61,6 +62,7 @@ const sidebarIcons: Record<string, ReactNode> = {
   dashboard: <IconSidebarDashboard size={SIDEBAR_ICON_SIZE} />,
   aiProviders: <IconSidebarProviders size={SIDEBAR_ICON_SIZE} />,
   authFiles: <IconSidebarAuthFiles size={SIDEBAR_ICON_SIZE} />,
+  supply: <IconSidebarStore size={SIDEBAR_ICON_SIZE} />,
   oauth: <IconSidebarOauth size={SIDEBAR_ICON_SIZE} />,
   quota: <IconSidebarQuota size={SIDEBAR_ICON_SIZE} />,
   usageAnalytics: <IconSidebarUsage size={SIDEBAR_ICON_SIZE} />,
@@ -532,6 +534,14 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
         icon: sidebarIcons.monitoring,
       }
     : null;
+  const supplyNavItem = featureAvailability.managerServiceAvailable && !demoMode
+    ? {
+        path: '/supply',
+        label: t('nav.supply'),
+        shortLabel: navShortLabel('nav.supply', t('nav.supply')),
+        icon: sidebarIcons.supply,
+      }
+    : null;
   const operationNavItems: NavItem[] = [
     ...(fileLogsAvailable
       ? [
@@ -600,6 +610,7 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
         shortLabel: navShortLabel('nav.auth_files', t('nav.auth_files')),
         icon: sidebarIcons.authFiles,
       },
+      ...(supplyNavItem ? [supplyNavItem] : []),
       {
         path: '/oauth',
         label: t('nav.oauth', { defaultValue: 'OAuth' }),

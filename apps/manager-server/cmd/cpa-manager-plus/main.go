@@ -120,6 +120,8 @@ func runServer() {
 
 	codexInspectionWorker := worker.NewCodexInspectionWorker(serverApp.AppContext().Store, serverApp.AppContext().CodexInspectionService)
 	codexInspectionWorker.Start(ctx)
+	supplyReplenishmentWorker := worker.NewSupplyReplenishmentWorker(serverApp.AppContext().SupplyService)
+	supplyReplenishmentWorker.Start(ctx)
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,

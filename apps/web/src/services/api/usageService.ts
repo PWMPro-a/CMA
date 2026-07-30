@@ -20,6 +20,7 @@ import {
 import { isDemoMode } from '@/features/demo/demoMode';
 import { normalizeApiBase } from '@/utils/connection';
 import type { ModelPrice } from '@/utils/usage';
+import type { SupplyConfig } from './supply';
 
 const USAGE_SERVICE_ERROR_CODES = new Set([
   'request_failed',
@@ -198,6 +199,7 @@ export interface ManagerConfig {
   cpaConnection: ManagerCPAConnectionConfig;
   collector: ManagerCollectorConfig;
   codexInspection?: ManagerCodexInspectionConfig;
+  supply?: SupplyConfig;
   externalUsageService: ManagerExternalUsageServiceConfig;
   updatedAtMs?: number;
 }

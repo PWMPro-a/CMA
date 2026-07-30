@@ -35,6 +35,7 @@ import { LogsPage } from '@/pages/LogsPage';
 import { PluginResourcePage } from '@/pages/PluginResourcePage';
 import { PluginsPage } from '@/pages/PluginsPage';
 import { SystemPage } from '@/pages/SystemPage';
+import { SupplyPage } from '@/pages/SupplyPage';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { CodexInspectionModeTabs } from '@/features/monitoring/components/CodexInspectionModeTabs';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
@@ -43,7 +44,7 @@ import { ensureRouteBasePathname, isDemoMode } from '@/features/demo/demoMode';
 import { useAuthStore, useConfigStore } from '@/stores';
 import codexInspectionStyles from '@/features/monitoring/CodexInspectionPage.module.scss';
 
-type FeatureKey = 'requestMonitoring' | 'modelPrices' | 'serverCodexInspection';
+type FeatureKey = 'managerService' | 'requestMonitoring' | 'modelPrices' | 'serverCodexInspection';
 
 function PluginGate({ children }: { children: ReactElement }) {
   const supportsPlugin = useAuthStore((state) => state.supportsPlugin);
@@ -67,7 +68,9 @@ function FeatureGate({
 }) {
   const availability = usePanelFeatureAvailability();
   const enabled =
-    feature === 'requestMonitoring'
+    feature === 'managerService'
+      ? availability.managerServiceAvailable
+      : feature === 'requestMonitoring'
       ? availability.requestMonitoringAvailable
       : feature === 'modelPrices'
         ? availability.modelPricesAvailable
@@ -197,6 +200,14 @@ const mainRoutes: RouteObject[] = [
   { path: '/ai-providers', element: <AiProvidersPage /> },
   { path: '/ai-providers/*', element: <AiProvidersPage /> },
   { path: '/auth-files', element: <AuthFilesPage /> },
+  {
+    path: '/supply',
+    element: (
+      <FeatureGate feature="managerService">
+        <SupplyPage />
+      </FeatureGate>
+    ),
+  },
   { path: '/auth-files/agent-identity-recovery', element: <AgentIdentityRecoveryPage /> },
   { path: '/auth-files/oauth-excluded', element: <AuthFilesOAuthExcludedEditPage /> },
   { path: '/auth-files/oauth-model-alias', element: <AuthFilesOAuthModelAliasEditPage /> },
