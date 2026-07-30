@@ -477,6 +477,9 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 }
 
 func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, order store.SupplyOrder) error {
+	if order.Status == "taking" && order.NextPollAtMS > time.Now().UnixMilli() {
+		return nil
+	}
 	if order.Status == "creating" {
 		order.Status = "create_uncertain"
 		order.LastError = "manager restarted while the create request was in progress"
@@ -531,10 +534,18 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		return s.store.UpdateSupplyOrder(ctx, order)
 	}
 
-	order.Status = "taking"
-	if err := s.store.UpdateSupplyOrder(ctx, order); err != nil {
+	nowMS := time.Now().UnixMilli()
+	leaseUntilMS := nowMS + int64(supplyTakeLeaseDuration(cfg.Supply)/time.Millisecond)
+	claimed, err := s.store.ClaimSupplyOrderTaking(ctx, order.OrderID, nowMS, leaseUntilMS)
+	if err != nil {
 		return err
 	}
+	if !claimed {
+		return nil
+	}
+	order.Status = "taking"
+	order.NextPollAtMS = leaseUntilMS
+	order.LastError = ""
 	taken, err := s.supplyClient.Take(ctx, credentials, order.OrderID, order.TakeURL)
 	if err != nil {
 		if isHTTPStatus(err, http.StatusConflict) {
@@ -548,17 +559,24 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		return s.store.UpdateSupplyOrder(ctx, order)
 	}
 	items := make([]store.SupplyImportItem, 0, len(taken.Accounts))
+	seenItemKeys := make(map[string]struct{}, len(taken.Accounts))
 	for index, raw := range taken.Accounts {
-		payload, key, fileName, err := normalizeAccountPayload(raw)
+		normalizedAccounts, err := normalizeAccountPayloads(raw)
 		if err != nil {
 			return s.updateOrderError(ctx, &order, fmt.Errorf("supply account %d format is unsupported: %w", index+1, err), cfg.Supply)
 		}
-		items = append(items, store.SupplyImportItem{
-			OrderID:     order.OrderID,
-			ItemKey:     key,
-			FileName:    fileName,
-			PayloadJSON: string(payload),
-		})
+		for _, account := range normalizedAccounts {
+			if _, duplicate := seenItemKeys[account.itemKey]; duplicate {
+				continue
+			}
+			seenItemKeys[account.itemKey] = struct{}{}
+			items = append(items, store.SupplyImportItem{
+				OrderID:     order.OrderID,
+				ItemKey:     account.itemKey,
+				FileName:    account.fileName,
+				PayloadJSON: string(account.payload),
+			})
+		}
 	}
 	if len(items) == 0 {
 		err := errors.New("supply take response did not include importable accounts")
@@ -981,7 +999,11 @@ func (s *Service) requireCredentials(cfg store.ManagerSupplyConfig) error {
 
 func (s *Service) updateOrderError(ctx context.Context, order *store.SupplyOrder, err error, cfg store.ManagerSupplyConfig) error {
 	order.LastError = safeError(err)
-	order.NextPollAtMS = nextPollAt(cfg, 0)
+	if order.Status == "taking" {
+		order.NextPollAtMS = time.Now().Add(supplyTakeLeaseDuration(cfg)).UnixMilli()
+	} else {
+		order.NextPollAtMS = nextPollAt(cfg, 0)
+	}
 	if updateErr := s.store.UpdateSupplyOrder(ctx, *order); updateErr != nil {
 		return updateErr
 	}
@@ -1166,6 +1188,21 @@ func isReadyForTake(status string) bool {
 	return status == "ready" || status == "ready_for_pickup" || isSuccessfulRemoteStatus(status)
 }
 
+func supplyTakeLeaseDuration(cfg store.ManagerSupplyConfig) time.Duration {
+	seconds := cfg.PollIntervalSeconds
+	if seconds <= 0 {
+		seconds = 3
+	}
+	lease := time.Duration(seconds)*time.Second + 45*time.Second
+	if lease < 45*time.Second {
+		return 45 * time.Second
+	}
+	if lease > 3*time.Minute {
+		return 3 * time.Minute
+	}
+	return lease
+}
+
 func nextPollAt(cfg store.ManagerSupplyConfig, retryAfterSeconds int) int64 {
 	seconds := retryAfterSeconds
 	if seconds <= 0 {
@@ -1199,81 +1236,173 @@ func automaticSettleWindow(cfg store.ManagerSupplyConfig) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+type normalizedSupplyAccount struct {
+	payload  []byte
+	itemKey  string
+	fileName string
+}
+
 func normalizeAccountPayload(raw json.RawMessage) ([]byte, string, string, error) {
+	accounts, err := normalizeAccountPayloads(raw)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if len(accounts) != 1 {
+		return nil, "", "", fmt.Errorf("expected one supply account payload, got %d", len(accounts))
+	}
+	account := accounts[0]
+	return account.payload, account.itemKey, account.fileName, nil
+}
+
+func normalizeAccountPayloads(raw json.RawMessage) ([]normalizedSupplyAccount, error) {
+	value, err := decodeSupplyAccountPayload(raw)
+	if err != nil {
+		return nil, err
+	}
+	accounts, err := normalizeSupplyAccountValue(value, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(accounts) == 0 {
+		return nil, errors.New("supply account payload did not include importable OpenAI OAuth accounts")
+	}
+	return accounts, nil
+}
+
+func decodeSupplyAccountPayload(raw json.RawMessage) (any, error) {
 	payload := bytes.TrimSpace(raw)
 	if len(payload) == 0 {
-		return nil, "", "", errors.New("empty supply account payload")
+		return nil, errors.New("empty supply account payload")
 	}
-	if payload[0] == '"' {
+	for unwrap := 0; unwrap < 3 && len(payload) > 0 && payload[0] == '"'; unwrap++ {
 		var text string
 		if err := json.Unmarshal(payload, &text); err != nil {
-			return nil, "", "", err
+			return nil, err
 		}
 		payload = []byte(strings.TrimSpace(text))
 	}
-	return normalizeAccountPayloadForImport(string(payload))
+	if len(payload) == 0 {
+		return nil, errors.New("empty supply account payload")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	return value, nil
 }
 
-func normalizeAccountPayloadForImport(payloadJSON string) ([]byte, string, string, error) {
-	var object map[string]any
-	decoder := json.NewDecoder(strings.NewReader(strings.TrimSpace(payloadJSON)))
-	decoder.UseNumber()
-	if err := decoder.Decode(&object); err != nil || len(object) == 0 {
-		if err == nil {
-			err = errors.New("supply account payload is empty")
+func normalizeSupplyAccountValue(value any, inheritedExportedAt any) ([]normalizedSupplyAccount, error) {
+	switch typed := value.(type) {
+	case map[string]any:
+		if child, exportedAt, ok := nestedSupplyAccountList(typed, inheritedExportedAt); ok {
+			return normalizeSupplyAccountList(child, exportedAt)
 		}
-		return nil, "", "", err
+		account, err := normalizeSupplyAccountObject(typed, inheritedExportedAt)
+		if err != nil {
+			return nil, err
+		}
+		return []normalizedSupplyAccount{account}, nil
+	case []any:
+		return normalizeSupplyAccountList(typed, inheritedExportedAt)
+	default:
+		return nil, errors.New("supply account payload must be a JSON object or account array")
 	}
+}
 
+func nestedSupplyAccountList(object map[string]any, inheritedExportedAt any) ([]any, any, bool) {
+	exportedAt := firstValueOrNil(inheritedExportedAt, object["exported_at"], object["exportedAt"])
+	for _, key := range []string{"accounts", "items"} {
+		if list, ok := object[key].([]any); ok {
+			return list, exportedAt, true
+		}
+	}
+	for _, key := range []string{"payload", "data", "result"} {
+		if child, ok := object[key].(map[string]any); ok {
+			if list, childExportedAt, found := nestedSupplyAccountList(child, exportedAt); found {
+				return list, childExportedAt, true
+			}
+		}
+	}
+	return nil, exportedAt, false
+}
+
+func normalizeSupplyAccountList(values []any, exportedAt any) ([]normalizedSupplyAccount, error) {
+	if len(values) == 0 {
+		return nil, errors.New("supply account list is empty")
+	}
+	accounts := make([]normalizedSupplyAccount, 0, len(values))
+	for index, value := range values {
+		children, err := normalizeSupplyAccountValue(value, exportedAt)
+		if err != nil {
+			return nil, fmt.Errorf("account %d: %w", index+1, err)
+		}
+		accounts = append(accounts, children...)
+	}
+	return accounts, nil
+}
+
+func normalizeSupplyAccountObject(object map[string]any, exportedAt any) (normalizedSupplyAccount, error) {
 	metadata := cloneMap(object)
 	if credentials, ok := object["credentials"].(map[string]any); ok {
 		if !isSupportedSupplyOAuth(object, credentials) {
-			return nil, "", "", errors.New("account is not an OpenAI OAuth credential")
+			return normalizedSupplyAccount{}, errors.New("account is not an OpenAI OAuth credential")
 		}
-		metadata = convertSub2AccountToCPAPayload(object, credentials)
-	} else if hasSupplyAccessToken(metadata) {
+		metadata = convertSub2AccountToCPAPayload(object, credentials, exportedAt)
+	} else if hasSupplyOAuthToken(metadata) {
 		metadata["type"] = "codex"
 		normalizeCodexPayloadAliases(metadata)
 	} else {
-		return nil, "", "", errors.New("account does not contain an OAuth access token")
+		return normalizedSupplyAccount{}, errors.New("account does not contain OAuth token data")
 	}
 
 	identity := supplyAccountIdentity(metadata)
 	if identity == "" {
-		return nil, "", "", errors.New("stable account identity is missing")
+		return normalizedSupplyAccount{}, errors.New("stable account identity is missing")
 	}
 
 	normalized, err := json.Marshal(metadata)
 	if err != nil {
-		return nil, "", "", err
+		return normalizedSupplyAccount{}, err
 	}
 	sum := sha256.Sum256([]byte(identity))
 	digest := hex.EncodeToString(sum[:])
-	return normalized, digest, "codex-supply-" + digest[:20] + ".json", nil
+	return normalizedSupplyAccount{payload: normalized, itemKey: digest, fileName: "codex-supply-" + digest[:20] + ".json"}, nil
 }
 
-func convertSub2AccountToCPAPayload(account map[string]any, credentials map[string]any) map[string]any {
+func normalizeAccountPayloadForImport(payloadJSON string) ([]byte, string, string, error) {
+	return normalizeAccountPayload(json.RawMessage(strings.TrimSpace(payloadJSON)))
+}
+
+func convertSub2AccountToCPAPayload(account map[string]any, credentials map[string]any, exportedAt any) map[string]any {
 	extra := mapFromMap(account, "extra")
-	email := stringFromMaps([]map[string]any{credentials, extra}, "email", "email_address", "emailAddress")
-	accountID := stringFromMaps([]map[string]any{credentials, extra}, "chatgpt_account_id", "chatgptAccountId", "account_id", "accountId")
-	userID := stringFromMaps([]map[string]any{credentials, extra}, "chatgpt_user_id", "chatgptUserId", "user_id", "userId")
-	organizationID := stringFromMaps([]map[string]any{credentials, extra}, "organization_id", "organizationId", "org_id", "orgId", "poid")
-	planType := stringFromMaps([]map[string]any{credentials, extra}, "plan_type", "planType", "chatgpt_plan_type", "chatgptPlanType")
-	expiresAt := stringFromMaps([]map[string]any{credentials, account}, "expires_at", "expiresAt", "expired")
-	lastRefresh := stringFromMaps([]map[string]any{credentials, extra, account}, "last_refresh", "lastRefresh", "exported_at", "exportedAt")
+	metadata := cloneMap(credentials)
+	metadata["type"] = "codex"
+	metadata["import_format"] = "sub2api"
+	metadata["sub2_platform"] = strings.ToLower(stringFromMap(account, "platform", "provider"))
+	setString(metadata, "source_product", stringFromMap(account, "product"))
+
+	if firstNonEmptyString(stringFromMap(metadata, "access_token"), stringFromMap(metadata, "accessToken")) == "" {
+		if accessToken := stringFromMap(metadata, "session_access_token", "sessionAccessToken"); accessToken != "" {
+			metadata["access_token"] = accessToken
+		}
+	}
+	normalizeCodexPayloadAliases(metadata)
+
+	email := stringFromMaps([]map[string]any{metadata, extra}, "email", "email_address", "emailAddress")
+	accountID := stringFromMaps([]map[string]any{metadata, extra}, "chatgpt_account_id", "chatgptAccountId", "account_id", "accountId")
+	userID := stringFromMaps([]map[string]any{metadata, extra}, "chatgpt_user_id", "chatgptUserId", "user_id", "userId")
+	organizationID := stringFromMaps([]map[string]any{metadata, extra}, "organization_id", "organizationId", "org_id", "orgId", "poid")
+	planType := stringFromMaps([]map[string]any{metadata, extra}, "plan_type", "planType", "chatgpt_plan_type", "chatgptPlanType")
+	expiresAt := stringFromMaps([]map[string]any{metadata, account}, "expires_at", "expiresAt", "expired")
+	lastRefresh := stringFromMaps([]map[string]any{metadata, extra, account}, "last_refresh", "lastRefresh", "exported_at", "exportedAt")
+	if lastRefresh == "" && exportedAt != nil {
+		lastRefresh = stringFromAny(exportedAt)
+	}
 	name := firstNonEmptyString(stringFromMap(account, "name"), email, accountID, "OpenAI OAuth Account")
 
-	metadata := map[string]any{
-		"type":           "codex",
-		"access_token":   firstNonEmptyString(stringFromMap(credentials, "access_token", "accessToken"), stringFromMap(credentials, "session_access_token", "sessionAccessToken")),
-		"name":           name,
-		"import_format":  "sub2api",
-		"sub2_platform":  strings.ToLower(stringFromMap(account, "platform", "provider")),
-		"source_product": stringFromMap(account, "product"),
-	}
-	setString(metadata, "refresh_token", stringFromMap(credentials, "refresh_token", "refreshToken"))
-	setString(metadata, "id_token", stringFromMap(credentials, "id_token", "idToken"))
-	setString(metadata, "client_id", stringFromMap(credentials, "client_id", "clientId"))
+	setString(metadata, "name", name)
 	setString(metadata, "email", email)
 	if accountID != "" {
 		metadata["account_id"] = accountID
@@ -1353,13 +1482,29 @@ func cloneMap(source map[string]any) map[string]any {
 func stringFromMap(values map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if value, ok := values[key]; ok && value != nil {
-			text := strings.TrimSpace(fmt.Sprint(value))
-			if text != "" && text != "<nil>" {
+			if text := stringFromAny(value); text != "" {
 				return text
 			}
 		}
 	}
 	return ""
+}
+
+func stringFromAny(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case json.Number:
+		return strings.TrimSpace(typed.String())
+	case string:
+		return strings.TrimSpace(typed)
+	default:
+		text := strings.TrimSpace(fmt.Sprint(value))
+		if text == "<nil>" {
+			return ""
+		}
+		return text
+	}
 }
 
 func stringFromMaps(values []map[string]any, keys ...string) string {
@@ -1372,6 +1517,18 @@ func stringFromMaps(values []map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstValueOrNil(values ...any) any {
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+		if text := stringFromAny(value); text != "" {
+			return value
+		}
+	}
+	return nil
 }
 
 func firstNonEmptyString(values ...string) string {
@@ -1417,6 +1574,16 @@ func stripEmptyValues(values map[string]any) map[string]any {
 	return values
 }
 
+func hasSupplyOAuthToken(values map[string]any) bool {
+	return firstNonEmptyString(
+		stringFromMap(values, "access_token", "accessToken"),
+		stringFromMap(values, "session_access_token", "sessionAccessToken"),
+		stringFromMap(values, "refresh_token", "refreshToken"),
+		stringFromMap(values, "id_token", "idToken"),
+		stringFromMap(values, "session_token", "sessionToken"),
+	) != ""
+}
+
 func hasSupplyAccessToken(values map[string]any) bool {
 	return firstNonEmptyString(stringFromMap(values, "access_token", "accessToken"), stringFromMap(values, "session_access_token", "sessionAccessToken")) != ""
 }
@@ -1424,13 +1591,17 @@ func hasSupplyAccessToken(values map[string]any) bool {
 func isSupportedSupplyOAuth(account map[string]any, credentials map[string]any) bool {
 	platform := strings.ToLower(stringFromMap(account, "platform", "provider"))
 	typeName := strings.ToLower(stringFromMap(account, "type"))
+	credentialType := strings.ToLower(stringFromMap(credentials, "type"))
 	if platform != "" && platform != "openai" && platform != "codex" {
+		return false
+	}
+	if credentialType != "" && credentialType != "codex" && credentialType != "openai" {
 		return false
 	}
 	if typeName != "" && typeName != "oauth" && typeName != "codex" {
 		return false
 	}
-	return hasSupplyAccessToken(credentials)
+	return hasSupplyOAuthToken(credentials)
 }
 
 func isAvailableCodexFile(file cpaauthfiles.File) bool {

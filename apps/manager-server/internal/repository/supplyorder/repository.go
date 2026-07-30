@@ -18,6 +18,7 @@ type Repository interface {
 	GetLatestCompletedAutomatic(ctx context.Context) (model.SupplyOrder, bool, error)
 	ActivateNextLegacyRepair(ctx context.Context) (model.SupplyOrder, bool, error)
 	PromoteCreateAttempt(ctx context.Context, localOrderID string, order model.SupplyOrder) error
+	ClaimTaking(ctx context.Context, orderID string, nowMS int64, leaseUntilMS int64) (bool, error)
 	Update(ctx context.Context, order model.SupplyOrder) error
 	List(ctx context.Context, limit int) ([]model.SupplyOrder, error)
 	InsertItems(ctx context.Context, orderID string, items []model.SupplyImportItem) (int, error)
@@ -197,6 +198,31 @@ func (r *repository) PromoteCreateAttempt(ctx context.Context, localOrderID stri
 		return errors.New("supply create attempt is no longer pending")
 	}
 	return nil
+}
+
+func (r *repository) ClaimTaking(ctx context.Context, orderID string, nowMS int64, leaseUntilMS int64) (bool, error) {
+	orderID = strings.TrimSpace(orderID)
+	if orderID == "" {
+		return false, errors.New("supply order id is required")
+	}
+	if nowMS <= 0 {
+		nowMS = time.Now().UnixMilli()
+	}
+	if leaseUntilMS <= nowMS {
+		leaseUntilMS = nowMS + int64(45*time.Second/time.Millisecond)
+	}
+	result, err := r.db.ExecContext(ctx, `update supply_orders set status = 'taking', last_error = null, next_poll_at_ms = ?, updated_at_ms = ?
+		where order_id = ? and (status in ('ready','waiting_inventory') or (status = 'taking' and coalesce(next_poll_at_ms, 0) <= ?))`,
+		leaseUntilMS, nowMS, orderID, nowMS,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
 }
 
 func (r *repository) Update(ctx context.Context, order model.SupplyOrder) error {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -353,6 +354,203 @@ func TestNormalizeSub2AccountPayloadForCPA(t *testing.T) {
 	}
 	if len(key) != 64 || len(fileName) != len("codex-supply-")+20+len(".json") || fileName[:13] != "codex-supply-" {
 		t.Fatalf("stable identity outputs key=%q file=%q", key, fileName)
+	}
+}
+
+func TestNormalizeSub2BundlePayloadForCPA(t *testing.T) {
+	raw := `{"type":"sub2api-data","exported_at":"2026-07-30T17:28:18Z","accounts":[{"name":"team-one","type":"oauth","platform":"openai","priority":2,"concurrency":8,"credentials":{"access_token":"access-one","refresh_token":"refresh-one","chatgpt_account_id":"account-shared","email":"one@example.com","plan_type":"team","expires_at":1786296161,"expires_in":864000,"workspace_id":"workspace-one"}},{"name":"team-two","type":"oauth","platform":"openai","credentials":{"session_access_token":"access-two","refresh_token":"refresh-two","account_id":"account-shared","email":"two@example.com","chatgpt_plan_type":"team"}}]}`
+	accounts, err := normalizeAccountPayloads([]byte(raw))
+	if err != nil {
+		t.Fatalf("normalize bundle: %v", err)
+	}
+	if len(accounts) != 2 {
+		t.Fatalf("normalized accounts = %d, want 2", len(accounts))
+	}
+	if accounts[0].fileName == accounts[1].fileName || accounts[0].itemKey == accounts[1].itemKey {
+		t.Fatalf("bundle accounts should keep distinct identities: %#v", accounts)
+	}
+	var first map[string]any
+	if err := json.Unmarshal(accounts[0].payload, &first); err != nil {
+		t.Fatalf("decode first payload: %v", err)
+	}
+	if first["type"] != "codex" || first["import_format"] != "sub2api" || first["access_token"] != "access-one" || first["refresh_token"] != "refresh-one" {
+		t.Fatalf("first normalized payload = %#v", first)
+	}
+	if _, nested := first["credentials"]; nested {
+		t.Fatalf("credentials wrapper was not removed: %#v", first)
+	}
+	if first["chatgpt_account_id"] != "account-shared" || first["account_id"] != "account-shared" || first["email"] != "one@example.com" || first["workspace_id"] != "workspace-one" {
+		t.Fatalf("credential metadata was not preserved: %#v", first)
+	}
+	if first["expired"] != "1786296161" || first["expires_at"] != "1786296161" || first["last_refresh"] != "2026-07-30T17:28:18Z" {
+		t.Fatalf("time metadata was not normalized: %#v", first)
+	}
+	var second map[string]any
+	if err := json.Unmarshal(accounts[1].payload, &second); err != nil {
+		t.Fatalf("decode second payload: %v", err)
+	}
+	if second["access_token"] != "access-two" || second["account_id"] != "account-shared" || second["email"] != "two@example.com" {
+		t.Fatalf("session access token account was not normalized: %#v", second)
+	}
+}
+
+func TestTakeResponseSub2BundleIsExpandedAndUploadedAsCPACodex(t *testing.T) {
+	var takeCalls atomic.Int32
+	var uploadCalls atomic.Int32
+	uploadedNames := sync.Map{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/pickup/orders/order-bundle" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"id":"order-bundle","status":"ready","ready_quantity":2,"progress":100,"take_url":"/custom/take-bundle"}`))
+		case r.URL.Path == "/custom/take-bundle" && r.Method == http.MethodPost:
+			takeCalls.Add(1)
+			_, _ = w.Write([]byte(`{"status":"completed","payload":{"accounts":[{"type":"sub2api-data","exported_at":"2026-07-30T17:28:18Z","accounts":[{"name":"team-one","type":"oauth","platform":"openai","credentials":{"access_token":"access-one","refresh_token":"refresh-one","chatgpt_account_id":"account-one","email":"one@example.com","plan_type":"team"}},{"name":"team-two","type":"oauth","platform":"openai","credentials":{"session_access_token":"access-two","refresh_token":"refresh-two","account_id":"account-two","email":"two@example.com","chatgpt_plan_type":"team"}}]}]}}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			name := r.URL.Query().Get("name")
+			if name == "" {
+				_, _ = w.Write([]byte(`{"files":[]}`))
+				return
+			}
+			if _, ok := uploadedNames.Load(name); ok {
+				_, _ = w.Write([]byte(`{"files":[{"name":"` + name + `","provider":"codex","disabled":false,"status":"ready"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodPost:
+			uploadCalls.Add(1)
+			part, err := r.MultipartReader()
+			if err != nil {
+				t.Fatalf("multipart reader: %v", err)
+			}
+			for {
+				item, err := part.NextPart()
+				if err != nil {
+					break
+				}
+				if item.FormName() != "file" {
+					continue
+				}
+				uploadedNames.Store(item.FileName(), struct{}{})
+				data, _ := io.ReadAll(item)
+				var payload map[string]any
+				if err := json.Unmarshal(data, &payload); err != nil {
+					t.Fatalf("decode upload payload %s: %v", data, err)
+				}
+				if payload["type"] != "codex" || payload["import_format"] != "sub2api" || payload["access_token"] == "" || payload["refresh_token"] == "" {
+					t.Fatalf("uploaded payload was not CPA Codex JSON: %#v", payload)
+				}
+				if _, nested := payload["credentials"]; nested {
+					t.Fatalf("uploaded payload still contains credentials wrapper: %#v", payload)
+				}
+			}
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			BaseURL: server.URL, Username: "customer", Password: "password",
+			Product: "oauth_30d", PollIntervalSeconds: 1,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "order-bundle", Product: "oauth_30d", RequestedQuantity: 2, Status: "ready", TakeURL: "/custom/take-bundle",
+	}); err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("run automatic: %v", err)
+	}
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	if takeCalls.Load() != 1 || uploadCalls.Load() != 2 {
+		t.Fatalf("calls take=%d upload=%d", takeCalls.Load(), uploadCalls.Load())
+	}
+	if len(status.Orders) != 1 || status.Orders[0].Status != "completed" || status.Orders[0].ImportedCount != 2 || status.Orders[0].ItemCount != 2 {
+		t.Fatalf("orders = %#v", status.Orders)
+	}
+}
+
+func TestTakingLeasePreventsDuplicateTake(t *testing.T) {
+	var takeCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case "/api/customer/pickup/orders/order-taking", "/api/customer/pickup/orders/order-taking/take":
+			takeCalls.Add(1)
+			t.Fatal("taking lease should block status polling and take retry")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		Supply: store.ManagerSupplyConfig{BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_30d"},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	leaseUntil := time.Now().Add(time.Minute).UnixMilli()
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "order-taking", Product: "oauth_30d", RequestedQuantity: 1, Status: "taking", NextPollAtMS: leaseUntil,
+	}); err != nil {
+		t.Fatalf("create taking order: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("run automatic: %v", err)
+	}
+	if takeCalls.Load() != 0 {
+		t.Fatalf("take/status calls = %d, want 0", takeCalls.Load())
+	}
+}
+
+func TestClaimSupplyOrderTakingAllowsOnlyOneWorker(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "order-claim", Product: "oauth_30d", RequestedQuantity: 1, Status: "ready",
+	}); err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	nowMS := time.Now().UnixMilli()
+	leaseUntilMS := nowMS + int64(time.Minute/time.Millisecond)
+	claimed, err := st.ClaimSupplyOrderTaking(context.Background(), "order-claim", nowMS, leaseUntilMS)
+	if err != nil || !claimed {
+		t.Fatalf("first claim=%v err=%v", claimed, err)
+	}
+	claimed, err = st.ClaimSupplyOrderTaking(context.Background(), "order-claim", nowMS, leaseUntilMS)
+	if err != nil || claimed {
+		t.Fatalf("second claim=%v err=%v, want false nil", claimed, err)
+	}
+	order, found, err := st.GetSupplyOrder(context.Background(), "order-claim")
+	if err != nil || !found || order.Status != "taking" || order.NextPollAtMS != leaseUntilMS {
+		t.Fatalf("order=%#v found=%v err=%v", order, found, err)
 	}
 }
 

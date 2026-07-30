@@ -337,6 +337,10 @@ func (s *Store) PromoteSupplyCreateAttempt(ctx context.Context, localOrderID str
 	return s.SupplyOrders.PromoteCreateAttempt(ctx, localOrderID, order)
 }
 
+func (s *Store) ClaimSupplyOrderTaking(ctx context.Context, orderID string, nowMS int64, leaseUntilMS int64) (bool, error) {
+	return s.SupplyOrders.ClaimTaking(ctx, orderID, nowMS, leaseUntilMS)
+}
+
 func (s *Store) UpdateSupplyOrder(ctx context.Context, order SupplyOrder) error {
 	return s.SupplyOrders.Update(ctx, order)
 }
