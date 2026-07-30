@@ -221,12 +221,19 @@ func newPprofServer(addr string) (*http.Server, error) {
 func runUsageResponseMetadataBackfill(ctx context.Context, db *store.Store) {
 	const batchLimit = 100
 	const maxStartupBatches = 20
+	const batchTimeout = 3 * time.Second
 	const batchDelay = 2 * time.Second
 	total := 0
 	for batch := 0; batch < maxStartupBatches; batch++ {
-		updated, err := db.BackfillUsageResponseMetadata(ctx, batchLimit)
+		batchCtx, cancel := context.WithTimeout(ctx, batchTimeout)
+		updated, err := db.BackfillUsageResponseMetadata(batchCtx, batchLimit)
+		cancel()
 		if err != nil {
 			if ctx.Err() == nil {
+				if errors.Is(err, context.DeadlineExceeded) {
+					log.Printf("usage response metadata backfill paused after timeout: updated=%d batch_limit=%d timeout=%s", total, batchLimit, batchTimeout)
+					return
+				}
 				log.Printf("usage response metadata backfill: %v", err)
 			}
 			return
