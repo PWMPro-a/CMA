@@ -4441,7 +4441,7 @@
     "smart_reason_snapshot_not_ready": "快照尚未生成",
     "smart_reason_unknown": "等待数据",
     "smart_reason_using_stale_auth_files": "使用旧账号快照",
-    "smart_subtitle": "按可用额度总计、每分钟消耗速度、预计耗尽时间和预锁订单状态综合判断补货数量。",
+    "smart_subtitle": "按1小时有效期内可消化额度、每分钟消耗速度、预计耗尽时间和预锁订单状态综合判断补货数量，避免账号到期浪费。",
     "smart_title": "智能资源统计",
     "snapshot_age": "账号快照 {{value}} 秒前",
     "status_cancelled": "已取消",
@@ -4476,6 +4476,11 @@
     "estimated_depletion": "预计多久消耗完",
     "legacy_target_accounts": "兼容目标账号数（关闭智能时生效）",
     "smart_reason_usage_rate_not_ready": "用量速度样本不足，暂不按账号数量补货",
-    "supply_inventory_value": "Supply 现货 {{value}}"
+    "supply_inventory_value": "Supply 现货 {{value}}",
+    "effective_capacity_1h": "1小时内可消化额度",
+    "effective_capacity_rcu": "有效可消化 / 目标容量",
+    "raw_capacity_waste_detail": "原始 {{raw}} RCU · 到期浪费风险 {{waste}} RCU · {{minutes}} 分钟有效期",
+    "effective_health_target_minutes": "有效健康水位 {{value}} 分钟（配置 {{configured}} 分钟）",
+    "smart_reason_expiry_limited_capacity": "受账号1小时有效期限制，当前不继续补货以避免浪费"
   }
 }

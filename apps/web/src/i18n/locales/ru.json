@@ -4441,7 +4441,7 @@
     "smart_reason_snapshot_not_ready": "Снимок ещё не готов",
     "smart_reason_unknown": "Ожидание данных",
     "smart_reason_using_stale_auth_files": "Используется старый снимок аккаунтов",
-    "smart_subtitle": "Рассчитывает пополнение по общей usable-квоте, расходу в минуту, времени до исчерпания и состоянию locked-заказа.",
+    "smart_subtitle": "Рассчитывает пополнение по ёмкости, которую можно израсходовать за 1 час жизни аккаунта, скорости расхода, времени до исчерпания и состоянию locked-заказа, чтобы избежать потерь при истечении.",
     "smart_title": "Умная статистика ресурсов",
     "snapshot_age": "Снимок аккаунтов {{value}} с назад",
     "status_cancelled": "Отменён",
@@ -4476,6 +4476,11 @@
     "estimated_depletion": "Оценка исчерпания",
     "legacy_target_accounts": "Legacy-цель аккаунтов (когда smart выключен)",
     "smart_reason_usage_rate_not_ready": "Недостаточно образцов скорости расхода; заказ по числу аккаунтов не создаётся",
-    "supply_inventory_value": "Склад Supply {{value}}"
+    "supply_inventory_value": "Склад Supply {{value}}",
+    "effective_capacity_1h": "Ёмкость, усваиваемая за 1 ч",
+    "effective_capacity_rcu": "Усваиваемая / целевая ёмкость",
+    "raw_capacity_waste_detail": "Сырая {{raw}} RCU · риск потерь при истечении {{waste}} RCU · срок {{minutes}} мин",
+    "effective_health_target_minutes": "Эффективный запас {{value}} мин (настроено {{configured}} мин)",
+    "smart_reason_expiry_limited_capacity": "Ограничено 1-часовым сроком аккаунта; новое пополнение пропущено, чтобы избежать потерь"
   }
 }

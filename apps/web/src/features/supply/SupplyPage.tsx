@@ -220,11 +220,12 @@ export function SupplyPage() {
       if (smart?.enabled ?? draft.smartEnabled !== false) {
         return [
           {
-            label: t('supply.available_capacity_total'),
+            label: t('supply.effective_capacity_1h'),
             value: formatRcu(smart?.currentCapacityRcu),
-            detail: t('supply.capacity_account_aux', {
-              effective: smart?.availableAccounts ?? 0,
-              schedulable: smart?.schedulableAccounts ?? 0,
+            detail: t('supply.raw_capacity_waste_detail', {
+              raw: formatNumber(smart?.rawCapacityRcu ?? smart?.currentCapacityRcu),
+              waste: formatNumber(smart?.expiryWasteRiskRcu ?? 0),
+              minutes: smart?.accountLifetimeMinutes ?? 60,
             }),
             icon: <IconDatabaseZap size={18} />,
             tone: 'teal',
@@ -242,8 +243,15 @@ export function SupplyPage() {
           {
             label: t('supply.estimated_depletion'),
             value: formatMinutes(smart?.estimatedSustainMinutes),
-            detail: t('supply.health_target_minutes', {
-              value: smart?.healthyMinutesTarget ?? draft.healthyMinutesTarget,
+            detail: t('supply.effective_health_target_minutes', {
+              value:
+                smart?.effectiveHealthyMinutesTarget ??
+                smart?.healthyMinutesTarget ??
+                draft.healthyMinutesTarget,
+              configured:
+                smart?.configuredHealthyMinutesTarget ??
+                smart?.healthyMinutesTarget ??
+                draft.healthyMinutesTarget,
             }),
             icon: <IconTimer size={18} />,
             tone: 'blue',
@@ -367,8 +375,15 @@ export function SupplyPage() {
             <span>{t('supply.sustain_minutes')}</span>
             <strong>{formatMinutes(smart?.estimatedSustainMinutes)}</strong>
             <small>
-              {t('supply.health_target_minutes', {
-                value: smart?.healthyMinutesTarget ?? draft.healthyMinutesTarget,
+              {t('supply.effective_health_target_minutes', {
+                value:
+                  smart?.effectiveHealthyMinutesTarget ??
+                  smart?.healthyMinutesTarget ??
+                  draft.healthyMinutesTarget,
+                configured:
+                  smart?.configuredHealthyMinutesTarget ??
+                  smart?.healthyMinutesTarget ??
+                  draft.healthyMinutesTarget,
               })}
             </small>
           </div>
@@ -405,7 +420,7 @@ export function SupplyPage() {
           </div>
           <div className={styles.capacityBox}>
             <div className={styles.capacityTop}>
-              <span>{t('supply.capacity_rcu')}</span>
+              <span>{t('supply.effective_capacity_rcu')}</span>
               <strong>
                 {formatNumber(smart?.currentCapacityRcu)} / {formatNumber(smart?.targetCapacityRcu)}
               </strong>
@@ -420,6 +435,13 @@ export function SupplyPage() {
             <div className={styles.capacityMeta}>
               <span>
                 {t('supply.capacity_gap', { value: formatNumber(smart?.capacityGapRcu) })}
+              </span>
+              <span>
+                {t('supply.raw_capacity_waste_detail', {
+                  raw: formatNumber(smart?.rawCapacityRcu ?? smart?.currentCapacityRcu),
+                  waste: formatNumber(smart?.expiryWasteRiskRcu ?? 0),
+                  minutes: smart?.accountLifetimeMinutes ?? 60,
+                })}
               </span>
               <span>
                 {t('supply.account_health_counts', {

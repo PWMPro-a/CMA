@@ -98,6 +98,9 @@ export interface SupplySmartResource {
   healthyAccounts: number;
   weakAccounts: number;
   targetAvailableAccounts: number;
+  configuredHealthyMinutesTarget?: number;
+  effectiveHealthyMinutesTarget: number;
+  accountLifetimeMinutes: number;
   estimatedSustainMinutes: number;
   healthyMinutesTarget: number;
   warningMinutes: number;
@@ -107,6 +110,9 @@ export interface SupplySmartResource {
   tpm30m: number;
   consumeRcuPerMinute: number;
   currentCapacityRcu: number;
+  rawCapacityRcu?: number;
+  timeLimitedCapacityRcu?: number;
+  expiryWasteRiskRcu?: number;
   targetCapacityRcu: number;
   capacityGapRcu: number;
   unitCapacityRcu: number;

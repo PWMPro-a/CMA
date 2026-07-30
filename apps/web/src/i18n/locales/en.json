@@ -4441,7 +4441,7 @@
     "smart_reason_snapshot_not_ready": "Snapshot is not ready",
     "smart_reason_unknown": "Waiting for data",
     "smart_reason_using_stale_auth_files": "Using a stale account snapshot",
-    "smart_subtitle": "Decides replenishment from total usable quota, per-minute burn rate, estimated depletion time, and locked-order state.",
+    "smart_subtitle": "Decides replenishment from capacity that can be consumed within the 1-hour lifetime, burn rate, depletion time, and locked-order state to avoid expiry waste.",
     "smart_title": "Smart resource statistics",
     "snapshot_age": "Account snapshot {{value}}s ago",
     "status_cancelled": "Cancelled",
@@ -4476,6 +4476,11 @@
     "estimated_depletion": "Estimated depletion",
     "legacy_target_accounts": "Legacy target accounts (used when smart is off)",
     "smart_reason_usage_rate_not_ready": "Burn-rate samples are not ready; no account-count fallback order is created",
-    "supply_inventory_value": "Supply inventory {{value}}"
+    "supply_inventory_value": "Supply inventory {{value}}",
+    "effective_capacity_1h": "Digestible capacity within 1h",
+    "effective_capacity_rcu": "Digestible / target capacity",
+    "raw_capacity_waste_detail": "Raw {{raw}} RCU · expiry waste risk {{waste}} RCU · {{minutes}} min lifetime",
+    "effective_health_target_minutes": "Effective runway {{value}} min (configured {{configured}} min)",
+    "smart_reason_expiry_limited_capacity": "Limited by the 1-hour account lifetime; skipping more replenishment to avoid waste"
   }
 }

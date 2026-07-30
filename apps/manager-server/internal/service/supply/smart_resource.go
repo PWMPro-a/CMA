@@ -45,38 +45,44 @@ const (
 )
 
 type SmartResource struct {
-	Enabled                 bool    `json:"enabled"`
-	HealthLevel             string  `json:"healthLevel"`
-	SuggestedAction         string  `json:"suggestedAction"`
-	SuggestedQuantity       int     `json:"suggestedQuantity"`
-	DecisionReason          string  `json:"decisionReason"`
-	Confidence              string  `json:"confidence"`
-	SnapshotFresh           bool    `json:"snapshotFresh"`
-	GeneratedAtMS           int64   `json:"generatedAtMs"`
-	AvailableAccounts       int     `json:"availableAccounts"`
-	SchedulableAccounts     int     `json:"schedulableAccounts"`
-	HealthyAccounts         int     `json:"healthyAccounts"`
-	WeakAccounts            int     `json:"weakAccounts"`
-	TargetAvailableAccounts int     `json:"targetAvailableAccounts"`
-	EstimatedSustainMinutes float64 `json:"estimatedSustainMinutes"`
-	HealthyMinutesTarget    int     `json:"healthyMinutesTarget"`
-	WarningMinutes          int     `json:"warningMinutes"`
-	CriticalMinutes         int     `json:"criticalMinutes"`
-	RPM30M                  float64 `json:"rpm30m"`
-	RPM5MPeak               float64 `json:"rpm5mPeak"`
-	TPM30M                  float64 `json:"tpm30m"`
-	ConsumeRCUPerMinute     float64 `json:"consumeRcuPerMinute"`
-	CurrentCapacityRCU      float64 `json:"currentCapacityRcu"`
-	TargetCapacityRCU       float64 `json:"targetCapacityRcu"`
-	CapacityGapRCU          float64 `json:"capacityGapRcu"`
-	UnitCapacityRCU         float64 `json:"unitCapacityRcu"`
-	RecommendedCapacityRCU  float64 `json:"recommendedCapacityRcu"`
-	PrelockedCapacityRCU    float64 `json:"prelockedCapacityRcu,omitempty"`
-	UsageSampleMinutes      int     `json:"usageSampleMinutes"`
-	AccountCacheAgeSeconds  int     `json:"accountCacheAgeSeconds"`
-	LockedOrderID           string  `json:"lockedOrderId,omitempty"`
-	LockedOrderAgeSeconds   int     `json:"lockedOrderAgeSeconds,omitempty"`
-	LockedConfirmRounds     int     `json:"lockedConfirmRounds,omitempty"`
+	Enabled                  bool    `json:"enabled"`
+	HealthLevel              string  `json:"healthLevel"`
+	SuggestedAction          string  `json:"suggestedAction"`
+	SuggestedQuantity        int     `json:"suggestedQuantity"`
+	DecisionReason           string  `json:"decisionReason"`
+	Confidence               string  `json:"confidence"`
+	SnapshotFresh            bool    `json:"snapshotFresh"`
+	GeneratedAtMS            int64   `json:"generatedAtMs"`
+	AvailableAccounts        int     `json:"availableAccounts"`
+	SchedulableAccounts      int     `json:"schedulableAccounts"`
+	HealthyAccounts          int     `json:"healthyAccounts"`
+	WeakAccounts             int     `json:"weakAccounts"`
+	TargetAvailableAccounts  int     `json:"targetAvailableAccounts"`
+	ConfiguredHealthyMinutes int     `json:"configuredHealthyMinutesTarget,omitempty"`
+	EffectiveHealthyMinutes  int     `json:"effectiveHealthyMinutesTarget"`
+	AccountLifetimeMinutes   int     `json:"accountLifetimeMinutes"`
+	EstimatedSustainMinutes  float64 `json:"estimatedSustainMinutes"`
+	HealthyMinutesTarget     int     `json:"healthyMinutesTarget"`
+	WarningMinutes           int     `json:"warningMinutes"`
+	CriticalMinutes          int     `json:"criticalMinutes"`
+	RPM30M                   float64 `json:"rpm30m"`
+	RPM5MPeak                float64 `json:"rpm5mPeak"`
+	TPM30M                   float64 `json:"tpm30m"`
+	ConsumeRCUPerMinute      float64 `json:"consumeRcuPerMinute"`
+	CurrentCapacityRCU       float64 `json:"currentCapacityRcu"`
+	RawCapacityRCU           float64 `json:"rawCapacityRcu,omitempty"`
+	TimeLimitedCapacityRCU   float64 `json:"timeLimitedCapacityRcu,omitempty"`
+	ExpiryWasteRiskRCU       float64 `json:"expiryWasteRiskRcu,omitempty"`
+	TargetCapacityRCU        float64 `json:"targetCapacityRcu"`
+	CapacityGapRCU           float64 `json:"capacityGapRcu"`
+	UnitCapacityRCU          float64 `json:"unitCapacityRcu"`
+	RecommendedCapacityRCU   float64 `json:"recommendedCapacityRcu"`
+	PrelockedCapacityRCU     float64 `json:"prelockedCapacityRcu,omitempty"`
+	UsageSampleMinutes       int     `json:"usageSampleMinutes"`
+	AccountCacheAgeSeconds   int     `json:"accountCacheAgeSeconds"`
+	LockedOrderID            string  `json:"lockedOrderId,omitempty"`
+	LockedOrderAgeSeconds    int     `json:"lockedOrderAgeSeconds,omitempty"`
+	LockedConfirmRounds      int     `json:"lockedConfirmRounds,omitempty"`
 }
 
 type smartUsageBucket struct {
@@ -102,20 +108,30 @@ type authFileSnapshot struct {
 	lastErr     error
 }
 
+type smartCapacityItem struct {
+	capacityRCU      float64
+	remainingMinutes float64
+}
+
 func defaultSmartResource(cfg store.ManagerSupplyConfig) SmartResource {
+	configuredTarget := smartHealthyMinutesTarget(cfg)
+	effectiveTarget := smartEffectiveHealthyMinutesTarget(cfg)
 	return SmartResource{
-		Enabled:                 smartSupplyEnabled(cfg),
-		HealthLevel:             smartHealthUnknown,
-		SuggestedAction:         smartActionSnapshotStale,
-		DecisionReason:          "snapshot_not_ready",
-		Confidence:              smartConfidenceLow,
-		SnapshotFresh:           false,
-		GeneratedAtMS:           time.Now().UnixMilli(),
-		TargetAvailableAccounts: cfg.TargetAvailableAccounts,
-		HealthyMinutesTarget:    smartHealthyMinutesTarget(cfg),
-		WarningMinutes:          smartWarningMinutes(cfg),
-		CriticalMinutes:         smartCriticalMinutes(cfg),
-		UnitCapacityRCU:         smartProductUnitCapacity(cfg.Product),
+		Enabled:                  smartSupplyEnabled(cfg),
+		HealthLevel:              smartHealthUnknown,
+		SuggestedAction:          smartActionSnapshotStale,
+		DecisionReason:           "snapshot_not_ready",
+		Confidence:               smartConfidenceLow,
+		SnapshotFresh:            false,
+		GeneratedAtMS:            time.Now().UnixMilli(),
+		TargetAvailableAccounts:  cfg.TargetAvailableAccounts,
+		ConfiguredHealthyMinutes: configuredTarget,
+		EffectiveHealthyMinutes:  effectiveTarget,
+		AccountLifetimeMinutes:   smartAccountLifetimeMinutes(),
+		HealthyMinutesTarget:     effectiveTarget,
+		WarningMinutes:           smartWarningMinutes(cfg),
+		CriticalMinutes:          smartCriticalMinutes(cfg),
+		UnitCapacityRCU:          smartProductUnitCapacity(cfg.Product),
 	}
 }
 
@@ -230,16 +246,25 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 	resource.UnitCapacityRCU = unit
 	var weightedCapacity float64
 	var effectiveAvailable float64
+	capacityItems := make([]smartCapacityItem, 0, len(authSnapshot.files))
 	for _, file := range authSnapshot.files {
 		if !isSmartCapacityCodexFile(file) {
 			continue
 		}
 		resource.SchedulableAccounts++
 		weight := smartAccountHealthWeight(file, accountUsage)
-		if rawCapacity, ok := smartAccountCapacityRCU(file.Raw, unit); ok {
-			weightedCapacity += rawCapacity * weight
+		rawCapacity, ok := smartAccountCapacityRCU(file.Raw, unit)
+		if ok {
+			rawCapacity *= weight
 		} else {
-			weightedCapacity += unit * weight
+			rawCapacity = unit * weight
+		}
+		weightedCapacity += rawCapacity
+		if rawCapacity > 0 {
+			capacityItems = append(capacityItems, smartCapacityItem{
+				capacityRCU:      rawCapacity,
+				remainingMinutes: smartAccountRemainingMinutes(file.Raw, now, smartAccountLifetimeMinutes()),
+			})
 		}
 		effectiveAvailable += weight
 		if weight >= smartHealthyAccountWeightThreshold {
@@ -249,10 +274,17 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		}
 	}
 	resource.AvailableAccounts = int(math.Floor(effectiveAvailable + smartEffectiveAccountEpsilon))
-	resource.CurrentCapacityRCU = round2(weightedCapacity)
+	resource.RawCapacityRCU = round2(weightedCapacity)
+	resource.CurrentCapacityRCU = resource.RawCapacityRCU
 	consumeRCUPerMinute := smartConsumeRCUPerMinute(resource.RPM30M, resource.RPM5MPeak, resource.TPM30M, unit)
 	resource.ConsumeRCUPerMinute = round2(consumeRCUPerMinute)
-	resource.TargetCapacityRCU = round2(consumeRCUPerMinute * float64(resource.HealthyMinutesTarget))
+	if consumeRCUPerMinute > 0 {
+		usableCapacity, wasteRisk := smartExpiryLimitedCapacity(capacityItems, consumeRCUPerMinute)
+		resource.TimeLimitedCapacityRCU = round2(usableCapacity)
+		resource.ExpiryWasteRiskRCU = round2(wasteRisk)
+		resource.CurrentCapacityRCU = resource.TimeLimitedCapacityRCU
+	}
+	resource.TargetCapacityRCU = round2(consumeRCUPerMinute * float64(resource.EffectiveHealthyMinutes))
 	resource.RecommendedCapacityRCU = resource.TargetCapacityRCU
 
 	if usageStats.requests30 <= 0 || consumeRCUPerMinute <= 0 {
@@ -273,7 +305,7 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 	} else {
 		resource.Confidence = smartConfidenceLow
 	}
-	if resource.EstimatedSustainMinutes >= float64(resource.HealthyMinutesTarget) {
+	if resource.EstimatedSustainMinutes >= float64(resource.EffectiveHealthyMinutes) {
 		resource.HealthLevel = smartHealthHealthy
 		resource.SuggestedAction = smartActionHealthy
 		resource.DecisionReason = "capacity_healthy"
@@ -296,7 +328,15 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 	if unitForNew <= 0 {
 		unitForNew = unit
 	}
-	resource.SuggestedQuantity = clampInt(int(math.Ceil(resource.CapacityGapRCU/unitForNew)), smartPrelockMinQuantity(cfg), smartPrelockMaxQuantity(cfg))
+	maxUsefulNewCapacity := math.Max(0, consumeRCUPerMinute*float64(smartUsefulAccountLifetimeMinutes())-resource.CurrentCapacityRCU-resource.PrelockedCapacityRCU)
+	gapForOrder := math.Min(resource.CapacityGapRCU, maxUsefulNewCapacity)
+	if gapForOrder <= 0 {
+		resource.HealthLevel = smartHealthWarning
+		resource.SuggestedAction = smartActionHealthy
+		resource.DecisionReason = "expiry_limited_capacity"
+		return resource
+	}
+	resource.SuggestedQuantity = clampInt(int(math.Ceil(gapForOrder/unitForNew)), smartPrelockMinQuantity(cfg), smartPrelockMaxQuantity(cfg))
 	return resource
 }
 
@@ -418,7 +458,10 @@ func (s *Service) currentSmartResource(cfg store.ManagerSupplyConfig) SmartResou
 		return defaultSmartResource(cfg)
 	}
 	resource.Enabled = smartSupplyEnabled(cfg)
-	resource.HealthyMinutesTarget = smartHealthyMinutesTarget(cfg)
+	resource.ConfiguredHealthyMinutes = smartHealthyMinutesTarget(cfg)
+	resource.EffectiveHealthyMinutes = smartEffectiveHealthyMinutesTarget(cfg)
+	resource.AccountLifetimeMinutes = smartAccountLifetimeMinutes()
+	resource.HealthyMinutesTarget = resource.EffectiveHealthyMinutes
 	resource.WarningMinutes = smartWarningMinutes(cfg)
 	resource.CriticalMinutes = smartCriticalMinutes(cfg)
 	resource.TargetAvailableAccounts = cfg.TargetAvailableAccounts
@@ -439,10 +482,26 @@ func smartHealthyMinutesTarget(cfg store.ManagerSupplyConfig) int {
 	return positiveOr(cfg.HealthyMinutesTarget, 120)
 }
 
+func smartAccountLifetimeMinutes() int {
+	return 60
+}
+
+func smartUsefulAccountLifetimeMinutes() int {
+	// Supplier accounts are short-lived. Keep a small tail as safety because
+	// taking, importing, scheduling and in-flight requests all consume part of
+	// the one-hour lifetime.
+	return 55
+}
+
+func smartEffectiveHealthyMinutesTarget(cfg store.ManagerSupplyConfig) int {
+	return min(smartHealthyMinutesTarget(cfg), smartUsefulAccountLifetimeMinutes())
+}
+
 func smartWarningMinutes(cfg store.ManagerSupplyConfig) int {
-	value := positiveOr(cfg.WarningMinutes, 60)
-	if value >= smartHealthyMinutesTarget(cfg) {
-		value = max(1, smartHealthyMinutesTarget(cfg)/2)
+	target := smartEffectiveHealthyMinutesTarget(cfg)
+	value := positiveOr(cfg.WarningMinutes, max(1, target/2))
+	if value >= target {
+		value = max(1, target/2)
 	}
 	return value
 }
@@ -694,6 +753,120 @@ func smartAccountCapacityRCU(values map[string]any, unit float64) (float64, bool
 	return 0, false
 }
 
+func smartExpiryLimitedCapacity(items []smartCapacityItem, consumeRCUPerMinute float64) (float64, float64) {
+	if consumeRCUPerMinute <= 0 || len(items) == 0 {
+		total := 0.0
+		for _, item := range items {
+			total += math.Max(0, item.capacityRCU)
+		}
+		return total, 0
+	}
+	ordered := make([]smartCapacityItem, 0, len(items))
+	for _, item := range items {
+		if item.capacityRCU <= 0 {
+			continue
+		}
+		item.remainingMinutes = math.Max(0, math.Min(float64(smartAccountLifetimeMinutes()), item.remainingMinutes))
+		ordered = append(ordered, item)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].remainingMinutes < ordered[j].remainingMinutes
+	})
+	usable := 0.0
+	wasteRisk := 0.0
+	for _, item := range ordered {
+		maxConsumableBeforeExpiry := consumeRCUPerMinute * item.remainingMinutes
+		remainingDemandBeforeExpiry := maxConsumableBeforeExpiry - usable
+		if remainingDemandBeforeExpiry <= 0 {
+			wasteRisk += item.capacityRCU
+			continue
+		}
+		use := math.Min(item.capacityRCU, remainingDemandBeforeExpiry)
+		usable += use
+		wasteRisk += math.Max(0, item.capacityRCU-use)
+	}
+	return usable, wasteRisk
+}
+
+func smartAccountRemainingMinutes(values map[string]any, now time.Time, fallbackMinutes int) float64 {
+	if fallbackMinutes <= 0 {
+		fallbackMinutes = smartAccountLifetimeMinutes()
+	}
+	if seconds, ok := numberFieldOK(values,
+		"remaining_seconds", "remainingSeconds", "remaining_valid_seconds", "remainingValidSeconds",
+		"minimum_remaining_seconds", "minimumRemainingSeconds", "ttl_seconds", "ttlSeconds",
+	); ok {
+		return clampFloat(seconds/60, 0, float64(smartAccountLifetimeMinutes()))
+	}
+	if minutes, ok := numberFieldOK(values, "remaining_minutes", "remainingMinutes", "ttl_minutes", "ttlMinutes"); ok {
+		return clampFloat(minutes, 0, float64(smartAccountLifetimeMinutes()))
+	}
+	if seconds, ok := numberFieldOK(values, "expires_in", "expiresIn", "expire_in", "expireIn"); ok {
+		return clampFloat(seconds/60, 0, float64(smartAccountLifetimeMinutes()))
+	}
+	for _, key := range []string{"expired", "expires_at", "expiresAt", "expire_at", "expireAt", "valid_until", "validUntil"} {
+		raw, ok := values[key]
+		if !ok || raw == nil {
+			continue
+		}
+		if expiry, ok := parseSmartExpiryTime(raw, now); ok {
+			return clampFloat(expiry.Sub(now).Minutes(), 0, float64(smartAccountLifetimeMinutes()))
+		}
+	}
+	return float64(fallbackMinutes)
+}
+
+func parseSmartExpiryTime(value any, now time.Time) (time.Time, bool) {
+	switch typed := value.(type) {
+	case int:
+		return unixLikeToTime(float64(typed), now)
+	case int64:
+		return unixLikeToTime(float64(typed), now)
+	case float64:
+		return unixLikeToTime(typed, now)
+	case jsonNumber:
+		parsed, err := typed.Float64()
+		if err != nil {
+			return time.Time{}, false
+		}
+		return unixLikeToTime(parsed, now)
+	case string:
+		text := strings.TrimSpace(typed)
+		if text == "" {
+			return time.Time{}, false
+		}
+		if parsed, ok := parseFloat(text); ok {
+			return unixLikeToTime(parsed, now)
+		}
+		for _, layout := range []string{
+			time.RFC3339Nano,
+			time.RFC3339,
+			"2006-01-02 15:04:05",
+			"2006-01-02T15:04:05",
+			"2006-01-02",
+		} {
+			if parsed, err := time.Parse(layout, text); err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func unixLikeToTime(value float64, now time.Time) (time.Time, bool) {
+	if value <= 0 {
+		return time.Time{}, false
+	}
+	// Values smaller than 10 years are durations from now rather than absolute unix timestamps.
+	if value < 10*365*24*60*60 {
+		return now.Add(time.Duration(value) * time.Second), true
+	}
+	if value > 1e12 {
+		return time.UnixMilli(int64(value)), true
+	}
+	return time.Unix(int64(value), 0), true
+}
+
 func smartFileAccountKeys(file cpaauthfiles.File) []string {
 	values := []string{file.AuthIndex, file.AccountID, file.AccountSnapshot, file.Name}
 	keys := make([]string, 0, len(values))
@@ -730,6 +903,11 @@ func smartUsageAccountKey(event usage.Event) string {
 }
 
 func numberField(values map[string]any, keys ...string) float64 {
+	value, _ := numberFieldOK(values, keys...)
+	return value
+}
+
+func numberFieldOK(values map[string]any, keys ...string) (float64, bool) {
 	for _, key := range keys {
 		value, ok := values[key]
 		if !ok || value == nil {
@@ -737,21 +915,21 @@ func numberField(values map[string]any, keys ...string) float64 {
 		}
 		switch typed := value.(type) {
 		case int:
-			return float64(typed)
+			return float64(typed), true
 		case int64:
-			return float64(typed)
+			return float64(typed), true
 		case float64:
-			return typed
+			return typed, true
 		case jsonNumber:
 			parsed, _ := typed.Float64()
-			return parsed
+			return parsed, true
 		case string:
 			if parsed, ok := parseFloat(typed); ok {
-				return parsed
+				return parsed, true
 			}
 		}
 	}
-	return 0
+	return 0, false
 }
 
 type jsonNumber interface{ Float64() (float64, error) }
@@ -780,6 +958,19 @@ func maxInt64(left, right int64) int64 {
 }
 
 func clampInt(value, minValue, maxValue int) int {
+	if maxValue < minValue {
+		maxValue = minValue
+	}
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
+}
+
+func clampFloat(value, minValue, maxValue float64) float64 {
 	if maxValue < minValue {
 		maxValue = minValue
 	}

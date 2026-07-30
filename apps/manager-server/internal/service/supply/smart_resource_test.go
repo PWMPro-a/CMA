@@ -151,6 +151,63 @@ func TestSmartResourceWeightsHealthByUsabilityAndRemainingCapacity(t *testing.T)
 	}
 }
 
+func TestSmartResourceLimitsCapacityByOneHourExpiry(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now()
+	events := make([]usage.Event, 0, 30)
+	for minute := 0; minute < 30; minute++ {
+		events = append(events, usage.Event{
+			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+			Provider:    "codex",
+			AuthIndex:   "slow-source",
+			TotalTokens: 100,
+		})
+	}
+	service.recordSmartUsageEvents(events, now)
+
+	files := make([]cpaauthfiles.File, 0, 10)
+	for index := 0; index < 10; index++ {
+		files = append(files, cpaauthfiles.File{
+			Name:     "capacity.json",
+			Provider: "codex",
+			Raw: map[string]any{
+				"status":            "ready",
+				"remaining_rcu":     80,
+				"remaining_seconds": 3600,
+				"recent_requests": []any{
+					map[string]any{"success": 12, "failed": 0},
+				},
+			},
+		})
+	}
+
+	resource := service.buildSmartResourceFromSnapshots(store.ManagerSupplyConfig{
+		Product:              "oauth_30d",
+		HealthyMinutesTarget: 120,
+		WarningMinutes:       60,
+		CriticalMinutes:      30,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   10,
+		NewAccountConfidence: 0.7,
+	}, authFileSnapshot{generatedAt: now, files: files}, now)
+
+	if resource.RawCapacityRCU != 800 {
+		t.Fatalf("raw capacity = %#v", resource)
+	}
+	if resource.CurrentCapacityRCU != 60 {
+		t.Fatalf("capacity should be limited by one-hour burn window, got %#v", resource)
+	}
+	if resource.ExpiryWasteRiskRCU != 740 {
+		t.Fatalf("waste risk should report capacity that cannot be consumed before expiry, got %#v", resource)
+	}
+	if resource.EffectiveHealthyMinutes != 55 || resource.TargetCapacityRCU != 55 {
+		t.Fatalf("healthy target should be capped by useful account lifetime, got %#v", resource)
+	}
+	if resource.HealthLevel != smartHealthHealthy || resource.SuggestedQuantity != 0 {
+		t.Fatalf("low burn with enough expiry-limited capacity should not replenish, got %#v", resource)
+	}
+}
+
 func TestSmartAutomaticSkipsCreateWhenUsageRateNotReady(t *testing.T) {
 	var createCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

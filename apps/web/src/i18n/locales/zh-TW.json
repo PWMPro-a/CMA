@@ -4441,7 +4441,7 @@
     "smart_reason_snapshot_not_ready": "快照尚未產生",
     "smart_reason_unknown": "等待資料",
     "smart_reason_using_stale_auth_files": "使用舊帳號快照",
-    "smart_subtitle": "按可用額度總計、每分鐘消耗速度、預計耗盡時間和預鎖訂單狀態綜合判斷補貨數量。",
+    "smart_subtitle": "按 1 小時有效期內可消化額度、每分鐘消耗速度、預計耗盡時間和預鎖訂單狀態綜合判斷補貨數量，避免帳號到期浪費。",
     "smart_title": "智慧資源統計",
     "snapshot_age": "帳號快照 {{value}} 秒前",
     "status_cancelled": "已取消",
@@ -4476,6 +4476,11 @@
     "estimated_depletion": "預計多久消耗完",
     "legacy_target_accounts": "相容目標帳號數（關閉智能時生效）",
     "smart_reason_usage_rate_not_ready": "用量速度樣本不足，暫不按帳號數量補貨",
-    "supply_inventory_value": "Supply 現貨 {{value}}"
+    "supply_inventory_value": "Supply 現貨 {{value}}",
+    "effective_capacity_1h": "1 小時內可消化額度",
+    "effective_capacity_rcu": "有效可消化 / 目標容量",
+    "raw_capacity_waste_detail": "原始 {{raw}} RCU · 到期浪費風險 {{waste}} RCU · {{minutes}} 分鐘有效期",
+    "effective_health_target_minutes": "有效健康水位 {{value}} 分鐘（設定 {{configured}} 分鐘）",
+    "smart_reason_expiry_limited_capacity": "受帳號 1 小時有效期限制，目前不繼續補貨以避免浪費"
   }
 }
