@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	_ "time/tzdata"
@@ -90,11 +91,19 @@ func runServer() {
 	})
 	accountActionWorker := worker.NewAccountActionCandidateWorker(db, runtimeSettings.AccountActionsAutoDisable)
 	accountHistoryRollupWorker := worker.NewAccountHistoryRollupWorker(db)
-	accountHistoryRollupWorker.Start(ctx)
 	var dashboardHourlyRollupWorker *worker.DashboardHourlyRollupWorker
 	if cfg.DashboardHourlyRollupEnabled {
 		dashboardHourlyRollupWorker = worker.NewDashboardHourlyRollupWorker(db)
-		dashboardHourlyRollupWorker.Start(ctx)
+	}
+	var startRollupsOnce sync.Once
+	startRollups := func() {
+		startRollupsOnce.Do(func() {
+			log.Printf("usage rollup workers starting after cache-accounting maintenance")
+			accountHistoryRollupWorker.Start(ctx)
+			if dashboardHourlyRollupWorker != nil {
+				dashboardHourlyRollupWorker.Start(ctx)
+			}
+		})
 	}
 	serverApp.AppContext().UsageService.SetEventsInsertedNotifier(func() {
 		accountHistoryRollupWorker.Wake()
@@ -154,11 +163,15 @@ func runServer() {
 	}()
 
 	usageCacheAccountingMigrationWorker := worker.NewUsageCacheAccountingMigrationWorker(db, func() {
-		go runUsageResponseMetadataBackfill(ctx, db)
-		accountHistoryRollupWorker.Wake()
-		if dashboardHourlyRollupWorker != nil {
-			dashboardHourlyRollupWorker.Wake()
-		}
+		go func() {
+			log.Printf("usage response metadata backfill starting before rollup catch-up")
+			runUsageResponseMetadataBackfill(ctx, db)
+			startRollups()
+			accountHistoryRollupWorker.Wake()
+			if dashboardHourlyRollupWorker != nil {
+				dashboardHourlyRollupWorker.Wake()
+			}
+		}()
 	})
 	usageCacheAccountingMigrationWorker.Start(ctx)
 
