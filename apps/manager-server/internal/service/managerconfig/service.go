@@ -297,14 +297,25 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	if submitted.Enabled != nil {
 		next.Enabled = BoolPtr(*submitted.Enabled)
 	}
+	credentialIdentityChanged := false
 	if value := strings.TrimSpace(submitted.BaseURL); value != "" {
-		next.BaseURL = strings.TrimRight(value, "/")
+		normalized := strings.TrimRight(value, "/")
+		if normalized != strings.TrimRight(strings.TrimSpace(current.BaseURL), "/") {
+			credentialIdentityChanged = true
+		}
+		next.BaseURL = normalized
 	}
 	if value := strings.TrimSpace(submitted.Username); value != "" {
+		if value != strings.TrimSpace(current.Username) {
+			credentialIdentityChanged = true
+		}
 		next.Username = value
 	}
-	if value := strings.TrimSpace(submitted.Password); value != "" {
-		next.Password = value
+	passwordSubmitted := strings.TrimSpace(submitted.Password) != ""
+	if passwordSubmitted {
+		next.Password = strings.TrimSpace(submitted.Password)
+	} else if credentialIdentityChanged {
+		next.Password = ""
 	}
 	if value := strings.ToLower(strings.TrimSpace(submitted.Product)); value != "" {
 		next.Product = value
