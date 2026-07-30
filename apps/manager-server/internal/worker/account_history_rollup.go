@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	defaultAccountHistoryRollupBatchLimit    = 1000
-	defaultAccountHistoryRollupMaxBatches    = 10
-	defaultAccountHistoryRollupCheckInterval = 30 * time.Second
+	defaultAccountHistoryRollupBatchLimit    = 200
+	defaultAccountHistoryRollupMaxBatches    = 1
+	defaultAccountHistoryRollupCheckInterval = 60 * time.Second
+	defaultAccountHistoryRollupWakeInterval  = 30 * time.Second
 )
 
 type AccountHistoryRollupWorker struct {
@@ -25,6 +26,8 @@ type AccountHistoryRollupWorker struct {
 	maxBatches        int
 	checkInterval     time.Duration
 	continuationDelay time.Duration
+	wakeMinInterval   time.Duration
+	lastWakeAtMS      int64
 }
 
 func NewAccountHistoryRollupWorker(store *store.Store) *AccountHistoryRollupWorker {
@@ -35,6 +38,7 @@ func NewAccountHistoryRollupWorker(store *store.Store) *AccountHistoryRollupWork
 		maxBatches:        defaultAccountHistoryRollupMaxBatches,
 		checkInterval:     defaultAccountHistoryRollupCheckInterval,
 		continuationDelay: defaultRollupContinuationDelay,
+		wakeMinInterval:   defaultAccountHistoryRollupWakeInterval,
 	}
 }
 
@@ -55,6 +59,9 @@ func (w *AccountHistoryRollupWorker) HandleUsageEvents(ctx context.Context, _ co
 
 func (w *AccountHistoryRollupWorker) Wake() {
 	if w == nil {
+		return
+	}
+	if !rollupWakeAllowed(&w.lastWakeAtMS, w.wakeMinInterval) {
 		return
 	}
 	select {
@@ -80,6 +87,10 @@ func (w *AccountHistoryRollupWorker) catchUp(ctx context.Context) bool {
 		}
 		result, err := w.store.CatchUpAccountHistoryRollups(ctx, w.batchLimit, time.Now().UnixMilli())
 		if err != nil {
+			if isSQLiteBusyError(err) {
+				log.Printf("[usage-rollup] account history catch-up deferred: sqlite writer busy")
+				return false
+			}
 			log.Printf("[usage-rollup] account history catch-up failed: %v", err)
 			return false
 		}

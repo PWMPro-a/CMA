@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const defaultRollupContinuationDelay = 250 * time.Millisecond
+const defaultRollupContinuationDelay = 5 * time.Second
 
 func runRollupLoop(
 	ctx context.Context,

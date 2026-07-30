@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	defaultDashboardHourlyRollupBatchLimit    = 1000
-	defaultDashboardHourlyRollupMaxBatches    = 10
-	defaultDashboardHourlyRollupCheckInterval = 30 * time.Second
+	defaultDashboardHourlyRollupBatchLimit    = 200
+	defaultDashboardHourlyRollupMaxBatches    = 1
+	defaultDashboardHourlyRollupCheckInterval = 60 * time.Second
+	defaultDashboardHourlyRollupWakeInterval  = 30 * time.Second
 )
 
 type DashboardHourlyRollupWorker struct {
@@ -25,6 +26,8 @@ type DashboardHourlyRollupWorker struct {
 	maxBatches        int
 	checkInterval     time.Duration
 	continuationDelay time.Duration
+	wakeMinInterval   time.Duration
+	lastWakeAtMS      int64
 }
 
 func NewDashboardHourlyRollupWorker(store *store.Store) *DashboardHourlyRollupWorker {
@@ -35,6 +38,7 @@ func NewDashboardHourlyRollupWorker(store *store.Store) *DashboardHourlyRollupWo
 		maxBatches:        defaultDashboardHourlyRollupMaxBatches,
 		checkInterval:     defaultDashboardHourlyRollupCheckInterval,
 		continuationDelay: defaultRollupContinuationDelay,
+		wakeMinInterval:   defaultDashboardHourlyRollupWakeInterval,
 	}
 }
 
@@ -55,6 +59,9 @@ func (w *DashboardHourlyRollupWorker) HandleUsageEvents(ctx context.Context, _ c
 
 func (w *DashboardHourlyRollupWorker) Wake() {
 	if w == nil {
+		return
+	}
+	if !rollupWakeAllowed(&w.lastWakeAtMS, w.wakeMinInterval) {
 		return
 	}
 	select {
@@ -80,6 +87,10 @@ func (w *DashboardHourlyRollupWorker) catchUp(ctx context.Context) bool {
 		}
 		result, err := w.store.CatchUpDashboardHourlyRollups(ctx, w.batchLimit, time.Now().UnixMilli())
 		if err != nil {
+			if isSQLiteBusyError(err) {
+				log.Printf("[usage-rollup] dashboard hourly catch-up deferred: sqlite writer busy")
+				return false
+			}
 			log.Printf("[usage-rollup] dashboard hourly catch-up failed: %v", err)
 			return false
 		}
