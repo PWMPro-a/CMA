@@ -217,13 +217,22 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		if manualQuantity > 0 {
 			return ErrOrderInProgress
 		}
-		if err := s.requireCredentials(supplyCfg); err != nil {
-			return err
+		switch active.Status {
+		case "creating", "create_uncertain", "importing", "partial":
+		default:
+			if err := s.requireCredentials(supplyCfg); err != nil {
+				return err
+			}
 		}
 		if !force && active.NextPollAtMS > time.Now().UnixMilli() {
 			return nil
 		}
 		return s.processOrder(ctx, cfg, active)
+	}
+	if repaired, repairedFound, err := s.store.ActivateNextLegacySupplyRepair(ctx); err != nil {
+		return err
+	} else if repairedFound {
+		return s.processOrder(ctx, cfg, repaired)
 	}
 
 	if allowCreate && manualQuantity == 0 && !managerconfigsvc.SupplyEnabled(supplyCfg) {
@@ -239,6 +248,14 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	available, err := s.countAvailableAccounts(ctx, cfg)
 	if err != nil {
 		return err
+	}
+	if manualQuantity == 0 {
+		if recent, recentFound, err := s.store.GetLatestCompletedAutomaticSupplyOrder(ctx); err != nil {
+			return err
+		} else if recentFound && time.Since(time.UnixMilli(recent.CompletedAtMS)) < automaticSettleWindow(supplyCfg) {
+			s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
+			return nil
+		}
 	}
 	quantity := manualQuantity
 	if quantity == 0 {
@@ -382,15 +399,15 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		return s.store.UpdateSupplyOrder(ctx, order)
 	}
 	items := make([]store.SupplyImportItem, 0, len(taken.Accounts))
-	for _, raw := range taken.Accounts {
-		payload, key, err := normalizeAccountPayload(raw)
+	for index, raw := range taken.Accounts {
+		payload, key, fileName, err := normalizeAccountPayload(raw)
 		if err != nil {
-			continue
+			return s.updateOrderError(ctx, &order, fmt.Errorf("supply account %d format is unsupported: %w", index+1, err), cfg.Supply)
 		}
 		items = append(items, store.SupplyImportItem{
 			OrderID:     order.OrderID,
 			ItemKey:     key,
-			FileName:    "supply-" + key[:16] + ".json",
+			FileName:    fileName,
 			PayloadJSON: string(payload),
 		})
 	}
@@ -416,8 +433,13 @@ func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, orde
 	}
 	var firstErr error
 	for _, item := range items {
-		err := s.authFiles.Upload(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey,
-			item.FileName, []byte(item.PayloadJSON), cfg.Supply.DefaultWebsockets)
+		payload, _, fileName, err := normalizeAccountPayloadForImport(item.PayloadJSON)
+		if err == nil && fileName != item.FileName {
+			err = s.store.UpdateSupplyImportItemFileName(ctx, item.ID, fileName)
+		}
+		if err == nil {
+			err = s.ensureCPAAccountImported(ctx, cfg, fileName, payload)
+		}
 		if err == nil {
 			if markErr := s.store.MarkSupplyImportItemImported(ctx, item.ID, time.Now().UnixMilli()); markErr != nil {
 				return markErr
@@ -540,6 +562,52 @@ func (s *Service) setOverview(overview Overview) {
 	s.stateMu.Lock()
 	s.overview = overview
 	s.stateMu.Unlock()
+}
+
+func (s *Service) updateCPAOverview(available int, target int) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	s.overview.CPAAvailable = available
+	s.overview.CPATarget = target
+	s.overview.CPADeficit = max(0, target-available)
+	s.overview.CheckedAtMS = time.Now().UnixMilli()
+}
+
+func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.ManagerConfig, fileName string, payload []byte) error {
+	find := func() error {
+		file, found, err := s.authFiles.Find(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName, "")
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errors.New("CPA did not register the imported auth file")
+		}
+		provider := strings.ToLower(strings.TrimSpace(file.Provider))
+		if provider != "codex" && provider != "openai-codex" {
+			return fmt.Errorf("CPA registered imported auth file with unsupported provider %q", provider)
+		}
+		if !isAvailableCodexFile(file) {
+			return errors.New("CPA registered imported auth file but it is not available")
+		}
+		return nil
+	}
+	if err := find(); err == nil {
+		return nil
+	}
+	if err := s.authFiles.Upload(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey,
+		fileName, payload, cfg.Supply.DefaultWebsockets); err != nil {
+		return err
+	}
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		if err := find(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
+	}
+	return lastErr
 }
 
 func (s *Service) recordError(err error) {
@@ -684,33 +752,249 @@ func retryDelay(attempt int) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func normalizeAccountPayload(raw json.RawMessage) ([]byte, string, error) {
+func automaticSettleWindow(cfg store.ManagerSupplyConfig) time.Duration {
+	seconds := cfg.CheckIntervalSeconds * 2
+	if seconds < 30 {
+		seconds = 30
+	}
+	if seconds > 120 {
+		seconds = 120
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func normalizeAccountPayload(raw json.RawMessage) ([]byte, string, string, error) {
 	payload := bytes.TrimSpace(raw)
 	if len(payload) == 0 {
-		return nil, "", errors.New("empty supply account payload")
+		return nil, "", "", errors.New("empty supply account payload")
 	}
 	if payload[0] == '"' {
 		var text string
 		if err := json.Unmarshal(payload, &text); err != nil {
-			return nil, "", err
+			return nil, "", "", err
 		}
 		payload = []byte(strings.TrimSpace(text))
 	}
+	return normalizeAccountPayloadForImport(string(payload))
+}
+
+func normalizeAccountPayloadForImport(payloadJSON string) ([]byte, string, string, error) {
 	var object map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder := json.NewDecoder(strings.NewReader(strings.TrimSpace(payloadJSON)))
 	decoder.UseNumber()
 	if err := decoder.Decode(&object); err != nil || len(object) == 0 {
 		if err == nil {
 			err = errors.New("supply account payload is empty")
 		}
-		return nil, "", err
+		return nil, "", "", err
 	}
-	normalized, err := json.Marshal(object)
+
+	metadata := cloneMap(object)
+	if credentials, ok := object["credentials"].(map[string]any); ok {
+		if !isSupportedSupplyOAuth(object, credentials) {
+			return nil, "", "", errors.New("account is not an OpenAI OAuth credential")
+		}
+		metadata = convertSub2AccountToCPAPayload(object, credentials)
+	} else if hasSupplyAccessToken(metadata) {
+		metadata["type"] = "codex"
+		normalizeCodexPayloadAliases(metadata)
+	} else {
+		return nil, "", "", errors.New("account does not contain an OAuth access token")
+	}
+
+	identity := supplyAccountIdentity(metadata)
+	if identity == "" {
+		return nil, "", "", errors.New("stable account identity is missing")
+	}
+
+	normalized, err := json.Marshal(metadata)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
-	sum := sha256.Sum256(normalized)
-	return normalized, hex.EncodeToString(sum[:]), nil
+	sum := sha256.Sum256([]byte(identity))
+	digest := hex.EncodeToString(sum[:])
+	return normalized, digest, "codex-supply-" + digest[:20] + ".json", nil
+}
+
+func convertSub2AccountToCPAPayload(account map[string]any, credentials map[string]any) map[string]any {
+	extra := mapFromMap(account, "extra")
+	email := stringFromMaps([]map[string]any{credentials, extra}, "email", "email_address", "emailAddress")
+	accountID := stringFromMaps([]map[string]any{credentials, extra}, "chatgpt_account_id", "chatgptAccountId", "account_id", "accountId")
+	userID := stringFromMaps([]map[string]any{credentials, extra}, "chatgpt_user_id", "chatgptUserId", "user_id", "userId")
+	organizationID := stringFromMaps([]map[string]any{credentials, extra}, "organization_id", "organizationId", "org_id", "orgId", "poid")
+	planType := stringFromMaps([]map[string]any{credentials, extra}, "plan_type", "planType", "chatgpt_plan_type", "chatgptPlanType")
+	expiresAt := stringFromMaps([]map[string]any{credentials, account}, "expires_at", "expiresAt", "expired")
+	lastRefresh := stringFromMaps([]map[string]any{credentials, extra, account}, "last_refresh", "lastRefresh", "exported_at", "exportedAt")
+	name := firstNonEmptyString(stringFromMap(account, "name"), email, accountID, "OpenAI OAuth Account")
+
+	metadata := map[string]any{
+		"type":           "codex",
+		"access_token":   firstNonEmptyString(stringFromMap(credentials, "access_token", "accessToken"), stringFromMap(credentials, "session_access_token", "sessionAccessToken")),
+		"name":           name,
+		"import_format":  "sub2api",
+		"sub2_platform":  strings.ToLower(stringFromMap(account, "platform", "provider")),
+		"source_product": stringFromMap(account, "product"),
+	}
+	setString(metadata, "refresh_token", stringFromMap(credentials, "refresh_token", "refreshToken"))
+	setString(metadata, "id_token", stringFromMap(credentials, "id_token", "idToken"))
+	setString(metadata, "client_id", stringFromMap(credentials, "client_id", "clientId"))
+	setString(metadata, "email", email)
+	if accountID != "" {
+		metadata["account_id"] = accountID
+		metadata["chatgpt_account_id"] = accountID
+	}
+	setString(metadata, "chatgpt_user_id", userID)
+	setString(metadata, "organization_id", organizationID)
+	if planType != "" {
+		metadata["plan_type"] = planType
+		metadata["chatgpt_plan_type"] = planType
+	}
+	if expiresAt != "" {
+		metadata["expired"] = expiresAt
+		metadata["expires_at"] = expiresAt
+	}
+	setString(metadata, "last_refresh", lastRefresh)
+	copyOptionalSupplyField(metadata, account, "priority", "priority")
+	copyOptionalSupplyField(metadata, account, "max_concurrency", "concurrency")
+	copyOptionalSupplyField(metadata, account, "proxy_url", "proxy_url")
+	copyOptionalSupplyField(metadata, account, "proxy_url", "proxyUrl")
+	copyOptionalSupplyField(metadata, extra, "proxy_url", "proxy_url")
+	copyOptionalSupplyField(metadata, extra, "proxy_url", "proxyUrl")
+	copyOptionalSupplyField(metadata, extra, "websockets", "websockets")
+	copyOptionalSupplyField(metadata, extra, "openai_oauth_responses_websockets_v2_enabled", "openai_oauth_responses_websockets_v2_enabled")
+	if value, ok := account["disabled"].(bool); ok && value {
+		metadata["disabled"] = true
+	} else if status := strings.ToLower(stringFromMap(account, "status", "state")); status == "disabled" || status == "inactive" || status == "expired" || status == "revoked" || status == "deleted" {
+		metadata["disabled"] = true
+	}
+	return stripEmptyValues(metadata)
+}
+
+func normalizeCodexPayloadAliases(metadata map[string]any) {
+	if value := firstNonEmptyString(stringFromMap(metadata, "access_token", "accessToken"), stringFromMap(metadata, "session_access_token", "sessionAccessToken")); value != "" {
+		metadata["access_token"] = value
+	}
+	if accountID := stringFromMap(metadata, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"); accountID != "" {
+		metadata["account_id"] = accountID
+		metadata["chatgpt_account_id"] = accountID
+	}
+	if planType := stringFromMap(metadata, "plan_type", "planType", "chatgpt_plan_type", "chatgptPlanType"); planType != "" {
+		metadata["plan_type"] = planType
+		metadata["chatgpt_plan_type"] = planType
+	}
+	if expiresAt := stringFromMap(metadata, "expired", "expires_at", "expiresAt"); expiresAt != "" {
+		metadata["expired"] = expiresAt
+	}
+}
+
+func supplyAccountIdentity(metadata map[string]any) string {
+	accountID := stringFromMap(metadata, "account_id", "chatgpt_account_id")
+	email := stringFromMap(metadata, "email")
+	planType := stringFromMap(metadata, "plan_type", "chatgpt_plan_type")
+	if accountID != "" && email != "" {
+		return accountID + "|" + email
+	}
+	if accountID != "" {
+		return accountID
+	}
+	if userID := stringFromMap(metadata, "chatgpt_user_id"); userID != "" {
+		return userID
+	}
+	if email != "" {
+		return email + "|" + planType
+	}
+	return stringFromMap(metadata, "refresh_token", "access_token", "id_token")
+}
+
+func cloneMap(source map[string]any) map[string]any {
+	clone := make(map[string]any, len(source))
+	for key, value := range source {
+		clone[key] = value
+	}
+	return clone
+}
+
+func stringFromMap(values map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := values[key]; ok && value != nil {
+			text := strings.TrimSpace(fmt.Sprint(value))
+			if text != "" && text != "<nil>" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func stringFromMaps(values []map[string]any, keys ...string) string {
+	for _, value := range values {
+		if len(value) == 0 {
+			continue
+		}
+		if text := stringFromMap(value, keys...); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func setString(values map[string]any, key string, value string) {
+	if value = strings.TrimSpace(value); value != "" {
+		values[key] = value
+	}
+}
+
+func mapFromMap(values map[string]any, key string) map[string]any {
+	if child, ok := values[key].(map[string]any); ok {
+		return child
+	}
+	return nil
+}
+
+func copyOptionalSupplyField(target map[string]any, source map[string]any, targetKey string, sourceKey string) {
+	if len(source) == 0 {
+		return
+	}
+	if _, exists := target[targetKey]; exists {
+		return
+	}
+	if value, exists := source[sourceKey]; exists && value != nil && strings.TrimSpace(fmt.Sprint(value)) != "" {
+		target[targetKey] = value
+	}
+}
+
+func stripEmptyValues(values map[string]any) map[string]any {
+	for key, value := range values {
+		if value == nil || strings.TrimSpace(fmt.Sprint(value)) == "" || strings.TrimSpace(fmt.Sprint(value)) == "<nil>" {
+			delete(values, key)
+		}
+	}
+	return values
+}
+
+func hasSupplyAccessToken(values map[string]any) bool {
+	return firstNonEmptyString(stringFromMap(values, "access_token", "accessToken"), stringFromMap(values, "session_access_token", "sessionAccessToken")) != ""
+}
+
+func isSupportedSupplyOAuth(account map[string]any, credentials map[string]any) bool {
+	platform := strings.ToLower(stringFromMap(account, "platform", "provider"))
+	typeName := strings.ToLower(stringFromMap(account, "type"))
+	if platform != "" && platform != "openai" && platform != "codex" {
+		return false
+	}
+	if typeName != "" && typeName != "oauth" && typeName != "codex" {
+		return false
+	}
+	return hasSupplyAccessToken(credentials)
 }
 
 func isAvailableCodexFile(file cpaauthfiles.File) bool {

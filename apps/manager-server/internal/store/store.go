@@ -325,6 +325,14 @@ func (s *Store) GetOpenSupplyOrder(ctx context.Context) (SupplyOrder, bool, erro
 	return s.SupplyOrders.GetOpen(ctx)
 }
 
+func (s *Store) GetLatestCompletedAutomaticSupplyOrder(ctx context.Context) (SupplyOrder, bool, error) {
+	return s.SupplyOrders.GetLatestCompletedAutomatic(ctx)
+}
+
+func (s *Store) ActivateNextLegacySupplyRepair(ctx context.Context) (SupplyOrder, bool, error) {
+	return s.SupplyOrders.ActivateNextLegacyRepair(ctx)
+}
+
 func (s *Store) PromoteSupplyCreateAttempt(ctx context.Context, localOrderID string, order SupplyOrder) error {
 	return s.SupplyOrders.PromoteCreateAttempt(ctx, localOrderID, order)
 }
@@ -351,6 +359,10 @@ func (s *Store) MarkSupplyImportItemImported(ctx context.Context, id int64, impo
 
 func (s *Store) MarkSupplyImportItemFailed(ctx context.Context, id int64, lastError string, nextRetryAtMS int64) error {
 	return s.SupplyOrders.MarkItemFailed(ctx, id, lastError, nextRetryAtMS)
+}
+
+func (s *Store) UpdateSupplyImportItemFileName(ctx context.Context, id int64, fileName string) error {
+	return s.SupplyOrders.UpdateItemFileName(ctx, id, fileName)
 }
 
 func (s *Store) SupplyImportCounts(ctx context.Context, orderID string) (int, int, error) {

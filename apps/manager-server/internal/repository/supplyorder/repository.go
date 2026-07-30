@@ -15,6 +15,8 @@ type Repository interface {
 	Create(ctx context.Context, order model.SupplyOrder) (model.SupplyOrder, error)
 	Get(ctx context.Context, orderID string) (model.SupplyOrder, bool, error)
 	GetOpen(ctx context.Context) (model.SupplyOrder, bool, error)
+	GetLatestCompletedAutomatic(ctx context.Context) (model.SupplyOrder, bool, error)
+	ActivateNextLegacyRepair(ctx context.Context) (model.SupplyOrder, bool, error)
 	PromoteCreateAttempt(ctx context.Context, localOrderID string, order model.SupplyOrder) error
 	Update(ctx context.Context, order model.SupplyOrder) error
 	List(ctx context.Context, limit int) ([]model.SupplyOrder, error)
@@ -22,6 +24,7 @@ type Repository interface {
 	ListPendingItems(ctx context.Context, orderID string, nowMS int64, limit int) ([]model.SupplyImportItem, error)
 	MarkItemImported(ctx context.Context, id int64, importedAtMS int64) error
 	MarkItemFailed(ctx context.Context, id int64, lastError string, nextRetryAtMS int64) error
+	UpdateItemFileName(ctx context.Context, id int64, fileName string) error
 	Counts(ctx context.Context, orderID string) (total int, imported int, err error)
 }
 
@@ -29,6 +32,8 @@ type repository struct {
 	db        *sql.DB
 	protector *security.Protector
 }
+
+const openOrderStatusClause = `'creating','create_uncertain','created','waiting_inventory','ready','taking','importing','partial'`
 
 func New(db *sql.DB, protector ...*security.Protector) Repository {
 	var p *security.Protector
@@ -51,12 +56,22 @@ func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model
 		order.CreatedAtMS = now
 	}
 	order.UpdatedAtMS = now
-	result, err := r.db.ExecContext(ctx, `insert into supply_orders (
+	statement := `insert into supply_orders (
 		order_id, product, requested_quantity, automatic, status, remote_status,
 		ready_quantity, progress, status_url, take_url, charged_fen, released_fen,
 		item_count, imported_count, last_error, next_poll_at_ms, completed_at_ms,
 		created_at_ms, updated_at_ms
-	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	if isOpenOrderStatus(order.Status) {
+		statement = `insert into supply_orders (
+			order_id, product, requested_quantity, automatic, status, remote_status,
+			ready_quantity, progress, status_url, take_url, charged_fen, released_fen,
+			item_count, imported_count, last_error, next_poll_at_ms, completed_at_ms,
+			created_at_ms, updated_at_ms
+		) select ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		where not exists (select 1 from supply_orders where status in (` + openOrderStatusClause + `))`
+	}
+	result, err := r.db.ExecContext(ctx, statement,
 		order.OrderID, order.Product, order.RequestedQuantity, boolInt(order.Automatic), order.Status,
 		nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress, nullString(order.StatusURL),
 		nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen, order.ItemCount,
@@ -65,6 +80,15 @@ func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model
 	)
 	if err != nil {
 		return model.SupplyOrder{}, err
+	}
+	if isOpenOrderStatus(order.Status) {
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return model.SupplyOrder{}, err
+		}
+		if affected == 0 {
+			return model.SupplyOrder{}, errors.New("supply open order already exists")
+		}
 	}
 	order.ID, err = result.LastInsertId()
 	return order, err
@@ -80,12 +104,70 @@ func (r *repository) Get(ctx context.Context, orderID string) (model.SupplyOrder
 }
 
 func (r *repository) GetOpen(ctx context.Context) (model.SupplyOrder, bool, error) {
-	row := r.db.QueryRowContext(ctx, orderSelect+` where status in ('creating','create_uncertain','created','waiting_inventory','ready','taking','importing','partial') order by created_at_ms asc limit 1`)
+	row := r.db.QueryRowContext(ctx, orderSelect+` where status in (`+openOrderStatusClause+`) order by created_at_ms asc limit 1`)
 	order, err := scanOrder(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.SupplyOrder{}, false, nil
 	}
 	return order, err == nil, err
+}
+
+func (r *repository) GetLatestCompletedAutomatic(ctx context.Context) (model.SupplyOrder, bool, error) {
+	row := r.db.QueryRowContext(ctx, orderSelect+` where automatic = 1 and status = 'completed'
+		order by completed_at_ms desc, id desc limit 1`)
+	order, err := scanOrder(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.SupplyOrder{}, false, nil
+	}
+	return order, err == nil, err
+}
+
+func (r *repository) ActivateNextLegacyRepair(ctx context.Context) (model.SupplyOrder, bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.SupplyOrder{}, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var orderID string
+	err = tx.QueryRowContext(ctx, `select o.order_id from supply_orders o
+		where o.status = 'completed' and exists (
+			select 1 from supply_import_items i
+			where i.order_id = o.order_id and i.status = 'imported' and i.file_name like 'supply-%'
+		)
+		order by o.created_at_ms asc, o.id asc limit 1`).Scan(&orderID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.SupplyOrder{}, false, nil
+	}
+	if err != nil {
+		return model.SupplyOrder{}, false, err
+	}
+	now := time.Now().UnixMilli()
+	result, err := tx.ExecContext(ctx, `update supply_orders set status = 'importing', imported_count = 0,
+		completed_at_ms = null, next_poll_at_ms = null, last_error = null, updated_at_ms = ?
+		where order_id = ? and status = 'completed'`, now, orderID)
+	if err != nil {
+		return model.SupplyOrder{}, false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return model.SupplyOrder{}, false, err
+	}
+	if affected != 1 {
+		return model.SupplyOrder{}, false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `update supply_import_items set status = 'pending', last_error = null,
+		next_retry_at_ms = null, imported_at_ms = null, updated_at_ms = ?
+		where order_id = ? and status = 'imported' and file_name like 'supply-%'`, now, orderID); err != nil {
+		return model.SupplyOrder{}, false, err
+	}
+	order, err := scanOrder(tx.QueryRowContext(ctx, orderSelect+` where order_id = ?`, orderID))
+	if err != nil {
+		return model.SupplyOrder{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.SupplyOrder{}, false, err
+	}
+	return order, true, nil
 }
 
 func (r *repository) PromoteCreateAttempt(ctx context.Context, localOrderID string, order model.SupplyOrder) error {
@@ -227,6 +309,16 @@ func (r *repository) MarkItemFailed(ctx context.Context, id int64, lastError str
 	return err
 }
 
+func (r *repository) UpdateItemFileName(ctx context.Context, id int64, fileName string) error {
+	fileName = strings.TrimSpace(fileName)
+	if fileName == "" {
+		return errors.New("supply import file name is required")
+	}
+	_, err := r.db.ExecContext(ctx, `update supply_import_items set file_name = ?, updated_at_ms = ? where id = ?`,
+		fileName, time.Now().UnixMilli(), id)
+	return err
+}
+
 func (r *repository) Counts(ctx context.Context, orderID string) (int, int, error) {
 	var total, imported int
 	err := r.db.QueryRowContext(ctx, `select count(*), coalesce(sum(case when status = 'imported' then 1 else 0 end), 0)
@@ -317,4 +409,13 @@ func nullPositive(value int64) any {
 		return nil
 	}
 	return value
+}
+
+func isOpenOrderStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "creating", "create_uncertain", "created", "waiting_inventory", "ready", "taking", "importing", "partial":
+		return true
+	default:
+		return false
+	}
 }
