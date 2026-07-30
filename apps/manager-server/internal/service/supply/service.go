@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -44,11 +45,12 @@ type Overview struct {
 }
 
 type Status struct {
-	Config      store.ManagerSupplyConfig `json:"config"`
-	Running     bool                      `json:"running"`
-	Overview    Overview                  `json:"overview"`
-	ActiveOrder *store.SupplyOrder        `json:"activeOrder,omitempty"`
-	Orders      []store.SupplyOrder       `json:"orders"`
+	Config        store.ManagerSupplyConfig `json:"config"`
+	Running       bool                      `json:"running"`
+	Overview      Overview                  `json:"overview"`
+	SmartResource SmartResource             `json:"smartResource"`
+	ActiveOrder   *store.SupplyOrder        `json:"activeOrder,omitempty"`
+	Orders        []store.SupplyOrder       `json:"orders"`
 }
 
 type Service struct {
@@ -61,6 +63,18 @@ type Service struct {
 	stateMu  sync.RWMutex
 	running  bool
 	overview Overview
+
+	smartMu            sync.RWMutex
+	smartBuckets       map[int64]*smartUsageBucket
+	authCacheMu        sync.Mutex
+	authRefreshMu      sync.Mutex
+	authCache          authFileSnapshot
+	smartResourceState SmartResource
+
+	criticalConfirmMu        sync.Mutex
+	criticalConfirmRounds    map[string]int
+	lastAutomaticCreateAtMS  int64
+	lastAutomaticReleaseAtMS int64
 }
 
 func New(st *store.Store, managerConfig *managerconfigsvc.Service, httpClient ...*http.Client) *Service {
@@ -69,10 +83,12 @@ func New(st *store.Store, managerConfig *managerconfigsvc.Service, httpClient ..
 		client = httpClient[0]
 	}
 	return &Service{
-		store:         st,
-		managerConfig: managerConfig,
-		supplyClient:  supplyclient.New(client),
-		authFiles:     cpaauthfiles.New(client),
+		store:                 st,
+		managerConfig:         managerConfig,
+		supplyClient:          supplyclient.New(client),
+		authFiles:             cpaauthfiles.New(client),
+		smartBuckets:          make(map[int64]*smartUsageBucket),
+		criticalConfirmRounds: make(map[string]int),
 	}
 }
 
@@ -100,10 +116,11 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		overview.CPADeficit = 0
 	}
 	status := Status{
-		Config:   sanitizeConfig(cfg.Supply),
-		Running:  running,
-		Overview: overview,
-		Orders:   orders,
+		Config:        sanitizeConfig(cfg.Supply),
+		Running:       running,
+		Overview:      overview,
+		SmartResource: s.currentSmartResource(cfg.Supply),
+		Orders:        orders,
 	}
 	if found {
 		status.ActiveOrder = &active
@@ -287,9 +304,20 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		return s.refreshOverview(ctx, cfg, supplyCfg.ReplenishBatchSize)
 	}
 
-	available, err := s.countAvailableAccounts(ctx, cfg)
-	if err != nil {
-		return err
+	available := 0
+	var resource SmartResource
+	useSmart := manualQuantity == 0 && smartSupplyEnabled(supplyCfg)
+	if useSmart {
+		resource, err = s.smartResource(ctx, cfg, force)
+		if err != nil {
+			return err
+		}
+		available = resource.AvailableAccounts
+	} else {
+		available, err = s.countAvailableAccounts(ctx, cfg)
+		if err != nil {
+			return err
+		}
 	}
 	if manualQuantity == 0 {
 		if recent, recentFound, err := s.store.GetLatestCompletedAutomaticSupplyOrder(ctx); err != nil {
@@ -301,14 +329,44 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	}
 	quantity := manualQuantity
 	if quantity == 0 {
-		deficit := supplyCfg.TargetAvailableAccounts - available
-		if deficit <= 0 {
-			return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
+		if useSmart {
+			if !resource.SnapshotFresh {
+				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
+			}
+			if resource.SuggestedAction == smartActionHealthy || resource.HealthLevel == smartHealthHealthy {
+				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
+			}
+			if s.automaticCreateCooldownActive(supplyCfg) {
+				s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
+				return nil
+			}
+			quantity = s.smartSuggestedCreateQuantity(supplyCfg, resource)
+		} else {
+			deficit := supplyCfg.TargetAvailableAccounts - available
+			if deficit <= 0 {
+				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
+			}
+			quantity = min(deficit, supplyCfg.ReplenishBatchSize)
 		}
-		quantity = min(deficit, supplyCfg.ReplenishBatchSize)
 	}
 	if quantity <= 0 {
 		return ErrInvalidQuantity
+	}
+	if useSmart && supplyCfg.DailyMaxReplenishQuantity > 0 {
+		remaining, err := s.remainingAutomaticDailyQuantity(ctx, supplyCfg)
+		if err != nil {
+			return err
+		}
+		if remaining <= 0 {
+			resource.SuggestedAction = smartActionManualReview
+			resource.DecisionReason = "daily_quantity_limit"
+			s.setSmartResource(resource)
+			s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
+			return nil
+		}
+		if quantity > remaining {
+			quantity = remaining
+		}
 	}
 
 	inventory, balance, err := s.fetchSupplyOverview(ctx, supplyCfg, quantity)
@@ -324,7 +382,35 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		Balance:      &balance,
 	})
 	if inventory.EstimatedTotalFen > 0 && balance.AvailableFen < inventory.EstimatedTotalFen {
+		if useSmart {
+			resource.SuggestedAction = smartActionBalanceBlocked
+			resource.DecisionReason = "balance_insufficient"
+			s.setSmartResource(resource)
+		}
 		return ErrInsufficientBalance
+	}
+	if useSmart {
+		if supplyCfg.MinBalanceReserveFen > 0 && inventory.EstimatedTotalFen > 0 && balance.AvailableFen-inventory.EstimatedTotalFen < supplyCfg.MinBalanceReserveFen {
+			resource.SuggestedAction = smartActionBalanceBlocked
+			resource.DecisionReason = "balance_reserve_protected"
+			s.setSmartResource(resource)
+			return ErrInsufficientBalance
+		}
+		if supplyCfg.DailyMaxHoldFen > 0 && inventory.EstimatedTotalFen > 0 && balance.HeldFen+inventory.EstimatedTotalFen > supplyCfg.DailyMaxHoldFen {
+			resource.SuggestedAction = smartActionManualReview
+			resource.DecisionReason = "daily_hold_limit"
+			s.setSmartResource(resource)
+			return nil
+		}
+		if inventory.Available <= 0 && !inventory.NeedsProduction && resource.HealthLevel != smartHealthCritical {
+			resource.SuggestedAction = smartActionInventoryBlocked
+			resource.DecisionReason = "inventory_unavailable"
+			s.setSmartResource(resource)
+			return nil
+		}
+		resource.SuggestedQuantity = quantity
+		resource.PrelockedCapacityRCU = round2(float64(quantity) * resource.UnitCapacityRCU)
+		s.setSmartResource(resource)
 	}
 
 	attempt := store.SupplyOrder{
@@ -336,6 +422,9 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	}
 	if _, err := s.store.CreateSupplyOrder(ctx, attempt); err != nil {
 		return err
+	}
+	if attempt.Automatic {
+		s.markAutomaticCreate()
 	}
 
 	credentials := credentialsFromConfig(supplyCfg)
@@ -405,7 +494,7 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	if total > imported {
 		return s.importItems(ctx, cfg, &order)
 	}
-	if released, err := s.releaseAutomaticOrderIfCPASatisfied(ctx, cfg, &order); released || err != nil {
+	if released, err := s.releaseAutomaticOrderIfCPASatisfied(ctx, cfg, &order, true); released || err != nil {
 		return err
 	}
 
@@ -426,8 +515,20 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		order.Status = "waiting_inventory"
 		return s.store.UpdateSupplyOrder(ctx, order)
 	}
-	if released, err := s.releaseAutomaticOrderIfCPASatisfied(ctx, cfg, &order); released || err != nil {
+	if released, err := s.releaseAutomaticOrderIfCPASatisfied(ctx, cfg, &order, true); released || err != nil {
 		return err
+	}
+
+	if order.Automatic && smartSupplyEnabled(cfg.Supply) && !s.smartTakeAllowed(cfg.Supply, order.OrderID) {
+		resource := s.currentSmartResource(cfg.Supply)
+		resource.LockedOrderID = order.OrderID
+		resource.SuggestedAction = smartActionWaitLocked
+		resource.DecisionReason = "critical_take_confirm_pending"
+		resource.LockedConfirmRounds = s.currentCriticalConfirmRounds(order.OrderID)
+		s.setSmartResource(resource)
+		order.Status = "ready"
+		order.NextPollAtMS = nextPollAt(cfg.Supply, 0)
+		return s.store.UpdateSupplyOrder(ctx, order)
 	}
 
 	order.Status = "taking"
@@ -466,6 +567,7 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	if _, err := s.store.InsertSupplyImportItems(ctx, order.OrderID, items); err != nil {
 		return s.updateOrderError(ctx, &order, err, cfg.Supply)
 	}
+	s.resetCriticalConfirm(order.OrderID)
 	order.Status = "importing"
 	order.LastError = ""
 	if err := s.store.UpdateSupplyOrder(ctx, order); err != nil {
@@ -474,13 +576,60 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	return s.importItems(ctx, cfg, &order)
 }
 
-func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg store.ManagerConfig, order *store.SupplyOrder) (bool, error) {
+func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg store.ManagerConfig, order *store.SupplyOrder, forceSmartRefresh bool) (bool, error) {
 	if order == nil || !order.Automatic || cfg.Supply.TargetAvailableAccounts <= 0 {
 		return false, nil
 	}
 	switch order.Status {
 	case "creating", "create_uncertain", "taking", "importing", "partial":
 		return false, nil
+	}
+	if smartSupplyEnabled(cfg.Supply) {
+		resource, err := s.smartResource(ctx, cfg, forceSmartRefresh)
+		if err != nil {
+			return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionSnapshotStale, "smart_snapshot_unavailable")
+		}
+		resource.LockedOrderID = order.OrderID
+		if order.CreatedAtMS > 0 {
+			resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
+		}
+		s.updateCPAOverview(resource.AvailableAccounts, cfg.Supply.TargetAvailableAccounts)
+		switch {
+		case !resource.SnapshotFresh:
+			return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionSnapshotStale, "smart_snapshot_stale")
+		case resource.HealthLevel == smartHealthHealthy || resource.SuggestedAction == smartActionHealthy:
+			if resource.DecisionReason != "fallback_account_count_healthy" && !s.lockedOrderMinHoldElapsed(cfg.Supply, order) {
+				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "min_hold_before_release")
+			}
+			if s.automaticReleaseCooldownActive(cfg.Supply) {
+				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "release_cooldown")
+			}
+			resource.SuggestedAction = smartActionReleaseLocked
+			resource.DecisionReason = "capacity_recovered_before_take"
+			s.setSmartResource(resource)
+			return true, s.releaseAutomaticOrder(ctx, cfg, order, resource.AvailableAccounts)
+		case order.Status == "ready" && resource.HealthLevel != smartHealthCritical:
+			s.resetCriticalConfirm(order.OrderID)
+			return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "locked_but_not_critical")
+		case order.Status == "ready" && resource.HealthLevel == smartHealthCritical:
+			if resource.DecisionReason == "fallback_account_deficit" {
+				resource.SuggestedAction = smartActionTakeLocked
+				resource.DecisionReason = "fallback_account_deficit_take"
+				s.setSmartResource(resource)
+				return false, nil
+			}
+			rounds := s.incrementCriticalConfirm(order.OrderID)
+			resource.LockedConfirmRounds = rounds
+			if rounds < smartCriticalTakeConfirmRounds(cfg.Supply) {
+				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "critical_take_confirm_pending")
+			}
+			resource.SuggestedAction = smartActionTakeLocked
+			resource.DecisionReason = "critical_take_confirmed"
+			s.setSmartResource(resource)
+			return false, nil
+		default:
+			return false, nil
+		}
 	}
 	available, err := s.countAvailableAccounts(ctx, cfg)
 	if err != nil {
@@ -515,6 +664,8 @@ func (s *Service) releaseAutomaticOrder(ctx context.Context, cfg store.ManagerCo
 	if err == nil {
 		order.LastError = ""
 	}
+	s.markAutomaticRelease()
+	s.resetCriticalConfirm(order.OrderID)
 	s.updateCPAOverview(available, cfg.Supply.TargetAvailableAccounts)
 	return s.store.UpdateSupplyOrder(ctx, *order)
 }
@@ -581,9 +732,19 @@ func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, orde
 }
 
 func (s *Service) refreshOverview(ctx context.Context, cfg store.ManagerConfig, quantity int) error {
-	available, err := s.countAvailableAccounts(ctx, cfg)
-	if err != nil {
-		return err
+	available := 0
+	if smartSupplyEnabled(cfg.Supply) {
+		resource, err := s.smartResource(ctx, cfg, true)
+		if err != nil {
+			return err
+		}
+		available = resource.AvailableAccounts
+	} else {
+		var err error
+		available, err = s.countAvailableAccounts(ctx, cfg)
+		if err != nil {
+			return err
+		}
 	}
 	return s.refreshSupplyOverview(ctx, cfg.Supply, available, max(1, quantity))
 }
@@ -618,6 +779,19 @@ func (s *Service) fetchSupplyOverview(ctx context.Context, cfg store.ManagerSupp
 }
 
 func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerConfig) (int, error) {
+	if smartSupplyEnabled(cfg.Supply) {
+		snapshot, err := s.cachedAuthFiles(ctx, cfg, false)
+		if err != nil && len(snapshot.files) == 0 {
+			return 0, err
+		}
+		count := 0
+		for _, file := range snapshot.files {
+			if isAvailableCodexFile(file) {
+				count++
+			}
+		}
+		return count, err
+	}
 	if strings.TrimSpace(cfg.CPAConnection.CPABaseURL) == "" || strings.TrimSpace(cfg.CPAConnection.ManagementKey) == "" {
 		return 0, errors.New("CPA connection is not configured")
 	}
@@ -629,6 +803,166 @@ func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerC
 		return false, nil
 	})
 	return count, err
+}
+
+func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, resource SmartResource) int {
+	quantity := resource.SuggestedQuantity
+	if quantity <= 0 {
+		deficit := cfg.TargetAvailableAccounts - resource.AvailableAccounts
+		if deficit > 0 {
+			quantity = deficit
+		}
+	}
+	if quantity <= 0 && resource.CapacityGapRCU > 0 && resource.UnitCapacityRCU > 0 {
+		unit := resource.UnitCapacityRCU * smartNewAccountConfidence(cfg)
+		if unit <= 0 {
+			unit = resource.UnitCapacityRCU
+		}
+		quantity = int(math.Ceil(resource.CapacityGapRCU / unit))
+	}
+	if quantity <= 0 {
+		return 0
+	}
+	if cfg.ReplenishBatchSize > 0 {
+		quantity = min(quantity, cfg.ReplenishBatchSize)
+	}
+	if smartPrelockEnabled(cfg) {
+		quantity = min(quantity, smartPrelockMaxQuantity(cfg))
+		quantity = max(quantity, smartPrelockMinQuantity(cfg))
+	}
+	if cfg.DailyMaxReplenishQuantity > 0 {
+		quantity = min(quantity, cfg.DailyMaxReplenishQuantity)
+	}
+	return clampInt(quantity, 1, 100)
+}
+
+func (s *Service) remainingAutomaticDailyQuantity(ctx context.Context, cfg store.ManagerSupplyConfig) (int, error) {
+	limit := cfg.DailyMaxReplenishQuantity
+	if limit <= 0 {
+		return 100, nil
+	}
+	orders, err := s.store.ListSupplyOrders(ctx, 200)
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now()
+	dayStartMS := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).UnixMilli()
+	used := 0
+	for _, order := range orders {
+		if order.CreatedAtMS > 0 && order.CreatedAtMS < dayStartMS {
+			break
+		}
+		if !order.Automatic {
+			continue
+		}
+		switch order.Status {
+		case "failed", "cancelled", "dismissed", "released":
+			continue
+		}
+		used += max(0, order.RequestedQuantity)
+	}
+	if used >= limit {
+		return 0, nil
+	}
+	return limit - used, nil
+}
+
+func (s *Service) waitLockedOrder(ctx context.Context, cfg store.ManagerSupplyConfig, order *store.SupplyOrder, resource SmartResource, action string, reason string) error {
+	if order == nil {
+		return nil
+	}
+	resource.SuggestedAction = action
+	resource.DecisionReason = reason
+	if resource.LockedOrderID == "" {
+		resource.LockedOrderID = order.OrderID
+	}
+	resource.LockedConfirmRounds = s.currentCriticalConfirmRounds(order.OrderID)
+	s.setSmartResource(resource)
+	order.NextPollAtMS = nextPollAt(cfg, 0)
+	return s.store.UpdateSupplyOrder(ctx, *order)
+}
+
+func (s *Service) lockedOrderMinHoldElapsed(cfg store.ManagerSupplyConfig, order *store.SupplyOrder) bool {
+	if order == nil || order.CreatedAtMS <= 0 {
+		return true
+	}
+	return time.Since(time.UnixMilli(order.CreatedAtMS)) >= time.Duration(smartMinHoldSeconds(cfg))*time.Second
+}
+
+func (s *Service) automaticCreateCooldownActive(cfg store.ManagerSupplyConfig) bool {
+	seconds := smartCreateCooldownSeconds(cfg)
+	s.stateMu.RLock()
+	last := s.lastAutomaticCreateAtMS
+	s.stateMu.RUnlock()
+	if seconds <= 0 || last <= 0 {
+		return false
+	}
+	return time.Since(time.UnixMilli(last)) < time.Duration(seconds)*time.Second
+}
+
+func (s *Service) automaticReleaseCooldownActive(cfg store.ManagerSupplyConfig) bool {
+	seconds := smartReleaseCooldownSeconds(cfg)
+	s.stateMu.RLock()
+	last := s.lastAutomaticReleaseAtMS
+	s.stateMu.RUnlock()
+	if seconds <= 0 || last <= 0 {
+		return false
+	}
+	return time.Since(time.UnixMilli(last)) < time.Duration(seconds)*time.Second
+}
+
+func (s *Service) markAutomaticCreate() {
+	s.stateMu.Lock()
+	s.lastAutomaticCreateAtMS = time.Now().UnixMilli()
+	s.stateMu.Unlock()
+}
+
+func (s *Service) markAutomaticRelease() {
+	s.stateMu.Lock()
+	s.lastAutomaticReleaseAtMS = time.Now().UnixMilli()
+	s.stateMu.Unlock()
+}
+
+func (s *Service) incrementCriticalConfirm(orderID string) int {
+	s.criticalConfirmMu.Lock()
+	defer s.criticalConfirmMu.Unlock()
+	if s.criticalConfirmRounds == nil {
+		s.criticalConfirmRounds = make(map[string]int)
+	}
+	s.criticalConfirmRounds[orderID]++
+	return s.criticalConfirmRounds[orderID]
+}
+
+func (s *Service) currentCriticalConfirmRounds(orderID string) int {
+	s.criticalConfirmMu.Lock()
+	defer s.criticalConfirmMu.Unlock()
+	if s.criticalConfirmRounds == nil {
+		return 0
+	}
+	return s.criticalConfirmRounds[orderID]
+}
+
+func (s *Service) smartCriticalTakeConfirmed(cfg store.ManagerSupplyConfig, orderID string) bool {
+	return s.currentCriticalConfirmRounds(orderID) >= smartCriticalTakeConfirmRounds(cfg)
+}
+
+func (s *Service) smartTakeAllowed(cfg store.ManagerSupplyConfig, orderID string) bool {
+	resource := s.currentSmartResource(cfg)
+	if resource.SuggestedAction == smartActionTakeLocked {
+		switch resource.DecisionReason {
+		case "critical_take_confirmed", "fallback_account_deficit_take":
+			return true
+		}
+	}
+	return s.smartCriticalTakeConfirmed(cfg, orderID)
+}
+
+func (s *Service) resetCriticalConfirm(orderID string) {
+	s.criticalConfirmMu.Lock()
+	defer s.criticalConfirmMu.Unlock()
+	if s.criticalConfirmRounds != nil {
+		delete(s.criticalConfirmRounds, orderID)
+	}
 }
 
 func (s *Service) requireCredentials(cfg store.ManagerSupplyConfig) error {

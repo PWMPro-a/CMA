@@ -20,7 +20,11 @@
   gap: 20px;
   padding: 18px 20px;
   background:
-    radial-gradient(circle at 92% 20%, color-mix(in srgb, var(--primary-color) 13%, transparent), transparent 34%),
+    radial-gradient(
+      circle at 92% 20%,
+      color-mix(in srgb, var(--primary-color) 13%, transparent),
+      transparent 34%
+    ),
     var(--bg-primary);
 }
 
@@ -29,7 +33,7 @@
   color: var(--primary-color);
   font-size: 11px;
   font-weight: 800;
-  letter-spacing: .14em;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
 }
 
@@ -130,14 +134,225 @@
   line-height: 1;
 }
 
-.teal { color: #0d9488; }
-.orange { color: #ea7b20; }
-.blue { color: #3182ce; }
-.violet { color: #805ad5; }
+.teal {
+  color: #0d9488;
+}
+.orange {
+  color: #ea7b20;
+}
+.blue {
+  color: #3182ce;
+}
+.violet {
+  color: #805ad5;
+}
+
+.smartPanel {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background:
+    radial-gradient(
+      circle at 0 0,
+      color-mix(in srgb, currentColor 11%, transparent),
+      transparent 26%
+    ),
+    radial-gradient(
+      circle at 100% 20%,
+      color-mix(in srgb, currentColor 9%, transparent),
+      transparent 30%
+    ),
+    var(--bg-primary);
+  color: var(--primary-color);
+}
+
+.smartPanelHealthy {
+  color: #0d9488;
+}
+.smartPanelWarning {
+  color: #ea7b20;
+}
+.smartPanelCritical {
+  color: #e5484d;
+}
+.smartPanelUnknown {
+  color: #3182ce;
+}
+
+.smartPanel.success {
+  border-color: color-mix(in srgb, var(--success-color) 35%, var(--border-color));
+  background:
+    radial-gradient(
+      circle at 0 0,
+      color-mix(in srgb, var(--success-color) 12%, transparent),
+      transparent 26%
+    ),
+    radial-gradient(
+      circle at 100% 20%,
+      color-mix(in srgb, var(--success-color) 10%, transparent),
+      transparent 30%
+    ),
+    var(--bg-primary);
+  color: var(--success-color);
+}
+
+.smartPanel.warning {
+  border-color: color-mix(in srgb, #f59e0b 35%, var(--border-color));
+  background:
+    radial-gradient(circle at 0 0, color-mix(in srgb, #f59e0b 12%, transparent), transparent 26%),
+    radial-gradient(
+      circle at 100% 20%,
+      color-mix(in srgb, #f59e0b 10%, transparent),
+      transparent 30%
+    ),
+    var(--bg-primary);
+  color: #b36905;
+}
+
+.smartPanel.error {
+  border-color: color-mix(in srgb, #ef4444 35%, var(--border-color));
+  background:
+    radial-gradient(circle at 0 0, color-mix(in srgb, #ef4444 12%, transparent), transparent 26%),
+    radial-gradient(
+      circle at 100% 20%,
+      color-mix(in srgb, #ef4444 10%, transparent),
+      transparent 30%
+    ),
+    var(--bg-primary);
+  color: #dc2626;
+}
+
+.smartHeader,
+.advancedHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.smartHeader h2,
+.advancedHeader h3 {
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.smartHeader h2 {
+  font-size: 18px;
+}
+
+.advancedHeader h3 {
+  font-size: 14px;
+}
+
+.smartHeader p,
+.advancedHeader p {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.smartGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(160px, 0.7fr)) minmax(280px, 1.2fr);
+  gap: 10px;
+}
+
+.smartHeroMetric,
+.smartMiniMetrics,
+.capacityBox,
+.smartReason,
+.advancedBlock {
+  border: 1px solid color-mix(in srgb, currentColor 22%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, currentColor 4%, var(--bg-primary));
+}
+
+.smartHeroMetric {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+}
+
+.smartHeroMetric span,
+.smartHeroMetric small,
+.capacityMeta,
+.smartMiniMetrics span,
+.capacityTop span,
+.smartReason {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.smartHeroMetric strong {
+  color: var(--text-primary);
+  font-size: 28px;
+  line-height: 1;
+}
+
+.smartMiniMetrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+}
+
+.smartMiniMetrics > div {
+  display: grid;
+  gap: 4px;
+  padding: 11px;
+  background: color-mix(in srgb, var(--bg-primary) 74%, transparent);
+}
+
+.smartMiniMetrics strong,
+.capacityTop strong {
+  color: var(--text-primary);
+  font-size: 16px;
+}
+
+.capacityBox {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+  grid-column: span 2;
+}
+
+.capacityTop,
+.capacityMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.smartReason {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  grid-column: 1 / -1;
+  line-height: 1.5;
+}
+
+.advancedBlock {
+  display: grid;
+  gap: 12px;
+  padding: 13px;
+  color: var(--primary-color);
+}
+
+.smartToggles {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.6fr);
+  gap: 12px;
+  align-items: end;
+}
 
 .contentGrid {
   display: grid;
-  grid-template-columns: minmax(0, 1.65fr) minmax(300px, .75fr);
+  grid-template-columns: minmax(0, 1.65fr) minmax(300px, 0.75fr);
   gap: 12px;
   align-items: start;
 }
@@ -232,7 +447,7 @@
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, #14b8a6, #22c55e);
-  transition: width .28s ease;
+  transition: width 0.28s ease;
 }
 
 .orderSummary dl {
@@ -248,7 +463,9 @@
   font-size: 12px;
 }
 
-.orderSummary dt { color: var(--text-secondary); }
+.orderSummary dt {
+  color: var(--text-secondary);
+}
 .orderSummary dd {
   margin: 0;
   overflow: hidden;
@@ -359,16 +576,44 @@
 }
 
 @media (max-width: 1100px) {
-  .metricGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .contentGrid { grid-template-columns: 1fr; }
+  .metricGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .smartGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .contentGrid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 680px) {
-  .hero { align-items: flex-start; flex-direction: column; padding: 15px; }
-  .heroActions { justify-content: flex-start; }
+  .hero {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 15px;
+  }
+  .heroActions {
+    justify-content: flex-start;
+  }
   .metricGrid,
-  .formGrid { grid-template-columns: 1fr; }
+  .smartGrid,
+  .smartToggles,
+  .formGrid {
+    grid-template-columns: 1fr;
+  }
   .panelHeader,
-  .configFooter { align-items: flex-start; flex-direction: column; }
-  .panel { padding: 14px; }
+  .smartHeader,
+  .advancedHeader,
+  .configFooter {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .capacityBox,
+  .smartReason {
+    grid-column: auto;
+  }
+  .panel {
+    padding: 14px;
+  }
 }

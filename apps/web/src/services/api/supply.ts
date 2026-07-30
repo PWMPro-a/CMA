@@ -14,6 +14,22 @@ export interface SupplyConfig {
   checkIntervalSeconds: number;
   pollIntervalSeconds: number;
   defaultWebsockets: boolean;
+  smartEnabled?: boolean;
+  healthyMinutesTarget: number;
+  warningMinutes: number;
+  criticalMinutes: number;
+  prelockEnabled?: boolean;
+  prelockMinQuantity: number;
+  prelockMaxQuantity: number;
+  criticalTakeConfirmRounds: number;
+  createCooldownSeconds: number;
+  releaseCooldownSeconds: number;
+  authFilesCacheTTLSeconds: number;
+  minHoldSeconds: number;
+  newAccountConfidence: number;
+  minBalanceReserveFen?: number;
+  dailyMaxHoldFen?: number;
+  dailyMaxReplenishQuantity?: number;
 }
 
 export interface SupplyInventory {
@@ -68,17 +84,50 @@ export interface SupplyOverview {
   lastError?: string;
 }
 
+export interface SupplySmartResource {
+  enabled: boolean;
+  healthLevel: 'healthy' | 'warning' | 'critical' | 'unknown' | string;
+  suggestedAction: string;
+  suggestedQuantity: number;
+  decisionReason: string;
+  confidence: 'high' | 'medium' | 'low' | string;
+  snapshotFresh: boolean;
+  generatedAtMs: number;
+  availableAccounts: number;
+  healthyAccounts: number;
+  weakAccounts: number;
+  targetAvailableAccounts: number;
+  estimatedSustainMinutes: number;
+  healthyMinutesTarget: number;
+  warningMinutes: number;
+  criticalMinutes: number;
+  rpm30m: number;
+  rpm5mPeak: number;
+  tpm30m: number;
+  currentCapacityRcu: number;
+  targetCapacityRcu: number;
+  capacityGapRcu: number;
+  unitCapacityRcu: number;
+  recommendedCapacityRcu: number;
+  prelockedCapacityRcu?: number;
+  usageSampleMinutes: number;
+  accountCacheAgeSeconds: number;
+  lockedOrderId?: string;
+  lockedOrderAgeSeconds?: number;
+  lockedConfirmRounds?: number;
+}
+
 export interface SupplyStatus {
   config: SupplyConfig;
   running: boolean;
   overview: SupplyOverview;
+  smartResource: SupplySmartResource;
   activeOrder?: SupplyOrder;
   orders: SupplyOrder[];
 }
 
 export const supplyApi = {
-  getStatus: (limit = 50): Promise<SupplyStatus> =>
-    apiClient.get('/supply', { params: { limit } }),
+  getStatus: (limit = 50): Promise<SupplyStatus> => apiClient.get('/supply', { params: { limit } }),
 
   saveConfig: (config: SupplyConfig): Promise<SupplyStatus> =>
     apiClient.put('/supply/config', { config }),

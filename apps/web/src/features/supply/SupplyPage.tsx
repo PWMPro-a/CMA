@@ -10,8 +10,15 @@ import {
   IconInbox,
   IconRefreshCw,
   IconTimer,
+  IconTrendingUp,
 } from '@/components/ui/icons';
-import { supplyApi, type SupplyConfig, type SupplyOrder, type SupplyStatus } from '@/services/api';
+import {
+  supplyApi,
+  type SupplyConfig,
+  type SupplyOrder,
+  type SupplySmartResource,
+  type SupplyStatus,
+} from '@/services/api';
 import { useNotificationStore } from '@/stores';
 import styles from './SupplyPage.module.scss';
 
@@ -27,9 +34,35 @@ const emptyConfig: SupplyConfig = {
   checkIntervalSeconds: 60,
   pollIntervalSeconds: 3,
   defaultWebsockets: false,
+  smartEnabled: true,
+  healthyMinutesTarget: 120,
+  warningMinutes: 60,
+  criticalMinutes: 30,
+  prelockEnabled: true,
+  prelockMinQuantity: 1,
+  prelockMaxQuantity: 10,
+  criticalTakeConfirmRounds: 2,
+  createCooldownSeconds: 120,
+  releaseCooldownSeconds: 60,
+  authFilesCacheTTLSeconds: 60,
+  minHoldSeconds: 30,
+  newAccountConfidence: 0.7,
+  minBalanceReserveFen: 0,
+  dailyMaxHoldFen: 0,
+  dailyMaxReplenishQuantity: 0,
 };
 
 const formatMoney = (fen?: number) => `¥${((fen ?? 0) / 100).toFixed(2)}`;
+
+const formatNumber = (value?: number, digits = 1) =>
+  typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '-';
+
+const formatMinutes = (value?: number) => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return '-';
+  if (value >= 1440) return `${(value / 1440).toFixed(1)}d`;
+  if (value >= 60) return `${(value / 60).toFixed(1)}h`;
+  return `${value.toFixed(1)}m`;
+};
 
 const formatTime = (value?: number) =>
   value && value > 0 ? new Date(value).toLocaleString() : '-';
@@ -44,6 +77,23 @@ const orderTone = (status: string) => {
 const canCancelOrder = (status: string) =>
   ['created', 'waiting_inventory', 'ready', 'taking'].includes(status);
 
+const smartTone = (resource?: SupplySmartResource) => {
+  if (!resource?.enabled) return styles.warning;
+  if (!resource.snapshotFresh) return styles.warning;
+  if (resource.healthLevel === 'healthy') return styles.success;
+  if (resource.healthLevel === 'critical') return styles.error;
+  if (resource.healthLevel === 'warning') return styles.warning;
+  return styles.active;
+};
+
+const smartPanelTone = (resource?: SupplySmartResource) => {
+  if (!resource?.enabled || !resource.snapshotFresh) return styles.smartPanelWarning;
+  if (resource.healthLevel === 'healthy') return styles.smartPanelHealthy;
+  if (resource.healthLevel === 'critical') return styles.smartPanelCritical;
+  if (resource.healthLevel === 'warning') return styles.smartPanelWarning;
+  return styles.smartPanelUnknown;
+};
+
 export function SupplyPage() {
   const { t } = useTranslation();
   const { showNotification, showConfirmation } = useNotificationStore();
@@ -51,7 +101,9 @@ export function SupplyPage() {
   const [draft, setDraft] = useState<SupplyConfig>(emptyConfig);
   const [manualQuantity, setManualQuantity] = useState(10);
   const [loading, setLoading] = useState(true);
-  const [action, setAction] = useState<'save' | 'check' | 'replenish' | 'dismiss' | 'cancel' | null>(null);
+  const [action, setAction] = useState<
+    'save' | 'check' | 'replenish' | 'dismiss' | 'cancel' | null
+  >(null);
   const configDirtyRef = useRef(false);
 
   const updateDraft = useCallback((patch: Partial<SupplyConfig>) => {
@@ -108,19 +160,14 @@ export function SupplyPage() {
       applyStatus(result);
       showNotification(successMessage, 'success');
     } catch (error) {
-      showNotification(
-        error instanceof Error ? error.message : t('common.unknown_error'),
-        'error'
-      );
+      showNotification(error instanceof Error ? error.message : t('common.unknown_error'), 'error');
     } finally {
       setAction(null);
     }
   };
 
-  const save = () =>
-    runAction('save', () => supplyApi.saveConfig(draft), t('supply.save_success'));
-  const check = () =>
-    runAction('check', () => supplyApi.check(), t('supply.check_success'));
+  const save = () => runAction('save', () => supplyApi.saveConfig(draft), t('supply.save_success'));
+  const check = () => runAction('check', () => supplyApi.check(), t('supply.check_success'));
   const replenish = () =>
     runAction(
       'replenish',
@@ -161,12 +208,15 @@ export function SupplyPage() {
   const overview = status?.overview;
   const inventory = overview?.inventory;
   const balance = overview?.balance;
+  const smart = status?.smartResource;
   const metrics = useMemo(
     () => [
       {
         label: t('supply.cpa_available'),
         value: overview?.cpaAvailable ?? '-',
-        detail: t('supply.target_value', { value: overview?.cpaTarget ?? draft.targetAvailableAccounts }),
+        detail: t('supply.target_value', {
+          value: overview?.cpaTarget ?? draft.targetAvailableAccounts,
+        }),
         icon: <IconDatabaseZap size={18} />,
         tone: 'teal',
       },
@@ -240,6 +290,99 @@ export function SupplyPage() {
 
       {overview?.lastError ? <div className={styles.errorBanner}>{overview.lastError}</div> : null}
 
+      <section className={`${styles.smartPanel} ${smartPanelTone(smart)}`}>
+        <div className={styles.smartHeader}>
+          <div>
+            <div className={styles.eyebrow}>{t('supply.smart_eyebrow')}</div>
+            <h2>{t('supply.smart_title')}</h2>
+            <p>{t('supply.smart_subtitle')}</p>
+          </div>
+          <span className={`${styles.statusPill} ${smartTone(smart)}`}>
+            {t(`supply.smart_health_${smart?.healthLevel || 'unknown'}`, {
+              defaultValue: smart?.healthLevel || '-',
+            })}
+          </span>
+        </div>
+        <div className={styles.smartGrid}>
+          <div className={styles.smartHeroMetric}>
+            <span>{t('supply.sustain_minutes')}</span>
+            <strong>{formatMinutes(smart?.estimatedSustainMinutes)}</strong>
+            <small>
+              {t('supply.health_target_minutes', {
+                value: smart?.healthyMinutesTarget ?? draft.healthyMinutesTarget,
+              })}
+            </small>
+          </div>
+          <div className={styles.smartHeroMetric}>
+            <span>{t('supply.suggested_quantity')}</span>
+            <strong>{smart?.suggestedQuantity ?? '-'}</strong>
+            <small>
+              {t(`supply.smart_action_${smart?.suggestedAction || 'unknown'}`, {
+                defaultValue: smart?.suggestedAction || '-',
+              })}
+            </small>
+          </div>
+          <div className={styles.smartMiniMetrics}>
+            <div>
+              <span>{t('supply.rpm30m')}</span>
+              <strong>{formatNumber(smart?.rpm30m)}</strong>
+            </div>
+            <div>
+              <span>{t('supply.rpm5m_peak')}</span>
+              <strong>{formatNumber(smart?.rpm5mPeak)}</strong>
+            </div>
+            <div>
+              <span>{t('supply.tpm30m')}</span>
+              <strong>{formatNumber(smart?.tpm30m, 0)}</strong>
+            </div>
+            <div>
+              <span>{t('supply.usage_sample')}</span>
+              <strong>{smart?.usageSampleMinutes ?? 0}m</strong>
+            </div>
+          </div>
+          <div className={styles.capacityBox}>
+            <div className={styles.capacityTop}>
+              <span>{t('supply.capacity_rcu')}</span>
+              <strong>
+                {formatNumber(smart?.currentCapacityRcu)} / {formatNumber(smart?.targetCapacityRcu)}
+              </strong>
+            </div>
+            <div className={styles.progressTrack}>
+              <span
+                style={{
+                  width: `${Math.min(100, Math.max(0, ((smart?.currentCapacityRcu ?? 0) / Math.max(1, smart?.targetCapacityRcu ?? 1)) * 100))}%`,
+                }}
+              />
+            </div>
+            <div className={styles.capacityMeta}>
+              <span>
+                {t('supply.capacity_gap', { value: formatNumber(smart?.capacityGapRcu) })}
+              </span>
+              <span>
+                {t('supply.account_health_counts', {
+                  healthy: smart?.healthyAccounts ?? 0,
+                  weak: smart?.weakAccounts ?? 0,
+                })}
+              </span>
+              <span>{t('supply.snapshot_age', { value: smart?.accountCacheAgeSeconds ?? 0 })}</span>
+            </div>
+          </div>
+          <div className={styles.smartReason}>
+            <IconTrendingUp size={16} />
+            <span>
+              {t('supply.smart_reason', {
+                reason: t(`supply.smart_reason_${smart?.decisionReason || 'unknown'}`, {
+                  defaultValue: smart?.decisionReason || '-',
+                }),
+                confidence: t(`supply.smart_confidence_${smart?.confidence || 'low'}`, {
+                  defaultValue: smart?.confidence || '-',
+                }),
+              })}
+            </span>
+          </div>
+        </div>
+      </section>
+
       <section className={styles.contentGrid}>
         <article className={styles.panel}>
           <div className={styles.panelHeader}>
@@ -272,7 +415,11 @@ export function SupplyPage() {
               type="password"
               value={draft.password ?? ''}
               onChange={(event) => updateDraft({ password: event.target.value })}
-              placeholder={draft.passwordConfigured ? t('supply.password_saved') : t('supply.password_placeholder')}
+              placeholder={
+                draft.passwordConfigured
+                  ? t('supply.password_saved')
+                  : t('supply.password_placeholder')
+              }
               autoComplete="new-password"
             />
             <div className={styles.field}>
@@ -292,7 +439,9 @@ export function SupplyPage() {
               min={1}
               max={10000}
               value={draft.targetAvailableAccounts}
-              onChange={(event) => updateDraft({ targetAvailableAccounts: Number(event.target.value) })}
+              onChange={(event) =>
+                updateDraft({ targetAvailableAccounts: Number(event.target.value) })
+              }
             />
             <Input
               label={t('supply.batch_size')}
@@ -308,7 +457,9 @@ export function SupplyPage() {
               min={10}
               max={3600}
               value={draft.checkIntervalSeconds}
-              onChange={(event) => updateDraft({ checkIntervalSeconds: Number(event.target.value) })}
+              onChange={(event) =>
+                updateDraft({ checkIntervalSeconds: Number(event.target.value) })
+              }
             />
             <Input
               label={t('supply.poll_interval')}
@@ -318,6 +469,94 @@ export function SupplyPage() {
               value={draft.pollIntervalSeconds}
               onChange={(event) => updateDraft({ pollIntervalSeconds: Number(event.target.value) })}
             />
+          </div>
+
+          <div className={styles.advancedBlock}>
+            <div className={styles.advancedHeader}>
+              <div>
+                <h3>{t('supply.smart_config_title')}</h3>
+                <p>{t('supply.smart_config_hint')}</p>
+              </div>
+              <ToggleSwitch
+                checked={draft.smartEnabled !== false}
+                onChange={(smartEnabled) => updateDraft({ smartEnabled })}
+                label={t('supply.smart_enable')}
+              />
+            </div>
+            <div className={styles.formGrid}>
+              <Input
+                label={t('supply.healthy_minutes_target')}
+                type="number"
+                min={10}
+                max={1440}
+                value={draft.healthyMinutesTarget}
+                onChange={(event) =>
+                  updateDraft({ healthyMinutesTarget: Number(event.target.value) })
+                }
+              />
+              <Input
+                label={t('supply.warning_minutes')}
+                type="number"
+                min={5}
+                max={1440}
+                value={draft.warningMinutes}
+                onChange={(event) => updateDraft({ warningMinutes: Number(event.target.value) })}
+              />
+              <Input
+                label={t('supply.critical_minutes')}
+                type="number"
+                min={1}
+                max={1440}
+                value={draft.criticalMinutes}
+                onChange={(event) => updateDraft({ criticalMinutes: Number(event.target.value) })}
+              />
+              <Input
+                label={t('supply.prelock_max_quantity')}
+                type="number"
+                min={1}
+                max={100}
+                value={draft.prelockMaxQuantity}
+                onChange={(event) =>
+                  updateDraft({ prelockMaxQuantity: Number(event.target.value) })
+                }
+              />
+              <Input
+                label={t('supply.critical_confirm_rounds')}
+                type="number"
+                min={1}
+                max={5}
+                value={draft.criticalTakeConfirmRounds}
+                onChange={(event) =>
+                  updateDraft({ criticalTakeConfirmRounds: Number(event.target.value) })
+                }
+              />
+              <Input
+                label={t('supply.auth_cache_ttl')}
+                type="number"
+                min={10}
+                max={600}
+                value={draft.authFilesCacheTTLSeconds}
+                onChange={(event) =>
+                  updateDraft({ authFilesCacheTTLSeconds: Number(event.target.value) })
+                }
+              />
+            </div>
+            <div className={styles.smartToggles}>
+              <ToggleSwitch
+                checked={draft.prelockEnabled !== false}
+                onChange={(prelockEnabled) => updateDraft({ prelockEnabled })}
+                label={t('supply.prelock_enable')}
+              />
+              <Input
+                label={t('supply.balance_reserve')}
+                type="number"
+                min={0}
+                value={Math.round((draft.minBalanceReserveFen ?? 0) / 100)}
+                onChange={(event) =>
+                  updateDraft({ minBalanceReserveFen: Number(event.target.value) * 100 })
+                }
+              />
+            </div>
           </div>
 
           <div className={styles.configFooter}>
@@ -414,7 +653,9 @@ export function SupplyPage() {
                   <td>{order.product}</td>
                   <td>{order.automatic ? t('supply.automatic') : t('supply.manual')}</td>
                   <td>{order.requestedQuantity}</td>
-                  <td>{order.importedCount}/{order.itemCount || order.requestedQuantity}</td>
+                  <td>
+                    {order.importedCount}/{order.itemCount || order.requestedQuantity}
+                  </td>
                   <td>{formatMoney(order.chargedFen)}</td>
                   <td>
                     <span className={`${styles.statusPill} ${orderTone(order.status)}`}>
@@ -425,7 +666,11 @@ export function SupplyPage() {
                 </tr>
               ))}
               {!status?.orders?.length ? (
-                <tr><td colSpan={8} className={styles.emptyCell}>{t('supply.no_history')}</td></tr>
+                <tr>
+                  <td colSpan={8} className={styles.emptyCell}>
+                    {t('supply.no_history')}
+                  </td>
+                </tr>
               ) : null}
             </tbody>
           </table>
@@ -449,7 +694,8 @@ function OrderSummary({
   onCancelOrder: (order: SupplyOrder) => void;
 }) {
   const { t } = useTranslation();
-  const importing = order.itemCount > 0 || order.status === 'importing' || order.status === 'partial';
+  const importing =
+    order.itemCount > 0 || order.status === 'importing' || order.status === 'partial';
   const progressValue = importing
     ? (order.importedCount / Math.max(1, order.itemCount || order.requestedQuantity)) * 100
     : order.progress > 0
@@ -470,11 +716,28 @@ function OrderSummary({
         <span style={{ width: `${Math.min(100, Math.max(0, progressValue))}%` }} />
       </div>
       <dl>
-        <div><dt>{t('supply.order_id')}</dt><dd>{order.orderId}</dd></div>
-        <div><dt>{t('supply.remote_status')}</dt><dd>{order.remoteStatus || '-'}</dd></div>
-        <div><dt>{t('supply.ready_quantity')}</dt><dd>{order.readyQuantity}/{order.requestedQuantity}</dd></div>
-        <div><dt>{t('supply.remote_progress')}</dt><dd>{order.progress > 0 ? `${order.progress}%` : '-'}</dd></div>
-        <div><dt>{t('supply.next_poll')}</dt><dd>{formatTime(order.nextPollAtMs)}</dd></div>
+        <div>
+          <dt>{t('supply.order_id')}</dt>
+          <dd>{order.orderId}</dd>
+        </div>
+        <div>
+          <dt>{t('supply.remote_status')}</dt>
+          <dd>{order.remoteStatus || '-'}</dd>
+        </div>
+        <div>
+          <dt>{t('supply.ready_quantity')}</dt>
+          <dd>
+            {order.readyQuantity}/{order.requestedQuantity}
+          </dd>
+        </div>
+        <div>
+          <dt>{t('supply.remote_progress')}</dt>
+          <dd>{order.progress > 0 ? `${order.progress}%` : '-'}</dd>
+        </div>
+        <div>
+          <dt>{t('supply.next_poll')}</dt>
+          <dd>{formatTime(order.nextPollAtMs)}</dd>
+        </div>
       </dl>
       {order.lastError ? <div className={styles.inlineError}>{order.lastError}</div> : null}
       {order.status === 'create_uncertain' ? (

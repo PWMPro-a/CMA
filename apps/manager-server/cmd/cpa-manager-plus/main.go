@@ -114,6 +114,7 @@ func runServer() {
 		automationRuntime.UsageEventHandler(),
 		accountHistoryRollupWorker,
 		dashboardHourlyRollupWorker,
+		serverApp.AppContext().SupplyService,
 	))
 
 	collectorWorker.Start(ctx)

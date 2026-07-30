@@ -1,0 +1,224 @@
+package supply
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
+	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
+)
+
+func TestSmartResourceRecommendsPrelockFromUsageCapacity(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now()
+	events := make([]usage.Event, 0, 120)
+	for minute := 0; minute < 30; minute++ {
+		for index := 0; index < 4; index++ {
+			events = append(events, usage.Event{
+				TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+				Provider:    "codex",
+				AuthIndex:   "account-a",
+				TotalTokens: 100,
+			})
+		}
+	}
+	service.recordSmartUsageEvents(events, now)
+
+	resource := service.buildSmartResourceFromSnapshots(store.ManagerSupplyConfig{
+		Product:                 "oauth_30d",
+		TargetAvailableAccounts: 2,
+		HealthyMinutesTarget:    120,
+		WarningMinutes:          60,
+		CriticalMinutes:         30,
+		PrelockMinQuantity:      1,
+		PrelockMaxQuantity:      10,
+		NewAccountConfidence:    0.7,
+	}, authFileSnapshot{
+		generatedAt: now,
+		files: []cpaauthfiles.File{
+			{Name: "a.json", Provider: "codex"},
+			{Name: "b.json", Provider: "codex"},
+		},
+	}, now)
+
+	if resource.HealthLevel != smartHealthCritical || resource.SuggestedQuantity < 2 {
+		t.Fatalf("resource = %#v", resource)
+	}
+	if resource.RPM30M <= 0 || resource.CurrentCapacityRCU <= 0 || resource.CapacityGapRCU <= 0 {
+		t.Fatalf("resource metrics were not computed: %#v", resource)
+	}
+}
+
+func TestSmartAutomaticDoesNotCreateWhenCapacityHealthy(t *testing.T) {
+	var createCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":10,"estimated_total_fen":100}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":10000}`))
+		case r.URL.Path == "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex"},{"name":"b.json","provider":"codex"},{"name":"c.json","provider":"codex"},{"name":"d.json","provider":"codex"}]}`))
+		case r.URL.Path == "/api/customer/pickup/orders":
+			createCalls.Add(1)
+			t.Fatal("healthy smart capacity should not create an order")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "smart-healthy.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password",
+			Product: "oauth_30d", TargetAvailableAccounts: 1, ReplenishBatchSize: 5,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	now := time.Now()
+	for minute := 0; minute < 30; minute++ {
+		service.recordSmartUsageEvents([]usage.Event{{
+			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+			Provider:    "codex",
+			AuthIndex:   "a.json",
+			TotalTokens: 10,
+		}}, now)
+	}
+
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("run automatic: %v", err)
+	}
+	if createCalls.Load() != 0 {
+		t.Fatalf("create calls = %d", createCalls.Load())
+	}
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	if status.SmartResource.HealthLevel != smartHealthHealthy || status.ActiveOrder != nil {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
+func TestSmartReadyOrderWaitsForCriticalConfirmRoundsBeforeTake(t *testing.T) {
+	var takeCalls atomic.Int32
+	var uploadCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/pickup/orders/order-critical":
+			_, _ = w.Write([]byte(`{"id":"order-critical","status":"ready","ready_quantity":1,"progress":100,"take_url":"/custom/take-critical"}`))
+		case r.URL.Path == "/custom/take-critical":
+			takeCalls.Add(1)
+			_, _ = w.Write([]byte(`{"payload":{"accounts":[{"type":"codex","account":"critical@example.com","access_token":"secret"}]},"status":"completed"}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			if name := r.URL.Query().Get("name"); name != "" && uploadCalls.Load() > 0 {
+				_, _ = w.Write([]byte(`{"files":[{"name":"` + name + `","provider":"codex","status":"ready"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex","status":"ready"}]}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodPost:
+			uploadCalls.Add(1)
+			part, err := r.MultipartReader()
+			if err != nil {
+				t.Fatalf("multipart reader: %v", err)
+			}
+			for {
+				item, err := part.NextPart()
+				if err != nil {
+					break
+				}
+				if item.FormName() == "file" {
+					data, _ := io.ReadAll(item)
+					var payload map[string]any
+					if err := json.Unmarshal(data, &payload); err != nil || payload["type"] != "codex" {
+						t.Fatalf("uploaded payload = %s err=%v", data, err)
+					}
+				}
+			}
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "smart-critical.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password",
+			Product: "oauth_30d", TargetAvailableAccounts: 1, ReplenishBatchSize: 1,
+			PollIntervalSeconds: 1, CriticalTakeConfirmRounds: 2,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "order-critical", Product: "oauth_30d", RequestedQuantity: 1, Automatic: true, Status: "ready", TakeURL: "/custom/take-critical",
+	}); err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	now := time.Now()
+	events := make([]usage.Event, 0, 180)
+	for minute := 0; minute < 30; minute++ {
+		for index := 0; index < 6; index++ {
+			events = append(events, usage.Event{
+				TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+				Provider:    "codex",
+				AuthIndex:   "a.json",
+				TotalTokens: 100,
+			})
+		}
+	}
+	service.recordSmartUsageEvents(events, now)
+
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if takeCalls.Load() != 0 {
+		t.Fatalf("take should wait for confirmation, calls=%d", takeCalls.Load())
+	}
+	order, found, err := st.GetSupplyOrder(context.Background(), "order-critical")
+	if err != nil || !found {
+		t.Fatalf("load order found=%v err=%v", found, err)
+	}
+	order.NextPollAtMS = 0
+	if err := st.UpdateSupplyOrder(context.Background(), order); err != nil {
+		t.Fatalf("reset poll: %v", err)
+	}
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if takeCalls.Load() != 1 || uploadCalls.Load() != 1 {
+		t.Fatalf("calls take=%d upload=%d", takeCalls.Load(), uploadCalls.Load())
+	}
+}

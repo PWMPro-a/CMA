@@ -240,13 +240,26 @@ func (s *Service) DefaultManagerConfig() store.ManagerConfig {
 		},
 		CodexInspection: store.DefaultCodexInspectionConfig(),
 		Supply: store.ManagerSupplyConfig{
-			Enabled:                 BoolPtr(false),
-			BaseURL:                 "https://sogouedu.cc",
-			Product:                 "oauth_30d",
-			TargetAvailableAccounts: 100,
-			ReplenishBatchSize:      10,
-			CheckIntervalSeconds:    60,
-			PollIntervalSeconds:     3,
+			Enabled:                   BoolPtr(false),
+			BaseURL:                   "https://sogouedu.cc",
+			Product:                   "oauth_30d",
+			TargetAvailableAccounts:   100,
+			ReplenishBatchSize:        10,
+			CheckIntervalSeconds:      60,
+			PollIntervalSeconds:       3,
+			SmartEnabled:              BoolPtr(true),
+			HealthyMinutesTarget:      120,
+			WarningMinutes:            60,
+			CriticalMinutes:           30,
+			PrelockEnabled:            BoolPtr(true),
+			PrelockMinQuantity:        1,
+			PrelockMaxQuantity:        10,
+			CriticalTakeConfirmRounds: 2,
+			CreateCooldownSeconds:     120,
+			ReleaseCooldownSeconds:    60,
+			AuthFilesCacheTTLSeconds:  60,
+			MinHoldSeconds:            30,
+			NewAccountConfidence:      0.7,
 		},
 	}
 }
@@ -301,6 +314,42 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	next.CheckIntervalSeconds = BoundedPositiveOrDefault(submitted.CheckIntervalSeconds, next.CheckIntervalSeconds, 60, 3600)
 	next.PollIntervalSeconds = BoundedPositiveOrDefault(submitted.PollIntervalSeconds, next.PollIntervalSeconds, 3, 60)
 	next.DefaultWebsockets = submitted.DefaultWebsockets
+	if submitted.SmartEnabled != nil {
+		next.SmartEnabled = BoolPtr(*submitted.SmartEnabled)
+	} else if next.SmartEnabled == nil {
+		next.SmartEnabled = BoolPtr(true)
+	}
+	next.HealthyMinutesTarget = BoundedPositiveOrDefault(submitted.HealthyMinutesTarget, next.HealthyMinutesTarget, 120, 1440)
+	next.WarningMinutes = BoundedPositiveOrDefault(submitted.WarningMinutes, next.WarningMinutes, 60, next.HealthyMinutesTarget)
+	if next.WarningMinutes >= next.HealthyMinutesTarget {
+		next.WarningMinutes = max(1, next.HealthyMinutesTarget/2)
+	}
+	next.CriticalMinutes = BoundedPositiveOrDefault(submitted.CriticalMinutes, next.CriticalMinutes, 30, next.WarningMinutes)
+	if next.CriticalMinutes >= next.WarningMinutes {
+		next.CriticalMinutes = max(1, next.WarningMinutes/2)
+	}
+	if submitted.PrelockEnabled != nil {
+		next.PrelockEnabled = BoolPtr(*submitted.PrelockEnabled)
+	} else if next.PrelockEnabled == nil {
+		next.PrelockEnabled = BoolPtr(true)
+	}
+	next.PrelockMinQuantity = BoundedPositiveOrDefault(submitted.PrelockMinQuantity, next.PrelockMinQuantity, 1, 100)
+	next.PrelockMaxQuantity = BoundedPositiveOrDefault(submitted.PrelockMaxQuantity, next.PrelockMaxQuantity, 10, 100)
+	if next.PrelockMaxQuantity < next.PrelockMinQuantity {
+		next.PrelockMaxQuantity = next.PrelockMinQuantity
+	}
+	next.CriticalTakeConfirmRounds = BoundedPositiveOrDefault(submitted.CriticalTakeConfirmRounds, next.CriticalTakeConfirmRounds, 2, 5)
+	next.CreateCooldownSeconds = BoundedPositiveOrDefault(submitted.CreateCooldownSeconds, next.CreateCooldownSeconds, 120, 3600)
+	next.ReleaseCooldownSeconds = BoundedPositiveOrDefault(submitted.ReleaseCooldownSeconds, next.ReleaseCooldownSeconds, 60, 3600)
+	next.AuthFilesCacheTTLSeconds = BoundedPositiveOrDefault(submitted.AuthFilesCacheTTLSeconds, next.AuthFilesCacheTTLSeconds, 60, 600)
+	if next.AuthFilesCacheTTLSeconds < 10 {
+		next.AuthFilesCacheTTLSeconds = 10
+	}
+	next.MinHoldSeconds = BoundedPositiveOrDefault(submitted.MinHoldSeconds, next.MinHoldSeconds, 30, 3600)
+	next.NewAccountConfidence = BoundedFloatOrDefault(submitted.NewAccountConfidence, next.NewAccountConfidence, 0.7, 0.1, 1)
+	next.MinBalanceReserveFen = BoundedOptionalInt64(submitted.MinBalanceReserveFen, next.MinBalanceReserveFen, 100_000_000)
+	next.DailyMaxHoldFen = BoundedOptionalInt64(submitted.DailyMaxHoldFen, next.DailyMaxHoldFen, 100_000_000)
+	next.DailyMaxReplenishQuantity = BoundedOptionalInt(submitted.DailyMaxReplenishQuantity, next.DailyMaxReplenishQuantity, 10_000)
 	next.PasswordConfigured = next.Password != ""
 	return next
 }
@@ -376,6 +425,51 @@ func PositiveOrDefault(value int, fallback int, hardDefault int) int {
 
 func BoundedPositiveOrDefault(value int, fallback int, hardDefault int, maximum int) int {
 	result := PositiveOrDefault(value, fallback, hardDefault)
+	if result > maximum {
+		return maximum
+	}
+	return result
+}
+
+func BoundedFloatOrDefault(value float64, fallback float64, hardDefault float64, minimum float64, maximum float64) float64 {
+	result := hardDefault
+	if fallback > 0 {
+		result = fallback
+	}
+	if value > 0 {
+		result = value
+	}
+	if result < minimum {
+		return minimum
+	}
+	if result > maximum {
+		return maximum
+	}
+	return result
+}
+
+func BoundedOptionalInt(value int, fallback int, maximum int) int {
+	result := fallback
+	if value > 0 || fallback <= 0 {
+		result = value
+	}
+	if result < 0 {
+		return 0
+	}
+	if result > maximum {
+		return maximum
+	}
+	return result
+}
+
+func BoundedOptionalInt64(value int64, fallback int64, maximum int64) int64 {
+	result := fallback
+	if value > 0 || fallback <= 0 {
+		result = value
+	}
+	if result < 0 {
+		return 0
+	}
 	if result > maximum {
 		return maximum
 	}
