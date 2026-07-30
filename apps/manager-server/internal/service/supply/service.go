@@ -30,6 +30,7 @@ var (
 	ErrCreateUncertain     = errors.New("supply order creation result is uncertain")
 	ErrOrderNotFound       = errors.New("supply order was not found")
 	ErrNotCreateUncertain  = errors.New("supply order is not waiting for create-result confirmation")
+	ErrOrderNotCancellable = errors.New("supply order cannot be cancelled in its current state")
 )
 
 type Overview struct {
@@ -153,6 +154,47 @@ func (s *Service) DismissCreateUncertain(ctx context.Context, orderID string) (S
 	order.CompletedAtMS = time.Now().UnixMilli()
 	order.NextPollAtMS = 0
 	order.LastError = "create-result block dismissed after remote order verification"
+	if err := s.store.UpdateSupplyOrder(ctx, order); err != nil {
+		return Status{}, err
+	}
+	return s.GetStatus(ctx, 50)
+}
+
+func (s *Service) CancelOrder(ctx context.Context, orderID string) (Status, error) {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	order, found, err := s.store.GetSupplyOrder(ctx, strings.TrimSpace(orderID))
+	if err != nil {
+		return Status{}, err
+	}
+	if !found {
+		return Status{}, ErrOrderNotFound
+	}
+	if !canCancelSupplyOrder(order.Status) {
+		return Status{}, ErrOrderNotCancellable
+	}
+	if order.Status != "creating" {
+		if err := s.requireCredentials(cfg.Supply); err != nil {
+			return Status{}, err
+		}
+		released, err := s.supplyClient.ReleaseOrder(ctx, credentialsFromConfig(cfg.Supply), order.OrderID)
+		if err != nil {
+			if errors.Is(err, supplyclient.ErrReleaseUnsupported) {
+				return Status{}, err
+			}
+			return Status{}, err
+		}
+		applyRemoteOrder(&order, released, cfg.Supply)
+	}
+	order.Status = "cancelled"
+	order.RemoteStatus = "cancelled"
+	order.LastError = ""
+	order.NextPollAtMS = 0
+	order.CompletedAtMS = time.Now().UnixMilli()
 	if err := s.store.UpdateSupplyOrder(ctx, order); err != nil {
 		return Status{}, err
 	}
@@ -475,6 +517,15 @@ func (s *Service) releaseAutomaticOrder(ctx context.Context, cfg store.ManagerCo
 	}
 	s.updateCPAOverview(available, cfg.Supply.TargetAvailableAccounts)
 	return s.store.UpdateSupplyOrder(ctx, *order)
+}
+
+func canCancelSupplyOrder(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "creating", "created", "waiting_inventory", "ready", "taking":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, order *store.SupplyOrder) error {

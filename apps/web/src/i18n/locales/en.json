@@ -4394,6 +4394,10 @@
     "dismiss_uncertain_confirm": "Confirm in the Supply customer console that order {{orderId}} was not created. Replenishment may submit a new order after this block is released.",
     "dismiss_uncertain_action": "Confirmed absent, release",
     "dismiss_uncertain_success": "The unknown-order block has been released",
-    "status_released": "Released"
+    "status_released": "Released",
+    "cancel_order_title": "Cancel supply order?",
+    "cancel_order_confirm": "Cancel order {{orderId}}? The manager will release it on the supply side first, then stop local pickup after release succeeds.",
+    "cancel_order_action": "Cancel order",
+    "cancel_order_success": "The order has been cancelled"
   }
 }

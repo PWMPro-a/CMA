@@ -33,6 +33,15 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		h.writeResult(w, result, err)
 		return
 	}
+	if orderID, ok := orderActionID(path, "/cancel"); ok {
+		if r.Method != http.MethodPost {
+			response.MethodNotAllowed(w)
+			return
+		}
+		result, err := h.App.SupplyService.CancelOrder(r.Context(), orderID)
+		h.writeResult(w, result, err)
+		return
+	}
 	switch path {
 	case "/v0/management/supply":
 		if r.Method != http.MethodGet {
@@ -107,8 +116,12 @@ func (h *Handler) writeResult(w http.ResponseWriter, result any, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, supplysvc.ErrNotCreateUncertain):
 		status = http.StatusConflict
+	case errors.Is(err, supplysvc.ErrOrderNotCancellable):
+		status = http.StatusConflict
 	case errors.Is(err, supplysvc.ErrInsufficientBalance):
 		status = http.StatusPaymentRequired
+	case errors.Is(err, supplyclient.ErrReleaseUnsupported):
+		status = http.StatusBadGateway
 	case errors.As(err, &upstreamErr):
 		switch upstreamErr.StatusCode {
 		case http.StatusBadRequest:
@@ -127,6 +140,15 @@ func (h *Handler) writeResult(w http.ResponseWriter, result any, err error) {
 func dismissUncertainOrderID(path string) (string, bool) {
 	const prefix = "/v0/management/supply/orders/"
 	const suffix = "/dismiss-uncertain"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", false
+	}
+	orderID := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix))
+	return orderID, orderID != "" && !strings.Contains(orderID, "/")
+}
+
+func orderActionID(path string, suffix string) (string, bool) {
+	const prefix = "/v0/management/supply/orders/"
 	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
 		return "", false
 	}

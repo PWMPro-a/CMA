@@ -41,6 +41,9 @@ const orderTone = (status: string) => {
   return styles.active;
 };
 
+const canCancelOrder = (status: string) =>
+  ['created', 'waiting_inventory', 'ready', 'taking'].includes(status);
+
 export function SupplyPage() {
   const { t } = useTranslation();
   const { showNotification, showConfirmation } = useNotificationStore();
@@ -48,7 +51,7 @@ export function SupplyPage() {
   const [draft, setDraft] = useState<SupplyConfig>(emptyConfig);
   const [manualQuantity, setManualQuantity] = useState(10);
   const [loading, setLoading] = useState(true);
-  const [action, setAction] = useState<'save' | 'check' | 'replenish' | 'dismiss' | null>(null);
+  const [action, setAction] = useState<'save' | 'check' | 'replenish' | 'dismiss' | 'cancel' | null>(null);
   const configDirtyRef = useRef(false);
 
   const updateDraft = useCallback((patch: Partial<SupplyConfig>) => {
@@ -92,7 +95,7 @@ export function SupplyPage() {
   }, [load]);
 
   const runAction = async (
-    kind: 'save' | 'check' | 'replenish' | 'dismiss',
+    kind: 'save' | 'check' | 'replenish' | 'dismiss' | 'cancel',
     operation: () => Promise<SupplyStatus>,
     successMessage: string
   ) => {
@@ -136,6 +139,21 @@ export function SupplyPage() {
           'dismiss',
           () => supplyApi.dismissCreateUncertain(order.orderId),
           t('supply.dismiss_uncertain_success')
+        ),
+    });
+  };
+
+  const cancelOrder = (order: SupplyOrder) => {
+    showConfirmation({
+      title: t('supply.cancel_order_title'),
+      message: t('supply.cancel_order_confirm', { orderId: order.orderId }),
+      variant: 'danger',
+      confirmText: t('supply.cancel_order_action'),
+      onConfirm: () =>
+        runAction(
+          'cancel',
+          () => supplyApi.cancelOrder(order.orderId),
+          t('supply.cancel_order_success')
         ),
     });
   };
@@ -357,7 +375,9 @@ export function SupplyPage() {
               <OrderSummary
                 order={status.activeOrder}
                 dismissing={action === 'dismiss'}
+                cancelling={action === 'cancel'}
                 onDismissUncertain={dismissUncertain}
+                onCancelOrder={cancelOrder}
               />
             ) : (
               <div className={styles.empty}>{t('supply.no_active_order')}</div>
@@ -418,11 +438,15 @@ export function SupplyPage() {
 function OrderSummary({
   order,
   dismissing,
+  cancelling,
   onDismissUncertain,
+  onCancelOrder,
 }: {
   order: SupplyOrder;
   dismissing: boolean;
+  cancelling: boolean;
   onDismissUncertain: (order: SupplyOrder) => void;
+  onCancelOrder: (order: SupplyOrder) => void;
 }) {
   const { t } = useTranslation();
   const importing = order.itemCount > 0 || order.status === 'importing' || order.status === 'partial';
@@ -463,6 +487,18 @@ function OrderSummary({
             onClick={() => onDismissUncertain(order)}
           >
             {t('supply.dismiss_uncertain_action')}
+          </Button>
+        </div>
+      ) : null}
+      {canCancelOrder(order.status) ? (
+        <div className={styles.orderActions}>
+          <Button
+            variant="danger"
+            size="sm"
+            loading={cancelling}
+            onClick={() => onCancelOrder(order)}
+          >
+            {t('supply.cancel_order_action')}
           </Button>
         </div>
       ) : null}

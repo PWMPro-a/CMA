@@ -4394,6 +4394,10 @@
     "dismiss_uncertain_confirm": "請先在 Supply 客戶控制台確認訂單 {{orderId}} 未建立。解除後補貨服務可能重新提交訂單。",
     "dismiss_uncertain_action": "確認未建立並解除",
     "dismiss_uncertain_success": "未知訂單阻塞已解除",
-    "status_released": "已釋放"
+    "status_released": "已釋放",
+    "cancel_order_title": "取消補貨訂單？",
+    "cancel_order_confirm": "確認取消訂單 {{orderId}}？系統會先通知補貨端釋放訂單，成功後本地訂單會結束，不再繼續取貨。",
+    "cancel_order_action": "取消訂單",
+    "cancel_order_success": "訂單已取消"
   }
 }

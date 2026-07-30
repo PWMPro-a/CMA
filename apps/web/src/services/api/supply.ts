@@ -90,4 +90,7 @@ export const supplyApi = {
 
   dismissCreateUncertain: (orderId: string): Promise<SupplyStatus> =>
     apiClient.post(`/supply/orders/${encodeURIComponent(orderId)}/dismiss-uncertain`),
+
+  cancelOrder: (orderId: string): Promise<SupplyStatus> =>
+    apiClient.post(`/supply/orders/${encodeURIComponent(orderId)}/cancel`),
 };

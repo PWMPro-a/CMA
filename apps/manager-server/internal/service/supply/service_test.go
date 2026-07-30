@@ -242,6 +242,74 @@ func TestOrderConflictIsPersistedAsCancelled(t *testing.T) {
 	}
 }
 
+func TestCancelSupplyOrderReleasesRemoteAndClearsActiveOrder(t *testing.T) {
+	var releaseCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/pickup/orders/order-to-cancel" && r.Method == http.MethodDelete:
+			releaseCalls.Add(1)
+			_, _ = w.Write([]byte(`{"order":{"id":"order-to-cancel","status":"cancelled","released_fen":1000}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_30d",
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "order-to-cancel", Product: "oauth_30d", RequestedQuantity: 1, Status: "waiting_inventory",
+	}); err != nil {
+		t.Fatalf("create local order: %v", err)
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	status, err := service.CancelOrder(context.Background(), "order-to-cancel")
+	if err != nil {
+		t.Fatalf("cancel order: %v", err)
+	}
+	if status.ActiveOrder != nil {
+		t.Fatalf("active order should be cleared: %#v", status.ActiveOrder)
+	}
+	order, found, err := st.GetSupplyOrder(context.Background(), "order-to-cancel")
+	if err != nil || !found || order.Status != "cancelled" || order.ReleasedFen != 1000 || order.CompletedAtMS == 0 {
+		t.Fatalf("order=%#v found=%v err=%v", order, found, err)
+	}
+	if releaseCalls.Load() != 1 {
+		t.Fatalf("release calls = %d, want 1", releaseCalls.Load())
+	}
+}
+
+func TestCancelSupplyOrderRejectsImportingOrder(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "order-importing", Product: "oauth_30d", RequestedQuantity: 1, Status: "importing",
+	}); err != nil {
+		t.Fatalf("create local order: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil))
+	if _, err := service.CancelOrder(context.Background(), "order-importing"); !errors.Is(err, ErrOrderNotCancellable) {
+		t.Fatalf("cancel importing order error = %v, want %v", err, ErrOrderNotCancellable)
+	}
+}
+
 func TestManualReplenishmentRejectsConcurrentOrder(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
 	if err != nil {
