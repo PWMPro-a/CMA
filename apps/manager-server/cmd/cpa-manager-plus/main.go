@@ -219,9 +219,11 @@ func newPprofServer(addr string) (*http.Server, error) {
 }
 
 func runUsageResponseMetadataBackfill(ctx context.Context, db *store.Store) {
-	const batchLimit = 1000
+	const batchLimit = 100
+	const maxStartupBatches = 20
+	const batchDelay = 2 * time.Second
 	total := 0
-	for {
+	for batch := 0; batch < maxStartupBatches; batch++ {
 		updated, err := db.BackfillUsageResponseMetadata(ctx, batchLimit)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -232,6 +234,8 @@ func runUsageResponseMetadataBackfill(ctx context.Context, db *store.Store) {
 		if updated == 0 {
 			if total > 0 {
 				log.Printf("usage response metadata backfill completed: updated=%d", total)
+			} else {
+				log.Printf("usage response metadata backfill no pending rows")
 			}
 			return
 		}
@@ -239,7 +243,8 @@ func runUsageResponseMetadataBackfill(ctx context.Context, db *store.Store) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(batchDelay):
 		}
 	}
+	log.Printf("usage response metadata backfill paused after startup slice: updated=%d batch_limit=%d max_batches=%d", total, batchLimit, maxStartupBatches)
 }
