@@ -55,6 +55,8 @@ const emptyConfig: SupplyConfig = {
 
 type SupplyWorkspaceTab = 'overview' | 'automation' | 'orders' | 'history';
 
+const SUPPLY_AUTO_REFRESH_MS = 10_000;
+
 const formatMoney = (fen?: number) => `¥${((fen ?? 0) / 100).toFixed(2)}`;
 
 const formatNumber = (value?: number, digits = 1) =>
@@ -122,6 +124,9 @@ export function SupplyPage() {
     'save' | 'check' | 'replenish' | 'dismiss' | 'cancel' | null
   >(null);
   const configDirtyRef = useRef(false);
+  const loadInFlightRef = useRef(false);
+  const actionInFlightRef = useRef(false);
+  const refreshGenerationRef = useRef(0);
 
   const updateDraft = useCallback((patch: Partial<SupplyConfig>) => {
     configDirtyRef.current = true;
@@ -140,9 +145,18 @@ export function SupplyPage() {
 
   const load = useCallback(
     async (quiet = false) => {
+      // Polling must never overlap an ongoing request or a state-changing
+      // operation. Otherwise an earlier response can overwrite the newer
+      // order/check result and make the workspace appear to jump backwards.
+      if (loadInFlightRef.current || (quiet && actionInFlightRef.current)) return;
+      loadInFlightRef.current = true;
+      const generation = ++refreshGenerationRef.current;
       if (!quiet) setLoading(true);
       try {
-        applyStatus(await supplyApi.getStatus());
+        const next = await supplyApi.getStatus();
+        if (generation === refreshGenerationRef.current) {
+          applyStatus(next);
+        }
       } catch (error) {
         if (!quiet) {
           showNotification(
@@ -151,6 +165,7 @@ export function SupplyPage() {
           );
         }
       } finally {
+        loadInFlightRef.current = false;
         if (!quiet) setLoading(false);
       }
     },
@@ -158,9 +173,22 @@ export function SupplyPage() {
   );
 
   useEffect(() => {
+    let disposed = false;
+    let timer: number | undefined;
+
+    const schedule = () => {
+      timer = window.setTimeout(async () => {
+        await load(true);
+        if (!disposed) schedule();
+      }, SUPPLY_AUTO_REFRESH_MS);
+    };
+
     void load();
-    const timer = window.setInterval(() => void load(true), 10_000);
-    return () => window.clearInterval(timer);
+    schedule();
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [load]);
 
   const runAction = async (
@@ -168,6 +196,10 @@ export function SupplyPage() {
     operation: () => Promise<SupplyStatus>,
     successMessage: string
   ) => {
+    // Invalidate a pending read before changing state. The action result is
+    // authoritative and cannot be replaced by a response started earlier.
+    refreshGenerationRef.current += 1;
+    actionInFlightRef.current = true;
     setAction(kind);
     try {
       const result = await operation();
@@ -179,6 +211,7 @@ export function SupplyPage() {
     } catch (error) {
       showNotification(error instanceof Error ? error.message : t('common.unknown_error'), 'error');
     } finally {
+      actionInFlightRef.current = false;
       setAction(null);
     }
   };
