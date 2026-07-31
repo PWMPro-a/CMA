@@ -4322,6 +4322,7 @@
     "auth_cache_ttl": "Account snapshot TTL (sec)",
     "capacity_coverage": "Quota coverage {{value}}%",
     "capacity_lifetime_coverage": "Lifetime evidence {{value}}%",
+    "pending_inspection_capacity": "{{count}} newly imported this cycle; conservatively adding {{capacity}} RCU pending the next usability inspection",
     "capacity_source_inspection_snapshot": "Source: completed quota inspection snapshot",
     "capacity_source_unavailable": "Source: quota snapshot unavailable",
     "auto_disabled": "Automatic supply disabled",

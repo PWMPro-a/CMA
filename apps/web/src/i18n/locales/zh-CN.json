@@ -4322,6 +4322,7 @@
     "auth_cache_ttl": "账号快照 TTL（秒）",
     "capacity_coverage": "额度覆盖率 {{value}}%",
     "capacity_lifetime_coverage": "有效期覆盖率 {{value}}%",
+    "pending_inspection_capacity": "本轮已导入 {{count}} 个，保守预估 +{{capacity}} RCU，待下一轮可用性巡检确认",
     "capacity_source_inspection_snapshot": "来源：已完成额度巡检快照",
     "capacity_source_unavailable": "来源：额度快照不可用",
     "auto_disabled": "自动补货已停用",

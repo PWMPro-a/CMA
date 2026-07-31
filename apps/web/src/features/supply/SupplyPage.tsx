@@ -466,6 +466,14 @@ export function SupplyPage() {
                   value: formatNumber(smart?.capacityLifetimeCoverage, 0),
                 })}
               </span>
+              {smart?.pendingInspectionAccounts ? (
+                <span>
+                  {t('supply.pending_inspection_capacity', {
+                    count: smart.pendingInspectionAccounts,
+                    capacity: formatNumber(smart.pendingInspectionCapacityRcu),
+                  })}
+                </span>
+              ) : null}
               <span>
                 {t('supply.quota_snapshot_age', {
                   value: smart?.capacitySnapshotAgeSeconds ?? 0,

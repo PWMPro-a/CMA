@@ -99,6 +99,8 @@ export interface SupplySmartResource {
   capacitySnapshotAtMs: number;
   capacitySnapshotAgeSeconds: number;
   capacitySnapshotRunId?: number;
+  pendingInspectionAccounts?: number;
+  pendingInspectionCapacityRcu?: number;
   configuredHealthyMinutesTarget?: number;
   effectiveHealthyMinutesTarget: number;
   accountLifetimeMinutes: number;

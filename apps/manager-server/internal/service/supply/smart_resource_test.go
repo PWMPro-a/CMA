@@ -238,6 +238,55 @@ func TestSmartResourceAcceleratesVerifiedLowerBoundDuringIncompleteInspection(t 
 	}
 }
 
+func TestSmartResourceIncludesRecentImportedCapacityUntilNextInspection(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	for minute := 0; minute < 30; minute++ {
+		service.recordSmartUsageEvents([]usage.Event{{
+			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+			Provider:    "codex",
+			AuthIndex:   "inspected.json",
+			TotalTokens: 80_000_000,
+		}}, now)
+	}
+	unused := 0.0
+	cfg := store.ManagerSupplyConfig{
+		Product:              "oauth_7d",
+		HealthyMinutesTarget: 40,
+		WarningMinutes:       25,
+		CriticalMinutes:      15,
+		NewAccountConfidence: 0.7,
+	}
+	base := inspectionQuotaSnapshot{
+		run:         store.CodexInspectionRun{ID: 88, ProbeSetCount: 1, SampledCount: 1, StartedAtMS: now.Add(-2 * time.Minute).UnixMilli(), FinishedAtMS: now.UnixMilli()},
+		generatedAt: now,
+		results: []store.CodexInspectionResult{{
+			AccountKey: "inspected", FileName: "inspected.json", Provider: "codex", Status: "active", UsedPercent: &unused,
+		}},
+	}
+	withoutRecentImport := service.buildSmartResourceFromInspectionSnapshot(cfg, base, now)
+	base.activeImportItems = []store.SupplyImportItem{{
+		OrderID:          "new-order",
+		FileName:         "newly-imported.json",
+		Status:           "imported",
+		ImportedAtMS:     now.Add(-time.Minute).UnixMilli(),
+		LeaseExpiresAtMS: now.Add(55 * time.Minute).UnixMilli(),
+	}}
+	withRecentImport := service.buildSmartResourceFromInspectionSnapshot(cfg, base, now)
+	if withRecentImport.PendingInspectionAccounts != 1 || withRecentImport.PendingInspectionCapacityRCU <= 0 {
+		t.Fatalf("recent import must be exposed as provisional capacity: %#v", withRecentImport)
+	}
+	if withRecentImport.CurrentCapacityRCU <= withoutRecentImport.CurrentCapacityRCU ||
+		withRecentImport.EstimatedSustainMinutes <= withoutRecentImport.EstimatedSustainMinutes {
+		t.Fatalf("recent imported capacity must affect the capacity plan: before=%#v after=%#v", withoutRecentImport, withRecentImport)
+	}
+	base.activeImportItems[0].FileName = "inspected.json"
+	withoutDuplicate := service.buildSmartResourceFromInspectionSnapshot(cfg, base, now)
+	if withoutDuplicate.PendingInspectionAccounts != 0 {
+		t.Fatalf("an account already present in the completed inspection must not be double counted: %#v", withoutDuplicate)
+	}
+}
+
 func TestSmartLowWaterUsesRecoveryBatchCapAndShortCooldown(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		ReplenishBatchSize:        15,

@@ -138,7 +138,7 @@ func TestStoreListsOnlyActiveSupplyImportLeases(t *testing.T) {
 		}
 	}
 	active, err := db.ListActiveImportedSupplyItems(context.Background(), now)
-	if err != nil || len(active) != 1 || active[0].FileName != "codex-supply-active.json" {
+	if err != nil || len(active) != 1 || active[0].FileName != "codex-supply-active.json" || active[0].ImportedAtMS != now {
 		t.Fatalf("active leases = %#v err=%v", active, err)
 	}
 }

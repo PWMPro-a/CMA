@@ -389,7 +389,7 @@ func (r *repository) ListActiveImportedItems(ctx context.Context, nowMS int64) (
 	if nowMS <= 0 {
 		nowMS = time.Now().UnixMilli()
 	}
-	rows, err := r.db.QueryContext(ctx, `select file_name, lease_expires_at_ms
+	rows, err := r.db.QueryContext(ctx, `select file_name, imported_at_ms, lease_expires_at_ms
 		from supply_import_items
 		where status = 'imported' and lease_expires_at_ms > ?
 		order by lease_expires_at_ms asc`, nowMS)
@@ -400,7 +400,7 @@ func (r *repository) ListActiveImportedItems(ctx context.Context, nowMS int64) (
 	items := make([]model.SupplyImportItem, 0)
 	for rows.Next() {
 		var item model.SupplyImportItem
-		if err := rows.Scan(&item.FileName, &item.LeaseExpiresAtMS); err != nil {
+		if err := rows.Scan(&item.FileName, &item.ImportedAtMS, &item.LeaseExpiresAtMS); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

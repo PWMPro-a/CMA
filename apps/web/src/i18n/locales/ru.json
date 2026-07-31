@@ -4322,6 +4322,7 @@
     "auth_cache_ttl": "TTL снимка аккаунтов (сек.)",
     "capacity_coverage": "Покрытие квоты {{value}}%",
     "capacity_lifetime_coverage": "Покрытие срока действия {{value}}%",
+    "pending_inspection_capacity": "В этом цикле импортировано: {{count}}; консервативно добавлено {{capacity}} RCU до следующей проверки доступности",
     "capacity_source_inspection_snapshot": "Источник: завершённый снимок проверки квоты",
     "capacity_source_unavailable": "Источник: снимок квоты недоступен",
     "auto_disabled": "Автопополнение отключено",
