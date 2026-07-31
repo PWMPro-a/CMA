@@ -26,6 +26,7 @@ const (
 	smartActionConfigError      = "config_error"
 	smartActionSnapshotStale    = "snapshot_stale"
 	smartActionManualReview     = "manual_review"
+	smartActionObserveDemand    = "observe_demand"
 
 	smartHealthHealthy  = "healthy"
 	smartHealthWarning  = "warning"
@@ -44,6 +45,11 @@ const (
 
 	smartCapacitySourceInspection  = "inspection_snapshot"
 	smartCapacitySourceUnavailable = "unavailable"
+
+	smartDemandTrendUnknown = "unknown"
+	smartDemandTrendStable  = "stable"
+	smartDemandTrendRising  = "rising"
+	smartDemandTrendFalling = "falling"
 )
 
 type SmartResource struct {
@@ -85,6 +91,17 @@ type SmartResource struct {
 	RPM30M                       float64 `json:"rpm30m"`
 	RPM5MPeak                    float64 `json:"rpm5mPeak"`
 	TPM30M                       float64 `json:"tpm30m"`
+	RPM1M                        float64 `json:"rpm1m"`
+	RPM5M                        float64 `json:"rpm5m"`
+	RPM10M                       float64 `json:"rpm10m"`
+	TPM1M                        float64 `json:"tpm1m"`
+	TPM5M                        float64 `json:"tpm5m"`
+	TPM10M                       float64 `json:"tpm10m"`
+	ConsumeRCU1M                 float64 `json:"consumeRcu1m"`
+	ConsumeRCU5M                 float64 `json:"consumeRcu5m"`
+	ConsumeRCU10M                float64 `json:"consumeRcu10m"`
+	DemandTrend                  string  `json:"demandTrend"`
+	DemandPlanningRCUPerMinute   float64 `json:"demandPlanningRcuPerMinute"`
 	ConsumeRCUPerMinute          float64 `json:"consumeRcuPerMinute"`
 	CurrentCapacityRCU           float64 `json:"currentCapacityRcu"`
 	RawCapacityRCU               float64 `json:"rawCapacityRcu,omitempty"`
@@ -156,6 +173,7 @@ func defaultSmartResource(cfg store.ManagerSupplyConfig) SmartResource {
 		SnapshotFresh:            false,
 		GeneratedAtMS:            time.Now().UnixMilli(),
 		CapacitySource:           smartCapacitySourceUnavailable,
+		DemandTrend:              smartDemandTrendUnknown,
 		CapacityLifetimeCoverage: 100,
 		TargetAvailableAccounts:  cfg.TargetAvailableAccounts,
 		ConfiguredHealthyMinutes: configuredTarget,
@@ -299,11 +317,8 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	resource.SnapshotFresh = smartInspectionSnapshotFresh(snapshot, now)
 
 	usageStats := s.smartUsageSnapshot(now)
-	resource.RPM30M = usageStats.rpm30
-	resource.RPM5MPeak = usageStats.rpm5Peak
-	resource.TPM30M = usageStats.tpm30
-	resource.UsageSampleMinutes = usageStats.sampleMinutes
 	resource.UnitCapacityRCU = smartProductUnitCapacity(cfg.Product)
+	consumeRCUPerMinute := applySmartUsage(&resource, usageStats, resource.UnitCapacityRCU)
 
 	if !smartInspectionSnapshotComplete(snapshot) {
 		resource.SnapshotFresh = false
@@ -434,8 +449,6 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	}
 	resource.RawCapacityRCU = round2(resource.RawCapacityRCU)
 	resource.CurrentCapacityRCU = resource.RawCapacityRCU
-	consumeRCUPerMinute := smartConsumeRCUPerMinute(resource.RPM30M, resource.RPM5MPeak, resource.TPM30M, resource.UnitCapacityRCU)
-	resource.ConsumeRCUPerMinute = round2(consumeRCUPerMinute)
 	if consumeRCUPerMinute > 0 {
 		usableCapacity, wasteRisk := smartExpiryLimitedCapacity(capacityItems, consumeRCUPerMinute)
 		resource.TimeLimitedCapacityRCU = round2(usableCapacity)
@@ -473,7 +486,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		}
 		return resource
 	}
-	if usageStats.successful30 <= 0 || consumeRCUPerMinute <= 0 {
+	if usageStats.successful30 <= 0 || (consumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling) {
 		resource.Confidence = smartConfidenceLow
 		resource.HealthLevel = smartHealthUnknown
 		resource.SuggestedAction = smartActionSnapshotStale
@@ -499,13 +512,10 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		resource.AccountCacheAgeSeconds = max(0, int(now.Sub(authSnapshot.generatedAt).Seconds()))
 	}
 	usageStats := s.smartUsageSnapshot(now)
-	resource.RPM30M = usageStats.rpm30
-	resource.RPM5MPeak = usageStats.rpm5Peak
-	resource.TPM30M = usageStats.tpm30
-	resource.UsageSampleMinutes = usageStats.sampleMinutes
 
 	unit := smartProductUnitCapacity(cfg.Product)
 	resource.UnitCapacityRCU = unit
+	consumeRCUPerMinute := applySmartUsage(&resource, usageStats, unit)
 	var weightedCapacity float64
 	var effectiveAvailable float64
 	capacityItems := make([]smartCapacityItem, 0, len(authSnapshot.files))
@@ -539,8 +549,6 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 	resource.AvailableAccounts = int(effectiveAvailable)
 	resource.RawCapacityRCU = round2(weightedCapacity)
 	resource.CurrentCapacityRCU = resource.RawCapacityRCU
-	consumeRCUPerMinute := smartConsumeRCUPerMinute(resource.RPM30M, resource.RPM5MPeak, resource.TPM30M, unit)
-	resource.ConsumeRCUPerMinute = round2(consumeRCUPerMinute)
 	if consumeRCUPerMinute > 0 {
 		usableCapacity, wasteRisk := smartExpiryLimitedCapacity(capacityItems, consumeRCUPerMinute)
 		resource.TimeLimitedCapacityRCU = round2(usableCapacity)
@@ -550,7 +558,7 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 	resource.TargetCapacityRCU = round2(consumeRCUPerMinute * float64(resource.EffectiveHealthyMinutes))
 	resource.RecommendedCapacityRCU = resource.TargetCapacityRCU
 
-	if usageStats.successful30 <= 0 || consumeRCUPerMinute <= 0 {
+	if usageStats.successful30 <= 0 || (consumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling) {
 		resource.Confidence = smartConfidenceLow
 		resource.HealthLevel = smartHealthUnknown
 		resource.SuggestedAction = smartActionSnapshotStale
@@ -574,7 +582,24 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 // existing capacity snapshot. GetStatus uses it too, so a changed health-water
 // level never keeps an obsolete health decision until the next CPA refresh.
 func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resource *SmartResource) {
-	if resource == nil || resource.ConsumeRCUPerMinute <= 0 {
+	if resource == nil {
+		return
+	}
+	if resource.ConsumeRCUPerMinute <= 0 {
+		if resource.DemandTrend != smartDemandTrendFalling {
+			return
+		}
+		// A completed zero-traffic minute after a previously observed demand is
+		// a valid falling signal, not a cold-start data gap. It has no active
+		// capacity target and must visibly pause new short-lived purchases.
+		resource.TargetCapacityRCU = 0
+		resource.RecommendedCapacityRCU = 0
+		resource.EstimatedSustainMinutes = 0
+		resource.CapacityGapRCU = 0
+		resource.SuggestedQuantity = 0
+		resource.HealthLevel = smartHealthHealthy
+		resource.SuggestedAction = smartActionObserveDemand
+		resource.DecisionReason = "demand_falling_observe"
 		return
 	}
 	resource.TargetCapacityRCU = round2(resource.ConsumeRCUPerMinute * float64(resource.EffectiveHealthyMinutes))
@@ -587,9 +612,7 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 		resource.HealthLevel = smartHealthHealthy
 		resource.SuggestedAction = smartActionHealthy
 		resource.DecisionReason = "capacity_healthy"
-		return
-	}
-	if resource.EstimatedSustainMinutes < float64(resource.CriticalMinutes) {
+	} else if resource.EstimatedSustainMinutes < float64(resource.CriticalMinutes) {
 		resource.HealthLevel = smartHealthCritical
 		resource.SuggestedAction = smartActionTakeLocked
 		resource.DecisionReason = "capacity_critical"
@@ -601,6 +624,19 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 		resource.HealthLevel = smartHealthWarning
 		resource.SuggestedAction = smartActionPrelock
 		resource.DecisionReason = "capacity_below_target"
+	}
+	if resource.DemandTrend == smartDemandTrendFalling {
+		// One completed low-minute sample is sufficient to stop creating more
+		// short-lived credentials. Keep the calculated health level visible, but
+		// pause new purchases while existing reservations follow their normal
+		// minimum-hold and release checks.
+		resource.SuggestedAction = smartActionObserveDemand
+		resource.DecisionReason = "demand_falling_observe"
+		return
+	}
+
+	if resource.EstimatedSustainMinutes >= float64(resource.EffectiveHealthyMinutes) {
+		return
 	}
 
 	unitForNew := smartEstimatedNewAccountCapacityRCU(cfg)
@@ -618,16 +654,42 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 	batchLimit := smartAutomaticOrderQuantityLimit(cfg, *resource)
 	minimumQuantity := min(smartPrelockMinQuantity(cfg), batchLimit)
 	resource.SuggestedQuantity = clampInt(int(math.Ceil(gapForOrder/unitForNew)), minimumQuantity, batchLimit)
+	if resource.DemandTrend == smartDemandTrendRising {
+		resource.SuggestedQuantity = min(resource.SuggestedQuantity, smartRisingObservationQuantity(cfg, *resource))
+		resource.DecisionReason = "demand_rising_observe"
+	}
 }
 
 type smartUsageAggregate struct {
-	requests30    int64
-	successful30  int64
-	tokens30      int64
-	rpm30         float64
-	rpm5Peak      float64
-	tpm30         float64
-	sampleMinutes int
+	requests30     int64
+	successful30   int64
+	tokens30       int64
+	rpm30          float64
+	rpm5Peak       float64
+	tpm30          float64
+	successful1    int64
+	successful5    int64
+	successful10   int64
+	tokens1        int64
+	tokens5        int64
+	tokens10       int64
+	rpm1           float64
+	rpm5           float64
+	rpm10          float64
+	tpm1           float64
+	tpm5           float64
+	tpm10          float64
+	oneMinuteReady bool
+	sampleMinutes  int
+}
+
+type smartDemandPlan struct {
+	consumeRCU  float64
+	planningRCU float64
+	rcu1        float64
+	rcu5        float64
+	rcu10       float64
+	trend       string
 }
 
 func (s *Service) smartUsageSnapshot(now time.Time) smartUsageAggregate {
@@ -639,6 +701,10 @@ func (s *Service) smartUsageSnapshot(now time.Time) smartUsageAggregate {
 	}
 	from30 := now.Add(-30*time.Minute).UnixMilli() / 60000 * 60000
 	from5 := now.Add(-5*time.Minute).UnixMilli() / 60000 * 60000
+	currentMinute := now.UnixMilli() / 60000 * 60000
+	lastCompletedMinute := currentMinute - int64(time.Minute/time.Millisecond)
+	from5Completed := lastCompletedMinute - 4*int64(time.Minute/time.Millisecond)
+	from10Completed := lastCompletedMinute - 9*int64(time.Minute/time.Millisecond)
 	firstMinute := int64(0)
 	perMinute5 := map[int64]int64{}
 	for minute, bucket := range s.smartBuckets {
@@ -656,6 +722,21 @@ func (s *Service) smartUsageSnapshot(now time.Time) smartUsageAggregate {
 			// the replenishment planner buy capacity for malformed/retried traffic.
 			perMinute5[minute] += bucket.success
 		}
+		// Capacity planning uses whole, completed minute buckets only. The
+		// in-progress minute is intentionally excluded so a partial bucket never
+		// looks like a sudden demand collapse at the beginning of each minute.
+		if minute == lastCompletedMinute {
+			result.successful1 += bucket.success
+			result.tokens1 += bucket.totalTokens
+		}
+		if minute >= from5Completed && minute <= lastCompletedMinute {
+			result.successful5 += bucket.success
+			result.tokens5 += bucket.totalTokens
+		}
+		if minute >= from10Completed && minute <= lastCompletedMinute {
+			result.successful10 += bucket.success
+			result.tokens10 += bucket.totalTokens
+		}
 	}
 	if firstMinute > 0 {
 		observedMinutes := int(now.Sub(time.UnixMilli(firstMinute)).Minutes()) + 1
@@ -669,12 +750,94 @@ func (s *Service) smartUsageSnapshot(now time.Time) smartUsageAggregate {
 		result.rpm30 = float64(result.successful30) / denominator
 		result.tpm30 = float64(result.tokens30) / denominator
 	}
+	// A zero in the most recently completed bucket is a meaningful demand
+	// signal once at least two minutes have been observed: it should stop new
+	// purchases quickly instead of leaving an old 30-minute average in charge.
+	result.oneMinuteReady = result.sampleMinutes >= 2
+	if result.oneMinuteReady {
+		result.rpm1 = float64(result.successful1)
+		result.tpm1 = float64(result.tokens1)
+		result.rpm5 = float64(result.successful5) / 5
+		result.tpm5 = float64(result.tokens5) / 5
+		result.rpm10 = float64(result.successful10) / 10
+		result.tpm10 = float64(result.tokens10) / 10
+	}
 	for _, count := range perMinute5 {
 		if float64(count) > result.rpm5Peak {
 			result.rpm5Peak = float64(count)
 		}
 	}
 	return result
+}
+
+func smartDemandPlanForUsage(usage smartUsageAggregate, unit float64) smartDemandPlan {
+	result := smartDemandPlan{
+		rcu1:        smartWindowConsumeRCU(usage.rpm1, usage.tpm1, unit),
+		rcu5:        smartWindowConsumeRCU(usage.rpm5, usage.tpm5, unit),
+		rcu10:       smartWindowConsumeRCU(usage.rpm10, usage.tpm10, unit),
+		trend:       smartDemandTrendUnknown,
+		consumeRCU:  smartConsumeRCUPerMinute(usage.rpm30, usage.rpm5Peak, usage.tpm30, unit),
+		planningRCU: smartConsumeRCUPerMinute(usage.rpm30, usage.rpm5Peak, usage.tpm30, unit),
+	}
+	if !usage.oneMinuteReady {
+		return result
+	}
+
+	baseline := math.Max(result.rcu5, result.rcu10)
+	result.consumeRCU = result.rcu1
+	result.planningRCU = result.rcu1
+	result.trend = smartDemandTrendStable
+	// A rise is confirmed by comparing the last complete minute with two
+	// broader windows. Its immediate burn still drives the health calculation,
+	// while purchase sizing is held to the 5/10 minute baseline and capped to a
+	// small observation batch elsewhere.
+	if result.rcu1 > 0 && (baseline <= 0 || result.rcu1 >= baseline*1.6) {
+		result.trend = smartDemandTrendRising
+		if baseline > 0 {
+			result.planningRCU = baseline
+		}
+		return result
+	}
+	// Demand falls are intentionally asymmetric. A completed low one-minute
+	// bucket immediately becomes the active rate to prevent buying credentials
+	// that will expire within an hour. New orders are paused by the caller.
+	if baseline > 0 && result.rcu1 <= baseline*0.55 {
+		result.trend = smartDemandTrendFalling
+	}
+	return result
+}
+
+func smartWindowConsumeRCU(rpm, tpm, unit float64) float64 {
+	requestRCU := math.Max(0, rpm)
+	tokenRCU := 0.0
+	if unit > 0 && tpm > 0 {
+		tokenRCU = tpm / 1000 / unit
+	}
+	return math.Max(requestRCU, tokenRCU)
+}
+
+func applySmartUsage(resource *SmartResource, usage smartUsageAggregate, unit float64) float64 {
+	if resource == nil {
+		return 0
+	}
+	demand := smartDemandPlanForUsage(usage, unit)
+	resource.RPM30M = usage.rpm30
+	resource.RPM5MPeak = usage.rpm5Peak
+	resource.TPM30M = usage.tpm30
+	resource.RPM1M = usage.rpm1
+	resource.RPM5M = usage.rpm5
+	resource.RPM10M = usage.rpm10
+	resource.TPM1M = usage.tpm1
+	resource.TPM5M = usage.tpm5
+	resource.TPM10M = usage.tpm10
+	resource.ConsumeRCU1M = round2(demand.rcu1)
+	resource.ConsumeRCU5M = round2(demand.rcu5)
+	resource.ConsumeRCU10M = round2(demand.rcu10)
+	resource.DemandTrend = demand.trend
+	resource.DemandPlanningRCUPerMinute = round2(demand.planningRCU)
+	resource.ConsumeRCUPerMinute = round2(demand.consumeRCU)
+	resource.UsageSampleMinutes = usage.sampleMinutes
+	return demand.consumeRCU
 }
 
 func (s *Service) cachedAuthFiles(ctx context.Context, cfg store.ManagerConfig, force bool) (authFileSnapshot, error) {
@@ -1181,6 +1344,27 @@ func smartAutomaticOrderQuantityLimit(cfg store.ManagerSupplyConfig, resource Sm
 	return max(1, limit)
 }
 
+func smartRisingObservationQuantity(cfg store.ManagerSupplyConfig, resource SmartResource) int {
+	limit := smartAutomaticOrderQuantityLimit(cfg, resource)
+	if limit <= 0 {
+		return 1
+	}
+	// A 1-minute spike is real enough to lower the capacity health immediately,
+	// but it is not enough evidence to buy a full one-hour batch. Cap the first
+	// reservation to 1/2/3 credentials according to the currently observed
+	// shortfall, then let the next complete minute and 5/10-minute windows
+	// decide whether another batch is justified.
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	if unit <= 0 {
+		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
+	}
+	needed := 1
+	if unit > 0 && resource.CapacityGapRCU > 0 {
+		needed = int(math.Ceil(resource.CapacityGapRCU / unit))
+	}
+	return clampInt(needed, 1, min(limit, 3))
+}
+
 func smartCriticalTakeConfirmRounds(cfg store.ManagerSupplyConfig) int {
 	return clampInt(positiveOr(cfg.CriticalTakeConfirmRounds, 2), 1, 5)
 }
@@ -1553,7 +1737,7 @@ func round2(value float64) float64 {
 }
 
 func supplySmartActionPriority(action string) int {
-	order := []string{smartActionHealthy, smartActionPrelock, smartActionWaitLocked, smartActionReleaseLocked, smartActionTakeLocked, smartActionBalanceBlocked, smartActionInventoryBlocked, smartActionConfigError, smartActionSnapshotStale, smartActionManualReview}
+	order := []string{smartActionHealthy, smartActionObserveDemand, smartActionPrelock, smartActionWaitLocked, smartActionReleaseLocked, smartActionTakeLocked, smartActionBalanceBlocked, smartActionInventoryBlocked, smartActionConfigError, smartActionSnapshotStale, smartActionManualReview}
 	for index, item := range order {
 		if item == action {
 			return index

@@ -310,6 +310,7 @@ export function SupplyPage() {
   const decisionReason = smart?.decisionReason || 'unknown';
   const confidence = smart?.confidence || 'low';
   const supplyPressureLevel = smart?.supplyPressureLevel || 'unknown';
+  const demandTrend = smart?.demandTrend || 'unknown';
   const effectiveHealthTargetMinutes =
     smart?.effectiveHealthyMinutesTarget ??
     smart?.healthyMinutesTarget ??
@@ -366,6 +367,12 @@ export function SupplyPage() {
         })
       : t('supply.automation_order_processing_detail')
     : t('supply.automation_no_active_order_detail');
+  const demandStrategy = t(`supply.demand_strategy_${demandTrend}`, {
+    defaultValue: demandTrend,
+  });
+  const demandBasis = t(`supply.demand_basis_${demandTrend}`, {
+    defaultValue: t('supply.demand_basis_unknown'),
+  });
 
   const metrics = useMemo(
     () => {
@@ -600,6 +607,33 @@ export function SupplyPage() {
                       defaultValue: decisionReason,
                     })}
                   </p>
+                </div>
+                <div className={styles.demandStrategy}>
+                  <div className={styles.demandStrategyHeader}>
+                    <div>
+                      <span>{t('supply.demand_strategy')}</span>
+                      <strong>{demandStrategy}</strong>
+                    </div>
+                    <small>{demandBasis}</small>
+                  </div>
+                  <div className={styles.demandMetricGrid}>
+                    <div>
+                      <span>{t('supply.demand_actual_1m')}</span>
+                      <strong>{formatRcuRate(smart?.consumeRcu1m)}</strong>
+                    </div>
+                    <div>
+                      <span>{t('supply.demand_reference_5m')}</span>
+                      <strong>{formatRcuRate(smart?.consumeRcu5m)}</strong>
+                    </div>
+                    <div>
+                      <span>{t('supply.demand_reference_10m')}</span>
+                      <strong>{formatRcuRate(smart?.consumeRcu10m)}</strong>
+                    </div>
+                    <div>
+                      <span>{t('supply.demand_purchase_basis')}</span>
+                      <strong>{formatRcuRate(smart?.demandPlanningRcuPerMinute)}</strong>
+                    </div>
+                  </div>
                 </div>
                 <div className={styles.executionStrip} aria-live="polite">
                   <div className={`${styles.executionCell} ${styles.executionCountdown}`}>

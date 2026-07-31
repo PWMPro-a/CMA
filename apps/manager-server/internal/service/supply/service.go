@@ -1093,6 +1093,12 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 	if quantity <= 0 {
 		return quantity, ""
 	}
+	if resource.DemandTrend == smartDemandTrendFalling {
+		return 0, "demand_falling_observe"
+	}
+	if resource.DemandTrend == smartDemandTrendRising {
+		return min(quantity, smartRisingObservationQuantity(cfg, resource)), "demand_rising_observe"
+	}
 	maxQuantity := smartAutomaticOrderQuantityLimit(cfg, resource)
 	minimumQuantity := min(smartPrelockMinQuantity(cfg), maxQuantity)
 	quantity = clampInt(quantity, minimumQuantity, maxQuantity)
@@ -1175,6 +1181,9 @@ func sameSupplyProduct(a string, b string) bool {
 }
 
 func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, resource SmartResource) int {
+	if resource.DemandTrend == smartDemandTrendFalling {
+		return 0
+	}
 	quantity := resource.SuggestedQuantity
 	if quantity <= 0 && resource.CapacityGapRCU > 0 && resource.UnitCapacityRCU > 0 {
 		unit := smartEstimatedNewAccountCapacityRCU(cfg)
@@ -1193,6 +1202,9 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	}
 	if cfg.DailyMaxReplenishQuantity > 0 {
 		quantity = min(quantity, cfg.DailyMaxReplenishQuantity)
+	}
+	if resource.DemandTrend == smartDemandTrendRising {
+		quantity = min(quantity, smartRisingObservationQuantity(cfg, resource))
 	}
 	return clampInt(quantity, 1, 100)
 }

@@ -1691,3 +1691,166 @@ func TestSmartPlentySmallBatchFollowsCapacityGap(t *testing.T) {
 		}
 	}
 }
+
+func TestSmartDemandPlanUsesShortTermRateAndTrendWindows(t *testing.T) {
+	tests := []struct {
+		name         string
+		usage        smartUsageAggregate
+		wantTrend    string
+		wantConsume  float64
+		wantPlanning float64
+	}{
+		{
+			name: "one minute window not ready retains historical fallback",
+			usage: smartUsageAggregate{
+				rpm30: 20, rpm5Peak: 30, tpm30: 1_600,
+			},
+			wantTrend: smartDemandTrendUnknown, wantConsume: 21, wantPlanning: 21,
+		},
+		{
+			name: "stable demand follows latest completed minute",
+			usage: smartUsageAggregate{
+				oneMinuteReady: true,
+				rpm1:           100,
+				rpm5:           100,
+				rpm10:          100,
+			},
+			wantTrend: smartDemandTrendStable, wantConsume: 100, wantPlanning: 100,
+		},
+		{
+			name: "spike keeps immediate capacity risk but uses trend baseline for purchase planning",
+			usage: smartUsageAggregate{
+				oneMinuteReady: true,
+				rpm1:           1_000,
+				rpm5:           100,
+				rpm10:          100,
+			},
+			wantTrend: smartDemandTrendRising, wantConsume: 1_000, wantPlanning: 100,
+		},
+		{
+			name: "completed low minute pauses new procurement immediately",
+			usage: smartUsageAggregate{
+				oneMinuteReady: true,
+				rpm1:           0,
+				rpm5:           100,
+				rpm10:          100,
+			},
+			wantTrend: smartDemandTrendFalling, wantConsume: 0, wantPlanning: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := smartDemandPlanForUsage(tt.usage, 80)
+			if plan.trend != tt.wantTrend || plan.consumeRCU != tt.wantConsume || plan.planningRCU != tt.wantPlanning {
+				t.Fatalf("plan = %#v, want trend=%q consume=%v planning=%v", plan, tt.wantTrend, tt.wantConsume, tt.wantPlanning)
+			}
+		})
+	}
+}
+
+func TestSmartDemandFallingPausesOrdersWhileKeepingCapacityHealthVisible(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Product:              "oauth_30d",
+		HealthyMinutesTarget: 40,
+		WarningMinutes:       15,
+		CriticalMinutes:      5,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   10,
+		ReplenishBatchSize:   10,
+		NewAccountConfidence: 1,
+	}
+	resource := SmartResource{
+		CurrentCapacityRCU:      100,
+		ConsumeRCUPerMinute:     10,
+		UnitCapacityRCU:         80,
+		EffectiveHealthyMinutes: 40,
+		WarningMinutes:          15,
+		CriticalMinutes:         5,
+		DemandTrend:             smartDemandTrendFalling,
+	}
+
+	recalculateSmartResourceCapacityPlan(cfg, &resource)
+	if resource.HealthLevel != smartHealthWarning || resource.SuggestedAction != smartActionObserveDemand ||
+		resource.DecisionReason != "demand_falling_observe" || resource.SuggestedQuantity != 0 {
+		t.Fatalf("falling demand decision = %#v", resource)
+	}
+	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); got != 0 {
+		t.Fatalf("falling demand must create no new order, got %d", got)
+	}
+
+	zeroTraffic := resource
+	zeroTraffic.ConsumeRCUPerMinute = 0
+	zeroTraffic.CurrentCapacityRCU = 500
+	recalculateSmartResourceCapacityPlan(cfg, &zeroTraffic)
+	if zeroTraffic.HealthLevel != smartHealthHealthy || zeroTraffic.SuggestedAction != smartActionObserveDemand ||
+		zeroTraffic.DecisionReason != "demand_falling_observe" || zeroTraffic.TargetCapacityRCU != 0 || zeroTraffic.SuggestedQuantity != 0 {
+		t.Fatalf("completed zero-traffic minute must pause procurement, got %#v", zeroTraffic)
+	}
+}
+
+func TestSmartDemandRisingCapsFirstOrderToObservationBatch(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Product:              "oauth_30d",
+		HealthyMinutesTarget: 40,
+		WarningMinutes:       15,
+		CriticalMinutes:      5,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   10,
+		ReplenishBatchSize:   10,
+		NewAccountConfidence: 1,
+	}
+	resource := SmartResource{
+		CurrentCapacityRCU:      0,
+		ConsumeRCUPerMinute:     1_000,
+		UnitCapacityRCU:         80,
+		EffectiveHealthyMinutes: 40,
+		WarningMinutes:          15,
+		CriticalMinutes:         5,
+		DemandTrend:             smartDemandTrendRising,
+	}
+
+	recalculateSmartResourceCapacityPlan(cfg, &resource)
+	if resource.SuggestedQuantity != 3 || resource.DecisionReason != "demand_rising_observe" {
+		t.Fatalf("rising demand must use a 1-3 account observation batch, got %#v", resource)
+	}
+	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); got != 3 {
+		t.Fatalf("rising demand create quantity = %d, want 3", got)
+	}
+}
+
+func TestSmartResourceTreatsCompletedZeroMinuteAsFallingDemand(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Minute).Add(10 * time.Second)
+	service.recordSmartUsageEvents([]usage.Event{{
+		TimestampMS: now.Add(-2 * time.Minute).UnixMilli(),
+		Provider:    "codex",
+		AuthIndex:   "previous-load",
+		TotalTokens: 100,
+	}}, now)
+
+	resource := service.buildSmartResourceFromSnapshots(store.ManagerSupplyConfig{
+		Product:              "oauth_30d",
+		HealthyMinutesTarget: 40,
+		WarningMinutes:       15,
+		CriticalMinutes:      5,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   10,
+	}, authFileSnapshot{
+		generatedAt: now,
+		files: []cpaauthfiles.File{{
+			Name:     "ready.json",
+			Provider: "codex",
+			Raw: map[string]any{
+				"status":        "ready",
+				"remaining_rcu": 100,
+			},
+		}},
+	}, now)
+
+	if resource.DemandTrend != smartDemandTrendFalling || resource.ConsumeRCUPerMinute != 0 ||
+		resource.SuggestedAction != smartActionObserveDemand || resource.DecisionReason != "demand_falling_observe" ||
+		resource.SuggestedQuantity != 0 {
+		t.Fatalf("completed zero minute must be an observable falling-demand pause, got %#v", resource)
+	}
+}

@@ -111,6 +111,17 @@ export interface SupplySmartResource {
   rpm30m: number;
   rpm5mPeak: number;
   tpm30m: number;
+  rpm1m: number;
+  rpm5m: number;
+  rpm10m: number;
+  tpm1m: number;
+  tpm5m: number;
+  tpm10m: number;
+  consumeRcu1m: number;
+  consumeRcu5m: number;
+  consumeRcu10m: number;
+  demandTrend: 'rising' | 'falling' | 'stable' | 'unknown' | string;
+  demandPlanningRcuPerMinute: number;
   consumeRcuPerMinute: number;
   currentCapacityRcu: number;
   rawCapacityRcu?: number;

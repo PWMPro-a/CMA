@@ -337,6 +337,71 @@
   line-height: 1.6;
 }
 
+.demandStrategy {
+  display: grid;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid color-mix(in srgb, var(--smart-tone) 24%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--smart-tone) 5%, var(--bg-primary));
+}
+
+.demandStrategyHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.demandStrategyHeader > div {
+  display: grid;
+  gap: 3px;
+}
+
+.demandStrategyHeader span,
+.demandStrategyHeader small,
+.demandMetricGrid span {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.demandStrategyHeader strong {
+  color: var(--smart-tone);
+  font-size: 14px;
+  font-weight: 780;
+}
+
+.demandStrategyHeader small {
+  max-width: 54%;
+  text-align: right;
+}
+
+.demandMetricGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.demandMetricGrid > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-primary) 72%, var(--surface-subtle));
+}
+
+.demandMetricGrid strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .executionStrip {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -722,6 +787,7 @@
   .formGrid,
   .smartToggles,
   .orderComposer,
+  .demandMetricGrid,
   .executionStrip,
   .decisionFooter,
   .miniMetricGrid,
@@ -751,9 +817,15 @@
   .compactHeader,
   .panelHeader,
   .configFooter,
-  .capacityOverview {
+  .capacityOverview,
+  .demandStrategyHeader {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .demandStrategyHeader small {
+    max-width: none;
+    text-align: left;
   }
 
   .panel,
