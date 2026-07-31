@@ -198,7 +198,7 @@ func TestSmartResourceExcludesInspectionErrorUntilUsabilityIsVerified(t *testing
 	}
 }
 
-func TestSmartResourceAcceleratesVerifiedLowerBoundDuringIncompleteInspection(t *testing.T) {
+func TestSmartResourceUsesVerifiedLowerBoundDuringIncompleteInspection(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Second)
 	for minute := 0; minute < 30; minute++ {
@@ -228,13 +228,68 @@ func TestSmartResourceAcceleratesVerifiedLowerBoundDuringIncompleteInspection(t 
 		},
 	}, now)
 
-	if resource.SnapshotFresh || resource.DecisionReason != "inspection_usability_incomplete_low_water" ||
+	if resource.SnapshotFresh || resource.DecisionReason != "inspection_usability_incomplete_capacity_deficit" ||
 		resource.HealthLevel != smartHealthCritical || resource.SuggestedQuantity != 15 {
-		t.Fatalf("low verified capacity must reserve a full recovery batch: %#v", resource)
+		t.Fatalf("low verified capacity must retain a capacity recovery plan: %#v", resource)
 	}
-	if !smartPartialInspectionLowWaterAllowed(resource) || resource.CurrentCapacityRCU <= 0 ||
+	if !smartPartialInspectionCapacityDeficitAllowed(resource) || resource.CurrentCapacityRCU <= 0 ||
 		resource.EstimatedSustainMinutes > float64(resource.CriticalMinutes) {
-		t.Fatalf("only the verified lower bound may enable emergency replenishment: %#v", resource)
+		t.Fatalf("only the verified lower bound may enable replenishment: %#v", resource)
+	}
+}
+
+func TestSmartResourceRetainsWarningPlanForRecentPartialInspectionCapacityDeficit(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	// 78.32M tokens/minute on oauth_7d is 1,958 RCU/minute. Twenty-two
+	// verified credentials have 48,400 RCU, so the lower bound supports
+	// about 24.7 minutes: below the 25-minute warning water and below the
+	// 40-minute health target. This is the regression case where the UI previously
+	// showed capacity unknown and a suggested quantity of zero.
+	for minute := 0; minute < 30; minute++ {
+		service.recordSmartUsageEvents([]usage.Event{{
+			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+			Provider:    "codex",
+			AuthIndex:   "verified.json",
+			TotalTokens: 78_320_000,
+		}}, now)
+	}
+	unused := 0.0
+	results := make([]store.CodexInspectionResult, 0, 23)
+	for index := 0; index < 22; index++ {
+		results = append(results, store.CodexInspectionResult{
+			AccountKey:  fmt.Sprintf("verified-%d", index),
+			FileName:    fmt.Sprintf("verified-%d.json", index),
+			Provider:    "codex",
+			Status:      "active",
+			UsedPercent: &unused,
+		})
+	}
+	results = append(results, store.CodexInspectionResult{
+		AccountKey: "probe-error", FileName: "probe-error.json", Provider: "codex", Status: "error", UsedPercent: &unused,
+	})
+	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product:              "oauth_7d",
+		HealthyMinutesTarget: 40,
+		WarningMinutes:       25,
+		CriticalMinutes:      10,
+		ReplenishBatchSize:   15,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   7,
+		NewAccountConfidence: 0.7,
+	}, inspectionQuotaSnapshot{
+		run:         store.CodexInspectionRun{ProbeSetCount: len(results), SampledCount: len(results), FinishedAtMS: now.Add(-21 * time.Minute).UnixMilli()},
+		generatedAt: now.Add(-21 * time.Minute),
+		results:     results,
+	}, now)
+
+	if resource.SnapshotFresh || resource.HealthLevel != smartHealthWarning ||
+		resource.DecisionReason != "inspection_usability_incomplete_capacity_deficit" || resource.SuggestedQuantity != 15 {
+		t.Fatalf("recent partial inspection must retain warning capacity plan: %#v", resource)
+	}
+	if resource.CurrentCapacityRCU <= 48_000 || resource.EstimatedSustainMinutes >= float64(resource.WarningMinutes) ||
+		resource.EstimatedSustainMinutes >= float64(resource.EffectiveHealthyMinutes) || !smartPartialInspectionCapacityDeficitAllowed(resource) {
+		t.Fatalf("plan must use only the recent verified capacity lower bound: %#v", resource)
 	}
 }
 

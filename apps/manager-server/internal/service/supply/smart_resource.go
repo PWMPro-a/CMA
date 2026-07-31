@@ -445,9 +445,8 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	// Keep the verified portion visible even while one or more credentials did
 	// not return quota evidence. Returning early here used to turn the entire
 	// dashboard into 0 RCU, despite most capacity being known. The resulting
-	// figure is a lower bound: normal automation pauses on partial evidence, but
-	// an exhausted lower bound is allowed to lock stock so an inspection blip
-	// never turns into a capacity outage.
+	// figure is a lower bound: a bounded purchase may use its capacity deficit
+	// while it remains recent, without counting unverified credentials as usable.
 	if quotaEvidenceIncomplete || usabilityEvidenceIncomplete {
 		if usageStats.successful30 > 0 && consumeRCUPerMinute > 0 {
 			recalculateSmartResourceCapacityPlan(cfg, &resource)
@@ -459,12 +458,11 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			incompleteReason = "inspection_quota_incomplete"
 		}
 		resource.DecisionReason = incompleteReason
-		if smartPartialInspectionLowWaterAllowed(resource) {
+		if smartPartialInspectionCapacityDeficitAllowed(resource) {
 			// Keep the capacity plan derived exclusively from verified credentials.
 			// The incomplete result never increases available capacity; it only
-			// permits an urgent, bounded reserve order against the verified lower
-			// bound.
-			resource.DecisionReason = incompleteReason + "_low_water"
+			// permits a bounded order against the recent verified lower bound.
+			resource.DecisionReason = incompleteReason + "_capacity_deficit"
 		} else {
 			resource.HealthLevel = smartHealthUnknown
 			resource.SuggestedAction = smartActionSnapshotStale
@@ -1040,16 +1038,17 @@ func smartResourceAtOrBelowWarning(resource SmartResource) bool {
 		resource.EstimatedSustainMinutes <= float64(resource.WarningMinutes)
 }
 
-// smartPartialInspectionLowWaterAllowed permits a bounded reserve order from
-// the verified capacity lower bound when inspection evidence is incomplete.
-// It deliberately keeps SnapshotFresh=false, so stale/unavailable snapshots
-// and missing burn-rate data remain blocked.
-func smartPartialInspectionLowWaterAllowed(resource SmartResource) bool {
-	if !smartResourceAtOrBelowWarning(resource) || resource.CurrentCapacityRCU <= 0 || resource.CapacityGapRCU <= 0 ||
-		resource.CapacitySnapshotAtMS <= 0 || resource.CapacitySnapshotAgeSeconds > 20*60 {
+// smartPartialInspectionCapacityDeficitAllowed permits a bounded purchase
+// from the verified capacity lower bound when usability/quota evidence is
+// incomplete. It deliberately excludes missing snapshots and old evidence;
+// the 45-minute upper bound accommodates the regular full-pool inspection
+// duration while avoiding decisions from a stale historic snapshot.
+func smartPartialInspectionCapacityDeficitAllowed(resource SmartResource) bool {
+	if resource.CurrentCapacityRCU <= 0 || resource.CapacityGapRCU <= 0 ||
+		resource.CapacitySnapshotAtMS <= 0 || resource.CapacitySnapshotAgeSeconds > 45*60 {
 		return false
 	}
-	baseReason := strings.TrimSuffix(resource.DecisionReason, "_low_water")
+	baseReason := strings.TrimSuffix(resource.DecisionReason, "_capacity_deficit")
 	switch baseReason {
 	case "inspection_quota_incomplete", "inspection_usability_incomplete":
 		return true

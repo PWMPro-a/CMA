@@ -353,7 +353,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	quantity := manualQuantity
 	if quantity == 0 {
 		if useSmart {
-			if !resource.SnapshotFresh && !smartPartialInspectionLowWaterAllowed(resource) {
+			if !resource.SnapshotFresh && !smartPartialInspectionCapacityDeficitAllowed(resource) {
 				return nil
 			}
 			if resource.DecisionReason == "usage_rate_not_ready" || resource.ConsumeRCUPerMinute <= 0 {
@@ -699,7 +699,7 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 			resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
 		}
 		switch {
-		case !resource.SnapshotFresh && !smartPartialInspectionLowWaterAllowed(resource):
+		case !resource.SnapshotFresh && !smartPartialInspectionCapacityDeficitAllowed(resource):
 			// A completed inspection can be older than the normal freshness window
 			// while a large pool is still being scanned. A ready order was already
 			// locked from a verified shortage, so do not strand it when the verified
