@@ -1902,15 +1902,11 @@ func isSupportedSupplyOAuth(account map[string]any, credentials map[string]any) 
 }
 
 func isAvailableCodexFile(file cpaauthfiles.File) bool {
-	if !isSmartCapacityCodexFile(file) {
-		return false
-	}
-	status := strings.ToLower(textField(file.Raw, "status", "state"))
-	switch status {
-	case "failed", "error", "unavailable", "pending", "refreshing":
-		return false
-	}
-	return true
+	// Runtime unavailable/error states include model cooldowns and transient
+	// upstream failures. They are not credential health signals and must not
+	// lower capacity or trigger replenishment. Only explicit disablement,
+	// credential invalidation, or hard quota exhaustion are excluded.
+	return isSmartCapacityCodexFile(file)
 }
 
 func isSmartCapacityCodexFile(file cpaauthfiles.File) bool {
@@ -1921,7 +1917,7 @@ func isSmartCapacityCodexFile(file cpaauthfiles.File) bool {
 	if provider != "codex" && provider != "openai-codex" {
 		return false
 	}
-	if boolField(file.Raw, "unavailable", "expired", "revoked", "deleted") {
+	if boolField(file.Raw, "disabled", "expired", "revoked", "deleted") {
 		return false
 	}
 	status := strings.ToLower(textField(file.Raw, "status", "state"))

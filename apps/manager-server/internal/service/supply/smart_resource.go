@@ -236,8 +236,8 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 			resource.WeakAccounts++
 			continue
 		}
-		// CPA 的 active/ready 运行态是凭证是否可调度的唯一来源。近期
-		// 请求历史只用于全局消耗速度，不能再折减单凭证余额或可用数量。
+		// 临时运行态（包括冷却与上游异常）不是凭证健康信号。请求历史
+		// 只用于全局消耗速度，不能折减单凭证余额或可用数量。
 		resource.AvailableAccounts++
 		resource.HealthyAccounts++
 		remainingMinutes := smartAccountRemainingMinutes(file.Raw, now, smartAccountLifetimeMinutes())

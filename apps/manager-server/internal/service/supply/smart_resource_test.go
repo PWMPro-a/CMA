@@ -88,7 +88,7 @@ func TestSmartResourceDoesNotFallbackToAccountCountWithoutUsageRate(t *testing.T
 	}
 }
 
-func TestSmartResourceOnlyCountsCPAUsableCredentialsForCapacity(t *testing.T) {
+func TestSmartResourceKeepsTransientErrorsInCapacity(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now()
 	events := make([]usage.Event, 0, 60)
@@ -140,14 +140,14 @@ func TestSmartResourceOnlyCountsCPAUsableCredentialsForCapacity(t *testing.T) {
 		},
 	}, now)
 
-	if resource.SchedulableAccounts != 2 || resource.HealthyAccounts != 1 || resource.WeakAccounts != 1 {
-		t.Fatalf("health counts should be based on request usability: %#v", resource)
+	if resource.SchedulableAccounts != 2 || resource.HealthyAccounts != 2 || resource.WeakAccounts != 0 {
+		t.Fatalf("transient runtime errors must not reduce credential health: %#v", resource)
 	}
-	if resource.AvailableAccounts != 1 || resource.CurrentCapacityRCU != 60 {
-		t.Fatalf("capacity should only use a CPA-usable credential at full balance, got %#v", resource)
+	if resource.AvailableAccounts != 2 || resource.RawCapacityRCU != 160 || resource.CurrentCapacityRCU != 120 {
+		t.Fatalf("transient runtime errors must retain capacity before the normal expiry cap, got %#v", resource)
 	}
-	if resource.ConsumeRCUPerMinute <= 0 || resource.CapacityGapRCU <= 0 {
-		t.Fatalf("burn rate and capacity gap were not computed: %#v", resource)
+	if resource.ConsumeRCUPerMinute <= 0 || resource.HealthLevel != smartHealthHealthy || resource.CapacityGapRCU != 0 {
+		t.Fatalf("restored cooldown capacity should produce a healthy no-replenishment decision: %#v", resource)
 	}
 }
 
@@ -179,6 +179,52 @@ func TestSmartResourceTreatsActiveCredentialAsHealthyWithoutHistory(t *testing.T
 	}
 	if resource.RawCapacityRCU != 100 || resource.CurrentCapacityRCU != 100 {
 		t.Fatalf("active credential balance should not be weighted down: %#v", resource)
+	}
+}
+
+func TestSmartResourceIgnoresCPAUnavailableDuringCooldown(t *testing.T) {
+	now := time.Now()
+	resource := New(nil, nil).buildSmartResourceFromSnapshots(store.ManagerSupplyConfig{
+		Product:              "oauth_30d",
+		HealthyMinutesTarget: 40,
+	}, authFileSnapshot{
+		generatedAt: now,
+		files: []cpaauthfiles.File{
+			{
+				Name:     "still-schedulable.json",
+				Provider: "codex",
+				Raw: map[string]any{
+					"status":        "error",
+					"unavailable":   false,
+					"remaining_rcu": 80,
+				},
+			},
+			{
+				Name:     "all-models-cooling.json",
+				Provider: "codex",
+				Raw: map[string]any{
+					"status":           "error",
+					"unavailable":      true,
+					"next_retry_after": now.Add(time.Minute).Format(time.RFC3339),
+					"remaining_rcu":    80,
+				},
+			},
+			{
+				Name:     "legacy-error.json",
+				Provider: "codex",
+				Raw: map[string]any{
+					"status":        "error",
+					"remaining_rcu": 80,
+				},
+			},
+		},
+	}, now)
+
+	if resource.SchedulableAccounts != 3 || resource.AvailableAccounts != 3 || resource.HealthyAccounts != 3 || resource.WeakAccounts != 0 {
+		t.Fatalf("cooldown and unavailable runtime fields must not change credential statistics: %#v", resource)
+	}
+	if resource.RawCapacityRCU != 240 {
+		t.Fatalf("cooldown credentials must retain their remaining capacity: %#v", resource)
 	}
 }
 
