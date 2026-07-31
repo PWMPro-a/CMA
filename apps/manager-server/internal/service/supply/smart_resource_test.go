@@ -3,6 +3,7 @@ package supply
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,11 +13,60 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
+
+func seedCompletedQuotaInspection(t *testing.T, st *store.Store, results ...store.CodexInspectionResult) {
+	t.Helper()
+	now := time.Now().UnixMilli()
+	run, err := st.CreateCodexInspectionRun(context.Background(), store.CodexInspectionRun{
+		TriggerType:   "scheduled",
+		TriggerKey:    fmt.Sprintf("supply-%d", now),
+		Status:        "completed",
+		ProbeSetCount: len(results),
+		SampledCount:  len(results),
+		FinishedAtMS:  now,
+	})
+	if err != nil {
+		t.Fatalf("create quota inspection run: %v", err)
+	}
+	for index := range results {
+		result := results[index]
+		result.RunID = run.ID
+		if result.AccountKey == "" {
+			result.AccountKey = fmt.Sprintf("quota-%d", index)
+		}
+		if result.FileName == "" {
+			result.FileName = result.AccountKey + ".json"
+		}
+		if result.DisplayAccount == "" {
+			result.DisplayAccount = result.AccountKey
+		}
+		if result.Provider == "" {
+			result.Provider = "codex"
+		}
+		if result.Action == "" {
+			result.Action = "keep"
+		}
+		if _, err := st.InsertCodexInspectionResult(context.Background(), result); err != nil {
+			t.Fatalf("insert quota inspection result: %v", err)
+		}
+	}
+}
+
+func quotaInspectionResult(usedPercent float64) store.CodexInspectionResult {
+	return store.CodexInspectionResult{
+		UsedPercent: &usedPercent,
+		QuotaWindows: []model.CodexInspectionQuotaWindow{{
+			ID:          "five-hour",
+			UsedPercent: &usedPercent,
+		}},
+	}
+}
 
 func TestSmartResourceRecommendsPrelockFromUsageCapacity(t *testing.T) {
 	service := New(nil, nil)
@@ -56,6 +106,161 @@ func TestSmartResourceRecommendsPrelockFromUsageCapacity(t *testing.T) {
 	}
 	if resource.RPM30M <= 0 || resource.CurrentCapacityRCU <= 0 || resource.CapacityGapRCU <= 0 {
 		t.Fatalf("resource metrics were not computed: %#v", resource)
+	}
+}
+
+func TestSmartResourceBlocksIncompleteInspectionQuotaEvidence(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now()
+	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product:              "oauth_30d",
+		HealthyMinutesTarget: 40,
+	}, inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{
+			ProbeSetCount: 2,
+			SampledCount:  2,
+			FinishedAtMS:  now.UnixMilli(),
+		},
+		generatedAt: now,
+		results: []store.CodexInspectionResult{
+			quotaInspectionResult(0),
+			{AccountKey: "missing-quota", FileName: "missing-quota.json", Provider: "codex", Action: "keep"},
+		},
+	}, now)
+
+	if resource.SnapshotFresh || resource.DecisionReason != "inspection_quota_incomplete" || resource.SuggestedQuantity != 0 {
+		t.Fatalf("incomplete inspection must pause instead of deriving capacity from account count: %#v", resource)
+	}
+}
+
+func TestSmartResourceUsesPersistedSupplyLeaseForCapacity(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	events := make([]usage.Event, 0, 30)
+	for minute := 0; minute < 30; minute++ {
+		events = append(events, usage.Event{
+			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+			Provider:    "codex",
+			AuthIndex:   "lease-source",
+			TotalTokens: 100,
+		})
+	}
+	service.recordSmartUsageEvents(events, now)
+	usedPercent := 0.0
+	fileName := "codex-supply-short-lease.json"
+	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product:              "oauth_30d",
+		HealthyMinutesTarget: 40,
+	}, inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{ProbeSetCount: 1, SampledCount: 1, FinishedAtMS: now.UnixMilli()},
+		results: []store.CodexInspectionResult{{
+			AccountKey: "short-lease", FileName: fileName, Provider: "codex", Action: "keep",
+			UsedPercent: &usedPercent,
+		}},
+		leaseExpiresByFile: map[string]int64{fileName: now.Add(5 * time.Minute).UnixMilli()},
+		generatedAt:        now,
+	}, now)
+
+	if !resource.SnapshotFresh || resource.CapacityLifetimeCoverage != 100 {
+		t.Fatalf("active supply lease should be a usable snapshot: %#v", resource)
+	}
+	if resource.RawCapacityRCU != 400 || resource.CurrentCapacityRCU != 5 {
+		t.Fatalf("capacity must use the remaining five-minute lease rather than an account count: %#v", resource)
+	}
+}
+
+func TestSmartResourcePausesWhenSupplyLeaseEvidenceIsMissing(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	usedPercent := 0.0
+	resource := New(nil, nil).buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product: "oauth_30d",
+	}, inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{ProbeSetCount: 1, SampledCount: 1, FinishedAtMS: now.UnixMilli()},
+		results: []store.CodexInspectionResult{{
+			AccountKey: "missing-lease", FileName: "codex-supply-missing-lease.json", Provider: "codex", Action: "keep",
+			UsedPercent: &usedPercent,
+		}},
+		generatedAt: now,
+	}, now)
+
+	if resource.SnapshotFresh || resource.DecisionReason != "inspection_lease_incomplete" || resource.CapacityLifetimeCoverage != 0 {
+		t.Fatalf("missing supply lease must pause automatic purchase: %#v", resource)
+	}
+}
+
+func TestSmartResourceDoesNotExcludeCooldownOnlyInspectionAction(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	usedPercent := 0.0
+	resource := New(nil, nil).buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product: "oauth_30d",
+	}, inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{ProbeSetCount: 1, SampledCount: 1, FinishedAtMS: now.UnixMilli()},
+		results: []store.CodexInspectionResult{{
+			AccountKey: "cooldown", FileName: "manual-cooldown.json", Provider: "codex", Action: "disable",
+			Status: "cooldown", Disabled: true, UsedPercent: &usedPercent,
+		}},
+		generatedAt: now,
+	}, now)
+
+	if !resource.SnapshotFresh || resource.RawCapacityRCU <= 0 {
+		t.Fatalf("cooldown action alone must not remove usable quota capacity: %#v", resource)
+	}
+}
+
+func TestInspectionCapacityExcludesQuotaEvenWhenCooldownIsPresent(t *testing.T) {
+	if !inspectionResultCapacityExcluded(store.CodexInspectionResult{IsQuota: true, Status: "cooldown", Disabled: true}) {
+		t.Fatal("quota exhaustion must stay excluded even when a cooldown label is present")
+	}
+	if !inspectionResultCapacityExcluded(store.CodexInspectionResult{Status: "quota cooldown", Disabled: true}) {
+		t.Fatal("quota evidence in a cooldown message must stay excluded")
+	}
+	if inspectionResultCapacityExcluded(store.CodexInspectionResult{Status: "cooldown", Disabled: true}) {
+		t.Fatal("a cooldown-only disabled state should retain verified capacity")
+	}
+}
+
+func TestSmartAutomaticPausesWithoutInspectionSnapshotOrAuthFileRead(t *testing.T) {
+	var authFileRequests atomic.Int32
+	var supplyRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v0/management/auth-files":
+			authFileRequests.Add(1)
+		case "/api/customer/login", "/api/customer/inventory", "/api/customer/balance", "/api/customer/pickup/orders":
+			supplyRequests.Add(1)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "smart-no-quota-snapshot.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_30d",
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("run automatic: %v", err)
+	}
+	if authFileRequests.Load() != 0 || supplyRequests.Load() != 0 {
+		t.Fatalf("automatic pause made unexpected requests auth=%d supply=%d", authFileRequests.Load(), supplyRequests.Load())
+	}
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	if status.SmartResource.DecisionReason != "inspection_snapshot_unavailable" || status.ActiveOrder != nil {
+		t.Fatalf("status = %#v", status)
 	}
 }
 
@@ -268,16 +473,17 @@ func TestGetStatusRefreshesSmartSnapshotWhenAutomaticSupplyDisabled(t *testing.T
 	}); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(0))
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
 
 	status, err := service.GetStatus(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("first status: %v", err)
 	}
-	if !status.SmartResource.SnapshotFresh || status.SmartResource.AvailableAccounts != 1 {
-		t.Fatalf("cold status should refresh the smart capacity snapshot: %#v", status.SmartResource)
+	if !status.SmartResource.SnapshotFresh || status.SmartResource.CapacitySource != smartCapacitySourceInspection {
+		t.Fatalf("cold status should load the completed quota inspection snapshot: %#v", status.SmartResource)
 	}
-	if authFileRequests.Load() != 1 || supplyRequests.Load() != 0 {
+	if authFileRequests.Load() != 0 || supplyRequests.Load() != 0 {
 		t.Fatalf("status refresh requests auth=%d supply=%d", authFileRequests.Load(), supplyRequests.Load())
 	}
 
@@ -285,7 +491,7 @@ func TestGetStatusRefreshesSmartSnapshotWhenAutomaticSupplyDisabled(t *testing.T
 	if err != nil {
 		t.Fatalf("second status: %v", err)
 	}
-	if !status.SmartResource.SnapshotFresh || authFileRequests.Load() != 1 || supplyRequests.Load() != 0 {
+	if !status.SmartResource.SnapshotFresh || authFileRequests.Load() != 0 || supplyRequests.Load() != 0 {
 		t.Fatalf("cached status should not refetch or create supply orders: status=%#v auth=%d supply=%d", status.SmartResource, authFileRequests.Load(), supplyRequests.Load())
 	}
 }
@@ -527,6 +733,7 @@ func TestSmartAutomaticSkipsCreateWhenUsageRateNotReady(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(0))
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
 
 	if err := service.RunAutomatic(context.Background()); err != nil {
@@ -580,6 +787,12 @@ func TestSmartAutomaticDoesNotCreateWhenCapacityHealthy(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
+	seedCompletedQuotaInspection(t, st,
+		quotaInspectionResult(0),
+		quotaInspectionResult(0),
+		quotaInspectionResult(0),
+		quotaInspectionResult(0),
+	)
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
 	now := time.Now()
 	for minute := 0; minute < 30; minute++ {
@@ -650,6 +863,7 @@ func TestSmartAutomaticUsesSmallBatchWhenSupplyIsPlenty(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(99.9))
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
 	now := time.Now()
 	events := make([]usage.Event, 0, 30)
@@ -722,6 +936,7 @@ func TestSmartAutomaticKeepsFullBatchWhenSupplyIsScarce(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(99.9))
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
 	now := time.Now()
 	events := make([]usage.Event, 0, 30)
@@ -818,6 +1033,7 @@ func TestSmartReadySmallOrderTakesWhenSupplyIsPlentyBeforeCritical(t *testing.T)
 	}); err != nil {
 		t.Fatalf("create order: %v", err)
 	}
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(98), quotaInspectionResult(98))
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
 	now := time.Now()
 	events := make([]usage.Event, 0, 120)
@@ -913,6 +1129,7 @@ func TestSmartReadyOrderWaitsForCriticalConfirmRoundsBeforeTake(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create order: %v", err)
 	}
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(99.9))
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
 	now := time.Now()
 	events := make([]usage.Event, 0, 180)

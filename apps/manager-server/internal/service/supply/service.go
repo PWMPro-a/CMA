@@ -24,14 +24,15 @@ import (
 )
 
 var (
-	ErrNotConfigured       = errors.New("account supply is not configured")
-	ErrOrderInProgress     = errors.New("a supply order is already in progress")
-	ErrInvalidQuantity     = errors.New("replenishment quantity must be between 1 and 100")
-	ErrInsufficientBalance = errors.New("supply account available balance is insufficient")
-	ErrCreateUncertain     = errors.New("supply order creation result is uncertain")
-	ErrOrderNotFound       = errors.New("supply order was not found")
-	ErrNotCreateUncertain  = errors.New("supply order is not waiting for create-result confirmation")
-	ErrOrderNotCancellable = errors.New("supply order cannot be cancelled in its current state")
+	ErrNotConfigured               = errors.New("account supply is not configured")
+	ErrOrderInProgress             = errors.New("a supply order is already in progress")
+	ErrInvalidQuantity             = errors.New("replenishment quantity must be between 1 and 100")
+	ErrInsufficientBalance         = errors.New("supply account available balance is insufficient")
+	ErrCreateUncertain             = errors.New("supply order creation result is uncertain")
+	ErrOrderNotFound               = errors.New("supply order was not found")
+	ErrNotCreateUncertain          = errors.New("supply order is not waiting for create-result confirmation")
+	ErrOrderNotCancellable         = errors.New("supply order cannot be cancelled in its current state")
+	ErrCapacitySnapshotUnavailable = errors.New("quota inspection snapshot is unavailable")
 )
 
 const (
@@ -74,6 +75,9 @@ type Service struct {
 	authCacheMu        sync.Mutex
 	authRefreshMu      sync.Mutex
 	authCache          authFileSnapshot
+	quotaSnapshotMu    sync.Mutex
+	quotaRefreshMu     sync.Mutex
+	quotaSnapshot      inspectionQuotaSnapshot
 	smartResourceState SmartResource
 
 	criticalConfirmMu        sync.Mutex
@@ -334,7 +338,6 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		if err != nil {
 			return err
 		}
-		available = resource.AvailableAccounts
 	} else {
 		available, err = s.countAvailableAccounts(ctx, cfg)
 		if err != nil {
@@ -353,7 +356,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	if quantity == 0 {
 		if useSmart {
 			if !resource.SnapshotFresh {
-				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
+				return nil
 			}
 			if resource.DecisionReason == "usage_rate_not_ready" || resource.ConsumeRCUPerMinute <= 0 {
 				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
@@ -528,6 +531,10 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	if order.Status == "taking" && order.NextPollAtMS > time.Now().UnixMilli() {
 		return nil
 	}
+	// Keep the fact that a take call was already issued while reconciling an
+	// expired lease. A timeout only means the client did not receive a response;
+	// the supplier may still be preparing the same idempotent delivery.
+	retryingTake := order.Status == "taking"
 	if order.Status == "creating" {
 		order.Status = "create_uncertain"
 		order.LastError = "manager restarted while the create request was in progress"
@@ -579,7 +586,7 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		}
 	}
 
-	if !unsupportedRelease && order.Automatic && smartSupplyEnabled(cfg.Supply) && !s.smartTakeAllowed(cfg.Supply, order.OrderID) {
+	if !unsupportedRelease && !retryingTake && order.Automatic && smartSupplyEnabled(cfg.Supply) && !s.smartTakeAllowed(cfg.Supply, order.OrderID) {
 		resource := s.currentSmartResource(cfg.Supply)
 		resource.LockedOrderID = order.OrderID
 		resource.SuggestedAction = smartActionWaitLocked
@@ -615,25 +622,34 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		order.Status = "waiting_inventory"
 		return s.store.UpdateSupplyOrder(ctx, order)
 	}
-	items := make([]store.SupplyImportItem, 0, len(taken.Accounts))
-	seenItemKeys := make(map[string]struct{}, len(taken.Accounts))
+	normalized := make([]normalizedSupplyAccount, 0, len(taken.Accounts))
 	for index, raw := range taken.Accounts {
 		normalizedAccounts, err := normalizeAccountPayloads(raw)
 		if err != nil {
 			return s.updateOrderError(ctx, &order, fmt.Errorf("supply account %d format is unsupported: %w", index+1, err), cfg.Supply)
 		}
-		for _, account := range normalizedAccounts {
-			if _, duplicate := seenItemKeys[account.itemKey]; duplicate {
-				continue
-			}
-			seenItemKeys[account.itemKey] = struct{}{}
-			items = append(items, store.SupplyImportItem{
-				OrderID:     order.OrderID,
-				ItemKey:     account.itemKey,
-				FileName:    account.fileName,
-				PayloadJSON: string(account.payload),
-			})
+		normalized = append(normalized, normalizedAccounts...)
+	}
+	// A supplier item describes delivery validity, whereas a returned payload may
+	// be a Sub2API bundle that expands into several CPA files.  Apply the order
+	// item leases only when that expansion is exactly one-to-one; otherwise keep
+	// the payload lease (or the conservative one-hour default) instead of making
+	// an unverifiable association.
+	applySupplyOrderItemLeases(normalized, taken.ItemRemainingSeconds, time.Now())
+	items := make([]store.SupplyImportItem, 0, len(normalized))
+	seenItemKeys := make(map[string]struct{}, len(normalized))
+	for _, account := range normalized {
+		if _, duplicate := seenItemKeys[account.itemKey]; duplicate {
+			continue
 		}
+		seenItemKeys[account.itemKey] = struct{}{}
+		items = append(items, store.SupplyImportItem{
+			OrderID:          order.OrderID,
+			ItemKey:          account.itemKey,
+			FileName:         account.fileName,
+			PayloadJSON:      string(account.payload),
+			LeaseExpiresAtMS: account.leaseExpiresAtMS,
+		})
 	}
 	if len(items) == 0 {
 		err := errors.New("supply take response did not include importable accounts")
@@ -684,7 +700,6 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 		if order.CreatedAtMS > 0 {
 			resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
 		}
-		s.updateCPAOverview(resource.AvailableAccounts, cfg.Supply.TargetAvailableAccounts)
 		switch {
 		case !resource.SnapshotFresh:
 			return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionSnapshotStale, "smart_snapshot_stale")
@@ -698,7 +713,7 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 			resource.SuggestedAction = smartActionReleaseLocked
 			resource.DecisionReason = "capacity_recovered_before_take"
 			s.setSmartResource(resource)
-			return true, s.releaseAutomaticOrder(ctx, cfg, order, resource.AvailableAccounts)
+			return true, s.releaseAutomaticOrder(ctx, cfg, order, 0)
 		case resource.HealthLevel != smartHealthCritical && pressure.level == smartSupplyPressurePlenty && currentCapacityGapRCU <= 0:
 			if !s.lockedOrderMinHoldElapsed(cfg.Supply, order) {
 				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "min_hold_before_release")
@@ -709,7 +724,7 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 			resource.SuggestedAction = smartActionReleaseLocked
 			resource.DecisionReason = "supply_plenty_release_noncritical"
 			s.setSmartResource(resource)
-			return true, s.releaseAutomaticOrder(ctx, cfg, order, resource.AvailableAccounts)
+			return true, s.releaseAutomaticOrder(ctx, cfg, order, 0)
 		case order.Status == "ready" && resource.HealthLevel != smartHealthCritical && pressure.level == smartSupplyPressurePlenty && neededQuantity > 0 && order.RequestedQuantity <= smartPlentyTakeBatchQuantity(cfg.Supply):
 			resource.SuggestedAction = smartActionTakeLocked
 			resource.DecisionReason = "supply_plenty_small_take"
@@ -725,7 +740,7 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 			resource.SuggestedAction = smartActionReleaseLocked
 			resource.DecisionReason = "supply_plenty_release_oversized"
 			s.setSmartResource(resource)
-			return true, s.releaseAutomaticOrder(ctx, cfg, order, resource.AvailableAccounts)
+			return true, s.releaseAutomaticOrder(ctx, cfg, order, 0)
 		case order.Status == "ready" && resource.HealthLevel != smartHealthCritical:
 			s.resetCriticalConfirm(order.OrderID)
 			return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "locked_but_not_critical")
@@ -770,7 +785,7 @@ func (s *Service) releaseAutomaticOrder(ctx context.Context, cfg store.ManagerCo
 		order.CompletedAtMS = 0
 		order.NextPollAtMS = nextPollAt(cfg.Supply, 0)
 		s.resetCriticalConfirm(order.OrderID)
-		s.updateCPAOverview(available, cfg.Supply.TargetAvailableAccounts)
+		s.updateCPAOverviewIfLegacy(cfg.Supply, available)
 		return s.store.UpdateSupplyOrder(ctx, *order)
 	}
 	if err != nil {
@@ -788,7 +803,7 @@ func (s *Service) releaseAutomaticOrder(ctx context.Context, cfg store.ManagerCo
 	order.LastError = ""
 	s.markAutomaticRelease()
 	s.resetCriticalConfirm(order.OrderID)
-	s.updateCPAOverview(available, cfg.Supply.TargetAvailableAccounts)
+	s.updateCPAOverviewIfLegacy(cfg.Supply, available)
 	return s.store.UpdateSupplyOrder(ctx, *order)
 }
 
@@ -856,11 +871,9 @@ func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, orde
 func (s *Service) refreshOverview(ctx context.Context, cfg store.ManagerConfig, quantity int) error {
 	available := 0
 	if smartSupplyEnabled(cfg.Supply) {
-		resource, err := s.smartResource(ctx, cfg, true)
-		if err != nil {
+		if _, err := s.smartResource(ctx, cfg, true); err != nil {
 			return err
 		}
-		available = resource.AvailableAccounts
 	} else {
 		var err error
 		available, err = s.countAvailableAccounts(ctx, cfg)
@@ -901,19 +914,6 @@ func (s *Service) fetchSupplyOverview(ctx context.Context, cfg store.ManagerSupp
 }
 
 func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerConfig) (int, error) {
-	if smartSupplyEnabled(cfg.Supply) {
-		snapshot, err := s.cachedAuthFiles(ctx, cfg, false)
-		if err != nil && len(snapshot.files) == 0 {
-			return 0, err
-		}
-		count := 0
-		for _, file := range snapshot.files {
-			if isAvailableCodexFile(file) {
-				count++
-			}
-		}
-		return count, err
-	}
 	if strings.TrimSpace(cfg.CPAConnection.CPABaseURL) == "" || strings.TrimSpace(cfg.CPAConnection.ManagementKey) == "" {
 		return 0, errors.New("CPA connection is not configured")
 	}
@@ -1297,7 +1297,7 @@ func (s *Service) requireCredentials(cfg store.ManagerSupplyConfig) error {
 func (s *Service) updateOrderError(ctx context.Context, order *store.SupplyOrder, err error, cfg store.ManagerSupplyConfig) error {
 	order.LastError = safeError(err)
 	if order.Status == "taking" {
-		order.NextPollAtMS = time.Now().Add(supplyTakeLeaseDuration(cfg)).UnixMilli()
+		order.NextPollAtMS = time.Now().Add(supplyTakeRetryDelay(cfg)).UnixMilli()
 	} else {
 		order.NextPollAtMS = nextPollAt(cfg, 0)
 	}
@@ -1326,6 +1326,16 @@ func (s *Service) updateCPAOverview(available int, target int) {
 	s.overview.CPATarget = target
 	s.overview.CPADeficit = max(0, target-available)
 	s.overview.CheckedAtMS = time.Now().UnixMilli()
+}
+
+// Legacy replenishment is count-based, so it owns the CPA account overview.
+// Smart replenishment is quota-capacity based and must not overwrite that view
+// with a stale or synthetic account count while releasing a prelocked order.
+func (s *Service) updateCPAOverviewIfLegacy(cfg store.ManagerSupplyConfig, available int) {
+	if smartSupplyEnabled(cfg) {
+		return
+	}
+	s.updateCPAOverview(available, cfg.TargetAvailableAccounts)
 }
 
 func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.ManagerConfig, fileName string, payload []byte) error {
@@ -1490,14 +1500,28 @@ func supplyTakeLeaseDuration(cfg store.ManagerSupplyConfig) time.Duration {
 	if seconds <= 0 {
 		seconds = 3
 	}
-	lease := time.Duration(seconds)*time.Second + 45*time.Second
-	if lease < 45*time.Second {
-		return 45 * time.Second
+	// The database claim must outlive the long take request plus a short
+	// recovery buffer. This protects the supplier's idempotent pickup while a
+	// manager restarts or another worker wakes up.
+	lease := supplyclient.DefaultTakeTimeout() + time.Duration(seconds)*time.Second + 30*time.Second
+	if lease < 2*time.Minute+30*time.Second {
+		return 2*time.Minute + 30*time.Second
 	}
-	if lease > 3*time.Minute {
-		return 3 * time.Minute
+	if lease > 5*time.Minute {
+		return 5 * time.Minute
 	}
 	return lease
+}
+
+func supplyTakeRetryDelay(cfg store.ManagerSupplyConfig) time.Duration {
+	seconds := cfg.PollIntervalSeconds
+	if seconds < 15 {
+		seconds = 15
+	}
+	if seconds > 60 {
+		seconds = 60
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func nextPollAt(cfg store.ManagerSupplyConfig, retryAfterSeconds int) int64 {
@@ -1534,9 +1558,10 @@ func automaticSettleWindow(cfg store.ManagerSupplyConfig) time.Duration {
 }
 
 type normalizedSupplyAccount struct {
-	payload  []byte
-	itemKey  string
-	fileName string
+	payload          []byte
+	itemKey          string
+	fileName         string
+	leaseExpiresAtMS int64
 }
 
 func normalizeAccountPayload(raw json.RawMessage) ([]byte, string, string, error) {
@@ -1665,7 +1690,71 @@ func normalizeSupplyAccountObject(object map[string]any, exportedAt any) (normal
 	}
 	sum := sha256.Sum256([]byte(identity))
 	digest := hex.EncodeToString(sum[:])
-	return normalizedSupplyAccount{payload: normalized, itemKey: digest, fileName: "codex-supply-" + digest[:20] + ".json"}, nil
+	return normalizedSupplyAccount{
+		payload:          normalized,
+		itemKey:          digest,
+		fileName:         "codex-supply-" + digest[:20] + ".json",
+		leaseExpiresAtMS: supplyDeliveryLeaseExpiresAtMS(object, time.Now()),
+	}, nil
+}
+
+// supplyDeliveryLeaseExpiresAtMS is deliberately based on the supplier's
+// delivery validity rather than OAuth token expiry. The supplier documents a
+// one-hour usable lifetime; when it omits per-item evidence we persist that
+// conservative import-time lease instead of treating the credential as fresh
+// on every subsequent capacity refresh.
+func supplyDeliveryLeaseExpiresAtMS(payload map[string]any, now time.Time) int64 {
+	defaultExpiry := now.Add(time.Hour)
+	if seconds, ok := numberFieldOK(payload,
+		"remaining_seconds", "remainingSeconds", "remaining_valid_seconds", "remainingValidSeconds",
+		"minimum_remaining_seconds", "minimumRemainingSeconds", "ttl_seconds", "ttlSeconds",
+	); ok {
+		return now.Add(time.Duration(clampFloat(seconds, 0, float64(time.Hour/time.Second))) * time.Second).UnixMilli()
+	}
+	if minutes, ok := numberFieldOK(payload, "remaining_minutes", "remainingMinutes", "ttl_minutes", "ttlMinutes"); ok {
+		return now.Add(time.Duration(clampFloat(minutes, 0, 60) * float64(time.Minute))).UnixMilli()
+	}
+	for _, key := range []string{"lease_expires_at", "leaseExpiresAt", "valid_until", "validUntil", "expires_at", "expiresAt", "expired"} {
+		raw, found := payload[key]
+		if !found || raw == nil {
+			continue
+		}
+		expiresAt, ok := parseSmartExpiryTime(raw, now)
+		if !ok || expiresAt.Before(now) {
+			continue
+		}
+		// OAuth refresh-token expiry may be measured in days. It must not extend
+		// the supplier's separate one-hour delivery lease.
+		if expiresAt.Before(defaultExpiry) {
+			return expiresAt.UnixMilli()
+		}
+	}
+	return defaultExpiry.UnixMilli()
+}
+
+func supplyDeliveryLeaseExpiresAtMSFromSeconds(seconds int64, now time.Time) int64 {
+	if seconds < 0 {
+		seconds = 0
+	}
+	maxSeconds := int64(time.Hour / time.Second)
+	if seconds > maxSeconds {
+		seconds = maxSeconds
+	}
+	return now.Add(time.Duration(seconds) * time.Second).UnixMilli()
+}
+
+// applySupplyOrderItemLeases returns true only for an exact, ordered mapping
+// between supplier order items and CPA import files. A bundled delivery may
+// expand one supplied payload into many files, so a partial mapping would make
+// a valid account appear expired (or vice versa).
+func applySupplyOrderItemLeases(accounts []normalizedSupplyAccount, remainingSeconds []int64, now time.Time) bool {
+	if len(accounts) == 0 || len(accounts) != len(remainingSeconds) {
+		return false
+	}
+	for index := range accounts {
+		accounts[index].leaseExpiresAtMS = supplyDeliveryLeaseExpiresAtMSFromSeconds(remainingSeconds[index], now)
+	}
+	return true
 }
 
 func normalizeAccountPayloadForImport(payloadJSON string) ([]byte, string, string, error) {
@@ -1691,7 +1780,8 @@ func convertSub2AccountToCPAPayload(account map[string]any, credentials map[stri
 	accountID := stringFromMaps([]map[string]any{metadata, extra}, "chatgpt_account_id", "chatgptAccountId", "account_id", "accountId")
 	userID := stringFromMaps([]map[string]any{metadata, extra}, "chatgpt_user_id", "chatgptUserId", "user_id", "userId")
 	organizationID := stringFromMaps([]map[string]any{metadata, extra}, "organization_id", "organizationId", "org_id", "orgId", "poid")
-	planType := stringFromMaps([]map[string]any{metadata, extra}, "plan_type", "planType", "chatgpt_plan_type", "chatgptPlanType")
+	workspaceID := stringFromMaps([]map[string]any{metadata, extra}, "workspace_id", "workspaceId", "chatgpt_workspace_id", "chatgptWorkspaceId", "workspace")
+	planType := resolveSupplyPlanType(metadata, extra)
 	expiresAt := stringFromMaps([]map[string]any{metadata, account}, "expires_at", "expiresAt", "expired")
 	lastRefresh := stringFromMaps([]map[string]any{metadata, extra, account}, "last_refresh", "lastRefresh", "exported_at", "exportedAt")
 	if lastRefresh == "" && exportedAt != nil {
@@ -1707,6 +1797,7 @@ func convertSub2AccountToCPAPayload(account map[string]any, credentials map[stri
 	}
 	setString(metadata, "chatgpt_user_id", userID)
 	setString(metadata, "organization_id", organizationID)
+	setString(metadata, "workspace_id", workspaceID)
 	if planType != "" {
 		metadata["plan_type"] = planType
 		metadata["chatgpt_plan_type"] = planType
@@ -1740,13 +1831,45 @@ func normalizeCodexPayloadAliases(metadata map[string]any) {
 		metadata["account_id"] = accountID
 		metadata["chatgpt_account_id"] = accountID
 	}
-	if planType := stringFromMap(metadata, "plan_type", "planType", "chatgpt_plan_type", "chatgptPlanType"); planType != "" {
+	if organizationID := stringFromMap(metadata, "organization_id", "organizationId", "org_id", "orgId", "poid"); organizationID != "" {
+		metadata["organization_id"] = organizationID
+	}
+	if workspaceID := stringFromMap(metadata, "workspace_id", "workspaceId", "chatgpt_workspace_id", "chatgptWorkspaceId", "workspace"); workspaceID != "" {
+		metadata["workspace_id"] = workspaceID
+	}
+	if planType := resolveSupplyPlanType(metadata); planType != "" {
 		metadata["plan_type"] = planType
 		metadata["chatgpt_plan_type"] = planType
 	}
 	if expiresAt := stringFromMap(metadata, "expired", "expires_at", "expiresAt"); expiresAt != "" {
 		metadata["expired"] = expiresAt
 	}
+}
+
+// Supply payloads may contain an old generic `plan_type: free` together with
+// the authoritative ChatGPT workspace plan. Preserve the more specific plan
+// so a Team import is never downgraded to Free.
+func resolveSupplyPlanType(values ...map[string]any) string {
+	candidates := make([]string, 0, len(values)*4)
+	for _, value := range values {
+		if len(value) == 0 {
+			continue
+		}
+		for _, key := range []string{"chatgpt_plan_type", "chatgptPlanType", "plan_type", "planType"} {
+			if candidate := strings.ToLower(strings.TrimSpace(stringFromMap(value, key))); candidate != "" {
+				candidates = append(candidates, candidate)
+			}
+		}
+	}
+	for _, candidate := range candidates {
+		if candidate != "free" {
+			return candidate
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return ""
 }
 
 func supplyAccountIdentity(metadata map[string]any) string {

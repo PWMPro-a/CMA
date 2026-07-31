@@ -452,14 +452,25 @@ export function SupplyPage() {
                 })}
               </span>
               <span>
-                {t('supply.account_health_counts', {
-                  effective: smart?.availableAccounts ?? 0,
-                  schedulable: smart?.schedulableAccounts ?? 0,
-                  healthy: smart?.healthyAccounts ?? 0,
-                  weak: smart?.weakAccounts ?? 0,
+                {t(`supply.capacity_source_${smart?.capacitySource || 'unavailable'}`, {
+                  defaultValue: smart?.capacitySource || '-',
                 })}
               </span>
-              <span>{t('supply.snapshot_age', { value: smart?.accountCacheAgeSeconds ?? 0 })}</span>
+              <span>
+                {t('supply.capacity_coverage', {
+                  value: formatNumber(smart?.capacityCoverage, 0),
+                })}
+              </span>
+              <span>
+                {t('supply.capacity_lifetime_coverage', {
+                  value: formatNumber(smart?.capacityLifetimeCoverage, 0),
+                })}
+              </span>
+              <span>
+                {t('supply.quota_snapshot_age', {
+                  value: smart?.capacitySnapshotAgeSeconds ?? 0,
+                })}
+              </span>
             </div>
           </div>
           <div className={styles.smartReason}>
@@ -528,20 +539,18 @@ export function SupplyPage() {
                 onChange={(product) => updateDraft({ product })}
               />
             </div>
-            <Input
-              label={
-                draft.smartEnabled !== false
-                  ? t('supply.legacy_target_accounts')
-                  : t('supply.target_accounts')
-              }
-              type="number"
-              min={1}
-              max={10000}
-              value={draft.targetAvailableAccounts}
-              onChange={(event) =>
-                updateDraft({ targetAvailableAccounts: Number(event.target.value) })
-              }
-            />
+            {draft.smartEnabled === false ? (
+              <Input
+                label={t('supply.target_accounts')}
+                type="number"
+                min={1}
+                max={10000}
+                value={draft.targetAvailableAccounts}
+                onChange={(event) =>
+                  updateDraft({ targetAvailableAccounts: Number(event.target.value) })
+                }
+              />
+            ) : null}
             <Input
               label={t('supply.batch_size')}
               type="number"
@@ -630,7 +639,7 @@ export function SupplyPage() {
                 }
               />
               <Input
-                label={t('supply.auth_cache_ttl')}
+                label={t('supply.quota_snapshot_cache_ttl')}
                 type="number"
                 min={10}
                 max={600}

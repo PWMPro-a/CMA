@@ -336,7 +336,7 @@ func TestManualReplenishmentRejectsConcurrentOrder(t *testing.T) {
 }
 
 func TestNormalizeSub2AccountPayloadForCPA(t *testing.T) {
-	raw := `{"name":"team-user","type":"oauth","platform":"openai","priority":2,"concurrency":8,"extra":{"organization_id":"org-extra","lastRefresh":"2026-07-01T00:00:00Z"},"credentials":{"access_token":"access","refresh_token":"refresh","chatgpt_account_id":"account-1","email":"user@example.com","plan_type":"team","expires_at":"2026-07-30T00:00:00Z"}}`
+	raw := `{"name":"team-user","type":"oauth","platform":"openai","priority":2,"concurrency":8,"extra":{"organization_id":"org-extra","lastRefresh":"2026-07-01T00:00:00Z"},"credentials":{"access_token":"access","refresh_token":"refresh","chatgpt_account_id":"account-1","email":"user@example.com","plan_type":"free","chatgpt_plan_type":"team","workspaceId":"workspace-1","expires_at":"2026-07-30T00:00:00Z"}}`
 	payload, key, fileName, err := normalizeAccountPayload([]byte(raw))
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
@@ -354,6 +354,7 @@ func TestNormalizeSub2AccountPayloadForCPA(t *testing.T) {
 	if result["account_id"] != "account-1" || result["chatgpt_account_id"] != "account-1" ||
 		result["email"] != "user@example.com" || result["plan_type"] != "team" ||
 		result["chatgpt_plan_type"] != "team" || result["organization_id"] != "org-extra" ||
+		result["workspace_id"] != "workspace-1" ||
 		result["expired"] != "2026-07-30T00:00:00Z" || result["max_concurrency"] != float64(8) {
 		t.Fatalf("normalized metadata = %#v", result)
 	}
@@ -399,6 +400,47 @@ func TestNormalizeSub2BundlePayloadForCPA(t *testing.T) {
 	}
 }
 
+func TestSupplyDeliveryLeaseUsesRemainingValidityInsteadOfOAuthExpiry(t *testing.T) {
+	now := time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC)
+	shortLease := supplyDeliveryLeaseExpiresAtMS(map[string]any{
+		"remaining_seconds": 900,
+		"expires_at":        now.Add(24 * time.Hour).Unix(),
+	}, now)
+	if got, want := shortLease, now.Add(15*time.Minute).UnixMilli(); got != want {
+		t.Fatalf("short supplier lease = %d, want %d", got, want)
+	}
+	defaultLease := supplyDeliveryLeaseExpiresAtMS(map[string]any{
+		"expires_at": now.Add(24 * time.Hour).Unix(),
+	}, now)
+	if got, want := defaultLease, now.Add(time.Hour).UnixMilli(); got != want {
+		t.Fatalf("OAuth expiry must not extend supplier lease: got %d want %d", got, want)
+	}
+}
+
+func TestSupplyOrderItemLeasesRequireExactExpandedAccountMapping(t *testing.T) {
+	now := time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC)
+	accounts := []normalizedSupplyAccount{
+		{leaseExpiresAtMS: now.Add(time.Hour).UnixMilli()},
+		{leaseExpiresAtMS: now.Add(time.Hour).UnixMilli()},
+	}
+	if !applySupplyOrderItemLeases(accounts, []int64{900, 1800}, now) {
+		t.Fatal("exactly expanded accounts should accept ordered item leases")
+	}
+	if got, want := accounts[0].leaseExpiresAtMS, now.Add(15*time.Minute).UnixMilli(); got != want {
+		t.Fatalf("first lease = %d, want %d", got, want)
+	}
+	if got, want := accounts[1].leaseExpiresAtMS, now.Add(30*time.Minute).UnixMilli(); got != want {
+		t.Fatalf("second lease = %d, want %d", got, want)
+	}
+	original := accounts[0].leaseExpiresAtMS
+	if applySupplyOrderItemLeases(accounts, []int64{300}, now) {
+		t.Fatal("mismatched order items must not be assigned to expanded accounts")
+	}
+	if accounts[0].leaseExpiresAtMS != original {
+		t.Fatalf("mismatched mapping changed original lease: %d", accounts[0].leaseExpiresAtMS)
+	}
+}
+
 func TestTakeResponseSub2BundleIsExpandedAndUploadedAsCPACodex(t *testing.T) {
 	var takeCalls atomic.Int32
 	var uploadCalls atomic.Int32
@@ -411,7 +453,7 @@ func TestTakeResponseSub2BundleIsExpandedAndUploadedAsCPACodex(t *testing.T) {
 			_, _ = w.Write([]byte(`{"id":"order-bundle","status":"ready","ready_quantity":2,"progress":100,"take_url":"/custom/take-bundle"}`))
 		case r.URL.Path == "/custom/take-bundle" && r.Method == http.MethodPost:
 			takeCalls.Add(1)
-			_, _ = w.Write([]byte(`{"status":"completed","payload":{"accounts":[{"type":"sub2api-data","exported_at":"2026-07-30T17:28:18Z","accounts":[{"name":"team-one","type":"oauth","platform":"openai","credentials":{"access_token":"access-one","refresh_token":"refresh-one","chatgpt_account_id":"account-one","email":"one@example.com","plan_type":"team"}},{"name":"team-two","type":"oauth","platform":"openai","credentials":{"session_access_token":"access-two","refresh_token":"refresh-two","account_id":"account-two","email":"two@example.com","chatgpt_plan_type":"team"}}]}]}}`))
+			_, _ = w.Write([]byte(`{"order":{"id":"order-bundle","status":"completed","items":[{"remaining_seconds":900},{"remaining_seconds":1800}]},"payload":{"accounts":[{"type":"sub2api-data","exported_at":"2026-07-30T17:28:18Z","accounts":[{"name":"team-one","type":"oauth","platform":"openai","credentials":{"access_token":"access-one","refresh_token":"refresh-one","chatgpt_account_id":"account-one","email":"one@example.com","plan_type":"team"}},{"name":"team-two","type":"oauth","platform":"openai","credentials":{"session_access_token":"access-two","refresh_token":"refresh-two","account_id":"account-two","email":"two@example.com","chatgpt_plan_type":"team"}}]}]}}`))
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
 			name := r.URL.Query().Get("name")
 			if name == "" {
@@ -490,6 +532,16 @@ func TestTakeResponseSub2BundleIsExpandedAndUploadedAsCPACodex(t *testing.T) {
 	if len(status.Orders) != 1 || status.Orders[0].Status != "completed" || status.Orders[0].ImportedCount != 2 || status.Orders[0].ItemCount != 2 {
 		t.Fatalf("orders = %#v", status.Orders)
 	}
+	items, err := st.ListActiveImportedSupplyItems(context.Background(), time.Now().UnixMilli())
+	if err != nil || len(items) != 2 {
+		t.Fatalf("active imported items=%#v err=%v", items, err)
+	}
+	for index, expected := range []int64{900, 1800} {
+		actualSeconds := (items[index].LeaseExpiresAtMS - time.Now().UnixMilli()) / 1000
+		if actualSeconds < expected-2 || actualSeconds > expected+1 {
+			t.Fatalf("item %d lease seconds=%d, want approximately %d; items=%#v", index, actualSeconds, expected, items)
+		}
+	}
 }
 
 func TestTakingLeasePreventsDuplicateTake(t *testing.T) {
@@ -529,6 +581,60 @@ func TestTakingLeasePreventsDuplicateTake(t *testing.T) {
 	}
 	if takeCalls.Load() != 0 {
 		t.Fatalf("take/status calls = %d, want 0", takeCalls.Load())
+	}
+}
+
+func TestTimedOutTakingOrderRetriesWithoutAutomaticRelease(t *testing.T) {
+	var takeCalls atomic.Int32
+	var releaseCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/pickup/orders/order-timeout" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"id":"order-timeout","status":"ready","ready_quantity":1,"progress":100}`))
+		case r.URL.Path == "/api/customer/pickup/orders/order-timeout/take" && r.Method == http.MethodPost:
+			takeCalls.Add(1)
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"order-timeout","status":"waiting_inventory","retry_after_seconds":1}`))
+		case r.URL.Path == "/api/customer/pickup/orders/order-timeout" && r.Method == http.MethodDelete:
+			releaseCalls.Add(1)
+			t.Fatal("a timed-out take attempt must reconcile and retry, not release the reserved order")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-timeout.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		Supply: store.ManagerSupplyConfig{
+			BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_30d", PollIntervalSeconds: 1,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "order-timeout", Product: "oauth_30d", RequestedQuantity: 1, Automatic: true,
+		Status: "taking", NextPollAtMS: time.Now().Add(-time.Second).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("create taking order: %v", err)
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("reconcile timed-out take: %v", err)
+	}
+	order, found, err := st.GetSupplyOrder(context.Background(), "order-timeout")
+	if err != nil || !found {
+		t.Fatalf("load order found=%v err=%v", found, err)
+	}
+	if takeCalls.Load() != 1 || releaseCalls.Load() != 0 || order.Status != "waiting_inventory" {
+		t.Fatalf("take=%d release=%d order=%#v", takeCalls.Load(), releaseCalls.Load(), order)
 	}
 }
 

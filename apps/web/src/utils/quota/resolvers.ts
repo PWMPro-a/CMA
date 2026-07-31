@@ -3,20 +3,13 @@
  */
 
 import type { AuthFileItem } from '@/types';
-import {
-  normalizeStringValue,
-  normalizePlanType,
-  parseIdTokenPayload
-} from './parsers';
+import { normalizeStringValue, normalizePlanType, parseIdTokenPayload } from './parsers';
 
 const resolveAccountIdCandidate = (value: unknown): string | null => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   return normalizeStringValue(
-    record.chatgpt_account_id ??
-      record.chatgptAccountId ??
-      record.account_id ??
-      record.accountId
+    record.chatgpt_account_id ?? record.chatgptAccountId ?? record.account_id ?? record.accountId
   );
 };
 
@@ -67,6 +60,28 @@ export function resolveCodexChatgptAccountId(file: AuthFileItem): string | null 
     if (id) return id;
   }
 
+  // A Team export may only expose the selected workspace. The Codex usage
+  // endpoint accepts that workspace identifier through Chatgpt-Account-Id,
+  // so use it only after the canonical account-id fields are exhausted.
+  const workspaceCandidates = [
+    file.workspace_id,
+    file.workspaceId,
+    file.chatgpt_workspace_id,
+    file.chatgptWorkspaceId,
+    metadata?.workspace_id,
+    metadata?.workspaceId,
+    metadata?.chatgpt_workspace_id,
+    metadata?.chatgptWorkspaceId,
+    attributes?.workspace_id,
+    attributes?.workspaceId,
+    attributes?.chatgpt_workspace_id,
+    attributes?.chatgptWorkspaceId,
+  ];
+  for (const candidate of workspaceCandidates) {
+    const id = normalizeStringValue(candidate);
+    if (id) return id;
+  }
+
   return null;
 }
 
@@ -93,6 +108,8 @@ export function resolveCodexPlanType(file: AuthFileItem): string | null {
     return normalizePlanType(payload.plan_type ?? payload.planType);
   };
   const candidates = [
+    file.chatgpt_plan_type,
+    file.chatgptPlanType,
     file.plan_type,
     file.planType,
     file['plan_type'],
@@ -100,14 +117,18 @@ export function resolveCodexPlanType(file: AuthFileItem): string | null {
     resolveIdTokenPlanCandidate(file.id_token),
     idToken?.plan_type,
     idToken?.planType,
+    metadata?.chatgpt_plan_type,
+    metadata?.chatgptPlanType,
     metadata?.plan_type,
     metadata?.planType,
     resolveIdTokenPlanCandidate(metadata?.id_token),
     metadataIdToken?.plan_type,
     metadataIdToken?.planType,
+    attributes?.chatgpt_plan_type,
+    attributes?.chatgptPlanType,
     attributes?.plan_type,
     attributes?.planType,
-    resolveIdTokenPlanCandidate(attributes?.id_token)
+    resolveIdTokenPlanCandidate(attributes?.id_token),
   ];
 
   for (const candidate of candidates) {

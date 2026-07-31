@@ -24,16 +24,17 @@ type SupplyOrder struct {
 }
 
 type SupplyImportItem struct {
-	ID            int64  `json:"id"`
-	OrderID       string `json:"orderId"`
-	ItemKey       string `json:"itemKey"`
-	FileName      string `json:"fileName"`
-	Status        string `json:"status"`
-	PayloadJSON   string `json:"-"`
-	LastError     string `json:"lastError,omitempty"`
-	AttemptCount  int    `json:"attemptCount"`
-	NextRetryAtMS int64  `json:"nextRetryAtMs,omitempty"`
-	ImportedAtMS  int64  `json:"importedAtMs,omitempty"`
-	CreatedAtMS   int64  `json:"createdAtMs"`
-	UpdatedAtMS   int64  `json:"updatedAtMs"`
+	ID               int64  `json:"id"`
+	OrderID          string `json:"orderId"`
+	ItemKey          string `json:"itemKey"`
+	FileName         string `json:"fileName"`
+	Status           string `json:"status"`
+	PayloadJSON      string `json:"-"`
+	LastError        string `json:"lastError,omitempty"`
+	AttemptCount     int    `json:"attemptCount"`
+	NextRetryAtMS    int64  `json:"nextRetryAtMs,omitempty"`
+	ImportedAtMS     int64  `json:"importedAtMs,omitempty"`
+	LeaseExpiresAtMS int64  `json:"leaseExpiresAtMs,omitempty"`
+	CreatedAtMS      int64  `json:"createdAtMs"`
+	UpdatedAtMS      int64  `json:"updatedAtMs"`
 }

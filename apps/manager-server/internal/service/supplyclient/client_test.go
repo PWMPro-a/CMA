@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestClientLogsInAndReadsInventoryAndBalance(t *testing.T) {
@@ -119,6 +120,49 @@ func TestClientCreatesPollsAndTakesOrder(t *testing.T) {
 	taken, err := client.Take(context.Background(), credentials, order.ID)
 	if err != nil || taken.Pending || len(taken.Accounts) != 2 {
 		t.Fatalf("take=%#v err=%v", taken, err)
+	}
+}
+
+func TestClientTakeReadsOrderedItemRemainingSeconds(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"token"}`))
+		case "/api/customer/pickup/orders/order-lease/take":
+			_, _ = w.Write([]byte(`{"order":{"id":"order-lease","status":"completed","items":[{"remaining_seconds":900},{"remaining_seconds":"1800"}]},"payload":{"accounts":[{"type":"codex","access_token":"a"},{"type":"codex","access_token":"b"}]}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	taken, err := New(server.Client()).Take(context.Background(), Credentials{BaseURL: server.URL, Username: "u", Password: "p"}, "order-lease")
+	if err != nil {
+		t.Fatalf("take order: %v", err)
+	}
+	if len(taken.Accounts) != 2 || len(taken.ItemRemainingSeconds) != 2 || taken.ItemRemainingSeconds[0] != 900 || taken.ItemRemainingSeconds[1] != 1800 {
+		t.Fatalf("take result = %#v", taken)
+	}
+}
+
+func TestClientTakeUsesExtendedTimeoutWithoutSlowingStatusRequests(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"token"}`))
+		case "/api/customer/pickup/orders/order-slow/take":
+			time.Sleep(120 * time.Millisecond)
+			_, _ = w.Write([]byte(`{"status":"completed","payload":{"accounts":[{"type":"codex","access_token":"a"}]}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.Client(), 50*time.Millisecond)
+	taken, err := client.Take(context.Background(), Credentials{BaseURL: server.URL, Username: "u", Password: "p"}, "order-slow")
+	if err != nil || len(taken.Accounts) != 1 {
+		t.Fatalf("take must use extended timeout: result=%#v err=%v", taken, err)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 )
@@ -106,6 +107,39 @@ func TestStoreEncryptsPendingSupplyAccountPayloads(t *testing.T) {
 	}
 	if items[0].PayloadJSON != payload {
 		t.Fatalf("decrypted supply payload = %q", items[0].PayloadJSON)
+	}
+}
+
+func TestStoreListsOnlyActiveSupplyImportLeases(t *testing.T) {
+	db, err := Open(t.TempDir() + "/supply.sqlite")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.CreateSupplyOrder(context.Background(), SupplyOrder{
+		OrderID: "order-leases", Product: "oauth_30d", RequestedQuantity: 2, Status: "importing",
+	}); err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	now := time.Now().UnixMilli()
+	if _, err := db.InsertSupplyImportItems(context.Background(), "order-leases", []SupplyImportItem{
+		{ItemKey: "active", FileName: "codex-supply-active.json", PayloadJSON: `{"access_token":"active"}`, LeaseExpiresAtMS: now + int64(time.Minute/time.Millisecond)},
+		{ItemKey: "expired", FileName: "codex-supply-expired.json", PayloadJSON: `{"access_token":"expired"}`, LeaseExpiresAtMS: now - 1},
+	}); err != nil {
+		t.Fatalf("insert items: %v", err)
+	}
+	pending, err := db.ListPendingSupplyImportItems(context.Background(), "order-leases", now, 10)
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("pending items = %#v err=%v", pending, err)
+	}
+	for _, item := range pending {
+		if err := db.MarkSupplyImportItemImported(context.Background(), item.ID, now); err != nil {
+			t.Fatalf("mark imported: %v", err)
+		}
+	}
+	active, err := db.ListActiveImportedSupplyItems(context.Background(), now)
+	if err != nil || len(active) != 1 || active[0].FileName != "codex-supply-active.json" {
+		t.Fatalf("active leases = %#v err=%v", active, err)
 	}
 }
 

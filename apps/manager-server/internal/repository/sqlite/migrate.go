@@ -409,6 +409,7 @@ func Migrate(db *sql.DB) error {
 			attempt_count integer not null default 0,
 			next_retry_at_ms integer,
 			imported_at_ms integer,
+			lease_expires_at_ms integer,
 			created_at_ms integer not null,
 			updated_at_ms integer not null,
 			foreign key(order_id) references supply_orders(order_id) on delete cascade
@@ -443,6 +444,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureSupplyOrderColumns(db); err != nil {
+		return err
+	}
+	if err := ensureSupplyImportItemColumns(db); err != nil {
 		return err
 	}
 	if err := ensureUsageRollupLongContextColumns(db); err != nil {
@@ -495,6 +499,49 @@ func ensureSupplyOrderColumns(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func ensureSupplyImportItemColumns(db *sql.DB) error {
+	rows, err := db.Query(`pragma table_info(supply_import_items)`)
+	if err != nil {
+		return err
+	}
+	existing := map[string]struct{}{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if _, ok := existing["lease_expires_at_ms"]; !ok {
+		if _, err := db.Exec(`alter table supply_import_items add column lease_expires_at_ms integer`); err != nil {
+			return err
+		}
+	}
+	// Older imports predate the explicit delivery lease. The supplier accounts
+	// are valid for one hour, so their original import timestamp is the only
+	// conservative evidence available. Keep this idempotent: a deployment may
+	// create the column and be interrupted before its historical rows are filled.
+	if _, err := db.Exec(`update supply_import_items
+		set lease_expires_at_ms = imported_at_ms + ?
+		where status = 'imported' and imported_at_ms is not null and imported_at_ms > 0
+		and (lease_expires_at_ms is null or lease_expires_at_ms <= 0)`, int64(time.Hour/time.Millisecond)); err != nil {
+		return err
+	}
+	_, err = db.Exec(`create index if not exists idx_supply_import_items_active_lease on supply_import_items(status, lease_expires_at_ms)`)
+	return err
 }
 
 func ensureDashboardHourlyRollupFormatVersion(db *sql.DB) error {

@@ -873,6 +873,27 @@ const readSub2ApiCredentialString = (
   return firstNonEmptyString(...values);
 };
 
+// Some Sub2API exports retain a generic `plan_type: free` fallback while the
+// ChatGPT-specific field identifies the actual paid workspace. Never let that
+// fallback downgrade Team (or another paid plan) during a CPA import.
+const resolveSub2ApiPlanType = (credentials: JsonRecord, extra: JsonRecord | undefined) => {
+  const candidates = [
+    credentials.chatgpt_plan_type,
+    credentials.chatgptPlanType,
+    extra?.chatgpt_plan_type,
+    extra?.chatgptPlanType,
+    credentials.plan_type,
+    credentials.planType,
+    extra?.plan_type,
+    extra?.planType,
+  ]
+    .map((value) => firstNonEmptyString(value)?.toLowerCase())
+    .filter((value): value is string => Boolean(value));
+
+  // `free` is only useful when no more specific plan signal is available.
+  return candidates.find((value) => value !== 'free') ?? candidates[0];
+};
+
 const convertSub2ApiAccountToCpaAuthJson = (
   account: JsonRecord,
   exportedAt: unknown,
@@ -919,14 +940,7 @@ const convertSub2ApiAccountToCpaAuthJson = (
     'user_id',
     'userId'
   );
-  const planType = readSub2ApiCredentialString(
-    credentials,
-    extra,
-    'plan_type',
-    'planType',
-    'chatgpt_plan_type',
-    'chatgptPlanType'
-  );
+  const planType = resolveSub2ApiPlanType(credentials, extra);
   const organizationId = readSub2ApiCredentialString(
     credentials,
     extra,
@@ -935,6 +949,15 @@ const convertSub2ApiAccountToCpaAuthJson = (
     'org_id',
     'orgId',
     'poid'
+  );
+  const workspaceId = readSub2ApiCredentialString(
+    credentials,
+    extra,
+    'workspace_id',
+    'workspaceId',
+    'chatgpt_workspace_id',
+    'chatgptWorkspaceId',
+    'workspace'
   );
   const expiresAt = firstNonEmpty(
     normalizeTimestamp(credentials.expires_at),
@@ -962,6 +985,7 @@ const convertSub2ApiAccountToCpaAuthJson = (
     chatgpt_account_id: accountId,
     chatgpt_user_id: userId,
     organization_id: organizationId,
+    workspace_id: workspaceId,
     email,
     name,
     plan_type: planType,

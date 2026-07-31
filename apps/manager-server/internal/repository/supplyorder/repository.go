@@ -24,6 +24,7 @@ type Repository interface {
 	List(ctx context.Context, limit int) ([]model.SupplyOrder, error)
 	InsertItems(ctx context.Context, orderID string, items []model.SupplyImportItem) (int, error)
 	ListPendingItems(ctx context.Context, orderID string, nowMS int64, limit int) ([]model.SupplyImportItem, error)
+	ListActiveImportedItems(ctx context.Context, nowMS int64) ([]model.SupplyImportItem, error)
 	MarkItemImported(ctx context.Context, id int64, importedAtMS int64) error
 	MarkItemFailed(ctx context.Context, id int64, lastError string, nextRetryAtMS int64) error
 	UpdateItemFileName(ctx context.Context, id int64, fileName string) error
@@ -342,8 +343,9 @@ func (r *repository) InsertItems(ctx context.Context, orderID string, items []mo
 			return 0, err
 		}
 		result, err := tx.ExecContext(ctx, `insert or ignore into supply_import_items (
-			order_id, item_key, file_name, status, payload_json, attempt_count, created_at_ms, updated_at_ms
-		) values (?, ?, ?, 'pending', ?, 0, ?, ?)`, orderID, item.ItemKey, item.FileName, payload, now, now)
+			order_id, item_key, file_name, status, payload_json, attempt_count, lease_expires_at_ms, created_at_ms, updated_at_ms
+		) values (?, ?, ?, 'pending', ?, 0, ?, ?, ?)`, orderID, item.ItemKey, item.FileName, payload,
+			nullPositive(item.LeaseExpiresAtMS), now, now)
 		if err != nil {
 			return 0, err
 		}
@@ -362,7 +364,7 @@ func (r *repository) ListPendingItems(ctx context.Context, orderID string, nowMS
 		limit = 50
 	}
 	rows, err := r.db.QueryContext(ctx, `select id, order_id, item_key, file_name, status,
-		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, created_at_ms, updated_at_ms
+		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms, created_at_ms, updated_at_ms
 		from supply_import_items
 		where order_id = ? and status in ('pending','failed') and coalesce(next_retry_at_ms, 0) <= ?
 		order by id asc limit ?`, orderID, nowMS, limit)
@@ -374,6 +376,31 @@ func (r *repository) ListPendingItems(ctx context.Context, orderID string, nowMS
 	for rows.Next() {
 		item, err := r.scanItem(rows)
 		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+// ListActiveImportedItems only reads the short supplier lease window. It is
+// used by the cached smart-capacity snapshot and never scans historical orders.
+func (r *repository) ListActiveImportedItems(ctx context.Context, nowMS int64) ([]model.SupplyImportItem, error) {
+	if nowMS <= 0 {
+		nowMS = time.Now().UnixMilli()
+	}
+	rows, err := r.db.QueryContext(ctx, `select file_name, lease_expires_at_ms
+		from supply_import_items
+		where status = 'imported' and lease_expires_at_ms > ?
+		order by lease_expires_at_ms asc`, nowMS)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]model.SupplyImportItem, 0)
+	for rows.Next() {
+		var item model.SupplyImportItem
+		if err := rows.Scan(&item.FileName, &item.LeaseExpiresAtMS); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -448,9 +475,9 @@ func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {
 	var item model.SupplyImportItem
 	var payload string
 	var lastError sql.NullString
-	var nextRetryAtMS, importedAtMS sql.NullInt64
+	var nextRetryAtMS, importedAtMS, leaseExpiresAtMS sql.NullInt64
 	if err := row.Scan(&item.ID, &item.OrderID, &item.ItemKey, &item.FileName, &item.Status,
-		&payload, &lastError, &item.AttemptCount, &nextRetryAtMS, &importedAtMS,
+		&payload, &lastError, &item.AttemptCount, &nextRetryAtMS, &importedAtMS, &leaseExpiresAtMS,
 		&item.CreatedAtMS, &item.UpdatedAtMS); err != nil {
 		return model.SupplyImportItem{}, err
 	}
@@ -462,6 +489,7 @@ func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {
 	item.LastError = lastError.String
 	item.NextRetryAtMS = nextRetryAtMS.Int64
 	item.ImportedAtMS = importedAtMS.Int64
+	item.LeaseExpiresAtMS = leaseExpiresAtMS.Int64
 	return item, nil
 }
 

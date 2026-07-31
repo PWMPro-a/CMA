@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestUsageDataMigrationInitialStateMatchesExistingUsageData(t *testing.T) {
@@ -189,6 +190,64 @@ func TestEnsureCodexInspectionResultColumnsAddsAutoRecoveryEligibility(t *testin
 	columns := migrationTableColumns(t, db, "codex_inspection_results")
 	if !columns["auto_recover_eligible"] {
 		t.Fatalf("legacy results columns = %#v, want auto_recover_eligible", columns)
+	}
+}
+
+func TestEnsureSupplyImportItemColumnsBackfillsExistingEmptyLeases(t *testing.T) {
+	db, err := sql.Open("sqlite", dataSourceName(filepath.Join(t.TempDir(), "supply-import-lease.sqlite")))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`create table supply_import_items (
+		id integer primary key,
+		status text not null,
+		imported_at_ms integer,
+		lease_expires_at_ms integer
+	)`); err != nil {
+		t.Fatalf("create supply import table: %v", err)
+	}
+	if _, err := db.Exec(`insert into supply_import_items (id, status, imported_at_ms, lease_expires_at_ms) values
+		(1, 'imported', 1000, null),
+		(2, 'imported', 2000, 0),
+		(3, 'imported', 3000, 9999),
+		(4, 'pending', 4000, null)`); err != nil {
+		t.Fatalf("seed supply import items: %v", err)
+	}
+	if err := ensureSupplyImportItemColumns(db); err != nil {
+		t.Fatalf("backfill existing supply import leases: %v", err)
+	}
+	if err := ensureSupplyImportItemColumns(db); err != nil {
+		t.Fatalf("retry supply import lease backfill: %v", err)
+	}
+	rows, err := db.Query(`select id, lease_expires_at_ms from supply_import_items order by id`)
+	if err != nil {
+		t.Fatalf("read lease results: %v", err)
+	}
+	defer rows.Close()
+	want := []sql.NullInt64{
+		{Int64: 1000 + int64(time.Hour/time.Millisecond), Valid: true},
+		{Int64: 2000 + int64(time.Hour/time.Millisecond), Valid: true},
+		{Int64: 9999, Valid: true},
+		{},
+	}
+	index := 0
+	for rows.Next() {
+		var id int
+		var lease sql.NullInt64
+		if err := rows.Scan(&id, &lease); err != nil {
+			t.Fatalf("scan lease result: %v", err)
+		}
+		if index >= len(want) || lease != want[index] {
+			t.Fatalf("lease id=%d got=%#v want=%#v", id, lease, want[index])
+		}
+		index++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate lease results: %v", err)
+	}
+	if index != len(want) {
+		t.Fatalf("lease row count=%d, want %d", index, len(want))
 	}
 }
 

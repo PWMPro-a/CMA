@@ -361,6 +361,10 @@ func (s *Store) ListPendingSupplyImportItems(ctx context.Context, orderID string
 	return s.SupplyOrders.ListPendingItems(ctx, orderID, nowMS, limit)
 }
 
+func (s *Store) ListActiveImportedSupplyItems(ctx context.Context, nowMS int64) ([]SupplyImportItem, error) {
+	return s.SupplyOrders.ListActiveImportedItems(ctx, nowMS)
+}
+
 func (s *Store) MarkSupplyImportItemImported(ctx context.Context, id int64, importedAtMS int64) error {
 	return s.SupplyOrders.MarkItemImported(ctx, id, importedAtMS)
 }

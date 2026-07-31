@@ -17,6 +17,7 @@ import (
 
 const (
 	defaultTimeout       = 30 * time.Second
+	defaultTakeTimeout   = 3 * time.Minute
 	maxResponseBodyBytes = 16 * 1024 * 1024
 )
 
@@ -74,9 +75,10 @@ type Order struct {
 }
 
 type TakeResult struct {
-	Order    Order
-	Accounts []json.RawMessage
-	Pending  bool
+	Order                Order
+	Accounts             []json.RawMessage
+	ItemRemainingSeconds []int64
+	Pending              bool
 }
 
 type tokenState struct {
@@ -86,10 +88,11 @@ type tokenState struct {
 }
 
 type Client struct {
-	httpClient *http.Client
-	timeout    time.Duration
-	mu         sync.Mutex
-	token      tokenState
+	httpClient  *http.Client
+	timeout     time.Duration
+	takeTimeout time.Duration
+	mu          sync.Mutex
+	token       tokenState
 }
 
 func New(httpClient *http.Client, timeout ...time.Duration) *Client {
@@ -100,8 +103,17 @@ func New(httpClient *http.Client, timeout ...time.Duration) *Client {
 	if len(timeout) > 0 && timeout[0] > 0 {
 		requestTimeout = timeout[0]
 	}
-	return &Client{httpClient: httpClient, timeout: requestTimeout}
+	takeTimeout := defaultTakeTimeout
+	if requestTimeout > takeTimeout {
+		takeTimeout = requestTimeout
+	}
+	return &Client{httpClient: httpClient, timeout: requestTimeout, takeTimeout: takeTimeout}
 }
+
+// DefaultTakeTimeout is intentionally longer than the normal API timeout.
+// Taking an order may require the supplier to prepare and serialize multiple
+// OAuth account files; inventory and status operations must stay short.
+func DefaultTakeTimeout() time.Duration { return defaultTakeTimeout }
 
 func (c *Client) Inventory(ctx context.Context, credentials Credentials, product string, quantity int) (Inventory, error) {
 	query := url.Values{}
@@ -173,7 +185,7 @@ func (c *Client) Take(ctx context.Context, credentials Credentials, orderID stri
 	if len(takeURL) > 0 && strings.TrimSpace(takeURL[0]) != "" {
 		endpoint = strings.TrimSpace(takeURL[0])
 	}
-	value, status, err := c.doAuthenticated(ctx, credentials, http.MethodPost, endpoint, map[string]any{})
+	value, status, err := c.doAuthenticatedWithTimeout(ctx, credentials, http.MethodPost, endpoint, map[string]any{}, c.takeTimeout)
 	if err != nil {
 		return TakeResult{}, err
 	}
@@ -183,9 +195,10 @@ func (c *Client) Take(ctx context.Context, credentials Credentials, orderID stri
 	}
 	accounts := rawAccounts(value)
 	return TakeResult{
-		Order:    order,
-		Accounts: accounts,
-		Pending:  status == http.StatusAccepted,
+		Order:                order,
+		Accounts:             accounts,
+		ItemRemainingSeconds: orderItemRemainingSeconds(value),
+		Pending:              status == http.StatusAccepted,
 	}, nil
 }
 
@@ -231,11 +244,15 @@ func (c *Client) ReleaseOrder(ctx context.Context, credentials Credentials, orde
 }
 
 func (c *Client) doAuthenticated(ctx context.Context, credentials Credentials, method string, path string, body any) (any, int, error) {
+	return c.doAuthenticatedWithTimeout(ctx, credentials, method, path, body, c.timeout)
+}
+
+func (c *Client) doAuthenticatedWithTimeout(ctx context.Context, credentials Credentials, method string, path string, body any, requestTimeout time.Duration) (any, int, error) {
 	token, err := c.login(ctx, credentials, false)
 	if err != nil {
 		return nil, 0, err
 	}
-	value, status, err := c.request(ctx, credentials.BaseURL, method, path, body, token)
+	value, status, err := c.requestWithTimeout(ctx, credentials.BaseURL, method, path, body, token, requestTimeout)
 	var httpErr *HTTPError
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized {
 		return value, status, err
@@ -245,7 +262,7 @@ func (c *Client) doAuthenticated(ctx context.Context, credentials Credentials, m
 	if err != nil {
 		return nil, 0, err
 	}
-	return c.request(ctx, credentials.BaseURL, method, path, body, token)
+	return c.requestWithTimeout(ctx, credentials.BaseURL, method, path, body, token, requestTimeout)
 }
 
 func (c *Client) login(ctx context.Context, credentials Credentials, force bool) (string, error) {
@@ -279,6 +296,10 @@ func (c *Client) invalidate(credentials Credentials) {
 }
 
 func (c *Client) request(ctx context.Context, baseURL string, method string, endpointRef string, body any, token string) (any, int, error) {
+	return c.requestWithTimeout(ctx, baseURL, method, endpointRef, body, token, c.timeout)
+}
+
+func (c *Client) requestWithTimeout(ctx context.Context, baseURL string, method string, endpointRef string, body any, token string, requestTimeout time.Duration) (any, int, error) {
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -287,7 +308,10 @@ func (c *Client) request(ctx context.Context, baseURL string, method string, end
 		}
 		reader = bytes.NewReader(data)
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	if requestTimeout <= 0 {
+		requestTimeout = c.timeout
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	endpoint, err := resolveEndpoint(baseURL, endpointRef)
 	if err != nil {
@@ -447,6 +471,64 @@ func rawAccounts(value any) []json.RawMessage {
 	return find(value)
 }
 
+// orderItemRemainingSeconds reads the supplier's per-delivery validity from
+// order.items.  It intentionally does not inspect arbitrary "items" arrays:
+// account payloads may use that name too, and treating those as order items
+// would incorrectly shorten an imported account's lease.
+func orderItemRemainingSeconds(value any) []int64 {
+	root, _ := value.(map[string]any)
+	if root == nil {
+		return nil
+	}
+	return findOrderItemRemainingSeconds(root)
+}
+
+func findOrderItemRemainingSeconds(root map[string]any) []int64 {
+	if order, ok := root["order"].(map[string]any); ok {
+		if remaining, found := itemRemainingSeconds(order["items"]); found {
+			return remaining
+		}
+	}
+	if remaining, found := itemRemainingSeconds(root["items"]); found && orderLike(root) {
+		return remaining
+	}
+	for _, key := range []string{"data", "payload", "result"} {
+		if child, ok := root[key].(map[string]any); ok {
+			if remaining := findOrderItemRemainingSeconds(child); len(remaining) > 0 {
+				return remaining
+			}
+		}
+	}
+	return nil
+}
+
+func orderLike(value map[string]any) bool {
+	if stringValue(value, "id", "order_id", "orderId") != "" {
+		return true
+	}
+	return stringValue(value, "product") != "" && int64Value(value, "quantity", "requested_quantity", "requestedQuantity") > 0
+}
+
+func itemRemainingSeconds(value any) ([]int64, bool) {
+	items, ok := value.([]any)
+	if !ok || len(items) == 0 {
+		return nil, false
+	}
+	remaining := make([]int64, 0, len(items))
+	for _, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		seconds, found := int64ValueOK(object, "remaining_seconds", "remainingSeconds")
+		if !found {
+			return nil, false
+		}
+		remaining = append(remaining, seconds)
+	}
+	return remaining, true
+}
+
 func primaryObject(value any) map[string]any {
 	root, _ := value.(map[string]any)
 	for _, key := range []string{"data", "payload", "result"} {
@@ -491,6 +573,11 @@ func stringValue(root map[string]any, keys ...string) string {
 func intValue(root map[string]any, keys ...string) int { return int(int64Value(root, keys...)) }
 
 func int64Value(root map[string]any, keys ...string) int64 {
+	value, _ := int64ValueOK(root, keys...)
+	return value
+}
+
+func int64ValueOK(root map[string]any, keys ...string) (int64, bool) {
 	for _, key := range keys {
 		value, ok := root[key]
 		if !ok || value == nil {
@@ -499,24 +586,24 @@ func int64Value(root map[string]any, keys ...string) int64 {
 		switch typed := value.(type) {
 		case json.Number:
 			if result, err := typed.Int64(); err == nil {
-				return result
+				return result, true
 			}
 			if result, err := typed.Float64(); err == nil {
-				return int64(result)
+				return int64(result), true
 			}
 		case float64:
-			return int64(typed)
+			return int64(typed), true
 		case int:
-			return int64(typed)
+			return int64(typed), true
 		case int64:
-			return typed
+			return typed, true
 		case string:
 			if result, err := strconv.ParseFloat(strings.TrimSpace(typed), 64); err == nil {
-				return int64(result)
+				return int64(result), true
 			}
 		}
 	}
-	return 0
+	return 0, false
 }
 
 func boolValue(root map[string]any, keys ...string) bool {

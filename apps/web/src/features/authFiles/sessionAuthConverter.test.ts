@@ -1155,6 +1155,7 @@ describe('convertAuthJsonInput', () => {
               chatgpt_account_id: 'sub-account',
               chatgpt_user_id: 'sub-user',
               organization_id: 'sub-org',
+              workspace_id: 'sub-workspace',
               plan_type: 'plus',
               client_id: 'sub-client',
             },
@@ -1184,6 +1185,7 @@ describe('convertAuthJsonInput', () => {
       chatgpt_account_id: 'sub-account',
       chatgpt_user_id: 'sub-user',
       organization_id: 'sub-org',
+      workspace_id: 'sub-workspace',
       email: 'sub-user@example.com',
       name: 'Sub2API OpenAI',
       plan_type: 'plus',
@@ -1194,6 +1196,41 @@ describe('convertAuthJsonInput', () => {
       client_id: 'sub-client',
       last_refresh: '2026-06-01T12:00:00.000Z',
       expired: '2026-07-01T00:00:00.000Z',
+    });
+  });
+
+  it('keeps a Sub2API Team workspace when a generic plan fallback says free', () => {
+    const result = convertAuthJsonInput(
+      JSON.stringify({
+        exported_at: '2026-07-31T16:39:40.000Z',
+        accounts: [
+          {
+            name: 'Team workspace',
+            platform: 'openai',
+            type: 'oauth',
+            credentials: {
+              access_token: 'team-access-token',
+              refresh_token: 'team-refresh-token',
+              account_id: 'team-account',
+              organizationId: 'team-organization',
+              workspaceId: 'team-workspace',
+              plan_type: 'free',
+              chatgpt_plan_type: 'team',
+            },
+          },
+        ],
+      }),
+      'sub2api'
+    );
+
+    expect(result).toMatchObject({
+      type: 'codex',
+      account_id: 'team-account',
+      chatgpt_account_id: 'team-account',
+      organization_id: 'team-organization',
+      workspace_id: 'team-workspace',
+      plan_type: 'team',
+      chatgpt_plan_type: 'team',
     });
   });
 

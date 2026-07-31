@@ -93,11 +93,12 @@ export interface SupplySmartResource {
   confidence: 'high' | 'medium' | 'low' | string;
   snapshotFresh: boolean;
   generatedAtMs: number;
-  availableAccounts: number;
-  schedulableAccounts: number;
-  healthyAccounts: number;
-  weakAccounts: number;
-  targetAvailableAccounts: number;
+  capacitySource: 'inspection_snapshot' | 'unavailable' | string;
+  capacityCoverage: number;
+  capacityLifetimeCoverage: number;
+  capacitySnapshotAtMs: number;
+  capacitySnapshotAgeSeconds: number;
+  capacitySnapshotRunId?: number;
   configuredHealthyMinutesTarget?: number;
   effectiveHealthyMinutesTarget: number;
   accountLifetimeMinutes: number;
@@ -126,7 +127,6 @@ export interface SupplySmartResource {
   supplyAvgFulfillSeconds?: number;
   supplyRecentWaiting?: number;
   usageSampleMinutes: number;
-  accountCacheAgeSeconds: number;
   lockedOrderId?: string;
   lockedOrderAgeSeconds?: number;
   lockedConfirmRounds?: number;

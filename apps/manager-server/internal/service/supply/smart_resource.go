@@ -40,54 +40,63 @@ const (
 	smartSupplyPressureTight   = "tight"
 	smartSupplyPressureScarce  = "scarce"
 	smartSupplyPressureUnknown = "unknown"
+
+	smartCapacitySourceInspection  = "inspection_snapshot"
+	smartCapacitySourceUnavailable = "unavailable"
 )
 
 type SmartResource struct {
-	Enabled                  bool    `json:"enabled"`
-	HealthLevel              string  `json:"healthLevel"`
-	SuggestedAction          string  `json:"suggestedAction"`
-	SuggestedQuantity        int     `json:"suggestedQuantity"`
-	DecisionReason           string  `json:"decisionReason"`
-	Confidence               string  `json:"confidence"`
-	SnapshotFresh            bool    `json:"snapshotFresh"`
-	GeneratedAtMS            int64   `json:"generatedAtMs"`
-	AvailableAccounts        int     `json:"availableAccounts"`
-	SchedulableAccounts      int     `json:"schedulableAccounts"`
-	HealthyAccounts          int     `json:"healthyAccounts"`
-	WeakAccounts             int     `json:"weakAccounts"`
-	TargetAvailableAccounts  int     `json:"targetAvailableAccounts"`
-	ConfiguredHealthyMinutes int     `json:"configuredHealthyMinutesTarget,omitempty"`
-	EffectiveHealthyMinutes  int     `json:"effectiveHealthyMinutesTarget"`
-	AccountLifetimeMinutes   int     `json:"accountLifetimeMinutes"`
-	EstimatedSustainMinutes  float64 `json:"estimatedSustainMinutes"`
-	HealthyMinutesTarget     int     `json:"healthyMinutesTarget"`
-	WarningMinutes           int     `json:"warningMinutes"`
-	CriticalMinutes          int     `json:"criticalMinutes"`
-	RPM30M                   float64 `json:"rpm30m"`
-	RPM5MPeak                float64 `json:"rpm5mPeak"`
-	TPM30M                   float64 `json:"tpm30m"`
-	ConsumeRCUPerMinute      float64 `json:"consumeRcuPerMinute"`
-	CurrentCapacityRCU       float64 `json:"currentCapacityRcu"`
-	RawCapacityRCU           float64 `json:"rawCapacityRcu,omitempty"`
-	TimeLimitedCapacityRCU   float64 `json:"timeLimitedCapacityRcu,omitempty"`
-	ExpiryWasteRiskRCU       float64 `json:"expiryWasteRiskRcu,omitempty"`
-	TargetCapacityRCU        float64 `json:"targetCapacityRcu"`
-	CapacityGapRCU           float64 `json:"capacityGapRcu"`
-	UnitCapacityRCU          float64 `json:"unitCapacityRcu"`
-	RecommendedCapacityRCU   float64 `json:"recommendedCapacityRcu"`
-	PrelockedCapacityRCU     float64 `json:"prelockedCapacityRcu,omitempty"`
-	SupplyPressureLevel      string  `json:"supplyPressureLevel,omitempty"`
-	SupplyPressureReason     string  `json:"supplyPressureReason,omitempty"`
-	SupplyInventoryAvailable int     `json:"supplyInventoryAvailable,omitempty"`
-	SupplyInventoryMissing   int     `json:"supplyInventoryMissing,omitempty"`
-	SupplyNeedsProduction    bool    `json:"supplyNeedsProduction,omitempty"`
-	SupplyAvgFulfillSeconds  int     `json:"supplyAvgFulfillSeconds,omitempty"`
-	SupplyRecentWaiting      int     `json:"supplyRecentWaiting,omitempty"`
-	UsageSampleMinutes       int     `json:"usageSampleMinutes"`
-	AccountCacheAgeSeconds   int     `json:"accountCacheAgeSeconds"`
-	LockedOrderID            string  `json:"lockedOrderId,omitempty"`
-	LockedOrderAgeSeconds    int     `json:"lockedOrderAgeSeconds,omitempty"`
-	LockedConfirmRounds      int     `json:"lockedConfirmRounds,omitempty"`
+	Enabled                    bool    `json:"enabled"`
+	HealthLevel                string  `json:"healthLevel"`
+	SuggestedAction            string  `json:"suggestedAction"`
+	SuggestedQuantity          int     `json:"suggestedQuantity"`
+	DecisionReason             string  `json:"decisionReason"`
+	Confidence                 string  `json:"confidence"`
+	SnapshotFresh              bool    `json:"snapshotFresh"`
+	GeneratedAtMS              int64   `json:"generatedAtMs"`
+	CapacitySource             string  `json:"capacitySource"`
+	CapacityCoverage           float64 `json:"capacityCoverage"`
+	CapacityLifetimeCoverage   float64 `json:"capacityLifetimeCoverage"`
+	CapacitySnapshotAtMS       int64   `json:"capacitySnapshotAtMs"`
+	CapacitySnapshotAgeSeconds int     `json:"capacitySnapshotAgeSeconds"`
+	CapacitySnapshotRunID      int64   `json:"capacitySnapshotRunId,omitempty"`
+	AvailableAccounts          int     `json:"-"`
+	SchedulableAccounts        int     `json:"-"`
+	HealthyAccounts            int     `json:"-"`
+	WeakAccounts               int     `json:"-"`
+	TargetAvailableAccounts    int     `json:"-"`
+	ConfiguredHealthyMinutes   int     `json:"configuredHealthyMinutesTarget,omitempty"`
+	EffectiveHealthyMinutes    int     `json:"effectiveHealthyMinutesTarget"`
+	AccountLifetimeMinutes     int     `json:"accountLifetimeMinutes"`
+	EstimatedSustainMinutes    float64 `json:"estimatedSustainMinutes"`
+	HealthyMinutesTarget       int     `json:"healthyMinutesTarget"`
+	WarningMinutes             int     `json:"warningMinutes"`
+	CriticalMinutes            int     `json:"criticalMinutes"`
+	RPM30M                     float64 `json:"rpm30m"`
+	RPM5MPeak                  float64 `json:"rpm5mPeak"`
+	TPM30M                     float64 `json:"tpm30m"`
+	ConsumeRCUPerMinute        float64 `json:"consumeRcuPerMinute"`
+	CurrentCapacityRCU         float64 `json:"currentCapacityRcu"`
+	RawCapacityRCU             float64 `json:"rawCapacityRcu,omitempty"`
+	TimeLimitedCapacityRCU     float64 `json:"timeLimitedCapacityRcu,omitempty"`
+	ExpiryWasteRiskRCU         float64 `json:"expiryWasteRiskRcu,omitempty"`
+	TargetCapacityRCU          float64 `json:"targetCapacityRcu"`
+	CapacityGapRCU             float64 `json:"capacityGapRcu"`
+	UnitCapacityRCU            float64 `json:"unitCapacityRcu"`
+	RecommendedCapacityRCU     float64 `json:"recommendedCapacityRcu"`
+	PrelockedCapacityRCU       float64 `json:"prelockedCapacityRcu,omitempty"`
+	SupplyPressureLevel        string  `json:"supplyPressureLevel,omitempty"`
+	SupplyPressureReason       string  `json:"supplyPressureReason,omitempty"`
+	SupplyInventoryAvailable   int     `json:"supplyInventoryAvailable,omitempty"`
+	SupplyInventoryMissing     int     `json:"supplyInventoryMissing,omitempty"`
+	SupplyNeedsProduction      bool    `json:"supplyNeedsProduction,omitempty"`
+	SupplyAvgFulfillSeconds    int     `json:"supplyAvgFulfillSeconds,omitempty"`
+	SupplyRecentWaiting        int     `json:"supplyRecentWaiting,omitempty"`
+	UsageSampleMinutes         int     `json:"usageSampleMinutes"`
+	AccountCacheAgeSeconds     int     `json:"accountCacheAgeSeconds"`
+	LockedOrderID              string  `json:"lockedOrderId,omitempty"`
+	LockedOrderAgeSeconds      int     `json:"lockedOrderAgeSeconds,omitempty"`
+	LockedConfirmRounds        int     `json:"lockedConfirmRounds,omitempty"`
 }
 
 type smartUsageBucket struct {
@@ -106,6 +115,19 @@ type authFileSnapshot struct {
 	lastErr     error
 }
 
+// inspectionQuotaSnapshot is derived exclusively from a completed credential
+// inspection. It deliberately does not read CPA's live auth-file list: that
+// list contains transient scheduler state and is too volatile to drive a
+// purchasing decision.
+type inspectionQuotaSnapshot struct {
+	run                store.CodexInspectionRun
+	results            []store.CodexInspectionResult
+	leaseExpiresByFile map[string]int64
+	generatedAt        time.Time
+	attemptedAt        time.Time
+	lastErr            error
+}
+
 type smartCapacityItem struct {
 	capacityRCU      float64
 	remainingMinutes float64
@@ -122,6 +144,8 @@ func defaultSmartResource(cfg store.ManagerSupplyConfig) SmartResource {
 		Confidence:               smartConfidenceLow,
 		SnapshotFresh:            false,
 		GeneratedAtMS:            time.Now().UnixMilli(),
+		CapacitySource:           smartCapacitySourceUnavailable,
+		CapacityLifetimeCoverage: 100,
 		TargetAvailableAccounts:  cfg.TargetAvailableAccounts,
 		ConfiguredHealthyMinutes: configuredTarget,
 		EffectiveHealthyMinutes:  effectiveTarget,
@@ -192,21 +216,149 @@ func (s *Service) smartResource(ctx context.Context, cfg store.ManagerConfig, fo
 		s.setSmartResource(resource)
 		return resource, nil
 	}
-	authSnapshot, err := s.cachedAuthFiles(ctx, cfg, forceAuthRefresh)
-	if err != nil && len(authSnapshot.files) == 0 {
+	quotaSnapshot, err := s.cachedInspectionQuotaSnapshot(ctx, cfg.Supply, forceAuthRefresh)
+	if err != nil && len(quotaSnapshot.results) == 0 {
 		resource := defaultSmartResource(cfg.Supply)
 		resource.SuggestedAction = smartActionSnapshotStale
-		resource.DecisionReason = "auth_files_unavailable"
+		resource.DecisionReason = "inspection_snapshot_unavailable"
 		s.setSmartResource(resource)
-		return resource, err
+		// Missing quota evidence is an expected cold-start state. The automatic
+		// loop must pause quietly rather than repeatedly recording an operational
+		// error or falling back to credential counts.
+		return resource, nil
 	}
-	resource := s.buildSmartResourceFromSnapshots(cfg.Supply, authSnapshot, time.Now())
+	resource := s.buildSmartResourceFromInspectionSnapshot(cfg.Supply, quotaSnapshot, time.Now())
 	if err != nil {
 		resource.SnapshotFresh = false
-		resource.DecisionReason = "using_stale_auth_files"
+		resource.DecisionReason = "using_stale_inspection_snapshot"
 	}
 	s.setSmartResource(resource)
 	return resource, nil
+}
+
+func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupplyConfig, snapshot inspectionQuotaSnapshot, now time.Time) SmartResource {
+	resource := defaultSmartResource(cfg)
+	resource.GeneratedAtMS = now.UnixMilli()
+	resource.CapacitySource = smartCapacitySourceInspection
+	resource.CapacitySnapshotRunID = snapshot.run.ID
+	if !snapshot.generatedAt.IsZero() {
+		resource.CapacitySnapshotAtMS = snapshot.generatedAt.UnixMilli()
+		resource.CapacitySnapshotAgeSeconds = max(0, int(now.Sub(snapshot.generatedAt).Seconds()))
+		resource.AccountCacheAgeSeconds = resource.CapacitySnapshotAgeSeconds
+	}
+	resource.SnapshotFresh = smartInspectionSnapshotFresh(snapshot, now)
+
+	usageStats := s.smartUsageSnapshot(now)
+	resource.RPM30M = usageStats.rpm30
+	resource.RPM5MPeak = usageStats.rpm5Peak
+	resource.TPM30M = usageStats.tpm30
+	resource.UsageSampleMinutes = usageStats.sampleMinutes
+	resource.UnitCapacityRCU = smartProductUnitCapacity(cfg.Product)
+
+	if !smartInspectionSnapshotComplete(snapshot) {
+		resource.SnapshotFresh = false
+		resource.Confidence = smartConfidenceLow
+		resource.HealthLevel = smartHealthUnknown
+		resource.SuggestedAction = smartActionSnapshotStale
+		resource.DecisionReason = "inspection_snapshot_incomplete"
+		return resource
+	}
+
+	capacityItems := make([]smartCapacityItem, 0, len(snapshot.results))
+	eligible := 0
+	withQuota := 0
+	leaseRequired := 0
+	withActiveLease := 0
+	for _, result := range snapshot.results {
+		if !isSmartCapacityInspectionResult(result) || inspectionResultCapacityExcluded(result) {
+			continue
+		}
+		eligible++
+		remaining, ok := inspectionResultRemainingQuotaFraction(result)
+		if !ok {
+			continue
+		}
+		withQuota++
+		remainingMinutes := float64(smartUsefulAccountLifetimeMinutes())
+		if smartSupplyManagedFileName(result.FileName) {
+			leaseRequired++
+			leaseExpiresAtMS, found := snapshot.leaseExpiresByFile[result.FileName]
+			if !found || leaseExpiresAtMS <= now.UnixMilli() {
+				continue
+			}
+			withActiveLease++
+			remainingMinutes = clampFloat(time.UnixMilli(leaseExpiresAtMS).Sub(now).Minutes(), 0, float64(smartUsefulAccountLifetimeMinutes()))
+		}
+		capacity := smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * remaining
+		if capacity <= 0 {
+			continue
+		}
+		capacityItems = append(capacityItems, smartCapacityItem{
+			capacityRCU:      capacity,
+			remainingMinutes: remainingMinutes,
+		})
+	}
+	if eligible > 0 {
+		resource.CapacityCoverage = round2(float64(withQuota) / float64(eligible) * 100)
+	} else {
+		// A complete inspection which has no usable credential is a trusted zero
+		// capacity state, not a missing data state.
+		resource.CapacityCoverage = 100
+	}
+	if leaseRequired > 0 {
+		resource.CapacityLifetimeCoverage = round2(float64(withActiveLease) / float64(leaseRequired) * 100)
+	} else {
+		resource.CapacityLifetimeCoverage = 100
+	}
+	if eligible > 0 && withQuota != eligible {
+		resource.SnapshotFresh = false
+		resource.Confidence = smartConfidenceLow
+		resource.HealthLevel = smartHealthUnknown
+		resource.SuggestedAction = smartActionSnapshotStale
+		resource.DecisionReason = "inspection_quota_incomplete"
+		return resource
+	}
+	if leaseRequired > 0 && withActiveLease != leaseRequired {
+		resource.SnapshotFresh = false
+		resource.Confidence = smartConfidenceLow
+		resource.HealthLevel = smartHealthUnknown
+		resource.SuggestedAction = smartActionSnapshotStale
+		resource.DecisionReason = "inspection_lease_incomplete"
+		return resource
+	}
+
+	for _, item := range capacityItems {
+		resource.RawCapacityRCU += item.capacityRCU
+	}
+	resource.RawCapacityRCU = round2(resource.RawCapacityRCU)
+	resource.CurrentCapacityRCU = resource.RawCapacityRCU
+	consumeRCUPerMinute := smartConsumeRCUPerMinute(resource.RPM30M, resource.RPM5MPeak, resource.TPM30M, resource.UnitCapacityRCU)
+	resource.ConsumeRCUPerMinute = round2(consumeRCUPerMinute)
+	if consumeRCUPerMinute > 0 {
+		usableCapacity, wasteRisk := smartExpiryLimitedCapacity(capacityItems, consumeRCUPerMinute)
+		resource.TimeLimitedCapacityRCU = round2(usableCapacity)
+		resource.ExpiryWasteRiskRCU = round2(wasteRisk)
+		resource.CurrentCapacityRCU = resource.TimeLimitedCapacityRCU
+	}
+	resource.TargetCapacityRCU = round2(consumeRCUPerMinute * float64(resource.EffectiveHealthyMinutes))
+	resource.RecommendedCapacityRCU = resource.TargetCapacityRCU
+
+	if usageStats.requests30 <= 0 || consumeRCUPerMinute <= 0 {
+		resource.Confidence = smartConfidenceLow
+		resource.HealthLevel = smartHealthUnknown
+		resource.SuggestedAction = smartActionSnapshotStale
+		resource.DecisionReason = "usage_rate_not_ready"
+		return resource
+	}
+	if usageStats.sampleMinutes >= 20 && resource.SnapshotFresh {
+		resource.Confidence = smartConfidenceHigh
+	} else if usageStats.sampleMinutes >= 5 {
+		resource.Confidence = smartConfidenceMedium
+	} else {
+		resource.Confidence = smartConfidenceLow
+	}
+	recalculateSmartResourceCapacityPlan(cfg, &resource)
+	return resource
 }
 
 func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig, authSnapshot authFileSnapshot, now time.Time) SmartResource {
@@ -429,6 +581,190 @@ func (s *Service) cachedAuthFiles(ctx context.Context, cfg store.ManagerConfig, 
 	return snapshot, err
 }
 
+func (s *Service) cachedInspectionQuotaSnapshot(ctx context.Context, cfg store.ManagerSupplyConfig, force bool) (inspectionQuotaSnapshot, error) {
+	if s == nil || s.store == nil {
+		return inspectionQuotaSnapshot{}, ErrCapacitySnapshotUnavailable
+	}
+	ttl := time.Duration(smartAuthFilesCacheTTLSeconds(cfg)) * time.Second
+	now := time.Now()
+	s.quotaSnapshotMu.Lock()
+	if !force && inspectionSnapshotCacheUsable(s.quotaSnapshot, now, ttl) {
+		snapshot := cloneInspectionQuotaSnapshot(s.quotaSnapshot)
+		s.quotaSnapshotMu.Unlock()
+		return snapshot, snapshot.lastErr
+	}
+	s.quotaSnapshotMu.Unlock()
+
+	s.quotaRefreshMu.Lock()
+	defer s.quotaRefreshMu.Unlock()
+	s.quotaSnapshotMu.Lock()
+	if !force && inspectionSnapshotCacheUsable(s.quotaSnapshot, now, ttl) {
+		snapshot := cloneInspectionQuotaSnapshot(s.quotaSnapshot)
+		s.quotaSnapshotMu.Unlock()
+		return snapshot, snapshot.lastErr
+	}
+	s.quotaSnapshotMu.Unlock()
+
+	refreshed, err := s.loadLatestInspectionQuotaSnapshot(ctx)
+	attemptedAt := time.Now()
+	s.quotaSnapshotMu.Lock()
+	if err == nil {
+		refreshed.attemptedAt = attemptedAt
+		refreshed.lastErr = nil
+		s.quotaSnapshot = refreshed
+	} else {
+		s.quotaSnapshot.attemptedAt = attemptedAt
+		s.quotaSnapshot.lastErr = err
+	}
+	snapshot := cloneInspectionQuotaSnapshot(s.quotaSnapshot)
+	s.quotaSnapshotMu.Unlock()
+	return snapshot, err
+}
+
+func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context) (inspectionQuotaSnapshot, error) {
+	runs, err := s.store.ListCodexInspectionRuns(ctx, 20)
+	if err != nil {
+		return inspectionQuotaSnapshot{}, err
+	}
+	for _, run := range runs {
+		if run.Status != "completed" {
+			continue
+		}
+		results, err := s.store.ListCodexInspectionResults(ctx, run.ID)
+		if err != nil {
+			return inspectionQuotaSnapshot{}, err
+		}
+		filtered := make([]store.CodexInspectionResult, 0, len(results))
+		for _, result := range results {
+			if isSmartCapacityInspectionResult(result) {
+				filtered = append(filtered, result)
+			}
+		}
+		if len(filtered) == 0 {
+			continue
+		}
+		leaseItems, err := s.store.ListActiveImportedSupplyItems(ctx, time.Now().UnixMilli())
+		if err != nil {
+			return inspectionQuotaSnapshot{}, err
+		}
+		leaseExpiresByFile := make(map[string]int64, len(leaseItems))
+		for _, item := range leaseItems {
+			fileName := strings.TrimSpace(item.FileName)
+			if fileName == "" || item.LeaseExpiresAtMS <= 0 {
+				continue
+			}
+			leaseExpiresByFile[fileName] = maxInt64(leaseExpiresByFile[fileName], item.LeaseExpiresAtMS)
+		}
+		generatedAt := time.UnixMilli(run.FinishedAtMS)
+		if run.FinishedAtMS <= 0 {
+			generatedAt = time.UnixMilli(run.UpdatedAtMS)
+		}
+		return inspectionQuotaSnapshot{run: run, results: filtered, leaseExpiresByFile: leaseExpiresByFile, generatedAt: generatedAt}, nil
+	}
+	return inspectionQuotaSnapshot{}, ErrCapacitySnapshotUnavailable
+}
+
+func inspectionSnapshotCacheUsable(snapshot inspectionQuotaSnapshot, now time.Time, ttl time.Duration) bool {
+	if !snapshot.generatedAt.IsZero() && now.Sub(snapshot.attemptedAt) <= ttl {
+		return true
+	}
+	return !snapshot.attemptedAt.IsZero() && now.Sub(snapshot.attemptedAt) <= ttl
+}
+
+func cloneInspectionQuotaSnapshot(snapshot inspectionQuotaSnapshot) inspectionQuotaSnapshot {
+	results := make([]store.CodexInspectionResult, len(snapshot.results))
+	copy(results, snapshot.results)
+	snapshot.results = results
+	leases := make(map[string]int64, len(snapshot.leaseExpiresByFile))
+	for fileName, expiresAtMS := range snapshot.leaseExpiresByFile {
+		leases[fileName] = expiresAtMS
+	}
+	snapshot.leaseExpiresByFile = leases
+	return snapshot
+}
+
+func smartInspectionSnapshotFresh(snapshot inspectionQuotaSnapshot, now time.Time) bool {
+	if snapshot.generatedAt.IsZero() || now.Before(snapshot.generatedAt) {
+		return false
+	}
+	return now.Sub(snapshot.generatedAt) <= 20*time.Minute
+}
+
+func smartInspectionSnapshotComplete(snapshot inspectionQuotaSnapshot) bool {
+	return snapshot.run.ProbeSetCount > 0 && snapshot.run.SampledCount >= snapshot.run.ProbeSetCount
+}
+
+func isSmartCapacityInspectionResult(result store.CodexInspectionResult) bool {
+	switch strings.ToLower(strings.TrimSpace(result.Provider)) {
+	case "codex", "openai", "openai-codex":
+		return true
+	default:
+		return false
+	}
+}
+
+func inspectionResultCapacityExcluded(result store.CodexInspectionResult) bool {
+	if result.IsQuota {
+		return true
+	}
+	message := strings.ToLower(strings.Join([]string{result.Status, result.State, result.ErrorKind, result.Error, result.ErrorDetail}, " "))
+	if strings.Contains(message, "invalid") ||
+		strings.Contains(message, "expired") ||
+		strings.Contains(message, "revoked") ||
+		strings.Contains(message, "unauthorized") ||
+		strings.Contains(message, "forbidden") ||
+		strings.Contains(message, "quota") ||
+		strings.Contains(message, "usage_limit_reached") {
+		return true
+	}
+	// A transient cooldown may temporarily mark a file disabled. It does not
+	// erase a credential's verified remaining quota, so retain it in capacity.
+	if inspectionResultInCooldown(result) {
+		return false
+	}
+	return result.Disabled
+}
+
+func inspectionResultInCooldown(result store.CodexInspectionResult) bool {
+	message := strings.ToLower(strings.Join([]string{result.Status, result.State, result.ActionReason, result.ErrorKind, result.Error, result.ErrorDetail}, " "))
+	return strings.Contains(message, "cooldown") ||
+		strings.Contains(message, "cooling") ||
+		strings.Contains(message, "retry_after")
+}
+
+func smartSupplyManagedFileName(fileName string) bool {
+	fileName = strings.ToLower(strings.TrimSpace(fileName))
+	return strings.HasPrefix(fileName, "codex-supply-") || strings.HasPrefix(fileName, "supply-")
+}
+
+func inspectionResultRemainingQuotaFraction(result store.CodexInspectionResult) (float64, bool) {
+	minimum := 1.0
+	found := false
+	for _, window := range result.QuotaWindows {
+		id := strings.ToLower(strings.TrimSpace(window.ID + " " + window.LabelKey))
+		if strings.Contains(id, "code-review") || window.UsedPercent == nil {
+			continue
+		}
+		used := *window.UsedPercent
+		if used > 1 {
+			used /= 100
+		}
+		minimum = math.Min(minimum, clampFloat(1-used, 0, 1))
+		found = true
+	}
+	if found {
+		return minimum, true
+	}
+	if result.UsedPercent == nil {
+		return 0, false
+	}
+	used := *result.UsedPercent
+	if used > 1 {
+		used /= 100
+	}
+	return clampFloat(1-used, 0, 1), true
+}
+
 func authSnapshotCacheUsable(snapshot authFileSnapshot, now time.Time, ttl time.Duration) bool {
 	if !snapshot.generatedAt.IsZero() && now.Sub(snapshot.generatedAt) <= ttl {
 		return true
@@ -458,6 +794,12 @@ func (s *Service) currentSmartResource(cfg store.ManagerSupplyConfig) SmartResou
 	resource.ConfiguredHealthyMinutes = smartHealthyMinutesTarget(cfg)
 	resource.EffectiveHealthyMinutes = smartEffectiveHealthyMinutesTarget(cfg)
 	resource.AccountLifetimeMinutes = smartAccountLifetimeMinutes()
+	if resource.CapacitySource == smartCapacitySourceInspection {
+		resource.CapacitySnapshotAgeSeconds = max(0, int(time.Since(time.UnixMilli(resource.CapacitySnapshotAtMS)).Seconds()))
+		if resource.CapacitySnapshotAgeSeconds > 20*60 {
+			resource.SnapshotFresh = false
+		}
+	}
 	resource.HealthyMinutesTarget = resource.EffectiveHealthyMinutes
 	resource.WarningMinutes = smartWarningMinutes(cfg)
 	resource.CriticalMinutes = smartCriticalMinutes(cfg)
