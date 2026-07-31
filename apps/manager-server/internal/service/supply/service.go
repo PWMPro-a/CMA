@@ -1040,11 +1040,9 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 	fallbackBatch := smartFallbackBatchQuantity(cfg)
 	switch pressure.level {
 	case smartSupplyPressurePlenty:
-		// 货源充足时走少量多次，避免一次预锁 10 个但随后又被容量判定释放。
-		smallBatch := min(minQuantity, fallbackBatch)
-		if smallBatch <= 0 {
-			smallBatch = 1
-		}
+		// 货源充足时仍然少量多次，但批量跟随容量缺口分档：1/2/3。
+		// quantity 已由消耗速率、账号剩余额度、有效期和健康水位共同计算。
+		smallBatch := smartPlentySmallBatchQuantity(cfg, quantity)
 		if quantity > smallBatch {
 			return smallBatch, "supply_plenty_small_batch"
 		}
@@ -1057,14 +1055,12 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 		}
 		return quantity, "supply_normal_moderate_batch"
 	case smartSupplyPressureTight:
-		if resource.HealthLevel != smartHealthCritical && quantity > fallbackBatch {
-			return fallbackBatch, "supply_tight_moderate_batch"
-		}
+		// 货源紧张时，健康度不足意味着需要尽快补足容量。不要再按
+		// fallbackBatch 固定拆成 5 个，避免补货速度落后于消耗速度。
 		return quantity, "supply_tight_full_batch"
 	case smartSupplyPressureScarce:
-		if resource.HealthLevel != smartHealthCritical && quantity > fallbackBatch {
-			return fallbackBatch, "supply_scarce_moderate_batch"
-		}
+		// 货源稀缺时同样按智能计算出的缺口一次锁定，数量仍已受
+		// PrelockMaxQuantity、ReplenishBatchSize 和日限额约束。
 		return quantity, "supply_scarce_full_batch"
 	default:
 		if resource.HealthLevel == smartHealthCritical {
@@ -1085,6 +1081,20 @@ func smartFallbackBatchQuantity(cfg store.ManagerSupplyConfig) int {
 	}
 	// 自动预锁的保护批量：最大允许 10 时优先降到 5；最大低于 5 时尊重配置。
 	return clampInt(5, 1, maxQuantity)
+}
+
+func smartPlentySmallBatchQuantity(cfg store.ManagerSupplyConfig, quantity int) int {
+	maxQuantity := smartPrelockMaxQuantity(cfg)
+	if cfg.ReplenishBatchSize > 0 {
+		maxQuantity = min(maxQuantity, cfg.ReplenishBatchSize)
+	}
+	if maxQuantity <= 0 || quantity <= 0 {
+		return 0
+	}
+
+	// quantity 是智能容量模型算出的实际缺口，不再使用固定的最小配置值。
+	// 货源充足时最多预锁 3 个，避免浪费；缺口小于 3 个时按缺口补齐。
+	return min(clampInt(quantity, 1, maxQuantity), 3)
 }
 
 func smartPlentyTakeBatchQuantity(cfg store.ManagerSupplyConfig) int {
@@ -1884,7 +1894,7 @@ func isAvailableCodexFile(file cpaauthfiles.File) bool {
 	}
 	status := strings.ToLower(textField(file.Raw, "status", "state"))
 	switch status {
-	case "failed", "error", "unavailable":
+	case "failed", "error", "unavailable", "pending", "refreshing":
 		return false
 	}
 	return true

@@ -88,7 +88,7 @@ func TestSmartResourceDoesNotFallbackToAccountCountWithoutUsageRate(t *testing.T
 	}
 }
 
-func TestSmartResourceWeightsHealthByUsabilityAndRemainingCapacity(t *testing.T) {
+func TestSmartResourceOnlyCountsCPAUsableCredentialsForCapacity(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now()
 	events := make([]usage.Event, 0, 60)
@@ -143,11 +143,72 @@ func TestSmartResourceWeightsHealthByUsabilityAndRemainingCapacity(t *testing.T)
 	if resource.SchedulableAccounts != 2 || resource.HealthyAccounts != 1 || resource.WeakAccounts != 1 {
 		t.Fatalf("health counts should be based on request usability: %#v", resource)
 	}
-	if resource.CurrentCapacityRCU != 65 {
-		t.Fatalf("capacity should use remaining_rcu weighted by health, got %#v", resource)
+	if resource.AvailableAccounts != 1 || resource.CurrentCapacityRCU != 60 {
+		t.Fatalf("capacity should only use a CPA-usable credential at full balance, got %#v", resource)
 	}
 	if resource.ConsumeRCUPerMinute <= 0 || resource.CapacityGapRCU <= 0 {
 		t.Fatalf("burn rate and capacity gap were not computed: %#v", resource)
+	}
+}
+
+func TestSmartResourceTreatsActiveCredentialAsHealthyWithoutHistory(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now()
+
+	resource := service.buildSmartResourceFromSnapshots(store.ManagerSupplyConfig{
+		Product:              "oauth_7d",
+		HealthyMinutesTarget: 30,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   10,
+	}, authFileSnapshot{
+		generatedAt: now,
+		files: []cpaauthfiles.File{{
+			Name:     "active.json",
+			Provider: "codex",
+			Raw: map[string]any{
+				"status":        "active",
+				"remaining_rcu": 100,
+				"success":       0,
+				"failed":        20,
+			},
+		}},
+	}, now)
+
+	if resource.SchedulableAccounts != 1 || resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 || resource.WeakAccounts != 0 {
+		t.Fatalf("active credential should be fully usable regardless of stale request counters: %#v", resource)
+	}
+	if resource.RawCapacityRCU != 100 || resource.CurrentCapacityRCU != 100 {
+		t.Fatalf("active credential balance should not be weighted down: %#v", resource)
+	}
+}
+
+func TestCurrentSmartResourceRecalculatesHealthForUpdatedWaterLevel(t *testing.T) {
+	service := New(nil, nil)
+	service.setSmartResource(SmartResource{
+		Enabled:             true,
+		SnapshotFresh:       true,
+		GeneratedAtMS:       time.Now().UnixMilli(),
+		HealthLevel:         smartHealthCritical,
+		SuggestedAction:     smartActionTakeLocked,
+		DecisionReason:      "capacity_critical",
+		CurrentCapacityRCU:  6600,
+		ConsumeRCUPerMinute: 100,
+		UnitCapacityRCU:     40,
+	})
+
+	resource := service.currentSmartResource(store.ManagerSupplyConfig{
+		Product:              "oauth_7d",
+		HealthyMinutesTarget: 40,
+		WarningMinutes:       15,
+		CriticalMinutes:      10,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   10,
+	})
+	if resource.EstimatedSustainMinutes != 66 || resource.HealthLevel != smartHealthHealthy || resource.SuggestedAction != smartActionHealthy || resource.SuggestedQuantity != 0 {
+		t.Fatalf("updated water level must recompute a cached capacity state: %#v", resource)
+	}
+	if resource.TargetCapacityRCU != 4000 || resource.CapacityGapRCU != 0 {
+		t.Fatalf("updated target capacity = %#v", resource)
 	}
 }
 
@@ -257,7 +318,7 @@ func TestSmartResourceUsesLifetimeCapacityForFallbackAccounts(t *testing.T) {
 		NewAccountConfidence: 0.7,
 	}, authFileSnapshot{generatedAt: now, files: files}, now)
 
-	if resource.RawCapacityRCU != 12000 {
+	if resource.RawCapacityRCU != 24000 {
 		t.Fatalf("fallback capacity should include the one-hour lifetime, got %#v", resource)
 	}
 	if resource.HealthLevel != smartHealthHealthy || resource.SuggestedQuantity != 0 {
@@ -497,8 +558,8 @@ func TestSmartAutomaticUsesSmallBatchWhenSupplyIsPlenty(t *testing.T) {
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if createQuantity.Load() != 1 {
-		t.Fatalf("plenty supply should create a one-account batch, quantity=%d", createQuantity.Load())
+	if createQuantity.Load() != 3 {
+		t.Fatalf("plenty supply should create a capacity-sized small batch, quantity=%d", createQuantity.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
 	if err != nil {
@@ -781,7 +842,7 @@ func TestSmartReadyOrderWaitsForCriticalConfirmRoundsBeforeTake(t *testing.T) {
 	}
 }
 
-func TestSmartPrelockDownshiftsNonCriticalLargeOrdersToFallbackBatch(t *testing.T) {
+func TestSmartPrelockKeepsFullBatchWhenSupplyIsTight(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		ReplenishBatchSize: 10,
 		PrelockMinQuantity: 1,
@@ -790,13 +851,13 @@ func TestSmartPrelockDownshiftsNonCriticalLargeOrdersToFallbackBatch(t *testing.
 	resource := SmartResource{HealthLevel: smartHealthWarning}
 
 	tightQuantity, tightReason := smartPrelockQuantityForSupplyPressure(cfg, resource, smartSupplyPressure{level: smartSupplyPressureTight}, 10)
-	if tightQuantity != 5 || tightReason != "supply_tight_moderate_batch" {
-		t.Fatalf("tight quantity=%d reason=%q, want 5/moderate", tightQuantity, tightReason)
+	if tightQuantity != 10 || tightReason != "supply_tight_full_batch" {
+		t.Fatalf("tight quantity=%d reason=%q, want 10/full", tightQuantity, tightReason)
 	}
 
 	scarceQuantity, scarceReason := smartPrelockQuantityForSupplyPressure(cfg, resource, smartSupplyPressure{level: smartSupplyPressureScarce}, 10)
-	if scarceQuantity != 5 || scarceReason != "supply_scarce_moderate_batch" {
-		t.Fatalf("scarce quantity=%d reason=%q, want 5/moderate", scarceQuantity, scarceReason)
+	if scarceQuantity != 10 || scarceReason != "supply_scarce_full_batch" {
+		t.Fatalf("scarce quantity=%d reason=%q, want 10/full", scarceQuantity, scarceReason)
 	}
 }
 
@@ -818,5 +879,25 @@ func TestSmartPlentyTakeBatchAllowsFiveAccountReadyOrder(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{ReplenishBatchSize: 10, PrelockMaxQuantity: 10}
 	if got := smartPlentyTakeBatchQuantity(cfg); got != 5 {
 		t.Fatalf("take batch threshold=%d, want 5", got)
+	}
+}
+
+func TestSmartPlentySmallBatchFollowsCapacityGap(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		ReplenishBatchSize: 10,
+		PrelockMinQuantity: 1,
+		PrelockMaxQuantity: 10,
+	}
+	for _, test := range []struct {
+		quantity int
+		want     int
+	}{
+		{quantity: 1, want: 1},
+		{quantity: 2, want: 2},
+		{quantity: 10, want: 3},
+	} {
+		if got := smartPlentySmallBatchQuantity(cfg, test.quantity); got != test.want {
+			t.Fatalf("quantity=%d batch=%d, want %d", test.quantity, got, test.want)
+		}
 	}
 }

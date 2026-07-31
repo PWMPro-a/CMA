@@ -4318,7 +4318,7 @@
     "gating_note": "關閉某項策略只會影響之後發現的新問題；已經排隊或正在處理的任務會繼續完成。"
   },
   "supply": {
-    "account_health_counts": "健康 {{healthy}} / 弱 {{weak}} · 健康等效 {{effective}} / 可調度 {{schedulable}}",
+    "account_health_counts": "可用 {{healthy}} / 異常 {{weak}} · 計入容量 {{effective}} / 可調度 {{schedulable}}",
     "auth_cache_ttl": "帳號快照 TTL（秒）",
     "auto_disabled": "自動補貨已停用",
     "auto_enabled": "自動補貨已開啟",
@@ -4422,10 +4422,10 @@
     "smart_config_title": "智慧補貨策略",
     "smart_enable": "啟用智慧判斷",
     "smart_eyebrow": "SMART RESOURCE",
-    "smart_health_critical": "緊急",
-    "smart_health_healthy": "健康",
-    "smart_health_unknown": "未知",
-    "smart_health_warning": "預警",
+    "smart_health_critical": "容量緊急",
+    "smart_health_healthy": "容量充足",
+    "smart_health_unknown": "容量未知",
+    "smart_health_warning": "容量預警",
     "smart_reason": "{{reason}} · 置信度 {{confidence}}",
     "smart_reason_auth_files_unavailable": "帳號池暫時不可讀",
     "smart_reason_balance_insufficient": "餘額不足",

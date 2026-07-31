@@ -4318,7 +4318,7 @@
     "gating_note": "Отключение переключателя влияет только на новые проблемы, найденные мониторингом. Уже поставленные или выполняющиеся задачи продолжат работу."
   },
   "supply": {
-    "account_health_counts": "Здоровые {{healthy}} / слабые {{weak}} · эквивалент {{effective}} / доступно к планированию {{schedulable}}",
+    "account_health_counts": "Доступны {{healthy}} / недоступны {{weak}} · в ёмкости {{effective}} / планируемые {{schedulable}}",
     "auth_cache_ttl": "TTL снимка аккаунтов (сек.)",
     "auto_disabled": "Автопополнение отключено",
     "auto_enabled": "Автопополнение включено",
@@ -4422,10 +4422,10 @@
     "smart_config_title": "Стратегия умного пополнения",
     "smart_enable": "Включить умное решение",
     "smart_eyebrow": "SMART RESOURCE",
-    "smart_health_critical": "Критично",
-    "smart_health_healthy": "Норма",
-    "smart_health_unknown": "Неизвестно",
-    "smart_health_warning": "Предупреждение",
+    "smart_health_critical": "Критическая ёмкость",
+    "smart_health_healthy": "Ёмкости достаточно",
+    "smart_health_unknown": "Ёмкость неизвестна",
+    "smart_health_warning": "Предупреждение ёмкости",
     "smart_reason": "{{reason}} · уверенность {{confidence}}",
     "smart_reason_auth_files_unavailable": "Пул аккаунтов CPA временно недоступен",
     "smart_reason_balance_insufficient": "Недостаточно баланса",

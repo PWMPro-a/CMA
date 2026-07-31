@@ -4318,7 +4318,7 @@
     "gating_note": "Disabling a switch only affects new problems found later. Tasks already queued or in progress will continue to finish."
   },
   "supply": {
-    "account_health_counts": "Healthy {{healthy}} / weak {{weak}} · effective {{effective}} / schedulable {{schedulable}}",
+    "account_health_counts": "Usable {{healthy}} / unavailable {{weak}} · in capacity {{effective}} / schedulable {{schedulable}}",
     "auth_cache_ttl": "Account snapshot TTL (sec)",
     "auto_disabled": "Automatic supply disabled",
     "auto_enabled": "Automatic supply enabled",
@@ -4422,10 +4422,10 @@
     "smart_config_title": "Smart replenishment strategy",
     "smart_enable": "Enable smart decisioning",
     "smart_eyebrow": "SMART RESOURCE",
-    "smart_health_critical": "Critical",
-    "smart_health_healthy": "Healthy",
-    "smart_health_unknown": "Unknown",
-    "smart_health_warning": "Warning",
+    "smart_health_critical": "Capacity critical",
+    "smart_health_healthy": "Capacity sufficient",
+    "smart_health_unknown": "Capacity unknown",
+    "smart_health_warning": "Capacity warning",
     "smart_reason": "{{reason}} · confidence {{confidence}}",
     "smart_reason_auth_files_unavailable": "CPA account pool is temporarily unreadable",
     "smart_reason_balance_insufficient": "Insufficient balance",

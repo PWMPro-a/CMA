@@ -4318,7 +4318,7 @@
     "gating_note": "关闭某项策略只会影响之后发现的新问题；已经排队或正在处理的任务会继续完成。"
   },
   "supply": {
-    "account_health_counts": "健康 {{healthy}} / 弱 {{weak}} · 健康等效 {{effective}} / 可调度 {{schedulable}}",
+    "account_health_counts": "可用 {{healthy}} / 异常 {{weak}} · 计入容量 {{effective}} / 可调度 {{schedulable}}",
     "auth_cache_ttl": "账号快照 TTL（秒）",
     "auto_disabled": "自动补货已停用",
     "auto_enabled": "自动补货已开启",
@@ -4422,10 +4422,10 @@
     "smart_config_title": "智能补货策略",
     "smart_enable": "启用智能判断",
     "smart_eyebrow": "SMART RESOURCE",
-    "smart_health_critical": "紧急",
-    "smart_health_healthy": "健康",
-    "smart_health_unknown": "未知",
-    "smart_health_warning": "预警",
+    "smart_health_critical": "容量紧急",
+    "smart_health_healthy": "容量充足",
+    "smart_health_unknown": "容量未知",
+    "smart_health_warning": "容量预警",
     "smart_reason": "{{reason}} · 置信度 {{confidence}}",
     "smart_reason_auth_files_unavailable": "账号池暂时不可读",
     "smart_reason_balance_insufficient": "余额不足",
