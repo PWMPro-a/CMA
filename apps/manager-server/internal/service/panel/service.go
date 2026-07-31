@@ -19,6 +19,11 @@ func New(panelPath string, embedded fs.FS) *Service {
 }
 
 func (s *Service) ServeManagementHTML(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error)) {
+	// management.html is a single-file bundle with a stable URL. Cache it only
+	// once and an older UI can outlive a server rollout, causing it to interpret
+	// new API data with stale presentation logic. Always fetch the active build.
+	w.Header().Set("Cache-Control", "no-store, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
 	if s.PanelPath != "" {
 		if file, err := os.Open(s.PanelPath); err == nil {
 			defer file.Close()

@@ -207,6 +207,41 @@ func TestSmartResourceDoesNotExcludeCooldownOnlyInspectionAction(t *testing.T) {
 	}
 }
 
+func TestSmartResourcePublishesInspectionCredentialCountsForCachedPanels(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	unused := 0.0
+	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product: "oauth_7d",
+	}, inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{ProbeSetCount: 4, SampledCount: 4, FinishedAtMS: now.UnixMilli()},
+		results: []store.CodexInspectionResult{
+			{AccountKey: "healthy", FileName: "healthy.json", Provider: "codex", UsedPercent: &unused},
+			{AccountKey: "cooldown", FileName: "cooldown.json", Provider: "codex", Status: "cooldown", Disabled: true, UsedPercent: &unused},
+			{AccountKey: "quota", FileName: "quota.json", Provider: "codex", IsQuota: true, UsedPercent: &unused},
+			{AccountKey: "invalid", FileName: "invalid.json", Provider: "codex", Status: "unauthorized", Disabled: true, UsedPercent: &unused},
+		},
+		generatedAt: now,
+	}, now)
+
+	if resource.SchedulableAccounts != 4 || resource.AvailableAccounts != 2 ||
+		resource.HealthyAccounts != 2 || resource.WeakAccounts != 2 {
+		t.Fatalf("inspection credential counts = %#v", resource)
+	}
+	encoded, err := json.Marshal(resource)
+	if err != nil {
+		t.Fatalf("marshal smart resource: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatalf("unmarshal smart resource: %v", err)
+	}
+	if payload["availableAccounts"] != float64(2) || payload["schedulableAccounts"] != float64(4) ||
+		payload["healthyAccounts"] != float64(2) || payload["weakAccounts"] != float64(2) {
+		t.Fatalf("serialized inspection counts = %#v", payload)
+	}
+}
+
 func TestInspectionCapacityExcludesQuotaEvenWhenCooldownIsPresent(t *testing.T) {
 	if !inspectionResultCapacityExcluded(store.CodexInspectionResult{IsQuota: true, Status: "cooldown", Disabled: true}) {
 		t.Fatal("quota exhaustion must stay excluded even when a cooldown label is present")

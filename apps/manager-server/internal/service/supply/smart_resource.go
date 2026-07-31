@@ -60,43 +60,47 @@ type SmartResource struct {
 	CapacitySnapshotAtMS       int64   `json:"capacitySnapshotAtMs"`
 	CapacitySnapshotAgeSeconds int     `json:"capacitySnapshotAgeSeconds"`
 	CapacitySnapshotRunID      int64   `json:"capacitySnapshotRunId,omitempty"`
-	AvailableAccounts          int     `json:"-"`
-	SchedulableAccounts        int     `json:"-"`
-	HealthyAccounts            int     `json:"-"`
-	WeakAccounts               int     `json:"-"`
-	TargetAvailableAccounts    int     `json:"-"`
-	ConfiguredHealthyMinutes   int     `json:"configuredHealthyMinutesTarget,omitempty"`
-	EffectiveHealthyMinutes    int     `json:"effectiveHealthyMinutesTarget"`
-	AccountLifetimeMinutes     int     `json:"accountLifetimeMinutes"`
-	EstimatedSustainMinutes    float64 `json:"estimatedSustainMinutes"`
-	HealthyMinutesTarget       int     `json:"healthyMinutesTarget"`
-	WarningMinutes             int     `json:"warningMinutes"`
-	CriticalMinutes            int     `json:"criticalMinutes"`
-	RPM30M                     float64 `json:"rpm30m"`
-	RPM5MPeak                  float64 `json:"rpm5mPeak"`
-	TPM30M                     float64 `json:"tpm30m"`
-	ConsumeRCUPerMinute        float64 `json:"consumeRcuPerMinute"`
-	CurrentCapacityRCU         float64 `json:"currentCapacityRcu"`
-	RawCapacityRCU             float64 `json:"rawCapacityRcu,omitempty"`
-	TimeLimitedCapacityRCU     float64 `json:"timeLimitedCapacityRcu,omitempty"`
-	ExpiryWasteRiskRCU         float64 `json:"expiryWasteRiskRcu,omitempty"`
-	TargetCapacityRCU          float64 `json:"targetCapacityRcu"`
-	CapacityGapRCU             float64 `json:"capacityGapRcu"`
-	UnitCapacityRCU            float64 `json:"unitCapacityRcu"`
-	RecommendedCapacityRCU     float64 `json:"recommendedCapacityRcu"`
-	PrelockedCapacityRCU       float64 `json:"prelockedCapacityRcu,omitempty"`
-	SupplyPressureLevel        string  `json:"supplyPressureLevel,omitempty"`
-	SupplyPressureReason       string  `json:"supplyPressureReason,omitempty"`
-	SupplyInventoryAvailable   int     `json:"supplyInventoryAvailable,omitempty"`
-	SupplyInventoryMissing     int     `json:"supplyInventoryMissing,omitempty"`
-	SupplyNeedsProduction      bool    `json:"supplyNeedsProduction,omitempty"`
-	SupplyAvgFulfillSeconds    int     `json:"supplyAvgFulfillSeconds,omitempty"`
-	SupplyRecentWaiting        int     `json:"supplyRecentWaiting,omitempty"`
-	UsageSampleMinutes         int     `json:"usageSampleMinutes"`
-	AccountCacheAgeSeconds     int     `json:"accountCacheAgeSeconds"`
-	LockedOrderID              string  `json:"lockedOrderId,omitempty"`
-	LockedOrderAgeSeconds      int     `json:"lockedOrderAgeSeconds,omitempty"`
-	LockedConfirmRounds        int     `json:"lockedConfirmRounds,omitempty"`
+	// These counts are informational only. Smart replenishment is driven by
+	// RCU capacity and burn rate, never by credential counts. They remain in
+	// the response so an older cached management page does not render its
+	// account-health summary as four misleading zeroes.
+	AvailableAccounts        int     `json:"availableAccounts"`
+	SchedulableAccounts      int     `json:"schedulableAccounts"`
+	HealthyAccounts          int     `json:"healthyAccounts"`
+	WeakAccounts             int     `json:"weakAccounts"`
+	TargetAvailableAccounts  int     `json:"-"`
+	ConfiguredHealthyMinutes int     `json:"configuredHealthyMinutesTarget,omitempty"`
+	EffectiveHealthyMinutes  int     `json:"effectiveHealthyMinutesTarget"`
+	AccountLifetimeMinutes   int     `json:"accountLifetimeMinutes"`
+	EstimatedSustainMinutes  float64 `json:"estimatedSustainMinutes"`
+	HealthyMinutesTarget     int     `json:"healthyMinutesTarget"`
+	WarningMinutes           int     `json:"warningMinutes"`
+	CriticalMinutes          int     `json:"criticalMinutes"`
+	RPM30M                   float64 `json:"rpm30m"`
+	RPM5MPeak                float64 `json:"rpm5mPeak"`
+	TPM30M                   float64 `json:"tpm30m"`
+	ConsumeRCUPerMinute      float64 `json:"consumeRcuPerMinute"`
+	CurrentCapacityRCU       float64 `json:"currentCapacityRcu"`
+	RawCapacityRCU           float64 `json:"rawCapacityRcu,omitempty"`
+	TimeLimitedCapacityRCU   float64 `json:"timeLimitedCapacityRcu,omitempty"`
+	ExpiryWasteRiskRCU       float64 `json:"expiryWasteRiskRcu,omitempty"`
+	TargetCapacityRCU        float64 `json:"targetCapacityRcu"`
+	CapacityGapRCU           float64 `json:"capacityGapRcu"`
+	UnitCapacityRCU          float64 `json:"unitCapacityRcu"`
+	RecommendedCapacityRCU   float64 `json:"recommendedCapacityRcu"`
+	PrelockedCapacityRCU     float64 `json:"prelockedCapacityRcu,omitempty"`
+	SupplyPressureLevel      string  `json:"supplyPressureLevel,omitempty"`
+	SupplyPressureReason     string  `json:"supplyPressureReason,omitempty"`
+	SupplyInventoryAvailable int     `json:"supplyInventoryAvailable,omitempty"`
+	SupplyInventoryMissing   int     `json:"supplyInventoryMissing,omitempty"`
+	SupplyNeedsProduction    bool    `json:"supplyNeedsProduction,omitempty"`
+	SupplyAvgFulfillSeconds  int     `json:"supplyAvgFulfillSeconds,omitempty"`
+	SupplyRecentWaiting      int     `json:"supplyRecentWaiting,omitempty"`
+	UsageSampleMinutes       int     `json:"usageSampleMinutes"`
+	AccountCacheAgeSeconds   int     `json:"accountCacheAgeSeconds"`
+	LockedOrderID            string  `json:"lockedOrderId,omitempty"`
+	LockedOrderAgeSeconds    int     `json:"lockedOrderAgeSeconds,omitempty"`
+	LockedConfirmRounds      int     `json:"lockedConfirmRounds,omitempty"`
 }
 
 type smartUsageBucket struct {
@@ -270,12 +274,18 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	leaseRequired := 0
 	withActiveLease := 0
 	for _, result := range snapshot.results {
-		if !isSmartCapacityInspectionResult(result) || inspectionResultCapacityExcluded(result) {
+		if !isSmartCapacityInspectionResult(result) {
+			continue
+		}
+		resource.SchedulableAccounts++
+		if inspectionResultCapacityExcluded(result) {
+			resource.WeakAccounts++
 			continue
 		}
 		eligible++
 		remaining, ok := inspectionResultRemainingQuotaFraction(result)
 		if !ok {
+			resource.WeakAccounts++
 			continue
 		}
 		withQuota++
@@ -284,6 +294,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			leaseRequired++
 			leaseExpiresAtMS, found := snapshot.leaseExpiresByFile[result.FileName]
 			if !found || leaseExpiresAtMS <= now.UnixMilli() {
+				resource.WeakAccounts++
 				continue
 			}
 			withActiveLease++
@@ -291,12 +302,15 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		}
 		capacity := smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * remaining
 		if capacity <= 0 {
+			resource.WeakAccounts++
 			continue
 		}
 		capacityItems = append(capacityItems, smartCapacityItem{
 			capacityRCU:      capacity,
 			remainingMinutes: remainingMinutes,
 		})
+		resource.AvailableAccounts++
+		resource.HealthyAccounts++
 	}
 	if eligible > 0 {
 		resource.CapacityCoverage = round2(float64(withQuota) / float64(eligible) * 100)
