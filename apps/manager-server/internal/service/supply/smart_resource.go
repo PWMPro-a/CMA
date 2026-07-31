@@ -661,6 +661,9 @@ func smartStatusHealthWeight(values map[string]any) (float64, bool) {
 	if combined == "" {
 		return 0, false
 	}
+	if smartAccountCapacityHardBlocked(values) {
+		return 0, true
+	}
 	switch {
 	case strings.Contains(combined, "invalid_grant"),
 		strings.Contains(combined, "unauthorized"),
@@ -678,6 +681,40 @@ func smartStatusHealthWeight(values map[string]any) (float64, bool) {
 		return 0.25, true
 	default:
 		return 0, false
+	}
+}
+
+func smartAccountCapacityHardBlocked(values map[string]any) bool {
+	status := strings.ToLower(textField(values, "status", "state", "runtime_status", "runtimeStatus"))
+	message := strings.ToLower(textField(values, "status_message", "statusMessage", "error_kind", "errorKind", "header_error_kind", "headerErrorKind", "last_error", "lastError"))
+	combined := strings.TrimSpace(status + " " + message)
+	if combined == "" {
+		return false
+	}
+	switch {
+	case strings.Contains(combined, "usage_limit_reached"),
+		strings.Contains(combined, "quota_exhausted"),
+		strings.Contains(combined, "insufficient_quota"),
+		strings.Contains(combined, "billing_hard_limit"),
+		strings.Contains(combined, "hard_limit_reached"),
+		strings.Contains(combined, "credit_grant_exhausted"),
+		strings.Contains(combined, "exceeded your current quota"):
+		return true
+	case strings.Contains(combined, "credential invalidated"),
+		strings.Contains(combined, "token_invalidated"),
+		strings.Contains(combined, "invalid_grant"),
+		strings.Contains(combined, "invalid token"),
+		strings.Contains(combined, "invalid_token"),
+		strings.Contains(combined, "login_required"),
+		strings.Contains(combined, "reauth"),
+		strings.Contains(combined, "unauthorized"),
+		strings.Contains(combined, "forbidden"),
+		strings.Contains(combined, "revoked"),
+		strings.Contains(combined, "expired"),
+		strings.Contains(combined, " 401 "):
+		return true
+	default:
+		return false
 	}
 }
 
@@ -749,6 +786,9 @@ func smartHealthWeight(success int64, failed int64, zeroTokens int64) float64 {
 func smartAccountCapacityRCU(values map[string]any, unit float64, remainingMinutes float64) (float64, bool) {
 	if unit <= 0 {
 		unit = 1
+	}
+	if smartAccountCapacityHardBlocked(values) {
+		return 0, true
 	}
 	if capacity := numberField(
 		values,

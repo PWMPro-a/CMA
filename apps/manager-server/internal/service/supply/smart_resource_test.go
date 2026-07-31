@@ -151,6 +151,76 @@ func TestSmartResourceWeightsHealthByUsabilityAndRemainingCapacity(t *testing.T)
 	}
 }
 
+func TestSmartResourceCapacityOnlyCountsNonDisabledUsableCredentials(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now()
+
+	resource := service.buildSmartResourceFromSnapshots(store.ManagerSupplyConfig{
+		Product:              "oauth_7d",
+		HealthyMinutesTarget: 30,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   10,
+		NewAccountConfidence: 0.7,
+	}, authFileSnapshot{
+		generatedAt: now,
+		files: []cpaauthfiles.File{
+			{
+				Name:     "usable.json",
+				Provider: "codex",
+				Raw: map[string]any{
+					"status":        "ready",
+					"remaining_rcu": 100,
+					"recent_requests": []any{
+						map[string]any{"success": 12, "failed": 0},
+					},
+				},
+			},
+			{
+				Name:     "disabled-field.json",
+				Provider: "codex",
+				Disabled: true,
+				Raw: map[string]any{
+					"status":        "ready",
+					"remaining_rcu": 1000,
+				},
+			},
+			{
+				Name:     "disabled-status.json",
+				Provider: "codex",
+				Raw: map[string]any{
+					"status":        "disabled",
+					"remaining_rcu": 1000,
+				},
+			},
+			{
+				Name:     "quota-exhausted.json",
+				Provider: "codex",
+				Raw: map[string]any{
+					"status":         "error",
+					"status_message": `{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`,
+					"remaining_rcu":  1000,
+				},
+			},
+			{
+				Name:     "invalidated.json",
+				Provider: "codex",
+				Raw: map[string]any{
+					"status":         "error",
+					"status_message": "credential invalidated",
+					"remaining_rcu":  1000,
+				},
+			},
+		},
+	}, now)
+
+	if resource.SchedulableAccounts != 1 || resource.HealthyAccounts != 1 || resource.WeakAccounts != 0 {
+		t.Fatalf("only one usable non-disabled credential should be counted: %#v", resource)
+	}
+	if resource.AvailableAccounts != 1 || resource.RawCapacityRCU != 100 || resource.CurrentCapacityRCU != 100 {
+		t.Fatalf("effective capacity should exclude disabled/exhausted credentials: %#v", resource)
+	}
+}
+
 func TestSmartResourceUsesLifetimeCapacityForFallbackAccounts(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now()

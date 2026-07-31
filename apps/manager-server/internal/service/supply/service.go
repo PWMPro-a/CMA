@@ -1864,6 +1864,9 @@ func isSmartCapacityCodexFile(file cpaauthfiles.File) bool {
 	case "disabled", "inactive", "invalid", "expired", "revoked", "deleted":
 		return false
 	}
+	if smartAccountCapacityHardBlocked(file.Raw) {
+		return false
+	}
 	return true
 }
 
