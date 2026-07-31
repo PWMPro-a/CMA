@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -280,74 +279,6 @@ func TestOrderConflictIsPersistedAsCancelled(t *testing.T) {
 	order, found, err := st.GetSupplyOrder(context.Background(), "order-cancelled")
 	if err != nil || !found || order.Status != "cancelled" || order.CompletedAtMS == 0 {
 		t.Fatalf("order=%#v found=%v err=%v", order, found, err)
-	}
-}
-
-func TestCancelSupplyOrderReleasesRemoteAndClearsActiveOrder(t *testing.T) {
-	var releaseCalls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/customer/login":
-			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
-		case r.URL.Path == "/api/customer/pickup/orders/order-to-cancel" && r.Method == http.MethodDelete:
-			releaseCalls.Add(1)
-			_, _ = w.Write([]byte(`{"order":{"id":"order-to-cancel","status":"cancelled","released_fen":1000}}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-	enabled := true
-	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
-		Supply: store.ManagerSupplyConfig{
-			Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_30d",
-		},
-	}); err != nil {
-		t.Fatalf("save config: %v", err)
-	}
-	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
-		OrderID: "order-to-cancel", Product: "oauth_30d", RequestedQuantity: 1, Status: "waiting_inventory",
-	}); err != nil {
-		t.Fatalf("create local order: %v", err)
-	}
-
-	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
-	status, err := service.CancelOrder(context.Background(), "order-to-cancel")
-	if err != nil {
-		t.Fatalf("cancel order: %v", err)
-	}
-	if status.ActiveOrder != nil {
-		t.Fatalf("active order should be cleared: %#v", status.ActiveOrder)
-	}
-	order, found, err := st.GetSupplyOrder(context.Background(), "order-to-cancel")
-	if err != nil || !found || order.Status != "cancelled" || order.ReleasedFen != 1000 || order.CompletedAtMS == 0 {
-		t.Fatalf("order=%#v found=%v err=%v", order, found, err)
-	}
-	if releaseCalls.Load() != 1 {
-		t.Fatalf("release calls = %d, want 1", releaseCalls.Load())
-	}
-}
-
-func TestCancelSupplyOrderRejectsImportingOrder(t *testing.T) {
-	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
-		OrderID: "order-importing", Product: "oauth_30d", RequestedQuantity: 1, Status: "importing",
-	}); err != nil {
-		t.Fatalf("create local order: %v", err)
-	}
-	service := New(st, managerconfigsvc.New(config.Config{}, st, nil))
-	if _, err := service.CancelOrder(context.Background(), "order-importing"); !errors.Is(err, ErrOrderNotCancellable) {
-		t.Fatalf("cancel importing order error = %v, want %v", err, ErrOrderNotCancellable)
 	}
 }
 
@@ -771,10 +702,8 @@ func TestImportVerificationFailureBlocksDuplicateAutomaticOrders(t *testing.T) {
 	}
 }
 
-func TestAutomaticOrderReleasesInsteadOfTakingWhenCPATargetIsAlreadySatisfied(t *testing.T) {
+func TestAutomaticOrderLocallyReleasesWhenCPATargetIsAlreadySatisfied(t *testing.T) {
 	var createCalls atomic.Int32
-	var releaseCalls atomic.Int32
-	var takeCalls atomic.Int32
 	var authListCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -788,14 +717,14 @@ func TestAutomaticOrderReleasesInsteadOfTakingWhenCPATargetIsAlreadySatisfied(t 
 			createCalls.Add(1)
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"order":{"id":"order-release","status":"waiting_inventory","quantity":1}}`))
-		case r.URL.Path == "/api/customer/pickup/orders/order-release" && r.Method == http.MethodDelete:
-			releaseCalls.Add(1)
-			_, _ = w.Write([]byte(`{"order":{"id":"order-release","status":"cancelled","released_fen":1000}}`))
 		case r.URL.Path == "/api/customer/pickup/orders/order-release" && r.Method == http.MethodGet:
-			t.Fatal("order status should not be polled after CPA target is already satisfied")
+			t.Fatal("locally released order must not be polled")
 		case r.URL.Path == "/api/customer/pickup/orders/order-release/take":
-			takeCalls.Add(1)
-			t.Fatal("ready order should be released instead of taken when CPA target is already satisfied")
+			t.Fatal("locally released order must not be taken")
+		case (r.URL.Path == "/api/customer/pickup/orders/order-release" && r.Method == http.MethodDelete) ||
+			r.URL.Path == "/api/customer/pickup/orders/order-release/cancel" ||
+			r.URL.Path == "/api/customer/pickup/orders/order-release/release":
+			t.Fatal("local automatic release must not call a supplier cancellation endpoint")
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
 			call := authListCalls.Add(1)
 			if call == 1 {
@@ -847,7 +776,7 @@ func TestAutomaticOrderReleasesInsteadOfTakingWhenCPATargetIsAlreadySatisfied(t 
 		t.Fatalf("make order due: %v", err)
 	}
 	if err := service.RunAutomatic(context.Background()); err != nil {
-		t.Fatalf("release satisfied order: %v", err)
+		t.Fatalf("locally release satisfied order: %v", err)
 	}
 	status, err := service.GetStatus(context.Background(), 10)
 	if err != nil {
@@ -856,16 +785,16 @@ func TestAutomaticOrderReleasesInsteadOfTakingWhenCPATargetIsAlreadySatisfied(t 
 	if status.ActiveOrder != nil {
 		t.Fatalf("active order should be cleared: %#v", status.ActiveOrder)
 	}
-	if len(status.Orders) != 1 || status.Orders[0].Status != "released" || status.Orders[0].ReleasedFen != 1000 {
+	if len(status.Orders) != 1 || status.Orders[0].Status != "released" ||
+		status.Orders[0].RemoteStatus != remoteStatusAutomaticReleasePending || status.Orders[0].ReleasedFen != 0 {
 		t.Fatalf("orders = %#v", status.Orders)
 	}
-	if createCalls.Load() != 1 || releaseCalls.Load() != 1 || takeCalls.Load() != 0 {
-		t.Fatalf("calls create=%d release=%d take=%d", createCalls.Load(), releaseCalls.Load(), takeCalls.Load())
+	if createCalls.Load() != 1 {
+		t.Fatalf("create calls = %d, want 1", createCalls.Load())
 	}
 }
 
-func TestAutomaticOrderTakesUnsupportedReleaseInsteadOfLeavingItReserved(t *testing.T) {
-	var releaseCalls atomic.Int32
+func TestAutomaticOrderTakesWhenCapacityStillNeededWithoutReleaseProbe(t *testing.T) {
 	var takeCalls atomic.Int32
 	var uploadCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -877,9 +806,6 @@ func TestAutomaticOrderTakesUnsupportedReleaseInsteadOfLeavingItReserved(t *test
 		case r.URL.Path == "/api/customer/pickup/orders/order-reserved/take" && r.Method == http.MethodPost:
 			takeCalls.Add(1)
 			_, _ = w.Write([]byte(`{"payload":{"accounts":[{"type":"codex","account":"reserved@example.com","access_token":"secret"}]},"status":"completed"}`))
-		case strings.HasPrefix(r.URL.Path, "/api/customer/pickup/orders/order-reserved"):
-			releaseCalls.Add(1)
-			http.NotFound(w, r)
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
 			if name := r.URL.Query().Get("name"); name != "" {
 				if uploadCalls.Load() > 0 {
@@ -889,7 +815,7 @@ func TestAutomaticOrderTakesUnsupportedReleaseInsteadOfLeavingItReserved(t *test
 				_, _ = w.Write([]byte(`{"files":[]}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"files":[{"name":"existing.json","provider":"codex","disabled":false,"status":"ready"}]}`))
+			_, _ = w.Write([]byte(`{"files":[]}`))
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodPost:
 			uploadCalls.Add(1)
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
@@ -929,26 +855,8 @@ func TestAutomaticOrderTakesUnsupportedReleaseInsteadOfLeavingItReserved(t *test
 	if err != nil || !found {
 		t.Fatalf("load order found=%v err=%v", found, err)
 	}
-	if order.Status != "ready" || order.RemoteStatus != remoteStatusReleaseUnsupported || order.CompletedAtMS != 0 {
-		t.Fatalf("unsupported release must remain active: %#v", order)
-	}
-	if releaseCalls.Load() != 3 {
-		t.Fatalf("release attempts=%d, want 3 endpoint probes", releaseCalls.Load())
-	}
-
-	order.NextPollAtMS = 0
-	if err := st.UpdateSupplyOrder(context.Background(), order); err != nil {
-		t.Fatalf("reset poll: %v", err)
-	}
-	if err := service.RunAutomatic(context.Background()); err != nil {
-		t.Fatalf("second automatic run: %v", err)
-	}
-	if releaseCalls.Load() != 3 {
-		t.Fatalf("unsupported order retried cancellation: calls=%d", releaseCalls.Load())
-	}
-	order, found, err = st.GetSupplyOrder(context.Background(), "order-reserved")
 	if err != nil || !found || order.Status != "completed" || order.ImportedCount != 1 {
-		t.Fatalf("unsupported release order was not imported: %#v found=%v err=%v", order, found, err)
+		t.Fatalf("needed order was not imported: %#v found=%v err=%v", order, found, err)
 	}
 	if takeCalls.Load() != 1 || uploadCalls.Load() != 1 {
 		t.Fatalf("take=%d upload=%d, want 1/1", takeCalls.Load(), uploadCalls.Load())
@@ -963,7 +871,7 @@ func TestStoreReactivatesLocallyReleasedUnsupportedOrder(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
 		OrderID: "old-unsupported-release", Product: "oauth_7d", RequestedQuantity: 10, Automatic: true,
-		Status: "released", RemoteStatus: remoteStatusReleaseUnsupported, Progress: 100,
+		Status: "released", RemoteStatus: "release_unsupported", Progress: 100,
 	}); err != nil {
 		t.Fatalf("create legacy order: %v", err)
 	}

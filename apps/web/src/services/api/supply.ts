@@ -101,6 +101,8 @@ export interface SupplySmartResource {
   capacitySnapshotRunId?: number;
   pendingInspectionAccounts?: number;
   pendingInspectionCapacityRcu?: number;
+  leaseEstimatedAccounts?: number;
+  leaseEstimatedCapacityRcu?: number;
   configuredHealthyMinutesTarget?: number;
   effectiveHealthyMinutesTarget: number;
   accountLifetimeMinutes: number;
@@ -181,7 +183,4 @@ export const supplyApi = {
 
   dismissCreateUncertain: (orderId: string): Promise<SupplyStatus> =>
     apiClient.post(`/supply/orders/${encodeURIComponent(orderId)}/dismiss-uncertain`),
-
-  cancelOrder: (orderId: string): Promise<SupplyStatus> =>
-    apiClient.post(`/supply/orders/${encodeURIComponent(orderId)}/cancel`),
 };

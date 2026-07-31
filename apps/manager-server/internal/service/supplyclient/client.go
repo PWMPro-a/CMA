@@ -21,8 +21,6 @@ const (
 	maxResponseBodyBytes = 16 * 1024 * 1024
 )
 
-var ErrReleaseUnsupported = errors.New("supply order release endpoint is not supported")
-
 type HTTPError struct {
 	StatusCode int
 	Message    string
@@ -200,47 +198,6 @@ func (c *Client) Take(ctx context.Context, credentials Credentials, orderID stri
 		ItemRemainingSeconds: orderItemRemainingSeconds(value),
 		Pending:              status == http.StatusAccepted,
 	}, nil
-}
-
-func (c *Client) ReleaseOrder(ctx context.Context, credentials Credentials, orderID string) (Order, error) {
-	trimmedOrderID := strings.TrimSpace(orderID)
-	if trimmedOrderID == "" {
-		return Order{}, errors.New("supply order id is required")
-	}
-	escapedOrderID := url.PathEscape(trimmedOrderID)
-	attempts := []struct {
-		method string
-		path   string
-		body   any
-	}{
-		{method: http.MethodDelete, path: "/api/customer/pickup/orders/" + escapedOrderID},
-		{method: http.MethodPost, path: "/api/customer/pickup/orders/" + escapedOrderID + "/cancel", body: map[string]any{}},
-		{method: http.MethodPost, path: "/api/customer/pickup/orders/" + escapedOrderID + "/release", body: map[string]any{}},
-	}
-	for _, attempt := range attempts {
-		value, _, err := c.doAuthenticated(ctx, credentials, attempt.method, attempt.path, attempt.body)
-		if err == nil {
-			order := parseOrderValue(value)
-			if order.ID == "" {
-				order.ID = trimmedOrderID
-			}
-			if order.Status == "" {
-				order.Status = "released"
-			}
-			return order, nil
-		}
-		var httpErr *HTTPError
-		if errors.As(err, &httpErr) {
-			switch httpErr.StatusCode {
-			case http.StatusConflict:
-				return Order{ID: trimmedOrderID, Status: "cancelled"}, nil
-			case http.StatusNotFound, http.StatusMethodNotAllowed:
-				continue
-			}
-		}
-		return Order{}, err
-	}
-	return Order{}, ErrReleaseUnsupported
 }
 
 func (c *Client) doAuthenticated(ctx context.Context, credentials Credentials, method string, path string, body any) (any, int, error) {

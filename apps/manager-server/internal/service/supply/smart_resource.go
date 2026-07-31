@@ -80,50 +80,56 @@ type SmartResource struct {
 	// them. They are deliberately separate from HealthyAccounts.
 	PendingInspectionAccounts    int     `json:"pendingInspectionAccounts,omitempty"`
 	PendingInspectionCapacityRCU float64 `json:"pendingInspectionCapacityRcu,omitempty"`
-	TargetAvailableAccounts      int     `json:"-"`
-	ConfiguredHealthyMinutes     int     `json:"configuredHealthyMinutesTarget,omitempty"`
-	EffectiveHealthyMinutes      int     `json:"effectiveHealthyMinutesTarget"`
-	AccountLifetimeMinutes       int     `json:"accountLifetimeMinutes"`
-	EstimatedSustainMinutes      float64 `json:"estimatedSustainMinutes"`
-	HealthyMinutesTarget         int     `json:"healthyMinutesTarget"`
-	WarningMinutes               int     `json:"warningMinutes"`
-	CriticalMinutes              int     `json:"criticalMinutes"`
-	RPM30M                       float64 `json:"rpm30m"`
-	RPM5MPeak                    float64 `json:"rpm5mPeak"`
-	TPM30M                       float64 `json:"tpm30m"`
-	RPM1M                        float64 `json:"rpm1m"`
-	RPM5M                        float64 `json:"rpm5m"`
-	RPM10M                       float64 `json:"rpm10m"`
-	TPM1M                        float64 `json:"tpm1m"`
-	TPM5M                        float64 `json:"tpm5m"`
-	TPM10M                       float64 `json:"tpm10m"`
-	ConsumeRCU1M                 float64 `json:"consumeRcu1m"`
-	ConsumeRCU5M                 float64 `json:"consumeRcu5m"`
-	ConsumeRCU10M                float64 `json:"consumeRcu10m"`
-	DemandTrend                  string  `json:"demandTrend"`
-	DemandPlanningRCUPerMinute   float64 `json:"demandPlanningRcuPerMinute"`
-	ConsumeRCUPerMinute          float64 `json:"consumeRcuPerMinute"`
-	CurrentCapacityRCU           float64 `json:"currentCapacityRcu"`
-	RawCapacityRCU               float64 `json:"rawCapacityRcu,omitempty"`
-	TimeLimitedCapacityRCU       float64 `json:"timeLimitedCapacityRcu,omitempty"`
-	ExpiryWasteRiskRCU           float64 `json:"expiryWasteRiskRcu,omitempty"`
-	TargetCapacityRCU            float64 `json:"targetCapacityRcu"`
-	CapacityGapRCU               float64 `json:"capacityGapRcu"`
-	UnitCapacityRCU              float64 `json:"unitCapacityRcu"`
-	RecommendedCapacityRCU       float64 `json:"recommendedCapacityRcu"`
-	PrelockedCapacityRCU         float64 `json:"prelockedCapacityRcu,omitempty"`
-	SupplyPressureLevel          string  `json:"supplyPressureLevel,omitempty"`
-	SupplyPressureReason         string  `json:"supplyPressureReason,omitempty"`
-	SupplyInventoryAvailable     int     `json:"supplyInventoryAvailable,omitempty"`
-	SupplyInventoryMissing       int     `json:"supplyInventoryMissing,omitempty"`
-	SupplyNeedsProduction        bool    `json:"supplyNeedsProduction,omitempty"`
-	SupplyAvgFulfillSeconds      int     `json:"supplyAvgFulfillSeconds,omitempty"`
-	SupplyRecentWaiting          int     `json:"supplyRecentWaiting,omitempty"`
-	UsageSampleMinutes           int     `json:"usageSampleMinutes"`
-	AccountCacheAgeSeconds       int     `json:"accountCacheAgeSeconds"`
-	LockedOrderID                string  `json:"lockedOrderId,omitempty"`
-	LockedOrderAgeSeconds        int     `json:"lockedOrderAgeSeconds,omitempty"`
-	LockedConfirmRounds          int     `json:"lockedConfirmRounds,omitempty"`
+	// A supplier-managed credential can have a verified usable probe but expose
+	// only its monthly quota window. The quota selector always prefers a shorter
+	// window; monthly data is used only as the fallback when no short window is
+	// present. The delivery lease still bounds its usable lifetime.
+	LeaseEstimatedAccounts     int     `json:"leaseEstimatedAccounts,omitempty"`
+	LeaseEstimatedCapacityRCU  float64 `json:"leaseEstimatedCapacityRcu,omitempty"`
+	TargetAvailableAccounts    int     `json:"-"`
+	ConfiguredHealthyMinutes   int     `json:"configuredHealthyMinutesTarget,omitempty"`
+	EffectiveHealthyMinutes    int     `json:"effectiveHealthyMinutesTarget"`
+	AccountLifetimeMinutes     int     `json:"accountLifetimeMinutes"`
+	EstimatedSustainMinutes    float64 `json:"estimatedSustainMinutes"`
+	HealthyMinutesTarget       int     `json:"healthyMinutesTarget"`
+	WarningMinutes             int     `json:"warningMinutes"`
+	CriticalMinutes            int     `json:"criticalMinutes"`
+	RPM30M                     float64 `json:"rpm30m"`
+	RPM5MPeak                  float64 `json:"rpm5mPeak"`
+	TPM30M                     float64 `json:"tpm30m"`
+	RPM1M                      float64 `json:"rpm1m"`
+	RPM5M                      float64 `json:"rpm5m"`
+	RPM10M                     float64 `json:"rpm10m"`
+	TPM1M                      float64 `json:"tpm1m"`
+	TPM5M                      float64 `json:"tpm5m"`
+	TPM10M                     float64 `json:"tpm10m"`
+	ConsumeRCU1M               float64 `json:"consumeRcu1m"`
+	ConsumeRCU5M               float64 `json:"consumeRcu5m"`
+	ConsumeRCU10M              float64 `json:"consumeRcu10m"`
+	DemandTrend                string  `json:"demandTrend"`
+	DemandPlanningRCUPerMinute float64 `json:"demandPlanningRcuPerMinute"`
+	ConsumeRCUPerMinute        float64 `json:"consumeRcuPerMinute"`
+	CurrentCapacityRCU         float64 `json:"currentCapacityRcu"`
+	RawCapacityRCU             float64 `json:"rawCapacityRcu,omitempty"`
+	TimeLimitedCapacityRCU     float64 `json:"timeLimitedCapacityRcu,omitempty"`
+	ExpiryWasteRiskRCU         float64 `json:"expiryWasteRiskRcu,omitempty"`
+	TargetCapacityRCU          float64 `json:"targetCapacityRcu"`
+	CapacityGapRCU             float64 `json:"capacityGapRcu"`
+	UnitCapacityRCU            float64 `json:"unitCapacityRcu"`
+	RecommendedCapacityRCU     float64 `json:"recommendedCapacityRcu"`
+	PrelockedCapacityRCU       float64 `json:"prelockedCapacityRcu,omitempty"`
+	SupplyPressureLevel        string  `json:"supplyPressureLevel,omitempty"`
+	SupplyPressureReason       string  `json:"supplyPressureReason,omitempty"`
+	SupplyInventoryAvailable   int     `json:"supplyInventoryAvailable,omitempty"`
+	SupplyInventoryMissing     int     `json:"supplyInventoryMissing,omitempty"`
+	SupplyNeedsProduction      bool    `json:"supplyNeedsProduction,omitempty"`
+	SupplyAvgFulfillSeconds    int     `json:"supplyAvgFulfillSeconds,omitempty"`
+	SupplyRecentWaiting        int     `json:"supplyRecentWaiting,omitempty"`
+	UsageSampleMinutes         int     `json:"usageSampleMinutes"`
+	AccountCacheAgeSeconds     int     `json:"accountCacheAgeSeconds"`
+	LockedOrderID              string  `json:"lockedOrderId,omitempty"`
+	LockedOrderAgeSeconds      int     `json:"lockedOrderAgeSeconds,omitempty"`
+	LockedConfirmRounds        int     `json:"lockedConfirmRounds,omitempty"`
 }
 
 type smartUsageBucket struct {
@@ -332,7 +338,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	capacityItems := make([]smartCapacityItem, 0, len(snapshot.results))
 	inspectedFiles := make(map[string]struct{}, len(snapshot.results))
 	eligible := 0
-	withQuota := 0
+	withQuotaEvidence := 0
 	usabilityRequired := 0
 	withVerifiedUsability := 0
 	leaseRequired := 0
@@ -351,9 +357,9 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		}
 		eligible++
 		usabilityRequired++
-		remaining, ok := inspectionResultRemainingQuotaFraction(result)
-		if ok {
-			withQuota++
+		remaining, hasCapacityQuota := inspectionResultRemainingQuotaFraction(result)
+		if hasCapacityQuota {
+			withQuotaEvidence++
 		}
 		// A completed inspection with status=error has quota headers but did
 		// not prove that the credential can serve a request. Keep it out of
@@ -364,16 +370,14 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			continue
 		}
 		withVerifiedUsability++
-		if !ok {
-			resource.WeakAccounts++
-			continue
-		}
 		remainingMinutes := float64(smartUsefulAccountLifetimeMinutes())
+		hasActiveLease := false
 		if smartSupplyManagedFileName(result.FileName) {
 			leaseRequired++
 			leaseExpiresAtMS, found := snapshot.leaseExpiresByFile[result.FileName]
 			if found && leaseExpiresAtMS > now.UnixMilli() {
 				withActiveLease++
+				hasActiveLease = true
 				remainingMinutes = clampFloat(time.UnixMilli(leaseExpiresAtMS).Sub(now).Minutes(), 0, float64(smartUsefulAccountLifetimeMinutes()))
 			}
 			// A successful current quota probe is stronger evidence than the
@@ -384,7 +388,25 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			// CapacityLifetimeCoverage instead of turning a working credential into
 			// zero capacity.
 		}
-		capacity := smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * remaining
+		if !hasCapacityQuota && hasActiveLease {
+			withQuotaEvidence++
+		}
+		capacity := 0.0
+		switch {
+		case hasCapacityQuota:
+			capacity = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * remaining
+		case hasActiveLease:
+			// The completed probe proved that the credential works, while the
+			// supplier's delivery record bounds how long it can remain usable.
+			// This is intentionally a conservative lease estimate, not a
+			// conversion of the excluded monthly allowance.
+			capacity = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * smartNewAccountConfidence(cfg)
+			resource.LeaseEstimatedAccounts++
+			resource.LeaseEstimatedCapacityRCU += capacity
+		default:
+			resource.WeakAccounts++
+			continue
+		}
 		if capacity <= 0 {
 			resource.WeakAccounts++
 			continue
@@ -427,8 +449,9 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		resource.PendingInspectionCapacityRCU += capacity
 	}
 	resource.PendingInspectionCapacityRCU = round2(resource.PendingInspectionCapacityRCU)
+	resource.LeaseEstimatedCapacityRCU = round2(resource.LeaseEstimatedCapacityRCU)
 	if eligible > 0 {
-		resource.CapacityCoverage = round2(float64(withQuota) / float64(eligible) * 100)
+		resource.CapacityCoverage = round2(float64(withQuotaEvidence) / float64(eligible) * 100)
 	} else {
 		// A complete inspection which has no usable credential is a trusted zero
 		// capacity state, not a missing data state.
@@ -439,7 +462,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	} else {
 		resource.CapacityLifetimeCoverage = 100
 	}
-	quotaEvidenceIncomplete := eligible > 0 && withQuota != eligible
+	quotaEvidenceIncomplete := eligible > 0 && withQuotaEvidence != eligible
 	usabilityEvidenceIncomplete := usabilityRequired > 0 && withVerifiedUsability != usabilityRequired
 	// Delivery-lease coverage is retained as an observability signal. It does
 	// not override a current successful quota probe: live usability and quota
@@ -1073,22 +1096,21 @@ func smartSupplyManagedFileName(fileName string) bool {
 const (
 	smartQuotaFiveHourSeconds = 5 * 60 * 60
 	smartQuotaWeekSeconds     = 7 * 24 * 60 * 60
-	smartQuotaMonthMinSeconds = 28 * 24 * 60 * 60
-	smartQuotaMonthMaxSeconds = 31 * 24 * 60 * 60
+	smartQuotaMonthSeconds    = 30 * 24 * 60 * 60
 )
 
 // inspectionResultRemainingQuotaFraction returns the capacity fraction that
 // can be used before the credential's next limiting quota window is
-// exhausted. Monthly allowance is deliberately excluded: it does not describe
-// the short-term capacity available to keep the pool serving requests.
+// exhausted. The shortest available window is always selected. Monthly quota
+// therefore acts only as a fallback for providers that do not expose a 5-hour
+// or weekly window; it is never added to a shorter-window allowance.
 //
 // A credential can expose both five-hour and weekly limits. The shortest
 // window is the one that will block it first, so only that window contributes
 // to the supply capacity calculation. If multiple windows have the same
 // shortest duration, use the lowest remaining fraction as the conservative
 // bound. Results written before quota windows were persisted retain the legacy
-// UsedPercent fallback; an inspection that contains only excluded windows is
-// intentionally not treated as usable capacity evidence.
+// UsedPercent fallback.
 func inspectionResultRemainingQuotaFraction(result store.CodexInspectionResult) (float64, bool) {
 	if len(result.QuotaWindows) == 0 {
 		if result.UsedPercent == nil {
@@ -1132,16 +1154,10 @@ func inspectionResultRemainingQuotaFraction(result store.CodexInspectionResult) 
 func inspectionQuotaWindowExcludedFromCapacity(window model.CodexInspectionQuotaWindow) bool {
 	metadata := strings.ToLower(strings.TrimSpace(window.ID + " " + window.LabelKey))
 	if strings.Contains(metadata, "code-review") ||
-		strings.Contains(metadata, "code_review") ||
-		strings.Contains(metadata, "monthly") ||
-		strings.Contains(metadata, "month") {
+		strings.Contains(metadata, "code_review") {
 		return true
 	}
-	if window.LimitWindowSeconds == nil || math.IsNaN(*window.LimitWindowSeconds) || math.IsInf(*window.LimitWindowSeconds, 0) {
-		return false
-	}
-	seconds := *window.LimitWindowSeconds
-	return seconds >= smartQuotaMonthMinSeconds && seconds <= smartQuotaMonthMaxSeconds
+	return false
 }
 
 func inspectionQuotaWindowDurationSeconds(window model.CodexInspectionQuotaWindow) float64 {
@@ -1161,6 +1177,9 @@ func inspectionQuotaWindowDurationSeconds(window model.CodexInspectionQuotaWindo
 		strings.Contains(metadata, "7-day"),
 		strings.Contains(metadata, "7_day"):
 		return smartQuotaWeekSeconds
+	case strings.Contains(metadata, "monthly"),
+		strings.Contains(metadata, "month"):
+		return smartQuotaMonthSeconds
 	default:
 		// Keep unclassified windows usable for backward compatibility, but only
 		// after every duration that is known or can be inferred.

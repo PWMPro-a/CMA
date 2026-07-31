@@ -80,7 +80,7 @@ func quotaWindow(id string, usedPercent, limitWindowSeconds float64) model.Codex
 	}
 }
 
-func TestInspectionResultQuotaFractionUsesShortestNonMonthlyWindow(t *testing.T) {
+func TestInspectionResultQuotaFractionUsesShortestWindow(t *testing.T) {
 	result := store.CodexInspectionResult{
 		UsedPercent: float64Ptr(0),
 		QuotaWindows: []model.CodexInspectionQuotaWindow{
@@ -108,15 +108,35 @@ func TestInspectionResultQuotaFractionUsesWeeklyWhenNoShorterWindowExists(t *tes
 	}
 }
 
-func TestInspectionResultQuotaFractionDoesNotTreatMonthlyOnlyEvidenceAsCapacity(t *testing.T) {
+func TestInspectionResultQuotaFractionUsesMonthlyWhenNoShorterWindowExists(t *testing.T) {
 	result := store.CodexInspectionResult{
 		UsedPercent: float64Ptr(0),
 		QuotaWindows: []model.CodexInspectionQuotaWindow{
-			quotaWindow("monthly", 0, 30*24*60*60),
+			quotaWindow("monthly", 0, 0),
 		},
 	}
-	if remaining, ok := inspectionResultRemainingQuotaFraction(result); ok || remaining != 0 {
-		t.Fatalf("monthly-only result must not fall back to aggregate usage: remaining=%v ok=%v", remaining, ok)
+	if remaining, ok := inspectionResultRemainingQuotaFraction(result); !ok || remaining != 1 {
+		t.Fatalf("monthly-only result must be the fallback: remaining=%v ok=%v", remaining, ok)
+	}
+}
+
+func TestSmartResourceUsesMonthlyQuotaFallbackForCurrentCapacity(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	used := 20.0
+	resource := New(nil, nil).buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product: "oauth_30d",
+	}, inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{ProbeSetCount: 1, SampledCount: 1, FinishedAtMS: now.UnixMilli()},
+		results: []store.CodexInspectionResult{{
+			AccountKey: "monthly-only", FileName: "monthly-only.json", Provider: "codex", Status: "active",
+			QuotaWindows: []model.CodexInspectionQuotaWindow{quotaWindow("monthly", used, 30*24*60*60)},
+		}},
+		generatedAt: now,
+	}, now)
+
+	if !resource.SnapshotFresh || resource.CapacityCoverage != 100 || resource.AvailableAccounts != 1 ||
+		resource.CurrentCapacityRCU <= 0 || resource.RawCapacityRCU <= 0 {
+		t.Fatalf("monthly fallback must restore usable current capacity: %#v", resource)
 	}
 }
 

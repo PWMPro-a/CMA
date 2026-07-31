@@ -166,57 +166,6 @@ func TestClientTakeUsesExtendedTimeoutWithoutSlowingStatusRequests(t *testing.T)
 	}
 }
 
-func TestClientReleasesOrderWithDelete(t *testing.T) {
-	var releaseCalls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/customer/login":
-			_, _ = w.Write([]byte(`{"token":"token"}`))
-		case r.URL.Path == "/api/customer/pickup/orders/order-1" && r.Method == http.MethodDelete:
-			releaseCalls.Add(1)
-			_, _ = w.Write([]byte(`{"order":{"id":"order-1","status":"cancelled","released_fen":1000}}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	released, err := New(server.Client()).ReleaseOrder(context.Background(), Credentials{BaseURL: server.URL, Username: "u", Password: "p"}, "order-1")
-	if err != nil {
-		t.Fatalf("release order: %v", err)
-	}
-	if released.ID != "order-1" || released.Status != "cancelled" || released.ReleasedFen != 1000 || releaseCalls.Load() != 1 {
-		t.Fatalf("released=%#v releaseCalls=%d", released, releaseCalls.Load())
-	}
-}
-
-func TestClientReleasesOrderWithFallbackCancel(t *testing.T) {
-	var cancelCalls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/customer/login":
-			_, _ = w.Write([]byte(`{"token":"token"}`))
-		case r.URL.Path == "/api/customer/pickup/orders/order-1" && r.Method == http.MethodDelete:
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			_, _ = w.Write([]byte(`{"message":"method not allowed"}`))
-		case r.URL.Path == "/api/customer/pickup/orders/order-1/cancel" && r.Method == http.MethodPost:
-			cancelCalls.Add(1)
-			_, _ = w.Write([]byte(`{"id":"order-1","status":"cancelled"}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	released, err := New(server.Client()).ReleaseOrder(context.Background(), Credentials{BaseURL: server.URL, Username: "u", Password: "p"}, "order-1")
-	if err != nil {
-		t.Fatalf("release order fallback: %v", err)
-	}
-	if released.ID != "order-1" || released.Status != "cancelled" || cancelCalls.Load() != 1 {
-		t.Fatalf("released=%#v cancelCalls=%d", released, cancelCalls.Load())
-	}
-}
-
 func TestClientTreatsAcceptedTakeAsPending(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/customer/login" {

@@ -31,13 +31,15 @@ var (
 	ErrCreateUncertain             = errors.New("supply order creation result is uncertain")
 	ErrOrderNotFound               = errors.New("supply order was not found")
 	ErrNotCreateUncertain          = errors.New("supply order is not waiting for create-result confirmation")
-	ErrOrderNotCancellable         = errors.New("supply order cannot be cancelled in its current state")
 	ErrCapacitySnapshotUnavailable = errors.New("quota inspection snapshot is unavailable")
 )
 
 const (
-	remoteStatusReleaseUnsupported = "release_unsupported"
-	unsupportedReleaseHoldMessage  = "supplier cancellation was not confirmed; order remains reserved upstream and will be picked up and imported"
+	// The supplier has no cancel/release endpoint. This local marker closes an
+	// automatic reservation that is no longer needed; the supplier releases it
+	// by its own order-expiry policy without any outbound cancellation request.
+	remoteStatusAutomaticReleasePending = "auto_release_pending"
+	automaticReleasePendingMessage      = "automatically released locally; supplier reservation will expire automatically"
 )
 
 type Overview struct {
@@ -103,10 +105,9 @@ type Service struct {
 	smartResourceState SmartResource
 	automation         AutomationExecution
 
-	criticalConfirmMu        sync.Mutex
-	criticalConfirmRounds    map[string]int
-	lastAutomaticCreateAtMS  int64
-	lastAutomaticReleaseAtMS int64
+	criticalConfirmMu       sync.Mutex
+	criticalConfirmRounds   map[string]int
+	lastAutomaticCreateAtMS int64
 }
 
 func New(st *store.Store, managerConfig *managerconfigsvc.Service, httpClient ...*http.Client) *Service {
@@ -223,47 +224,6 @@ func (s *Service) DismissCreateUncertain(ctx context.Context, orderID string) (S
 	order.CompletedAtMS = time.Now().UnixMilli()
 	order.NextPollAtMS = 0
 	order.LastError = "create-result block dismissed after remote order verification"
-	if err := s.store.UpdateSupplyOrder(ctx, order); err != nil {
-		return Status{}, err
-	}
-	return s.GetStatus(ctx, 50)
-}
-
-func (s *Service) CancelOrder(ctx context.Context, orderID string) (Status, error) {
-	s.runMu.Lock()
-	defer s.runMu.Unlock()
-	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
-	if err != nil {
-		return Status{}, err
-	}
-	order, found, err := s.store.GetSupplyOrder(ctx, strings.TrimSpace(orderID))
-	if err != nil {
-		return Status{}, err
-	}
-	if !found {
-		return Status{}, ErrOrderNotFound
-	}
-	if !canCancelSupplyOrder(order.Status) {
-		return Status{}, ErrOrderNotCancellable
-	}
-	if order.Status != "creating" {
-		if err := s.requireCredentials(cfg.Supply); err != nil {
-			return Status{}, err
-		}
-		released, err := s.supplyClient.ReleaseOrder(ctx, credentialsFromConfig(cfg.Supply), order.OrderID)
-		if err != nil {
-			if errors.Is(err, supplyclient.ErrReleaseUnsupported) {
-				return Status{}, err
-			}
-			return Status{}, err
-		}
-		applyRemoteOrder(&order, released, cfg.Supply)
-	}
-	order.Status = "cancelled"
-	order.RemoteStatus = "cancelled"
-	order.LastError = ""
-	order.NextPollAtMS = 0
-	order.CompletedAtMS = time.Now().UnixMilli()
 	if err := s.store.UpdateSupplyOrder(ctx, order); err != nil {
 		return Status{}, err
 	}
@@ -580,14 +540,9 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	if total > imported {
 		return s.importItems(ctx, cfg, &order)
 	}
-	if released, err := s.releaseAutomaticOrderIfCPASatisfied(ctx, cfg, &order, true); released || err != nil {
+	if released, err := s.autoReleaseAutomaticOrderIfNotNeeded(ctx, cfg, &order, true); released || err != nil {
 		return err
 	}
-
-	// A supplier that cannot confirm cancellation still holds the accounts. Once
-	// that condition has been observed, the only reliable terminal action is to
-	// take the ready order and import it instead of trying another local release.
-	unsupportedRelease := order.RemoteStatus == remoteStatusReleaseUnsupported
 	remote, err := s.supplyClient.GetOrder(ctx, credentials, order.OrderID, order.StatusURL)
 	if err != nil {
 		if isHTTPStatus(err, http.StatusConflict) {
@@ -596,9 +551,6 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		return s.updateOrderError(ctx, &order, err, cfg.Supply)
 	}
 	applyRemoteOrder(&order, remote, cfg.Supply)
-	if unsupportedRelease {
-		order.RemoteStatus = remoteStatusReleaseUnsupported
-	}
 	if isTerminalRemoteStatus(remote.Status) && !isSuccessfulRemoteStatus(remote.Status) {
 		order.Status = localOrderStatus(remote.Status)
 		order.CompletedAtMS = time.Now().UnixMilli()
@@ -608,13 +560,10 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		order.Status = "waiting_inventory"
 		return s.store.UpdateSupplyOrder(ctx, order)
 	}
-	if !unsupportedRelease {
-		if released, err := s.releaseAutomaticOrderIfCPASatisfied(ctx, cfg, &order, true); released || err != nil {
-			return err
-		}
+	if released, err := s.autoReleaseAutomaticOrderIfNotNeeded(ctx, cfg, &order, true); released || err != nil {
+		return err
 	}
-
-	if !unsupportedRelease && !retryingTake && order.Automatic && smartSupplyEnabled(cfg.Supply) && !s.smartTakeAllowed(cfg.Supply, order.OrderID) {
+	if !retryingTake && order.Automatic && smartSupplyEnabled(cfg.Supply) && !s.smartTakeAllowed(cfg.Supply, order.OrderID) {
 		resource := s.currentSmartResource(cfg.Supply)
 		resource.LockedOrderID = order.OrderID
 		resource.SuggestedAction = smartActionWaitLocked
@@ -695,7 +644,11 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	return s.importItems(ctx, cfg, &order)
 }
 
-func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg store.ManagerConfig, order *store.SupplyOrder, forceSmartRefresh bool) (bool, error) {
+// autoReleaseAutomaticOrderIfNotNeeded finishes an automatic order locally
+// when the verified pool no longer has a deficit. The supplier explicitly does
+// not provide a cancellation/release API, so this function must never issue an
+// HTTP request. The upstream reservation expires on the supplier's own timer.
+func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg store.ManagerConfig, order *store.SupplyOrder, forceSmartRefresh bool) (bool, error) {
 	if order == nil || !order.Automatic {
 		return false, nil
 	}
@@ -703,107 +656,22 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 	case "creating", "create_uncertain", "taking", "importing", "partial":
 		return false, nil
 	}
-	if order.RemoteStatus == remoteStatusReleaseUnsupported {
-		return false, nil
-	}
 	if smartSupplyEnabled(cfg.Supply) {
 		resource, err := s.smartResource(ctx, cfg, forceSmartRefresh)
-		if err != nil {
-			return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionSnapshotStale, "smart_snapshot_unavailable")
-		}
-		currentCapacityGapRCU := resource.CapacityGapRCU
-		neededQuantity := s.smartSuggestedCreateQuantity(cfg.Supply, resource)
-		pressure := smartSupplyPressure{level: smartSupplyPressureUnknown, reason: "supply_pressure_unknown"}
-		if order.Status == "ready" {
-			inventory, inventoryErr := s.supplyClient.Inventory(ctx, credentialsFromConfig(cfg.Supply), cfg.Supply.Product, max(1, order.RequestedQuantity))
-			if inventoryErr == nil {
-				pressure = s.smartSupplyPressure(ctx, cfg.Supply, inventory, max(1, order.RequestedQuantity))
-				applySmartSupplyPressure(&resource, pressure)
-			}
+		if err != nil || !resource.SnapshotFresh || resource.ConsumeRCUPerMinute <= 0 {
+			// A stale/unknown snapshot is not enough evidence to abandon a paid
+			// reservation. Continue the normal status polling path instead.
+			return false, nil
 		}
 		resource.LockedOrderID = order.OrderID
-		resource.SuggestedQuantity = neededQuantity
-		resource.PrelockedCapacityRCU = estimatedSupplyOrderCapacityRCU(cfg.Supply, order.RequestedQuantity)
-		resource.CapacityGapRCU = round2(math.Max(0, currentCapacityGapRCU-resource.PrelockedCapacityRCU))
-		if order.CreatedAtMS > 0 {
-			resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
-		}
-		switch {
-		case !resource.SnapshotFresh && !smartPartialInspectionCapacityDeficitAllowed(resource):
-			// A completed inspection can be older than the normal freshness window
-			// while a large pool is still being scanned. A ready order was already
-			// locked from a verified shortage, so do not strand it when the verified
-			// lower bound remains below warning water. Critical mode still keeps its
-			// configured confirmation rounds.
-			if order.Status == "ready" && smartStaleVerifiedLowWaterReadyTakeAllowed(resource) {
-				if resource.HealthLevel == smartHealthCritical {
-					rounds := s.incrementCriticalConfirm(order.OrderID)
-					resource.LockedConfirmRounds = rounds
-					if rounds < smartCriticalTakeConfirmRounds(cfg.Supply) {
-						return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "critical_take_confirm_pending")
-					}
-					resource.SuggestedAction = smartActionTakeLocked
-					resource.DecisionReason = "critical_take_confirmed_stale_lower_bound"
-					s.setSmartResource(resource)
-					return false, nil
-				}
+		resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
+		if resource.HealthLevel != smartHealthHealthy && resource.CapacityGapRCU > 0 {
+			if resource.HealthLevel != smartHealthCritical {
 				resource.SuggestedAction = smartActionTakeLocked
-				resource.DecisionReason = "low_water_take_ready_stale_lower_bound"
+				resource.DecisionReason = "low_water_take_ready"
 				s.setSmartResource(resource)
 				return false, nil
 			}
-			return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionSnapshotStale, "smart_snapshot_stale")
-		case resource.HealthLevel == smartHealthHealthy || resource.SuggestedAction == smartActionHealthy:
-			if !s.lockedOrderMinHoldElapsed(cfg.Supply, order) {
-				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "min_hold_before_release")
-			}
-			if s.automaticReleaseCooldownActive(cfg.Supply) {
-				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "release_cooldown")
-			}
-			resource.SuggestedAction = smartActionReleaseLocked
-			resource.DecisionReason = "capacity_recovered_before_take"
-			s.setSmartResource(resource)
-			return true, s.releaseAutomaticOrder(ctx, cfg, order, 0)
-		case order.Status == "ready" && resource.HealthLevel != smartHealthCritical && smartResourceAtOrBelowWarning(resource):
-			// The order was created from a verified capacity shortage. Supply
-			// availability is not a reason to release it while the pool remains
-			// below warning water: taking the ready batch is the fast recovery path.
-			// Critical water keeps its existing multi-round confirmation guard.
-			resource.SuggestedAction = smartActionTakeLocked
-			resource.DecisionReason = "low_water_take_ready"
-			s.setSmartResource(resource)
-			return false, nil
-		case resource.HealthLevel != smartHealthCritical && pressure.level == smartSupplyPressurePlenty && currentCapacityGapRCU <= 0:
-			if !s.lockedOrderMinHoldElapsed(cfg.Supply, order) {
-				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "min_hold_before_release")
-			}
-			if s.automaticReleaseCooldownActive(cfg.Supply) {
-				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "release_cooldown")
-			}
-			resource.SuggestedAction = smartActionReleaseLocked
-			resource.DecisionReason = "supply_plenty_release_noncritical"
-			s.setSmartResource(resource)
-			return true, s.releaseAutomaticOrder(ctx, cfg, order, 0)
-		case order.Status == "ready" && resource.HealthLevel != smartHealthCritical && pressure.level == smartSupplyPressurePlenty && neededQuantity > 0 && order.RequestedQuantity <= smartPlentyTakeBatchQuantity(cfg.Supply):
-			resource.SuggestedAction = smartActionTakeLocked
-			resource.DecisionReason = "supply_plenty_small_take"
-			s.setSmartResource(resource)
-			return false, nil
-		case order.Status == "ready" && resource.HealthLevel != smartHealthCritical && pressure.level == smartSupplyPressurePlenty:
-			if !s.lockedOrderMinHoldElapsed(cfg.Supply, order) {
-				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "min_hold_before_release")
-			}
-			if s.automaticReleaseCooldownActive(cfg.Supply) {
-				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "release_cooldown")
-			}
-			resource.SuggestedAction = smartActionReleaseLocked
-			resource.DecisionReason = "supply_plenty_release_oversized"
-			s.setSmartResource(resource)
-			return true, s.releaseAutomaticOrder(ctx, cfg, order, 0)
-		case order.Status == "ready" && resource.HealthLevel != smartHealthCritical:
-			s.resetCriticalConfirm(order.OrderID)
-			return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "locked_but_not_critical")
-		case order.Status == "ready" && resource.HealthLevel == smartHealthCritical:
 			rounds := s.incrementCriticalConfirm(order.OrderID)
 			resource.LockedConfirmRounds = rounds
 			if rounds < smartCriticalTakeConfirmRounds(cfg.Supply) {
@@ -813,9 +681,11 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 			resource.DecisionReason = "critical_take_confirmed"
 			s.setSmartResource(resource)
 			return false, nil
-		default:
-			return false, nil
 		}
+		resource.SuggestedAction = smartActionReleaseLocked
+		resource.DecisionReason = "capacity_recovered_before_take"
+		s.setSmartResource(resource)
+		return true, s.markAutomaticOrderReleasedLocally(ctx, order)
 	}
 	if cfg.Supply.TargetAvailableAccounts <= 0 {
 		return false, nil
@@ -828,51 +698,22 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 	if available < cfg.Supply.TargetAvailableAccounts {
 		return false, nil
 	}
-	return true, s.releaseAutomaticOrder(ctx, cfg, order, available)
+	return true, s.markAutomaticOrderReleasedLocally(ctx, order)
 }
 
-func (s *Service) releaseAutomaticOrder(ctx context.Context, cfg store.ManagerConfig, order *store.SupplyOrder, available int) error {
+func (s *Service) markAutomaticOrderReleasedLocally(ctx context.Context, order *store.SupplyOrder) error {
 	if order == nil {
 		return nil
 	}
-	released, err := s.supplyClient.ReleaseOrder(ctx, credentialsFromConfig(cfg.Supply), order.OrderID)
-	if errors.Is(err, supplyclient.ErrReleaseUnsupported) {
-		// A local release is meaningless without a supplier confirmation: the
-		// next processing round will pick up this still-reserved order instead.
-		order.RemoteStatus = remoteStatusReleaseUnsupported
-		order.LastError = unsupportedReleaseHoldMessage
-		order.CompletedAtMS = 0
-		order.NextPollAtMS = nextPollAt(cfg.Supply, 0)
-		s.resetCriticalConfirm(order.OrderID)
-		s.updateCPAOverviewIfLegacy(cfg.Supply, available)
-		return s.store.UpdateSupplyOrder(ctx, *order)
-	}
-	if err != nil {
-		return s.updateOrderError(ctx, order, fmt.Errorf("release satisfied supply order: %w", err), cfg.Supply)
-	}
-	applyRemoteOrder(order, released, cfg.Supply)
 	order.Status = "released"
+	order.RemoteStatus = remoteStatusAutomaticReleasePending
 	order.ItemCount = 0
 	order.ImportedCount = 0
 	order.NextPollAtMS = 0
 	order.CompletedAtMS = time.Now().UnixMilli()
-	if order.RemoteStatus == "" {
-		order.RemoteStatus = "released"
-	}
-	order.LastError = ""
-	s.markAutomaticRelease()
+	order.LastError = automaticReleasePendingMessage
 	s.resetCriticalConfirm(order.OrderID)
-	s.updateCPAOverviewIfLegacy(cfg.Supply, available)
 	return s.store.UpdateSupplyOrder(ctx, *order)
-}
-
-func canCancelSupplyOrder(status string) bool {
-	switch strings.TrimSpace(status) {
-	case "creating", "created", "waiting_inventory", "ready", "taking":
-		return true
-	default:
-		return false
-	}
 }
 
 func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, order *store.SupplyOrder) error {
@@ -1322,13 +1163,6 @@ func (s *Service) waitLockedOrder(ctx context.Context, cfg store.ManagerSupplyCo
 	return s.store.UpdateSupplyOrder(ctx, *order)
 }
 
-func (s *Service) lockedOrderMinHoldElapsed(cfg store.ManagerSupplyConfig, order *store.SupplyOrder) bool {
-	if order == nil || order.CreatedAtMS <= 0 {
-		return true
-	}
-	return time.Since(time.UnixMilli(order.CreatedAtMS)) >= time.Duration(smartMinHoldSeconds(cfg))*time.Second
-}
-
 func (s *Service) automaticCreateCooldownActive(cfg store.ManagerSupplyConfig, resource SmartResource) bool {
 	seconds := smartCreateCooldownForResource(cfg, resource)
 	s.stateMu.RLock()
@@ -1355,26 +1189,9 @@ func smartAutomaticCheckIntervalSeconds(cfg store.ManagerSupplyConfig, resource 
 	return max(1, seconds)
 }
 
-func (s *Service) automaticReleaseCooldownActive(cfg store.ManagerSupplyConfig) bool {
-	seconds := smartReleaseCooldownSeconds(cfg)
-	s.stateMu.RLock()
-	last := s.lastAutomaticReleaseAtMS
-	s.stateMu.RUnlock()
-	if seconds <= 0 || last <= 0 {
-		return false
-	}
-	return time.Since(time.UnixMilli(last)) < time.Duration(seconds)*time.Second
-}
-
 func (s *Service) markAutomaticCreate() {
 	s.stateMu.Lock()
 	s.lastAutomaticCreateAtMS = time.Now().UnixMilli()
-	s.stateMu.Unlock()
-}
-
-func (s *Service) markAutomaticRelease() {
-	s.stateMu.Lock()
-	s.lastAutomaticReleaseAtMS = time.Now().UnixMilli()
 	s.stateMu.Unlock()
 }
 
