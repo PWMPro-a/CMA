@@ -324,22 +324,8 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	} else {
 		resource.CapacityLifetimeCoverage = 100
 	}
-	if eligible > 0 && withQuota != eligible {
-		resource.SnapshotFresh = false
-		resource.Confidence = smartConfidenceLow
-		resource.HealthLevel = smartHealthUnknown
-		resource.SuggestedAction = smartActionSnapshotStale
-		resource.DecisionReason = "inspection_quota_incomplete"
-		return resource
-	}
-	if leaseRequired > 0 && withActiveLease != leaseRequired {
-		resource.SnapshotFresh = false
-		resource.Confidence = smartConfidenceLow
-		resource.HealthLevel = smartHealthUnknown
-		resource.SuggestedAction = smartActionSnapshotStale
-		resource.DecisionReason = "inspection_lease_incomplete"
-		return resource
-	}
+	quotaEvidenceIncomplete := eligible > 0 && withQuota != eligible
+	leaseEvidenceIncomplete := leaseRequired > 0 && withActiveLease != leaseRequired
 
 	for _, item := range capacityItems {
 		resource.RawCapacityRCU += item.capacityRCU
@@ -357,6 +343,26 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	resource.TargetCapacityRCU = round2(consumeRCUPerMinute * float64(resource.EffectiveHealthyMinutes))
 	resource.RecommendedCapacityRCU = resource.TargetCapacityRCU
 
+	// Keep the verified portion visible even while one or more credentials did
+	// not return quota evidence. Returning early here used to turn the entire
+	// dashboard into 0 RCU, despite most capacity being known. Automation still
+	// pauses below; these figures are display-only lower bounds.
+	if quotaEvidenceIncomplete || leaseEvidenceIncomplete {
+		if usageStats.requests30 > 0 && consumeRCUPerMinute > 0 {
+			recalculateSmartResourceCapacityPlan(cfg, &resource)
+		}
+		resource.SnapshotFresh = false
+		resource.Confidence = smartConfidenceLow
+		resource.HealthLevel = smartHealthUnknown
+		resource.SuggestedAction = smartActionSnapshotStale
+		resource.SuggestedQuantity = 0
+		if quotaEvidenceIncomplete {
+			resource.DecisionReason = "inspection_quota_incomplete"
+		} else {
+			resource.DecisionReason = "inspection_lease_incomplete"
+		}
+		return resource
+	}
 	if usageStats.requests30 <= 0 || consumeRCUPerMinute <= 0 {
 		resource.Confidence = smartConfidenceLow
 		resource.HealthLevel = smartHealthUnknown
@@ -364,6 +370,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		resource.DecisionReason = "usage_rate_not_ready"
 		return resource
 	}
+	recalculateSmartResourceCapacityPlan(cfg, &resource)
 	if usageStats.sampleMinutes >= 20 && resource.SnapshotFresh {
 		resource.Confidence = smartConfidenceHigh
 	} else if usageStats.sampleMinutes >= 5 {
@@ -371,7 +378,6 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	} else {
 		resource.Confidence = smartConfidenceLow
 	}
-	recalculateSmartResourceCapacityPlan(cfg, &resource)
 	return resource
 }
 

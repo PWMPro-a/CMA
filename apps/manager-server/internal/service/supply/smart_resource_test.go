@@ -133,6 +133,39 @@ func TestSmartResourceBlocksIncompleteInspectionQuotaEvidence(t *testing.T) {
 	}
 }
 
+func TestSmartResourceShowsVerifiedCapacityWhenInspectionQuotaEvidenceIsPartial(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	for minute := 0; minute < 10; minute++ {
+		service.recordSmartUsageEvents([]usage.Event{{
+			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+			Provider:    "codex",
+			AuthIndex:   "verified.json",
+			TotalTokens: 100,
+		}}, now)
+	}
+	unused := 0.0
+	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product:              "oauth_7d",
+		HealthyMinutesTarget: 40,
+	}, inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{ProbeSetCount: 2, SampledCount: 2, FinishedAtMS: now.UnixMilli()},
+		results: []store.CodexInspectionResult{
+			{AccountKey: "verified", FileName: "verified.json", Provider: "codex", UsedPercent: &unused},
+			{AccountKey: "missing", FileName: "missing.json", Provider: "codex"},
+		},
+		generatedAt: now,
+	}, now)
+
+	if resource.SnapshotFresh || resource.DecisionReason != "inspection_quota_incomplete" || resource.SuggestedQuantity != 0 {
+		t.Fatalf("incomplete inspection must still pause automation: %#v", resource)
+	}
+	if resource.CurrentCapacityRCU <= 0 || resource.ConsumeRCUPerMinute <= 0 ||
+		resource.TargetCapacityRCU <= 0 || resource.EstimatedSustainMinutes <= 0 {
+		t.Fatalf("verified capacity must remain visible during an incomplete inspection: %#v", resource)
+	}
+}
+
 func TestSmartResourceUsesPersistedSupplyLeaseForCapacity(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Second)
