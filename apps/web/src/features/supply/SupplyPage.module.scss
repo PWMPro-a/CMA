@@ -74,6 +74,16 @@
   min-width: fit-content;
 }
 
+.autoSupplyControl {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 3px 9px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 36%, var(--border-color));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
+}
+
 .heroSummary,
 .configFooter,
 .orderTopline,

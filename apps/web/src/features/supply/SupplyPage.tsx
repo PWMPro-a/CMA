@@ -217,6 +217,21 @@ export function SupplyPage() {
   };
 
   const save = () => runAction('save', () => supplyApi.saveConfig(draft), t('supply.save_success'));
+
+  const toggleAutoSupply = (enabled: boolean) => {
+    // Keep the header switch independent from unsaved fields in the
+    // automation form: only the currently persisted configuration plus the
+    // new enabled state is submitted.
+    const current = status?.config ?? draft;
+    const next = { ...current, enabled, password: '' };
+    setDraft((previous) => ({ ...previous, enabled }));
+    runAction(
+      'save',
+      () => supplyApi.saveConfig(next),
+      enabled ? t('supply.auto_enabled') : t('supply.auto_disabled')
+    );
+  };
+
   const check = () => runAction('check', () => supplyApi.check(), t('supply.check_success'));
   const replenish = () =>
     runAction(
@@ -259,6 +274,7 @@ export function SupplyPage() {
   const inventory = overview?.inventory;
   const balance = overview?.balance;
   const smart = status?.smartResource;
+  const autoSupplyEnabled = status?.config.enabled ?? draft.enabled ?? false;
   const smartModeEnabled = smart?.enabled ?? draft.smartEnabled !== false;
   const activeOrder = status?.activeOrder;
   const orderCount = status?.orders?.length ?? 0;
@@ -424,10 +440,19 @@ export function SupplyPage() {
           <p>{t('supply.subtitle')}</p>
         </div>
         <div className={styles.heroActions}>
+          <div className={styles.autoSupplyControl}>
+            <ToggleSwitch
+              checked={autoSupplyEnabled}
+              disabled={action === 'save'}
+              label={t('supply.enable_auto')}
+              labelPosition="left"
+              onChange={toggleAutoSupply}
+            />
+          </div>
           <div className={styles.heroSummary}>
-            <span className={`${styles.serviceBadge} ${draft.enabled ? styles.success : ''}`}>
+            <span className={`${styles.serviceBadge} ${autoSupplyEnabled ? styles.success : ''}`}>
               <span />
-              {draft.enabled ? t('supply.auto_enabled') : t('supply.auto_disabled')}
+              {autoSupplyEnabled ? t('supply.auto_enabled') : t('supply.auto_disabled')}
             </span>
             <span className={`${styles.statusPill} ${smartTone(smart)}`}>
               {t(`supply.smart_health_${healthLevel}`, {
@@ -694,11 +719,6 @@ export function SupplyPage() {
                     <h2>{t('supply.automation_rules_title')}</h2>
                     <p>{t('supply.automation_rules_hint')}</p>
                   </div>
-                  <ToggleSwitch
-                    checked={Boolean(draft.enabled)}
-                    onChange={(enabled) => updateDraft({ enabled })}
-                    label={t('supply.enable_auto')}
-                  />
                 </div>
                 <div className={styles.formGrid}>
                   {draft.smartEnabled === false ? (
