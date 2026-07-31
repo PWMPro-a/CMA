@@ -780,3 +780,43 @@ func TestSmartReadyOrderWaitsForCriticalConfirmRoundsBeforeTake(t *testing.T) {
 		t.Fatalf("calls take=%d upload=%d", takeCalls.Load(), uploadCalls.Load())
 	}
 }
+
+func TestSmartPrelockDownshiftsNonCriticalLargeOrdersToFallbackBatch(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		ReplenishBatchSize: 10,
+		PrelockMinQuantity: 1,
+		PrelockMaxQuantity: 10,
+	}
+	resource := SmartResource{HealthLevel: smartHealthWarning}
+
+	tightQuantity, tightReason := smartPrelockQuantityForSupplyPressure(cfg, resource, smartSupplyPressure{level: smartSupplyPressureTight}, 10)
+	if tightQuantity != 5 || tightReason != "supply_tight_moderate_batch" {
+		t.Fatalf("tight quantity=%d reason=%q, want 5/moderate", tightQuantity, tightReason)
+	}
+
+	scarceQuantity, scarceReason := smartPrelockQuantityForSupplyPressure(cfg, resource, smartSupplyPressure{level: smartSupplyPressureScarce}, 10)
+	if scarceQuantity != 5 || scarceReason != "supply_scarce_moderate_batch" {
+		t.Fatalf("scarce quantity=%d reason=%q, want 5/moderate", scarceQuantity, scarceReason)
+	}
+}
+
+func TestSmartPrelockKeepsFullBatchWhenCapacityCritical(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		ReplenishBatchSize: 10,
+		PrelockMinQuantity: 1,
+		PrelockMaxQuantity: 10,
+	}
+	resource := SmartResource{HealthLevel: smartHealthCritical}
+
+	quantity, reason := smartPrelockQuantityForSupplyPressure(cfg, resource, smartSupplyPressure{level: smartSupplyPressureScarce}, 10)
+	if quantity != 10 || reason != "supply_scarce_full_batch" {
+		t.Fatalf("critical quantity=%d reason=%q, want 10/full", quantity, reason)
+	}
+}
+
+func TestSmartPlentyTakeBatchAllowsFiveAccountReadyOrder(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{ReplenishBatchSize: 10, PrelockMaxQuantity: 10}
+	if got := smartPlentyTakeBatchQuantity(cfg); got != 5 {
+		t.Fatalf("take batch threshold=%d, want 5", got)
+	}
+}

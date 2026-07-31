@@ -676,7 +676,7 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 			resource.DecisionReason = "supply_plenty_release_noncritical"
 			s.setSmartResource(resource)
 			return true, s.releaseAutomaticOrder(ctx, cfg, order, resource.AvailableAccounts)
-		case order.Status == "ready" && resource.HealthLevel != smartHealthCritical && pressure.level == smartSupplyPressurePlenty && neededQuantity > 0 && order.RequestedQuantity <= smartPlentySmallBatchQuantity(cfg.Supply):
+		case order.Status == "ready" && resource.HealthLevel != smartHealthCritical && pressure.level == smartSupplyPressurePlenty && neededQuantity > 0 && order.RequestedQuantity <= smartPlentyTakeBatchQuantity(cfg.Supply):
 			resource.SuggestedAction = smartActionTakeLocked
 			resource.DecisionReason = "supply_plenty_small_take"
 			s.setSmartResource(resource)
@@ -1009,9 +1009,11 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 	}
 	quantity = clampInt(quantity, 1, maxQuantity)
 	minQuantity := min(smartPrelockMinQuantity(cfg), maxQuantity)
+	fallbackBatch := smartFallbackBatchQuantity(cfg)
 	switch pressure.level {
 	case smartSupplyPressurePlenty:
-		smallBatch := minQuantity
+		// 货源充足时走少量多次，避免一次预锁 10 个但随后又被容量判定释放。
+		smallBatch := min(minQuantity, fallbackBatch)
 		if smallBatch <= 0 {
 			smallBatch = 1
 		}
@@ -1021,19 +1023,26 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 		return quantity, "supply_plenty_small_batch"
 	case smartSupplyPressureNormal:
 		moderateBatch := clampInt(int(math.Ceil(float64(quantity)/2)), minQuantity, maxQuantity)
+		moderateBatch = min(moderateBatch, fallbackBatch)
 		if quantity > moderateBatch {
 			return moderateBatch, "supply_normal_moderate_batch"
 		}
 		return quantity, "supply_normal_moderate_batch"
 	case smartSupplyPressureTight:
+		if resource.HealthLevel != smartHealthCritical && quantity > fallbackBatch {
+			return fallbackBatch, "supply_tight_moderate_batch"
+		}
 		return quantity, "supply_tight_full_batch"
 	case smartSupplyPressureScarce:
+		if resource.HealthLevel != smartHealthCritical && quantity > fallbackBatch {
+			return fallbackBatch, "supply_scarce_moderate_batch"
+		}
 		return quantity, "supply_scarce_full_batch"
 	default:
 		if resource.HealthLevel == smartHealthCritical {
 			return quantity, ""
 		}
-		conservativeBatch := clampInt(2, minQuantity, maxQuantity)
+		conservativeBatch := min(clampInt(2, minQuantity, maxQuantity), fallbackBatch)
 		if quantity > conservativeBatch {
 			return conservativeBatch, "supply_unknown_conservative_batch"
 		}
@@ -1041,12 +1050,17 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 	}
 }
 
-func smartPlentySmallBatchQuantity(cfg store.ManagerSupplyConfig) int {
+func smartFallbackBatchQuantity(cfg store.ManagerSupplyConfig) int {
 	maxQuantity := smartPrelockMaxQuantity(cfg)
 	if cfg.ReplenishBatchSize > 0 {
 		maxQuantity = min(maxQuantity, cfg.ReplenishBatchSize)
 	}
-	return clampInt(smartPrelockMinQuantity(cfg), 1, maxQuantity)
+	// 自动预锁的保护批量：最大允许 10 时优先降到 5；最大低于 5 时尊重配置。
+	return clampInt(5, 1, maxQuantity)
+}
+
+func smartPlentyTakeBatchQuantity(cfg store.ManagerSupplyConfig) int {
+	return smartFallbackBatchQuantity(cfg)
 }
 
 func sameSupplyProduct(a string, b string) bool {
