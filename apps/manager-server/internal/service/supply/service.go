@@ -87,6 +87,10 @@ type Service struct {
 	stateMu  sync.RWMutex
 	running  bool
 	overview Overview
+	// overviewRefreshMu makes cold-start status hydration single-flight. The
+	// management page polls every ten seconds, so every concurrent first-page
+	// request must not independently log in to the supplier after a restart.
+	overviewRefreshMu sync.Mutex
 
 	smartMu            sync.RWMutex
 	smartBuckets       map[int64]*smartUsageBucket
@@ -138,6 +142,12 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 			resource = s.currentSmartResource(cfg.Supply)
 		}
 	}
+	// Overview used to live only in process memory. Recreating the Manager
+	// therefore made inventory and balance look empty until a later automation
+	// branch happened to refresh them; an open order can keep that branch from
+	// running for a long time. Hydrate the read-only supplier snapshot once on
+	// cold start so the dashboard keeps its operational data after deployment.
+	s.hydrateOverviewIfNeeded(ctx, cfg.Supply)
 	orders, err := s.store.ListSupplyOrders(ctx, limit)
 	if err != nil {
 		return Status{}, err
@@ -947,6 +957,55 @@ func (s *Service) refreshSupplyOverview(ctx context.Context, cfg store.ManagerSu
 		Balance:      &balance,
 	})
 	return nil
+}
+
+func (s *Service) hydrateOverviewIfNeeded(ctx context.Context, cfg store.ManagerSupplyConfig) {
+	if s == nil || !supplyCredentialsConfigured(cfg) {
+		return
+	}
+
+	s.overviewRefreshMu.Lock()
+	defer s.overviewRefreshMu.Unlock()
+
+	s.stateMu.RLock()
+	current := s.overview
+	s.stateMu.RUnlock()
+	if current.Inventory != nil && current.Balance != nil {
+		return
+	}
+	// Keep a failed supplier request from being retried by every 10-second UI
+	// refresh while still recovering promptly from a short upstream outage.
+	if current.CheckedAtMS > 0 && time.Since(time.UnixMilli(current.CheckedAtMS)) < 20*time.Second {
+		return
+	}
+
+	refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	inventory, balance, err := s.fetchSupplyOverview(refreshCtx, cfg, max(1, cfg.ReplenishBatchSize))
+	cancel()
+
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	// Automation may have refreshed the overview while the supplier request was
+	// in flight. Do not replace fresher complete data with this cold-start copy.
+	if s.overview.Inventory != nil && s.overview.Balance != nil {
+		return
+	}
+	s.overview.CheckedAtMS = time.Now().UnixMilli()
+	s.overview.CPATarget = cfg.TargetAvailableAccounts
+	s.overview.CPADeficit = max(0, cfg.TargetAvailableAccounts-s.overview.CPAAvailable)
+	if err != nil {
+		s.overview.LastError = safeError(err)
+		return
+	}
+	s.overview.Inventory = &inventory
+	s.overview.Balance = &balance
+	s.overview.LastError = ""
+}
+
+func supplyCredentialsConfigured(cfg store.ManagerSupplyConfig) bool {
+	return strings.TrimSpace(cfg.BaseURL) != "" &&
+		strings.TrimSpace(cfg.Username) != "" &&
+		strings.TrimSpace(cfg.Password) != ""
 }
 
 func (s *Service) fetchSupplyOverview(ctx context.Context, cfg store.ManagerSupplyConfig, quantity int) (supplyclient.Inventory, supplyclient.Balance, error) {

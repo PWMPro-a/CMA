@@ -1086,3 +1086,46 @@ func TestSupplyOrderDatabaseAllowsOnlyOneOpenOrder(t *testing.T) {
 		t.Fatal("second open order was accepted")
 	}
 }
+
+func TestHydrateOverviewIfNeededRestoresSupplierSnapshotAfterRestart(t *testing.T) {
+	var inventoryCalls atomic.Int32
+	var balanceCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case "/api/customer/inventory":
+			inventoryCalls.Add(1)
+			_, _ = w.Write([]byte(`{"available":7,"missing":0,"estimated_total_fen":7000}`))
+		case "/api/customer/balance":
+			balanceCalls.Add(1)
+			_, _ = w.Write([]byte(`{"balance_fen":12000,"held_fen":2000,"available_fen":10000,"currency":"CNY"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	service := New(nil, nil, server.Client())
+	cfg := store.ManagerSupplyConfig{
+		BaseURL:            server.URL,
+		Username:           "customer",
+		Password:           "password",
+		Product:            "oauth_30d",
+		ReplenishBatchSize: 5,
+	}
+	service.hydrateOverviewIfNeeded(context.Background(), cfg)
+
+	service.stateMu.RLock()
+	overview := service.overview
+	service.stateMu.RUnlock()
+	if overview.Inventory == nil || overview.Inventory.Available != 7 ||
+		overview.Balance == nil || overview.Balance.AvailableFen != 10_000 || overview.CheckedAtMS <= 0 {
+		t.Fatalf("cold-start overview was not restored: %#v", overview)
+	}
+
+	service.hydrateOverviewIfNeeded(context.Background(), cfg)
+	if inventoryCalls.Load() != 1 || balanceCalls.Load() != 1 {
+		t.Fatalf("complete overview must not refetch on each UI poll: inventory=%d balance=%d", inventoryCalls.Load(), balanceCalls.Load())
+	}
+}
