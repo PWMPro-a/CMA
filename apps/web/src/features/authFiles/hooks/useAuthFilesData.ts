@@ -21,8 +21,8 @@ import {
 import {
   getTypeLabel,
   hasAuthFileStatusMessage,
-  isHealthyAuthFile,
   isRuntimeOnlyAuthFile,
+  isUsableAuthCredential,
   normalizeProviderKey,
 } from '@/features/authFiles/constants';
 import {
@@ -809,7 +809,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
                       }
                       if (isProblemOnly && !hasAuthFileStatusMessage(file)) return false;
                       if (isDisabledOnly && file.disabled !== true) return false;
-                      if (isHealthyOnly && !isHealthyAuthFile(file)) return false;
+                      if (isHealthyOnly && !isUsableAuthCredential(file)) return false;
                       return true;
                     })
               ).filter((file) => !isRuntimeOnlyAuthFile(file));

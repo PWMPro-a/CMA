@@ -3,6 +3,7 @@ import {
   hasAuthFileFreezeConfig,
   hasAuthFileRateLimitConfig,
   isAuthFileRuntimeUnlimited,
+  isUsableAuthCredential,
   parseNonNegativeIntegerValue,
   readAuthFileBooleanField,
   readAuthFileIntegerField,
@@ -61,5 +62,33 @@ describe('auth file runtime limits', () => {
         selection_error_freeze_seconds: 30,
       })
     ).toBe(true);
+  });
+
+  it('treats runtime health and quota states as credential-usable', () => {
+    expect(isUsableAuthCredential({ name: 'new.json', success: 0, failed: 3 })).toBe(true);
+    expect(
+      isUsableAuthCredential({
+        name: 'quota.json',
+        statusMessage: 'stability_budget_exhausted · quota temporarily unavailable',
+      })
+    ).toBe(true);
+    expect(
+      isUsableAuthCredential(
+        {
+          name: 'observed-quota.json',
+          statusMessage: '',
+        },
+        { isHttp401: false, needsReauth: false }
+      )
+    ).toBe(true);
+  });
+
+  it('rejects credentials with hard OAuth failures', () => {
+    expect(isUsableAuthCredential({ name: 'disabled.json', disabled: true })).toBe(false);
+    expect(isUsableAuthCredential({ name: 'gone.json', status: 'expired' })).toBe(false);
+    expect(
+      isUsableAuthCredential({ name: 'reauth.json', statusMessage: 'invalid_grant login_required' })
+    ).toBe(false);
+    expect(isUsableAuthCredential({ name: '401.json' }, { isHttp401: true })).toBe(false);
   });
 });

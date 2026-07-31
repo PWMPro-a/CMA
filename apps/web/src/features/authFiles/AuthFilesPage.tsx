@@ -49,8 +49,8 @@ import {
   hasAuthFileRateLimitConfig,
   isAuthFileRuntimeUnlimited,
   hasAuthFileStatusMessage,
-  isHealthyAuthFile,
   isRuntimeOnlyAuthFile,
+  isUsableAuthCredential,
   normalizeProviderKey,
   parseNonNegativeIntegerValue,
   parsePriorityValue,
@@ -1229,10 +1229,7 @@ export function AuthFilesPage() {
         const accountActions = getAccountActionsForFile(file);
         const quotaCooldown = getQuotaCooldownForFile(file);
         const hasAutomationProblem = accountActions.length > 0 || Boolean(quotaCooldown);
-        if (
-          healthyOnly &&
-          (!isHealthyAuthFile(file) || hasAutomationProblem || Boolean(codexStatus?.badges.length))
-        ) {
+        if (healthyOnly && !isUsableAuthCredential(file, codexStatus)) {
           return false;
         }
         if (

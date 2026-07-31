@@ -197,6 +197,33 @@ const hasDefiniteAuthFileAvailabilityFailure = (file: AuthFileItem): boolean => 
   ].some((keyword) => message.includes(keyword));
 };
 
+type AuthCredentialCodexStatus = {
+  isHttp401?: boolean;
+  needsReauth?: boolean;
+};
+
+const hasDefiniteAuthCredentialFailure = (file: AuthFileItem): boolean => {
+  const status = String(file.status ?? file['state'] ?? '')
+    .trim()
+    .toLowerCase();
+  if (['invalid', 'expired', 'revoked', 'deleted'].includes(status)) {
+    return true;
+  }
+  const message = getAuthFileStatusMessage(file).toLowerCase();
+  return [
+    '401',
+    'invalid_grant',
+    'invalid token',
+    'invalid_token',
+    'token_invalidated',
+    'unauthorized',
+    'revoked',
+    'expired',
+    'login_required',
+    'reauth',
+  ].some((keyword) => message.includes(keyword));
+};
+
 const isCapacityOnlyRuntimeStatus = (file: AuthFileItem): boolean => {
   const message = getAuthFileStatusMessage(file).toLowerCase();
   return ['frozen', 'cooldown', 'rate_limit', 'quota', 'stability_budget_exhausted'].some(
@@ -214,6 +241,15 @@ export const isHealthyAuthFile = (file: AuthFileItem): boolean => {
     return true;
   }
   return !hasAuthFileStatusMessage(file);
+};
+
+export const isUsableAuthCredential = (
+  file: AuthFileItem,
+  codexStatus?: AuthCredentialCodexStatus
+): boolean => {
+  if (file.disabled === true || file.unavailable === true) return false;
+  if (codexStatus?.isHttp401 === true || codexStatus?.needsReauth === true) return false;
+  return !hasDefiniteAuthCredentialFailure(file);
 };
 
 export const getTypeLabel = (t: TFunction, type: string): string => {
