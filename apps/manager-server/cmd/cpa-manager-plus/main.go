@@ -83,6 +83,11 @@ func runServer() {
 	defer stop()
 
 	serverApp := httpapi.New(cfg, db, manager)
+	warmCtx, warmCancel := context.WithTimeout(ctx, 5*time.Second)
+	if err := serverApp.AppContext().SupplyService.WarmSmartUsage(warmCtx); err != nil {
+		log.Printf("smart supply usage warm-up: %v", err)
+	}
+	warmCancel()
 	automationSettingsService := serverApp.AppContext().AccountProcessingPolicyService
 	runtimeSettings := automationSettingsService.RuntimeSettings(ctx)
 	rateLimitAutoDisableWorker := worker.NewRateLimitAutoDisableWorker(db, collector.RuntimeConfig{

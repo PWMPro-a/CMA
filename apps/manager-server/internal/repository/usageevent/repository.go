@@ -13,6 +13,7 @@ import (
 type Repository interface {
 	InsertBatch(ctx context.Context, events []model.UsageEvent) (model.InsertResult, error)
 	ListRecent(ctx context.Context, limit int) ([]model.UsageEvent, error)
+	ListSupplyUsageMinutes(ctx context.Context, sinceMS int64) ([]SupplyUsageMinute, error)
 	ModelUsageSummary(ctx context.Context, limit int) (model.ModelUsageSummary, error)
 	BackfillResponseMetadata(ctx context.Context, batchLimit int) (int, error)
 	Count(ctx context.Context) (int64, error)
@@ -48,6 +49,17 @@ type Repository interface {
 	LatestHeaderSnapshots(ctx context.Context, sinceMS int64, limit int) ([]HeaderSnapshot, error)
 	ActiveDaysWithFilter(ctx context.Context, filter AnalyticsFilter, location *time.Location) (int64, error)
 	ZeroTokenModelsWithFilter(ctx context.Context, filter AnalyticsFilter) ([]string, error)
+}
+
+// SupplyUsageMinute is the small restart-recovery snapshot consumed by smart
+// replenishment. It intentionally contains only aggregate values so warming
+// the in-memory planner never loads individual request records.
+type SupplyUsageMinute struct {
+	MinuteMS    int64
+	Requests    int64
+	Successful  int64
+	Failed      int64
+	TotalTokens int64
 }
 
 type repository struct {
@@ -198,6 +210,49 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 		return model.InsertResult{}, err
 	}
 	return result, nil
+}
+
+func (r *repository) ListSupplyUsageMinutes(ctx context.Context, sinceMS int64) ([]SupplyUsageMinute, error) {
+	rows, err := r.db.QueryContext(ctx, `select
+		(timestamp_ms / 60000) * 60000 as minute_ms,
+		count(*) as requests,
+		sum(case when failed = 0 then 1 else 0 end) as successful,
+		sum(case when failed <> 0 then 1 else 0 end) as failed,
+		sum(case
+			when total_tokens > input_tokens + output_tokens + reasoning_tokens then total_tokens
+			else input_tokens + output_tokens + reasoning_tokens
+		end) as total_tokens
+		from usage_events
+		where timestamp_ms >= ?
+			and (
+				lower(coalesce(provider, '')) like '%codex%'
+				or lower(coalesce(provider, '')) like '%openai%'
+				or lower(coalesce(executor_type, '')) like '%codex%'
+				or lower(coalesce(executor_type, '')) like '%openai%'
+				or lower(coalesce(auth_type, '')) like '%codex%'
+				or lower(coalesce(auth_type, '')) like '%openai%'
+				or lower(coalesce(auth_provider_snapshot, '')) like '%codex%'
+				or lower(coalesce(auth_provider_snapshot, '')) like '%openai%'
+				or coalesce(auth_index, '') <> ''
+				or coalesce(account_snapshot, '') <> ''
+				or coalesce(auth_file_snapshot, '') <> ''
+			)
+		group by minute_ms
+		order by minute_ms asc`, sinceMS)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	minutes := make([]SupplyUsageMinute, 0, 30)
+	for rows.Next() {
+		var minute SupplyUsageMinute
+		if err := rows.Scan(&minute.MinuteMS, &minute.Requests, &minute.Successful, &minute.Failed, &minute.TotalTokens); err != nil {
+			return nil, err
+		}
+		minutes = append(minutes, minute)
+	}
+	return minutes, rows.Err()
 }
 
 func (r *repository) ListRecent(ctx context.Context, limit int) ([]model.UsageEvent, error) {

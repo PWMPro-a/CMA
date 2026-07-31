@@ -168,6 +168,45 @@ func (s *Service) HandleUsageEvents(ctx context.Context, _ collectorpkg.RuntimeC
 	s.recordSmartUsageEvents(events, time.Now())
 }
 
+// WarmSmartUsage restores the small rolling demand window after a Manager
+// restart. It reads one grouped 30-minute slice during startup only; runtime
+// collectors continue to update smartBuckets incrementally in memory.
+func (s *Service) WarmSmartUsage(ctx context.Context) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	now := time.Now()
+	from := now.Add(-30 * time.Minute).UnixMilli()
+	minutes, err := s.store.ListSupplyUsageMinutes(ctx, from)
+	if err != nil {
+		return err
+	}
+	oldestMinute := now.Add(-180*time.Minute).UnixMilli() / 60000 * 60000
+	s.smartMu.Lock()
+	defer s.smartMu.Unlock()
+	if s.smartBuckets == nil {
+		s.smartBuckets = make(map[int64]*smartUsageBucket)
+	}
+	for _, minute := range minutes {
+		if minute.MinuteMS < oldestMinute {
+			continue
+		}
+		s.smartBuckets[minute.MinuteMS] = &smartUsageBucket{
+			minuteMS:    minute.MinuteMS,
+			requests:    minute.Requests,
+			success:     minute.Successful,
+			failed:      minute.Failed,
+			totalTokens: minute.TotalTokens,
+		}
+	}
+	for minute := range s.smartBuckets {
+		if minute < oldestMinute {
+			delete(s.smartBuckets, minute)
+		}
+	}
+	return nil
+}
+
 func (s *Service) recordSmartUsageEvents(events []usage.Event, now time.Time) {
 	s.smartMu.Lock()
 	defer s.smartMu.Unlock()
@@ -271,6 +310,8 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	capacityItems := make([]smartCapacityItem, 0, len(snapshot.results))
 	eligible := 0
 	withQuota := 0
+	usabilityRequired := 0
+	withVerifiedUsability := 0
 	leaseRequired := 0
 	withActiveLease := 0
 	for _, result := range snapshot.results {
@@ -283,12 +324,24 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			continue
 		}
 		eligible++
+		usabilityRequired++
 		remaining, ok := inspectionResultRemainingQuotaFraction(result)
+		if ok {
+			withQuota++
+		}
+		// A completed inspection with status=error has quota headers but did
+		// not prove that the credential can serve a request. Keep it out of
+		// verified capacity and pause automation rather than purchasing against
+		// a possibly unavailable account.
+		if inspectionResultUsabilityUnverified(result) {
+			resource.WeakAccounts++
+			continue
+		}
+		withVerifiedUsability++
 		if !ok {
 			resource.WeakAccounts++
 			continue
 		}
-		withQuota++
 		remainingMinutes := float64(smartUsefulAccountLifetimeMinutes())
 		if smartSupplyManagedFileName(result.FileName) {
 			leaseRequired++
@@ -325,6 +378,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		resource.CapacityLifetimeCoverage = 100
 	}
 	quotaEvidenceIncomplete := eligible > 0 && withQuota != eligible
+	usabilityEvidenceIncomplete := usabilityRequired > 0 && withVerifiedUsability != usabilityRequired
 	leaseEvidenceIncomplete := leaseRequired > 0 && withActiveLease != leaseRequired
 
 	for _, item := range capacityItems {
@@ -347,8 +401,8 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	// not return quota evidence. Returning early here used to turn the entire
 	// dashboard into 0 RCU, despite most capacity being known. Automation still
 	// pauses below; these figures are display-only lower bounds.
-	if quotaEvidenceIncomplete || leaseEvidenceIncomplete {
-		if usageStats.requests30 > 0 && consumeRCUPerMinute > 0 {
+	if quotaEvidenceIncomplete || usabilityEvidenceIncomplete || leaseEvidenceIncomplete {
+		if usageStats.successful30 > 0 && consumeRCUPerMinute > 0 {
 			recalculateSmartResourceCapacityPlan(cfg, &resource)
 		}
 		resource.SnapshotFresh = false
@@ -358,12 +412,14 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		resource.SuggestedQuantity = 0
 		if quotaEvidenceIncomplete {
 			resource.DecisionReason = "inspection_quota_incomplete"
+		} else if usabilityEvidenceIncomplete {
+			resource.DecisionReason = "inspection_usability_incomplete"
 		} else {
 			resource.DecisionReason = "inspection_lease_incomplete"
 		}
 		return resource
 	}
-	if usageStats.requests30 <= 0 || consumeRCUPerMinute <= 0 {
+	if usageStats.successful30 <= 0 || consumeRCUPerMinute <= 0 {
 		resource.Confidence = smartConfidenceLow
 		resource.HealthLevel = smartHealthUnknown
 		resource.SuggestedAction = smartActionSnapshotStale
@@ -440,7 +496,7 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 	resource.TargetCapacityRCU = round2(consumeRCUPerMinute * float64(resource.EffectiveHealthyMinutes))
 	resource.RecommendedCapacityRCU = resource.TargetCapacityRCU
 
-	if usageStats.requests30 <= 0 || consumeRCUPerMinute <= 0 {
+	if usageStats.successful30 <= 0 || consumeRCUPerMinute <= 0 {
 		resource.Confidence = smartConfidenceLow
 		resource.HealthLevel = smartHealthUnknown
 		resource.SuggestedAction = smartActionSnapshotStale
@@ -510,6 +566,7 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 
 type smartUsageAggregate struct {
 	requests30    int64
+	successful30  int64
 	tokens30      int64
 	rpm30         float64
 	rpm5Peak      float64
@@ -526,29 +583,34 @@ func (s *Service) smartUsageSnapshot(now time.Time) smartUsageAggregate {
 	}
 	from30 := now.Add(-30*time.Minute).UnixMilli() / 60000 * 60000
 	from5 := now.Add(-5*time.Minute).UnixMilli() / 60000 * 60000
-	activeMinutes := map[int64]struct{}{}
+	firstMinute := int64(0)
 	perMinute5 := map[int64]int64{}
 	for minute, bucket := range s.smartBuckets {
 		if bucket == nil || minute < from30 {
 			continue
 		}
 		result.requests30 += bucket.requests
+		result.successful30 += bucket.success
 		result.tokens30 += bucket.totalTokens
-		if bucket.requests > 0 {
-			activeMinutes[minute] = struct{}{}
+		if bucket.success > 0 && (firstMinute == 0 || minute < firstMinute) {
+			firstMinute = minute
 		}
 		if minute >= from5 {
-			perMinute5[minute] += bucket.requests
+			// Failed calls do not consume output/input tokens and should not make
+			// the replenishment planner buy capacity for malformed/retried traffic.
+			perMinute5[minute] += bucket.success
 		}
 	}
-	result.sampleMinutes = len(activeMinutes)
-	if result.requests30 > 0 {
-		denominator := math.Max(1, math.Min(30, float64(max(1, result.sampleMinutes))))
-		// Use the full 30 minute window once there is enough data; otherwise keep early startup responsive.
-		if result.sampleMinutes >= 10 {
-			denominator = 30
-		}
-		result.rpm30 = float64(result.requests30) / denominator
+	if firstMinute > 0 {
+		observedMinutes := int(now.Sub(time.UnixMilli(firstMinute)).Minutes()) + 1
+		result.sampleMinutes = clampInt(observedMinutes, 1, 30)
+	}
+	if result.successful30 > 0 {
+		// A warm Manager has a persisted 30-minute baseline. A cold Manager
+		// divides by its actual observed span instead of pretending the partial
+		// in-memory history already covers 30 minutes.
+		denominator := math.Max(1, float64(result.sampleMinutes))
+		result.rpm30 = float64(result.successful30) / denominator
 		result.tpm30 = float64(result.tokens30) / denominator
 	}
 	for _, count := range perMinute5 {
@@ -743,6 +805,15 @@ func inspectionResultCapacityExcluded(result store.CodexInspectionResult) bool {
 		return false
 	}
 	return result.Disabled
+}
+
+func inspectionResultUsabilityUnverified(result store.CodexInspectionResult) bool {
+	if inspectionResultInCooldown(result) {
+		return false
+	}
+	status := strings.ToLower(strings.TrimSpace(result.Status))
+	state := strings.ToLower(strings.TrimSpace(result.State))
+	return status == "error" || state == "error"
 }
 
 func inspectionResultInCooldown(result store.CodexInspectionResult) bool {

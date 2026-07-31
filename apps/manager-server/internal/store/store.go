@@ -84,6 +84,7 @@ type TaskBucket = usageevent.TaskBucket
 type EventPageItem = usageevent.EventPageItem
 type EventsPage = usageevent.EventsPage
 type HeaderSnapshot = usageevent.HeaderSnapshot
+type SupplyUsageMinute = usageevent.SupplyUsageMinute
 type UsageRollupCheckpoint = usagerollup.Checkpoint
 type UsageRollupCatchUpResult = usagerollup.CatchUpResult
 type AccountHistoryRollupRow = usagerollup.AccountHistoryRow
@@ -403,6 +404,14 @@ func (s *Store) RestoreCodexInspectionDisableOwnership(ctx context.Context, item
 
 func (s *Store) InsertEvents(ctx context.Context, events []usage.Event) (InsertResult, error) {
 	return s.UsageEvents.InsertBatch(ctx, events)
+}
+
+// ListSupplyUsageMinutes reads only the current short rolling window as
+// aggregate minute buckets. Smart replenishment uses this once during startup
+// to preserve its demand window across a Manager restart; request and UI paths
+// continue to read the in-memory snapshot.
+func (s *Store) ListSupplyUsageMinutes(ctx context.Context, sinceMS int64) ([]SupplyUsageMinute, error) {
+	return s.UsageEvents.ListSupplyUsageMinutes(ctx, sinceMS)
 }
 
 func (s *Store) UsageCacheAccountingMigrationState(ctx context.Context) (DataMigrationState, error) {

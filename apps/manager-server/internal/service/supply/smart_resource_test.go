@@ -166,6 +166,86 @@ func TestSmartResourceShowsVerifiedCapacityWhenInspectionQuotaEvidenceIsPartial(
 	}
 }
 
+func TestSmartResourceExcludesInspectionErrorUntilUsabilityIsVerified(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	for minute := 0; minute < 10; minute++ {
+		service.recordSmartUsageEvents([]usage.Event{{
+			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+			Provider:    "codex",
+			AuthIndex:   "verified.json",
+			TotalTokens: 100,
+		}}, now)
+	}
+	unused := 0.0
+	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product:              "oauth_7d",
+		HealthyMinutesTarget: 40,
+	}, inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{ProbeSetCount: 2, SampledCount: 2, FinishedAtMS: now.UnixMilli()},
+		results: []store.CodexInspectionResult{
+			{AccountKey: "verified", FileName: "verified.json", Provider: "codex", Status: "active", UsedPercent: &unused},
+			{AccountKey: "probe-error", FileName: "probe-error.json", Provider: "codex", Status: "error", UsedPercent: &unused},
+		},
+		generatedAt: now,
+	}, now)
+
+	if resource.SnapshotFresh || resource.DecisionReason != "inspection_usability_incomplete" || resource.SuggestedQuantity != 0 {
+		t.Fatalf("an inspection error must pause automation until availability is verified: %#v", resource)
+	}
+	if resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 || resource.WeakAccounts != 1 || resource.RawCapacityRCU != 2200 {
+		t.Fatalf("only the successfully verified credential may contribute capacity: %#v", resource)
+	}
+}
+
+func TestWarmSmartUsageRestoresDemandWindowAndExcludesFailedRequestRPM(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().Truncate(time.Minute)
+	events := make([]usage.Event, 0, 60)
+	for minute := 0; minute < 30; minute++ {
+		timestamp := now.Add(-time.Duration(minute) * time.Minute)
+		events = append(events,
+			usage.Event{
+				EventHash:   fmt.Sprintf("success-%d", minute),
+				TimestampMS: timestamp.UnixMilli(),
+				Timestamp:   timestamp.Format(time.RFC3339),
+				Provider:    "codex",
+				AuthIndex:   "capacity-source",
+				Model:       "gpt-test",
+				TotalTokens: 40_000,
+				CreatedAtMS: timestamp.UnixMilli(),
+			},
+			usage.Event{
+				EventHash:   fmt.Sprintf("failed-%d", minute),
+				TimestampMS: timestamp.UnixMilli(),
+				Timestamp:   timestamp.Format(time.RFC3339),
+				Provider:    "codex",
+				AuthIndex:   "capacity-source",
+				Model:       "gpt-test",
+				Failed:      true,
+				CreatedAtMS: timestamp.UnixMilli(),
+			},
+		)
+	}
+	if _, err := st.InsertEvents(context.Background(), events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	service := New(st, nil)
+	if err := service.WarmSmartUsage(context.Background()); err != nil {
+		t.Fatalf("warm smart usage: %v", err)
+	}
+	usageStats := service.smartUsageSnapshot(time.Now())
+	if usageStats.sampleMinutes != 30 || usageStats.rpm30 != 1 || usageStats.rpm5Peak != 1 || usageStats.tpm30 != 40_000 {
+		t.Fatalf("persisted demand window was not restored accurately: %#v", usageStats)
+	}
+}
+
 func TestSmartResourceUsesPersistedSupplyLeaseForCapacity(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Second)
