@@ -102,6 +102,19 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
+	resource := s.currentSmartResource(cfg.Supply)
+	if resource.Enabled && !resource.SnapshotFresh {
+		// Automatic replenishment may be disabled while operators still need a
+		// current capacity view. Refresh the cold snapshot without placing orders.
+		refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		refreshed, refreshErr := s.smartResource(refreshCtx, cfg, false)
+		cancel()
+		if refreshErr == nil {
+			resource = refreshed
+		} else {
+			resource = s.currentSmartResource(cfg.Supply)
+		}
+	}
 	orders, err := s.store.ListSupplyOrders(ctx, limit)
 	if err != nil {
 		return Status{}, err
@@ -124,7 +137,7 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		Config:        sanitizeConfig(cfg.Supply),
 		Running:       running,
 		Overview:      overview,
-		SmartResource: s.currentSmartResource(cfg.Supply),
+		SmartResource: resource,
 		Orders:        orders,
 	}
 	if found {

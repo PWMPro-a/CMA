@@ -102,6 +102,7 @@ type smartUsageBucket struct {
 type authFileSnapshot struct {
 	files       []cpaauthfiles.File
 	generatedAt time.Time
+	attemptedAt time.Time
 	lastErr     error
 }
 
@@ -393,7 +394,7 @@ func (s *Service) cachedAuthFiles(ctx context.Context, cfg store.ManagerConfig, 
 	ttl := time.Duration(smartAuthFilesCacheTTLSeconds(cfg.Supply)) * time.Second
 	now := time.Now()
 	s.authCacheMu.Lock()
-	if !force && !s.authCache.generatedAt.IsZero() && now.Sub(s.authCache.generatedAt) <= ttl {
+	if !force && authSnapshotCacheUsable(s.authCache, now, ttl) {
 		snapshot := cloneAuthSnapshot(s.authCache)
 		s.authCacheMu.Unlock()
 		return snapshot, snapshot.lastErr
@@ -403,7 +404,7 @@ func (s *Service) cachedAuthFiles(ctx context.Context, cfg store.ManagerConfig, 
 	s.authRefreshMu.Lock()
 	defer s.authRefreshMu.Unlock()
 	s.authCacheMu.Lock()
-	if !force && !s.authCache.generatedAt.IsZero() && now.Sub(s.authCache.generatedAt) <= ttl {
+	if !force && authSnapshotCacheUsable(s.authCache, now, ttl) {
 		snapshot := cloneAuthSnapshot(s.authCache)
 		s.authCacheMu.Unlock()
 		return snapshot, snapshot.lastErr
@@ -416,14 +417,23 @@ func (s *Service) cachedAuthFiles(ctx context.Context, cfg store.ManagerConfig, 
 		return false, nil
 	})
 	s.authCacheMu.Lock()
+	attemptedAt := time.Now()
 	if err == nil {
-		s.authCache = authFileSnapshot{files: files, generatedAt: time.Now()}
-	} else if len(s.authCache.files) > 0 {
+		s.authCache = authFileSnapshot{files: files, generatedAt: attemptedAt, attemptedAt: attemptedAt}
+	} else {
+		s.authCache.attemptedAt = attemptedAt
 		s.authCache.lastErr = err
 	}
 	snapshot := cloneAuthSnapshot(s.authCache)
 	s.authCacheMu.Unlock()
 	return snapshot, err
+}
+
+func authSnapshotCacheUsable(snapshot authFileSnapshot, now time.Time, ttl time.Duration) bool {
+	if !snapshot.generatedAt.IsZero() && now.Sub(snapshot.generatedAt) <= ttl {
+		return true
+	}
+	return !snapshot.attemptedAt.IsZero() && now.Sub(snapshot.attemptedAt) <= ttl
 }
 
 func cloneAuthSnapshot(snapshot authFileSnapshot) authFileSnapshot {

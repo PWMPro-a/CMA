@@ -182,6 +182,68 @@ func TestSmartResourceTreatsActiveCredentialAsHealthyWithoutHistory(t *testing.T
 	}
 }
 
+func TestGetStatusRefreshesSmartSnapshotWhenAutomaticSupplyDisabled(t *testing.T) {
+	var authFileRequests atomic.Int32
+	var supplyRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v0/management/auth-files":
+			authFileRequests.Add(1)
+			if r.Header.Get("Authorization") != "Bearer management-key" {
+				http.Error(w, "missing management key", http.StatusUnauthorized)
+				return
+			}
+			_, _ = w.Write([]byte(`{"files":[{"name":"ready.json","provider":"codex","status":"ready","remaining_rcu":100}]}`))
+		case "/api/customer/login", "/api/customer/inventory", "/api/customer/balance", "/api/customer/pickup/orders":
+			supplyRequests.Add(1)
+			http.Error(w, "supply request is unexpected", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	automaticSupplyEnabled := false
+	smartEnabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled:                  &automaticSupplyEnabled,
+			SmartEnabled:             &smartEnabled,
+			Product:                  "oauth_7d",
+			HealthyMinutesTarget:     40,
+			AuthFilesCacheTTLSeconds: 60,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("first status: %v", err)
+	}
+	if !status.SmartResource.SnapshotFresh || status.SmartResource.AvailableAccounts != 1 {
+		t.Fatalf("cold status should refresh the smart capacity snapshot: %#v", status.SmartResource)
+	}
+	if authFileRequests.Load() != 1 || supplyRequests.Load() != 0 {
+		t.Fatalf("status refresh requests auth=%d supply=%d", authFileRequests.Load(), supplyRequests.Load())
+	}
+
+	status, err = service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("second status: %v", err)
+	}
+	if !status.SmartResource.SnapshotFresh || authFileRequests.Load() != 1 || supplyRequests.Load() != 0 {
+		t.Fatalf("cached status should not refetch or create supply orders: status=%#v auth=%d supply=%d", status.SmartResource, authFileRequests.Load(), supplyRequests.Load())
+	}
+}
+
 func TestCurrentSmartResourceRecalculatesHealthForUpdatedWaterLevel(t *testing.T) {
 	service := New(nil, nil)
 	service.setSmartResource(SmartResource{
