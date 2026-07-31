@@ -198,6 +198,99 @@ func TestSmartResourceExcludesInspectionErrorUntilUsabilityIsVerified(t *testing
 	}
 }
 
+func TestSmartResourceAcceleratesVerifiedLowerBoundDuringIncompleteInspection(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	for minute := 0; minute < 30; minute++ {
+		service.recordSmartUsageEvents([]usage.Event{{
+			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+			Provider:    "codex",
+			AuthIndex:   "verified.json",
+			TotalTokens: 80_000_000,
+		}}, now)
+	}
+	unused := 0.0
+	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product:              "oauth_7d",
+		HealthyMinutesTarget: 40,
+		WarningMinutes:       25,
+		CriticalMinutes:      15,
+		ReplenishBatchSize:   15,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   7,
+		NewAccountConfidence: 0.7,
+	}, inspectionQuotaSnapshot{
+		run:         store.CodexInspectionRun{ProbeSetCount: 2, SampledCount: 2, FinishedAtMS: now.UnixMilli()},
+		generatedAt: now,
+		results: []store.CodexInspectionResult{
+			{AccountKey: "verified", FileName: "verified.json", Provider: "codex", Status: "active", UsedPercent: &unused},
+			{AccountKey: "probe-error", FileName: "probe-error.json", Provider: "codex", Status: "error", UsedPercent: &unused},
+		},
+	}, now)
+
+	if resource.SnapshotFresh || resource.DecisionReason != "inspection_usability_incomplete_low_water" ||
+		resource.HealthLevel != smartHealthCritical || resource.SuggestedQuantity != 15 {
+		t.Fatalf("low verified capacity must reserve a full recovery batch: %#v", resource)
+	}
+	if !smartPartialInspectionLowWaterAllowed(resource) || resource.CurrentCapacityRCU <= 0 ||
+		resource.EstimatedSustainMinutes > float64(resource.CriticalMinutes) {
+		t.Fatalf("only the verified lower bound may enable emergency replenishment: %#v", resource)
+	}
+}
+
+func TestSmartLowWaterUsesRecoveryBatchCapAndShortCooldown(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		ReplenishBatchSize:        15,
+		PrelockMinQuantity:        1,
+		PrelockMaxQuantity:        7,
+		CreateCooldownSeconds:     120,
+		DailyMaxReplenishQuantity: 100,
+	}
+	critical := SmartResource{
+		HealthLevel:             smartHealthCritical,
+		WarningMinutes:          25,
+		CriticalMinutes:         15,
+		EstimatedSustainMinutes: 8,
+		ConsumeRCUPerMinute:     2_000,
+		CapacityGapRCU:          61_250,
+		UnitCapacityRCU:         40,
+		SuggestedQuantity:       20,
+	}
+	if got := smartAutomaticOrderQuantityLimit(cfg, critical); got != 15 {
+		t.Fatalf("critical batch limit=%d, want 15", got)
+	}
+	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, critical); got != 15 {
+		t.Fatalf("critical suggested quantity=%d, want 15", got)
+	}
+	if got, reason := smartPrelockQuantityForSupplyPressure(cfg, critical, smartSupplyPressure{level: smartSupplyPressurePlenty}, 20); got != 15 || reason != "low_water_critical_full_batch" {
+		t.Fatalf("critical pressure adjustment=%d/%q, want 15/full", got, reason)
+	}
+	if got := smartCreateCooldownForResource(cfg, critical); got != 15 {
+		t.Fatalf("critical cooldown=%d, want 15", got)
+	}
+	if got := smartAutomaticCheckIntervalSeconds(cfg, critical); got != 15 {
+		t.Fatalf("critical worker interval=%d, want 15", got)
+	}
+
+	warning := critical
+	warning.HealthLevel = smartHealthWarning
+	warning.EstimatedSustainMinutes = 20
+	if got := smartCreateCooldownForResource(cfg, warning); got != 45 {
+		t.Fatalf("warning cooldown=%d, want 45", got)
+	}
+	if got := smartAutomaticCheckIntervalSeconds(cfg, warning); got != 45 {
+		t.Fatalf("warning worker interval=%d, want 45", got)
+	}
+	healthy := warning
+	healthy.EstimatedSustainMinutes = 30
+	if got := smartAutomaticOrderQuantityLimit(cfg, healthy); got != 7 {
+		t.Fatalf("healthy prelock limit=%d, want 7", got)
+	}
+	if got := smartCreateCooldownForResource(cfg, healthy); got != 120 {
+		t.Fatalf("healthy cooldown=%d, want 120", got)
+	}
+}
+
 func TestWarmSmartUsageRestoresDemandWindowAndExcludesFailedRequestRPM(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
@@ -282,10 +375,19 @@ func TestSmartResourceUsesPersistedSupplyLeaseForCapacity(t *testing.T) {
 	}
 }
 
-func TestSmartResourcePausesWhenSupplyLeaseEvidenceIsMissing(t *testing.T) {
+func TestSmartResourceTreatsMissingSupplyLeaseAsKnownZeroCapacity(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	usedPercent := 0.0
-	resource := New(nil, nil).buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+	service := New(nil, nil)
+	for minute := 0; minute < 30; minute++ {
+		service.recordSmartUsageEvents([]usage.Event{{
+			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+			Provider:    "codex",
+			AuthIndex:   "missing-lease.json",
+			TotalTokens: 100,
+		}}, now)
+	}
+	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
 		Product: "oauth_30d",
 	}, inspectionQuotaSnapshot{
 		run: store.CodexInspectionRun{ProbeSetCount: 1, SampledCount: 1, FinishedAtMS: now.UnixMilli()},
@@ -296,8 +398,9 @@ func TestSmartResourcePausesWhenSupplyLeaseEvidenceIsMissing(t *testing.T) {
 		generatedAt: now,
 	}, now)
 
-	if resource.SnapshotFresh || resource.DecisionReason != "inspection_lease_incomplete" || resource.CapacityLifetimeCoverage != 0 {
-		t.Fatalf("missing supply lease must pause automatic purchase: %#v", resource)
+	if !resource.SnapshotFresh || resource.CapacityLifetimeCoverage != 0 || resource.CurrentCapacityRCU != 0 ||
+		resource.HealthLevel != smartHealthCritical || resource.SuggestedQuantity < 1 {
+		t.Fatalf("expired or missing supply lease must be a known zero-capacity signal: %#v", resource)
 	}
 }
 
@@ -967,7 +1070,7 @@ func TestSmartAutomaticDoesNotCreateWhenCapacityHealthy(t *testing.T) {
 	}
 }
 
-func TestSmartAutomaticUsesSmallBatchWhenSupplyIsPlenty(t *testing.T) {
+func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *testing.T) {
 	var createQuantity atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -1029,13 +1132,13 @@ func TestSmartAutomaticUsesSmallBatchWhenSupplyIsPlenty(t *testing.T) {
 		t.Fatalf("run automatic: %v", err)
 	}
 	if createQuantity.Load() != 3 {
-		t.Fatalf("plenty supply should create a capacity-sized small batch, quantity=%d", createQuantity.Load())
+		t.Fatalf("low-water recovery should retain the capacity-sized batch, quantity=%d", createQuantity.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("get status: %v", err)
 	}
-	if status.SmartResource.SupplyPressureLevel != smartSupplyPressurePlenty || status.SmartResource.DecisionReason != "supply_plenty_small_batch" {
+	if status.SmartResource.SupplyPressureLevel != smartSupplyPressurePlenty || status.SmartResource.DecisionReason != "low_water_critical_full_batch" {
 		t.Fatalf("smart resource = %#v", status.SmartResource)
 	}
 }
@@ -1108,7 +1211,7 @@ func TestSmartAutomaticKeepsFullBatchWhenSupplyIsScarce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get status: %v", err)
 	}
-	if status.SmartResource.SupplyPressureLevel != smartSupplyPressureScarce || status.SmartResource.DecisionReason != "supply_scarce_full_batch" {
+	if status.SmartResource.SupplyPressureLevel != smartSupplyPressureScarce || status.SmartResource.DecisionReason != "low_water_critical_full_batch" {
 		t.Fatalf("smart resource = %#v", status.SmartResource)
 	}
 }
@@ -1345,6 +1448,49 @@ func TestSmartPrelockKeepsFullBatchWhenCapacityCritical(t *testing.T) {
 	quantity, reason := smartPrelockQuantityForSupplyPressure(cfg, resource, smartSupplyPressure{level: smartSupplyPressureScarce}, 10)
 	if quantity != 10 || reason != "supply_scarce_full_batch" {
 		t.Fatalf("critical quantity=%d reason=%q, want 10/full", quantity, reason)
+	}
+}
+
+func TestSmartTakeAllowedWhenReadyBelowWarningWater(t *testing.T) {
+	service := New(nil, nil)
+	service.setSmartResource(SmartResource{
+		Enabled:         true,
+		GeneratedAtMS:   time.Now().UnixMilli(),
+		SnapshotFresh:   true,
+		SuggestedAction: smartActionTakeLocked,
+		DecisionReason:  "low_water_take_ready",
+	})
+	if !service.smartTakeAllowed(store.ManagerSupplyConfig{}, "ready-low-water") {
+		t.Fatal("ready low-water order must be allowed to take without the plenty-supply release path")
+	}
+}
+
+func TestSmartStaleVerifiedLowWaterReadyTakeAllowed(t *testing.T) {
+	resource := SmartResource{
+		SnapshotFresh:              false,
+		Confidence:                 smartConfidenceMedium,
+		CapacitySource:             smartCapacitySourceInspection,
+		CapacitySnapshotRunID:      42,
+		CapacityCoverage:           100,
+		CapacitySnapshotAtMS:       time.Now().Add(-25 * time.Minute).UnixMilli(),
+		CapacitySnapshotAgeSeconds: 25 * 60,
+		CurrentCapacityRCU:         12_000,
+		ConsumeRCUPerMinute:        1_000,
+		EstimatedSustainMinutes:    12,
+		WarningMinutes:             25,
+		HealthLevel:                smartHealthCritical,
+	}
+	if !smartStaleVerifiedLowWaterReadyTakeAllowed(resource) {
+		t.Fatalf("complete but aging critical lower bound must take an already-ready order: %#v", resource)
+	}
+	resource.CapacityCoverage = 99
+	if smartStaleVerifiedLowWaterReadyTakeAllowed(resource) {
+		t.Fatalf("incomplete inspection coverage must not take from stale data: %#v", resource)
+	}
+	resource.CapacityCoverage = 100
+	resource.CapacitySnapshotAgeSeconds = 91 * 60
+	if smartStaleVerifiedLowWaterReadyTakeAllowed(resource) {
+		t.Fatalf("expired inspection lower bound must not take: %#v", resource)
 	}
 }
 

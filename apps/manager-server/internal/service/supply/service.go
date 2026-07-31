@@ -272,10 +272,8 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 	if !managerconfigsvc.SupplyEnabled(cfg.Supply) {
 		return time.Minute
 	}
-	seconds := cfg.Supply.CheckIntervalSeconds
-	if seconds <= 0 {
-		seconds = 60
-	}
+	resource := s.currentSmartResource(cfg.Supply)
+	seconds := smartAutomaticCheckIntervalSeconds(cfg.Supply, resource)
 	return time.Duration(seconds) * time.Second
 }
 
@@ -355,7 +353,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	quantity := manualQuantity
 	if quantity == 0 {
 		if useSmart {
-			if !resource.SnapshotFresh {
+			if !resource.SnapshotFresh && !smartPartialInspectionLowWaterAllowed(resource) {
 				return nil
 			}
 			if resource.DecisionReason == "usage_rate_not_ready" || resource.ConsumeRCUPerMinute <= 0 {
@@ -367,7 +365,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			if resource.SuggestedAction == smartActionHealthy || resource.HealthLevel == smartHealthHealthy {
 				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
 			}
-			if s.automaticCreateCooldownActive(supplyCfg) {
+			if s.automaticCreateCooldownActive(supplyCfg, resource) {
 				s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
 				return nil
 			}
@@ -701,7 +699,29 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 			resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
 		}
 		switch {
-		case !resource.SnapshotFresh:
+		case !resource.SnapshotFresh && !smartPartialInspectionLowWaterAllowed(resource):
+			// A completed inspection can be older than the normal freshness window
+			// while a large pool is still being scanned. A ready order was already
+			// locked from a verified shortage, so do not strand it when the verified
+			// lower bound remains below warning water. Critical mode still keeps its
+			// configured confirmation rounds.
+			if order.Status == "ready" && smartStaleVerifiedLowWaterReadyTakeAllowed(resource) {
+				if resource.HealthLevel == smartHealthCritical {
+					rounds := s.incrementCriticalConfirm(order.OrderID)
+					resource.LockedConfirmRounds = rounds
+					if rounds < smartCriticalTakeConfirmRounds(cfg.Supply) {
+						return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "critical_take_confirm_pending")
+					}
+					resource.SuggestedAction = smartActionTakeLocked
+					resource.DecisionReason = "critical_take_confirmed_stale_lower_bound"
+					s.setSmartResource(resource)
+					return false, nil
+				}
+				resource.SuggestedAction = smartActionTakeLocked
+				resource.DecisionReason = "low_water_take_ready_stale_lower_bound"
+				s.setSmartResource(resource)
+				return false, nil
+			}
 			return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionSnapshotStale, "smart_snapshot_stale")
 		case resource.HealthLevel == smartHealthHealthy || resource.SuggestedAction == smartActionHealthy:
 			if !s.lockedOrderMinHoldElapsed(cfg.Supply, order) {
@@ -714,6 +734,15 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 			resource.DecisionReason = "capacity_recovered_before_take"
 			s.setSmartResource(resource)
 			return true, s.releaseAutomaticOrder(ctx, cfg, order, 0)
+		case order.Status == "ready" && resource.HealthLevel != smartHealthCritical && smartResourceAtOrBelowWarning(resource):
+			// The order was created from a verified capacity shortage. Supply
+			// availability is not a reason to release it while the pool remains
+			// below warning water: taking the ready batch is the fast recovery path.
+			// Critical water keeps its existing multi-round confirmation guard.
+			resource.SuggestedAction = smartActionTakeLocked
+			resource.DecisionReason = "low_water_take_ready"
+			s.setSmartResource(resource)
+			return false, nil
 		case resource.HealthLevel != smartHealthCritical && pressure.level == smartSupplyPressurePlenty && currentCapacityGapRCU <= 0:
 			if !s.lockedOrderMinHoldElapsed(cfg.Supply, order) {
 				return true, s.waitLockedOrder(ctx, cfg.Supply, order, resource, smartActionWaitLocked, "min_hold_before_release")
@@ -1041,15 +1070,22 @@ func applySmartSupplyPressure(resource *SmartResource, pressure smartSupplyPress
 }
 
 func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resource SmartResource, pressure smartSupplyPressure, quantity int) (int, string) {
-	if quantity <= 0 || !smartPrelockEnabled(cfg) {
+	if quantity <= 0 {
 		return quantity, ""
 	}
-	maxQuantity := smartPrelockMaxQuantity(cfg)
-	if cfg.ReplenishBatchSize > 0 {
-		maxQuantity = min(maxQuantity, cfg.ReplenishBatchSize)
+	maxQuantity := smartAutomaticOrderQuantityLimit(cfg, resource)
+	minimumQuantity := min(smartPrelockMinQuantity(cfg), maxQuantity)
+	quantity = clampInt(quantity, minimumQuantity, maxQuantity)
+	if smartResourceAtOrBelowWarning(resource) {
+		if resource.HealthLevel == smartHealthCritical {
+			return quantity, "low_water_critical_full_batch"
+		}
+		return quantity, "low_water_warning_full_batch"
 	}
-	quantity = clampInt(quantity, 1, maxQuantity)
-	minQuantity := min(smartPrelockMinQuantity(cfg), maxQuantity)
+	if !smartPrelockEnabled(cfg) {
+		return quantity, ""
+	}
+	minQuantity := minimumQuantity
 	fallbackBatch := smartFallbackBatchQuantity(cfg)
 	switch pressure.level {
 	case smartSupplyPressurePlenty:
@@ -1130,12 +1166,10 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	if quantity <= 0 {
 		return 0
 	}
-	if cfg.ReplenishBatchSize > 0 {
-		quantity = min(quantity, cfg.ReplenishBatchSize)
-	}
+	limit := smartAutomaticOrderQuantityLimit(cfg, resource)
+	quantity = min(quantity, limit)
 	if smartPrelockEnabled(cfg) {
-		quantity = min(quantity, smartPrelockMaxQuantity(cfg))
-		quantity = max(quantity, smartPrelockMinQuantity(cfg))
+		quantity = max(quantity, min(smartPrelockMinQuantity(cfg), limit))
 	}
 	if cfg.DailyMaxReplenishQuantity > 0 {
 		quantity = min(quantity, cfg.DailyMaxReplenishQuantity)
@@ -1204,8 +1238,8 @@ func (s *Service) lockedOrderMinHoldElapsed(cfg store.ManagerSupplyConfig, order
 	return time.Since(time.UnixMilli(order.CreatedAtMS)) >= time.Duration(smartMinHoldSeconds(cfg))*time.Second
 }
 
-func (s *Service) automaticCreateCooldownActive(cfg store.ManagerSupplyConfig) bool {
-	seconds := smartCreateCooldownSeconds(cfg)
+func (s *Service) automaticCreateCooldownActive(cfg store.ManagerSupplyConfig, resource SmartResource) bool {
+	seconds := smartCreateCooldownForResource(cfg, resource)
 	s.stateMu.RLock()
 	last := s.lastAutomaticCreateAtMS
 	s.stateMu.RUnlock()
@@ -1213,6 +1247,21 @@ func (s *Service) automaticCreateCooldownActive(cfg store.ManagerSupplyConfig) b
 		return false
 	}
 	return time.Since(time.UnixMilli(last)) < time.Duration(seconds)*time.Second
+}
+
+// smartAutomaticCheckIntervalSeconds keeps the worker responsive while the
+// capacity lower bound is below a warning line. Without this adjustment a
+// 60-second normal check interval could make a 15-minute emergency decision
+// wait a full minute before the next order attempt.
+func smartAutomaticCheckIntervalSeconds(cfg store.ManagerSupplyConfig, resource SmartResource) int {
+	seconds := cfg.CheckIntervalSeconds
+	if seconds <= 0 {
+		seconds = 60
+	}
+	if smartResourceAtOrBelowWarning(resource) {
+		seconds = min(seconds, smartCreateCooldownForResource(cfg, resource))
+	}
+	return max(1, seconds)
 }
 
 func (s *Service) automaticReleaseCooldownActive(cfg store.ManagerSupplyConfig) bool {
@@ -1265,7 +1314,7 @@ func (s *Service) smartTakeAllowed(cfg store.ManagerSupplyConfig, orderID string
 	resource := s.currentSmartResource(cfg)
 	if resource.SuggestedAction == smartActionTakeLocked {
 		switch resource.DecisionReason {
-		case "critical_take_confirmed", "supply_plenty_small_take":
+		case "critical_take_confirmed", "critical_take_confirmed_stale_lower_bound", "supply_plenty_small_take", "low_water_take_ready", "low_water_take_ready_stale_lower_bound":
 			return true
 		}
 	}

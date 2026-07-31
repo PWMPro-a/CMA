@@ -379,8 +379,12 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	}
 	quotaEvidenceIncomplete := eligible > 0 && withQuota != eligible
 	usabilityEvidenceIncomplete := usabilityRequired > 0 && withVerifiedUsability != usabilityRequired
-	leaseEvidenceIncomplete := leaseRequired > 0 && withActiveLease != leaseRequired
-
+	// A managed file without an active delivery lease is a known exclusion, not
+	// missing inspection evidence. Its supplier one-hour validity is over (or it
+	// has no matching imported delivery record), so it contributes zero capacity
+	// while the remaining verified files still form a complete lower-bound plan.
+	// Treating this as a stale snapshot hid an otherwise reliable capacity and
+	// stopped replenishment exactly when expired supply files needed replacing.
 	for _, item := range capacityItems {
 		resource.RawCapacityRCU += item.capacityRCU
 	}
@@ -399,23 +403,31 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 
 	// Keep the verified portion visible even while one or more credentials did
 	// not return quota evidence. Returning early here used to turn the entire
-	// dashboard into 0 RCU, despite most capacity being known. Automation still
-	// pauses below; these figures are display-only lower bounds.
-	if quotaEvidenceIncomplete || usabilityEvidenceIncomplete || leaseEvidenceIncomplete {
+	// dashboard into 0 RCU, despite most capacity being known. The resulting
+	// figure is a lower bound: normal automation pauses on partial evidence, but
+	// an exhausted lower bound is allowed to lock stock so an inspection blip
+	// never turns into a capacity outage.
+	if quotaEvidenceIncomplete || usabilityEvidenceIncomplete {
 		if usageStats.successful30 > 0 && consumeRCUPerMinute > 0 {
 			recalculateSmartResourceCapacityPlan(cfg, &resource)
 		}
 		resource.SnapshotFresh = false
 		resource.Confidence = smartConfidenceLow
-		resource.HealthLevel = smartHealthUnknown
-		resource.SuggestedAction = smartActionSnapshotStale
-		resource.SuggestedQuantity = 0
+		incompleteReason := "inspection_usability_incomplete"
 		if quotaEvidenceIncomplete {
-			resource.DecisionReason = "inspection_quota_incomplete"
-		} else if usabilityEvidenceIncomplete {
-			resource.DecisionReason = "inspection_usability_incomplete"
+			incompleteReason = "inspection_quota_incomplete"
+		}
+		resource.DecisionReason = incompleteReason
+		if smartPartialInspectionLowWaterAllowed(resource) {
+			// Keep the capacity plan derived exclusively from verified credentials.
+			// The incomplete result never increases available capacity; it only
+			// permits an urgent, bounded reserve order against the verified lower
+			// bound.
+			resource.DecisionReason = incompleteReason + "_low_water"
 		} else {
-			resource.DecisionReason = "inspection_lease_incomplete"
+			resource.HealthLevel = smartHealthUnknown
+			resource.SuggestedAction = smartActionSnapshotStale
+			resource.SuggestedQuantity = 0
 		}
 		return resource
 	}
@@ -561,7 +573,9 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 		resource.DecisionReason = "expiry_limited_capacity"
 		return
 	}
-	resource.SuggestedQuantity = clampInt(int(math.Ceil(gapForOrder/unitForNew)), smartPrelockMinQuantity(cfg), smartPrelockMaxQuantity(cfg))
+	batchLimit := smartAutomaticOrderQuantityLimit(cfg, *resource)
+	minimumQuantity := min(smartPrelockMinQuantity(cfg), batchLimit)
+	resource.SuggestedQuantity = clampInt(int(math.Ceil(gapForOrder/unitForNew)), minimumQuantity, batchLimit)
 }
 
 type smartUsageAggregate struct {
@@ -968,12 +982,89 @@ func smartPrelockMaxQuantity(cfg store.ManagerSupplyConfig) int {
 	return maxQuantity
 }
 
+// smartResourceAtOrBelowWarning distinguishes a true warning-water event from
+// the ordinary "below healthy target" prelock state. Only the former may use
+// the larger ReplenishBatchSize cap and the shorter retry cooldown.
+func smartResourceAtOrBelowWarning(resource SmartResource) bool {
+	return resource.ConsumeRCUPerMinute > 0 && resource.WarningMinutes > 0 &&
+		resource.EstimatedSustainMinutes <= float64(resource.WarningMinutes)
+}
+
+// smartPartialInspectionLowWaterAllowed permits a bounded reserve order from
+// the verified capacity lower bound when inspection evidence is incomplete.
+// It deliberately keeps SnapshotFresh=false, so stale/unavailable snapshots
+// and missing burn-rate data remain blocked.
+func smartPartialInspectionLowWaterAllowed(resource SmartResource) bool {
+	if !smartResourceAtOrBelowWarning(resource) || resource.CurrentCapacityRCU <= 0 || resource.CapacityGapRCU <= 0 ||
+		resource.CapacitySnapshotAtMS <= 0 || resource.CapacitySnapshotAgeSeconds > 20*60 {
+		return false
+	}
+	baseReason := strings.TrimSuffix(resource.DecisionReason, "_low_water")
+	switch baseReason {
+	case "inspection_quota_incomplete", "inspection_usability_incomplete":
+		return true
+	default:
+		return false
+	}
+}
+
+// smartStaleVerifiedLowWaterReadyTakeAllowed is intentionally narrower than
+// normal automation: it never creates another order from stale data. It only
+// permits taking an already-reserved ready order when the last completed
+// inspection has complete quota/usability coverage and its verified lower
+// bound remains at or below warning water. This prevents a long inspection of
+// a large pool from stranding needed capacity after the normal freshness
+// window, without acting on an incomplete inspection.
+func smartStaleVerifiedLowWaterReadyTakeAllowed(resource SmartResource) bool {
+	if resource.SnapshotFresh || !smartResourceAtOrBelowWarning(resource) ||
+		resource.CapacitySource != smartCapacitySourceInspection || resource.CapacitySnapshotRunID <= 0 ||
+		resource.CapacityCoverage < 100 || resource.CurrentCapacityRCU < 0 ||
+		resource.ConsumeRCUPerMinute <= 0 || resource.CapacitySnapshotAtMS <= 0 ||
+		resource.CapacitySnapshotAgeSeconds > 90*60 {
+		return false
+	}
+	return resource.Confidence == smartConfidenceMedium || resource.Confidence == smartConfidenceHigh
+}
+
+func smartReplenishBatchLimit(cfg store.ManagerSupplyConfig) int {
+	return clampInt(positiveOr(cfg.ReplenishBatchSize, smartPrelockMaxQuantity(cfg)), 1, 100)
+}
+
+// smartAutomaticOrderQuantityLimit keeps normal prelocks inside their
+// conservative cap. At or below warning water, ReplenishBatchSize becomes the
+// active safety cap so a configured 15-account recovery batch is not silently
+// reduced by a smaller routine-prelock setting such as 7.
+func smartAutomaticOrderQuantityLimit(cfg store.ManagerSupplyConfig, resource SmartResource) int {
+	if smartResourceAtOrBelowWarning(resource) {
+		return smartReplenishBatchLimit(cfg)
+	}
+	limit := smartReplenishBatchLimit(cfg)
+	if smartPrelockEnabled(cfg) {
+		limit = min(limit, smartPrelockMaxQuantity(cfg))
+	}
+	return max(1, limit)
+}
+
 func smartCriticalTakeConfirmRounds(cfg store.ManagerSupplyConfig) int {
 	return clampInt(positiveOr(cfg.CriticalTakeConfirmRounds, 2), 1, 5)
 }
 
 func smartCreateCooldownSeconds(cfg store.ManagerSupplyConfig) int {
 	return clampInt(positiveOr(cfg.CreateCooldownSeconds, 120), 0, 3600)
+}
+
+// smartCreateCooldownForResource shortens recovery retries without removing
+// the configured cooldown entirely. One open order remains enforced by the
+// store, daily limits and balance limits still apply.
+func smartCreateCooldownForResource(cfg store.ManagerSupplyConfig, resource SmartResource) int {
+	cooldown := smartCreateCooldownSeconds(cfg)
+	if !smartResourceAtOrBelowWarning(resource) {
+		return cooldown
+	}
+	if resource.HealthLevel == smartHealthCritical {
+		return min(cooldown, 15)
+	}
+	return min(cooldown, 45)
 }
 
 func smartReleaseCooldownSeconds(cfg store.ManagerSupplyConfig) int {
