@@ -658,7 +658,8 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 	}
 	if smartSupplyEnabled(cfg.Supply) {
 		resource, err := s.smartResource(ctx, cfg, forceSmartRefresh)
-		if err != nil || !resource.SnapshotFresh || resource.ConsumeRCUPerMinute <= 0 {
+		if err != nil || !resource.SnapshotFresh ||
+			(resource.ConsumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling) {
 			// A stale/unknown snapshot is not enough evidence to abandon a paid
 			// reservation. Continue the normal status polling path instead.
 			return false, nil
