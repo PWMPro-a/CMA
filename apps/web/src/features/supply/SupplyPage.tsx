@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
+import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
 import { Select } from '@/components/ui/Select';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import {
@@ -52,6 +53,8 @@ const emptyConfig: SupplyConfig = {
   dailyMaxReplenishQuantity: 0,
 };
 
+type SupplyWorkspaceTab = 'overview' | 'automation' | 'orders' | 'history';
+
 const formatMoney = (fen?: number) => `¥${((fen ?? 0) / 100).toFixed(2)}`;
 
 const formatNumber = (value?: number, digits = 1) =>
@@ -72,6 +75,13 @@ const formatMinutes = (value?: number) => {
 
 const formatTime = (value?: number) =>
   value && value > 0 ? new Date(value).toLocaleString() : '-';
+
+const clampPercent = (value: number) => Math.min(100, Math.max(0, value));
+
+const shortOrderId = (value?: string) => {
+  if (!value) return '-';
+  return value.length > 10 ? `…${value.slice(-8)}` : value;
+};
 
 const orderTone = (status: string) => {
   if (status === 'completed' || status === 'released') return styles.success;
@@ -107,6 +117,7 @@ export function SupplyPage() {
   const [draft, setDraft] = useState<SupplyConfig>(emptyConfig);
   const [manualQuantity, setManualQuantity] = useState(10);
   const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<SupplyWorkspaceTab>('overview');
   const [action, setAction] = useState<
     'save' | 'check' | 'replenish' | 'dismiss' | 'cancel' | null
   >(null);
@@ -215,6 +226,33 @@ export function SupplyPage() {
   const inventory = overview?.inventory;
   const balance = overview?.balance;
   const smart = status?.smartResource;
+  const smartModeEnabled = smart?.enabled ?? draft.smartEnabled !== false;
+  const activeOrder = status?.activeOrder;
+  const orderCount = status?.orders?.length ?? 0;
+  const healthLevel = smart?.healthLevel || 'unknown';
+  const suggestedAction = smart?.suggestedAction || 'unknown';
+  const decisionReason = smart?.decisionReason || 'unknown';
+  const confidence = smart?.confidence || 'low';
+  const supplyPressureLevel = smart?.supplyPressureLevel || 'unknown';
+  const effectiveHealthTargetMinutes =
+    smart?.effectiveHealthyMinutesTarget ??
+    smart?.healthyMinutesTarget ??
+    draft.healthyMinutesTarget;
+  const configuredHealthTargetMinutes =
+    smart?.configuredHealthyMinutesTarget ??
+    smart?.healthyMinutesTarget ??
+    draft.healthyMinutesTarget;
+  const capacityPercent = smart
+    ? clampPercent(
+        ((smart.currentCapacityRcu ?? 0) / Math.max(1, smart.targetCapacityRcu ?? 1)) * 100
+      )
+    : 0;
+  const snapshotLabel = smart
+    ? smart.snapshotFresh
+      ? t('supply.snapshot_fresh')
+      : t('supply.snapshot_stale')
+    : t('supply.no_snapshot');
+
   const metrics = useMemo(
     () => {
       if (smart?.enabled ?? draft.smartEnabled !== false) {
@@ -314,6 +352,32 @@ export function SupplyPage() {
     ]
   );
 
+  const tabItems = useMemo<SegmentedTabItem<SupplyWorkspaceTab>[]>(
+    () => [
+      { id: 'overview', label: t('supply.tabs_overview') },
+      { id: 'automation', label: t('supply.tabs_automation') },
+      {
+        id: 'orders',
+        label: (
+          <span className={styles.tabLabel}>
+            {t('supply.tabs_orders')}
+            {activeOrder ? <span className={styles.tabBadge}>1</span> : null}
+          </span>
+        ),
+      },
+      {
+        id: 'history',
+        label: (
+          <span className={styles.tabLabel}>
+            {t('supply.tabs_history')}
+            {orderCount > 0 ? <span className={styles.tabBadge}>{orderCount}</span> : null}
+          </span>
+        ),
+      },
+    ],
+    [activeOrder, orderCount, t]
+  );
+
   if (loading && !status) {
     return <div className={styles.loading}>{t('common.loading')}</div>;
   }
@@ -321,16 +385,28 @@ export function SupplyPage() {
   return (
     <div className={styles.page}>
       <section className={styles.hero}>
-        <div>
+        <div className={styles.heroCopy}>
           <div className={styles.eyebrow}>{t('supply.eyebrow')}</div>
           <h1>{t('supply.title')}</h1>
           <p>{t('supply.subtitle')}</p>
         </div>
         <div className={styles.heroActions}>
-          <span className={`${styles.serviceBadge} ${draft.enabled ? styles.success : ''}`}>
-            <span />
-            {draft.enabled ? t('supply.auto_enabled') : t('supply.auto_disabled')}
-          </span>
+          <div className={styles.heroSummary}>
+            <span className={`${styles.serviceBadge} ${draft.enabled ? styles.success : ''}`}>
+              <span />
+              {draft.enabled ? t('supply.auto_enabled') : t('supply.auto_disabled')}
+            </span>
+            <span className={`${styles.statusPill} ${smartTone(smart)}`}>
+              {t(`supply.smart_health_${healthLevel}`, {
+                defaultValue: smart?.healthLevel || '-',
+              })}
+            </span>
+            <span className={`${styles.statusPill} ${activeOrder ? styles.active : ''}`}>
+              {activeOrder
+                ? t('supply.active_order_short', { value: shortOrderId(activeOrder.orderId) })
+                : t('supply.no_active_order_short')}
+            </span>
+          </div>
           <Button
             variant="secondary"
             size="sm"
@@ -357,439 +433,499 @@ export function SupplyPage() {
 
       {overview?.lastError ? <div className={styles.errorBanner}>{overview.lastError}</div> : null}
 
-      <section className={`${styles.smartPanel} ${smartPanelTone(smart)}`}>
-        <div className={styles.smartHeader}>
-          <div>
-            <div className={styles.eyebrow}>{t('supply.smart_eyebrow')}</div>
-            <h2>{t('supply.smart_title')}</h2>
-            <p>{t('supply.smart_subtitle')}</p>
-          </div>
-          <span className={`${styles.statusPill} ${smartTone(smart)}`}>
-            {t(`supply.smart_health_${smart?.healthLevel || 'unknown'}`, {
-              defaultValue: smart?.healthLevel || '-',
-            })}
-          </span>
-        </div>
-        <div className={styles.smartGrid}>
-          <div className={styles.smartHeroMetric}>
-            <span>{t('supply.sustain_minutes')}</span>
-            <strong>{formatMinutes(smart?.estimatedSustainMinutes)}</strong>
-            <small>
-              {t('supply.effective_health_target_minutes', {
-                value:
-                  smart?.effectiveHealthyMinutesTarget ??
-                  smart?.healthyMinutesTarget ??
-                  draft.healthyMinutesTarget,
-                configured:
-                  smart?.configuredHealthyMinutesTarget ??
-                  smart?.healthyMinutesTarget ??
-                  draft.healthyMinutesTarget,
-              })}
-            </small>
-          </div>
-          <div className={styles.smartHeroMetric}>
-            <span>{t('supply.suggested_quantity')}</span>
-            <strong>{smart?.suggestedQuantity ?? '-'}</strong>
-            <small>
-              {t(`supply.smart_action_${smart?.suggestedAction || 'unknown'}`, {
-                defaultValue: smart?.suggestedAction || '-',
-              })}
-            </small>
-          </div>
-          <div className={styles.smartMiniMetrics}>
-            <div>
-              <span>{t('supply.consume_rcu_per_min')}</span>
-              <strong>{formatNumber(smart?.consumeRcuPerMinute)}</strong>
-            </div>
-            <div>
-              <span>{t('supply.rpm30m')}</span>
-              <strong>{formatNumber(smart?.rpm30m)}</strong>
-            </div>
-            <div>
-              <span>{t('supply.rpm5m_peak')}</span>
-              <strong>{formatNumber(smart?.rpm5mPeak)}</strong>
-            </div>
-            <div>
-              <span>{t('supply.tpm30m')}</span>
-              <strong>{formatNumber(smart?.tpm30m, 0)}</strong>
-            </div>
-            <div>
-              <span>{t('supply.usage_sample')}</span>
-              <strong>{smart?.usageSampleMinutes ?? 0}m</strong>
-            </div>
-            <div>
-              <span>{t('supply.supply_pressure')}</span>
-              <strong>
-                {t(`supply.supply_pressure_${smart?.supplyPressureLevel || 'unknown'}`, {
-                  defaultValue: smart?.supplyPressureLevel || '-',
-                })}
-              </strong>
-            </div>
-          </div>
-          <div className={styles.capacityBox}>
-            <div className={styles.capacityTop}>
-              <span>{t('supply.effective_capacity_rcu')}</span>
-              <strong>
-                {formatNumber(smart?.currentCapacityRcu)} / {formatNumber(smart?.targetCapacityRcu)}
-              </strong>
-            </div>
-            <div className={styles.progressTrack}>
-              <span
-                style={{
-                  width: `${Math.min(100, Math.max(0, ((smart?.currentCapacityRcu ?? 0) / Math.max(1, smart?.targetCapacityRcu ?? 1)) * 100))}%`,
-                }}
-              />
-            </div>
-            <div className={styles.capacityMeta}>
-              <span>
-                {t('supply.capacity_gap', { value: formatNumber(smart?.capacityGapRcu) })}
-              </span>
-              <span>
-                {t('supply.raw_capacity_waste_detail', {
-                  raw: formatNumber(smart?.rawCapacityRcu ?? smart?.currentCapacityRcu),
-                  waste: formatNumber(smart?.expiryWasteRiskRcu ?? 0),
-                  minutes: smart?.accountLifetimeMinutes ?? 60,
-                })}
-              </span>
-              <span>
-                {t(`supply.capacity_source_${smart?.capacitySource || 'unavailable'}`, {
-                  defaultValue: smart?.capacitySource || '-',
-                })}
-              </span>
-              <span>
-                {t('supply.capacity_coverage', {
-                  value: formatNumber(smart?.capacityCoverage, 0),
-                })}
-              </span>
-              <span>
-                {t('supply.capacity_lifetime_coverage', {
-                  value: formatNumber(smart?.capacityLifetimeCoverage, 0),
-                })}
-              </span>
-              {smart?.pendingInspectionAccounts ? (
-                <span>
-                  {t('supply.pending_inspection_capacity', {
-                    count: smart.pendingInspectionAccounts,
-                    capacity: formatNumber(smart.pendingInspectionCapacityRcu),
-                  })}
-                </span>
-              ) : null}
-              <span>
-                {t('supply.quota_snapshot_age', {
-                  value: smart?.capacitySnapshotAgeSeconds ?? 0,
-                })}
-              </span>
-            </div>
-          </div>
-          <div className={styles.smartReason}>
-            <IconTrendingUp size={16} />
-            <span>
-              {t('supply.smart_reason', {
-                reason: t(`supply.smart_reason_${smart?.decisionReason || 'unknown'}`, {
-                  defaultValue: smart?.decisionReason || '-',
-                }),
-                confidence: t(`supply.smart_confidence_${smart?.confidence || 'low'}`, {
-                  defaultValue: smart?.confidence || '-',
-                }),
-              })}
-            </span>
+      <section className={styles.workspace}>
+        <div className={styles.workspaceHeader}>
+          <SegmentedTabs
+            items={tabItems}
+            activeTab={activeTab}
+            ariaLabel={t('supply.tabs_aria')}
+            onChange={setActiveTab}
+            idBase="supply-workspace-tabs"
+            fullWidth
+            equalWidth
+          />
+          <div className={styles.workspaceMeta}>
+            {t('supply.last_checked', { value: formatTime(overview?.checkedAtMs) })}
           </div>
         </div>
-      </section>
 
-      <section className={styles.contentGrid}>
-        <article className={styles.panel}>
-          <div className={styles.panelHeader}>
-            <div>
-              <h2>{t('supply.config_title')}</h2>
-              <p>{t('supply.config_hint')}</p>
-            </div>
-            <ToggleSwitch
-              checked={Boolean(draft.enabled)}
-              onChange={(enabled) => updateDraft({ enabled })}
-              label={t('supply.enable_auto')}
-            />
-          </div>
+        <div className={styles.tabPanel} role="tabpanel" id={`supply-workspace-${activeTab}`}>
+          {activeTab === 'overview' ? (
+            <section className={styles.overviewGrid}>
+              <article className={`${styles.decisionPanel} ${smartPanelTone(smart)}`}>
+                <div className={styles.compactHeader}>
+                  <div>
+                    <div className={styles.eyebrow}>{t('supply.ops_next_action')}</div>
+                    <h2>{t('supply.runtime_summary')}</h2>
+                  </div>
+                  <span className={`${styles.statusPill} ${smartTone(smart)}`}>
+                    {t(`supply.smart_health_${healthLevel}`, {
+                      defaultValue: smart?.healthLevel || '-',
+                    })}
+                  </span>
+                </div>
+                <div className={styles.decisionBody}>
+                  <span>{t('supply.ops_next_action')}</span>
+                  <strong>
+                    {t(`supply.smart_action_${suggestedAction}`, {
+                      defaultValue: suggestedAction,
+                    })}
+                  </strong>
+                  <p>
+                    {t('supply.decision_reason')}: {' '}
+                    {t(`supply.smart_reason_${decisionReason}`, {
+                      defaultValue: decisionReason,
+                    })}
+                  </p>
+                </div>
+                <div className={styles.decisionFooter}>
+                  <div>
+                    <span>{t('supply.suggested_quantity')}</span>
+                    <strong>{smart?.suggestedQuantity ?? '-'}</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.confidence')}</span>
+                    <strong>
+                      {t(`supply.smart_confidence_${confidence}`, {
+                        defaultValue: confidence,
+                      })}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.snapshot_status')}</span>
+                    <strong>{snapshotLabel}</strong>
+                  </div>
+                </div>
+              </article>
 
-          <div className={styles.formGrid}>
-            <Input
-              label={t('supply.base_url')}
-              value={draft.baseUrl}
-              onChange={(event) => updateDraft({ baseUrl: event.target.value })}
-              placeholder="https://sogouedu.cc"
-            />
-            <Input
-              label={t('supply.username')}
-              value={draft.username}
-              onChange={(event) => updateDraft({ username: event.target.value })}
-              autoComplete="username"
-            />
-            <Input
-              label={t('supply.password')}
-              type="password"
-              value={draft.password ?? ''}
-              onChange={(event) => updateDraft({ password: event.target.value })}
-              placeholder={
-                draft.passwordConfigured
-                  ? t('supply.password_saved')
-                  : t('supply.password_placeholder')
-              }
-              autoComplete="new-password"
-            />
-            <div className={styles.field}>
-              <label>{t('supply.product')}</label>
-              <Select
-                value={draft.product}
-                options={[
-                  { value: 'oauth_30d', label: t('supply.product_30d') },
-                  { value: 'oauth_7d', label: t('supply.product_7d') },
-                ]}
-                onChange={(product) => updateDraft({ product })}
-              />
-            </div>
-            {draft.smartEnabled === false ? (
-              <Input
-                label={t('supply.target_accounts')}
-                type="number"
-                min={1}
-                max={10000}
-                value={draft.targetAvailableAccounts}
-                onChange={(event) =>
-                  updateDraft({ targetAvailableAccounts: Number(event.target.value) })
-                }
-              />
-            ) : null}
-            <Input
-              label={t('supply.batch_size')}
-              type="number"
-              min={1}
-              max={100}
-              value={draft.replenishBatchSize}
-              onChange={(event) => updateDraft({ replenishBatchSize: Number(event.target.value) })}
-            />
-            <Input
-              label={t('supply.check_interval')}
-              type="number"
-              min={10}
-              max={3600}
-              value={draft.checkIntervalSeconds}
-              onChange={(event) =>
-                updateDraft({ checkIntervalSeconds: Number(event.target.value) })
-              }
-            />
-            <Input
-              label={t('supply.poll_interval')}
-              type="number"
-              min={1}
-              max={60}
-              value={draft.pollIntervalSeconds}
-              onChange={(event) => updateDraft({ pollIntervalSeconds: Number(event.target.value) })}
-            />
-          </div>
+              <article className={`${styles.panel} ${styles.capacityPanel}`}>
+                <div className={styles.panelHeader}>
+                  <div>
+                    <h2>{t('supply.capacity_summary')}</h2>
+                    <p>
+                      {t('supply.effective_health_target_minutes', {
+                        value: effectiveHealthTargetMinutes,
+                        configured: configuredHealthTargetMinutes,
+                      })}
+                    </p>
+                  </div>
+                </div>
+                <div className={styles.capacityOverview}>
+                  <div>
+                    <span>{t('supply.current_capacity')}</span>
+                    <strong>{formatRcu(smart?.currentCapacityRcu)}</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.target_capacity')}</span>
+                    <strong>{formatRcu(smart?.targetCapacityRcu)}</strong>
+                  </div>
+                </div>
+                <div className={styles.progressTrack}>
+                  <span style={{ width: `${capacityPercent}%` }} />
+                </div>
+                <div className={styles.miniMetricGrid}>
+                  <div>
+                    <span>{t('supply.capacity_gap_label')}</span>
+                    <strong>{formatRcu(smart?.capacityGapRcu)}</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.supply_pressure')}</span>
+                    <strong>
+                      {t(`supply.supply_pressure_${supplyPressureLevel}`, {
+                        defaultValue: supplyPressureLevel,
+                      })}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.capacity_coverage_label')}</span>
+                    <strong>{formatNumber(smart?.capacityCoverage, 0)}%</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.capacity_source_label')}</span>
+                    <strong>
+                      {t(`supply.capacity_source_${smart?.capacitySource || 'unavailable'}`, {
+                        defaultValue: smart?.capacitySource || '-',
+                      })}
+                    </strong>
+                  </div>
+                </div>
+              </article>
 
-          <div className={styles.advancedBlock}>
-            <div className={styles.advancedHeader}>
-              <div>
-                <h3>{t('supply.smart_config_title')}</h3>
-                <p>{t('supply.smart_config_hint')}</p>
+              <article className={styles.panel}>
+                <div className={styles.panelHeader}>
+                  <div>
+                    <h2>{t('supply.supply_summary')}</h2>
+                    <p>{smartModeEnabled ? t('supply.smart_enabled') : t('supply.smart_disabled')}</p>
+                  </div>
+                </div>
+                <div className={styles.summaryList}>
+                  <div>
+                    <span>{t('supply.supply_inventory')}</span>
+                    <strong>{inventory?.available ?? '-'}</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.deficit')}</span>
+                    <strong>{inventory?.missing ?? overview?.cpaDeficit ?? '-'}</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.available_balance')}</span>
+                    <strong>{balance ? formatMoney(balance.availableFen) : '-'}</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.estimated_total')}</span>
+                    <strong>{inventory ? formatMoney(inventory.estimatedTotalFen) : '-'}</strong>
+                  </div>
+                </div>
+              </article>
+
+              <article className={styles.panel}>
+                <div className={styles.panelHeader}>
+                  <div>
+                    <h2>{t('supply.traffic_summary')}</h2>
+                    <p>{t('supply.usage_sample')}: {smart?.usageSampleMinutes ?? 0}m</p>
+                  </div>
+                </div>
+                <div className={styles.summaryList}>
+                  <div>
+                    <span>{t('supply.consume_rate')}</span>
+                    <strong>{formatRcuRate(smart?.consumeRcuPerMinute)}</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.rpm30m')}</span>
+                    <strong>{formatNumber(smart?.rpm30m)}</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.tpm30m')}</span>
+                    <strong>{formatNumber(smart?.tpm30m, 0)}</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.quota_snapshot_age_label')}</span>
+                    <strong>{smart ? `${smart.capacitySnapshotAgeSeconds ?? 0}s` : '-'}</strong>
+                  </div>
+                </div>
+              </article>
+            </section>
+          ) : null}
+
+          {activeTab === 'automation' ? (
+            <section className={styles.automationGrid}>
+              <article className={styles.panel}>
+                <div className={styles.panelHeader}>
+                  <div>
+                    <h2>{t('supply.supply_connection_title')}</h2>
+                    <p>{t('supply.supply_connection_hint')}</p>
+                  </div>
+                </div>
+                <div className={styles.formGrid}>
+                  <Input
+                    label={t('supply.base_url')}
+                    value={draft.baseUrl}
+                    onChange={(event) => updateDraft({ baseUrl: event.target.value })}
+                    placeholder="https://sogouedu.cc"
+                  />
+                  <Input
+                    label={t('supply.username')}
+                    value={draft.username}
+                    onChange={(event) => updateDraft({ username: event.target.value })}
+                    autoComplete="username"
+                  />
+                  <Input
+                    label={t('supply.password')}
+                    type="password"
+                    value={draft.password ?? ''}
+                    onChange={(event) => updateDraft({ password: event.target.value })}
+                    placeholder={
+                      draft.passwordConfigured
+                        ? t('supply.password_saved')
+                        : t('supply.password_placeholder')
+                    }
+                    autoComplete="new-password"
+                  />
+                  <div className={styles.field}>
+                    <label>{t('supply.product')}</label>
+                    <Select
+                      value={draft.product}
+                      options={[
+                        { value: 'oauth_30d', label: t('supply.product_30d') },
+                        { value: 'oauth_7d', label: t('supply.product_7d') },
+                      ]}
+                      onChange={(product) => updateDraft({ product })}
+                    />
+                  </div>
+                </div>
+              </article>
+
+              <article className={styles.panel}>
+                <div className={styles.panelHeader}>
+                  <div>
+                    <h2>{t('supply.automation_rules_title')}</h2>
+                    <p>{t('supply.automation_rules_hint')}</p>
+                  </div>
+                  <ToggleSwitch
+                    checked={Boolean(draft.enabled)}
+                    onChange={(enabled) => updateDraft({ enabled })}
+                    label={t('supply.enable_auto')}
+                  />
+                </div>
+                <div className={styles.formGrid}>
+                  {draft.smartEnabled === false ? (
+                    <Input
+                      label={t('supply.target_accounts')}
+                      type="number"
+                      min={1}
+                      max={10000}
+                      value={draft.targetAvailableAccounts}
+                      onChange={(event) =>
+                        updateDraft({ targetAvailableAccounts: Number(event.target.value) })
+                      }
+                    />
+                  ) : null}
+                  <Input
+                    label={t('supply.batch_size')}
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={draft.replenishBatchSize}
+                    onChange={(event) =>
+                      updateDraft({ replenishBatchSize: Number(event.target.value) })
+                    }
+                  />
+                  <Input
+                    label={t('supply.check_interval')}
+                    type="number"
+                    min={10}
+                    max={3600}
+                    value={draft.checkIntervalSeconds}
+                    onChange={(event) =>
+                      updateDraft({ checkIntervalSeconds: Number(event.target.value) })
+                    }
+                  />
+                  <Input
+                    label={t('supply.poll_interval')}
+                    type="number"
+                    min={1}
+                    max={60}
+                    value={draft.pollIntervalSeconds}
+                    onChange={(event) =>
+                      updateDraft({ pollIntervalSeconds: Number(event.target.value) })
+                    }
+                  />
+                </div>
+              </article>
+
+              <article className={`${styles.panel} ${styles.fullSpan}`}>
+                <div className={styles.panelHeader}>
+                  <div>
+                    <h2>{t('supply.smart_config_title')}</h2>
+                    <p>{t('supply.smart_config_hint')}</p>
+                  </div>
+                  <ToggleSwitch
+                    checked={draft.smartEnabled !== false}
+                    onChange={(smartEnabled) => updateDraft({ smartEnabled })}
+                    label={t('supply.smart_enable')}
+                  />
+                </div>
+                <div className={styles.formGrid}>
+                  <Input
+                    label={t('supply.healthy_minutes_target')}
+                    type="number"
+                    min={10}
+                    max={1440}
+                    value={draft.healthyMinutesTarget}
+                    onChange={(event) =>
+                      updateDraft({ healthyMinutesTarget: Number(event.target.value) })
+                    }
+                  />
+                  <Input
+                    label={t('supply.warning_minutes')}
+                    type="number"
+                    min={5}
+                    max={1440}
+                    value={draft.warningMinutes}
+                    onChange={(event) => updateDraft({ warningMinutes: Number(event.target.value) })}
+                  />
+                  <Input
+                    label={t('supply.critical_minutes')}
+                    type="number"
+                    min={1}
+                    max={1440}
+                    value={draft.criticalMinutes}
+                    onChange={(event) =>
+                      updateDraft({ criticalMinutes: Number(event.target.value) })
+                    }
+                  />
+                  <Input
+                    label={t('supply.prelock_max_quantity')}
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={draft.prelockMaxQuantity}
+                    onChange={(event) =>
+                      updateDraft({ prelockMaxQuantity: Number(event.target.value) })
+                    }
+                  />
+                  <Input
+                    label={t('supply.critical_confirm_rounds')}
+                    type="number"
+                    min={1}
+                    max={5}
+                    value={draft.criticalTakeConfirmRounds}
+                    onChange={(event) =>
+                      updateDraft({ criticalTakeConfirmRounds: Number(event.target.value) })
+                    }
+                  />
+                  <Input
+                    label={t('supply.quota_snapshot_cache_ttl')}
+                    type="number"
+                    min={10}
+                    max={600}
+                    value={draft.authFilesCacheTTLSeconds}
+                    onChange={(event) =>
+                      updateDraft({ authFilesCacheTTLSeconds: Number(event.target.value) })
+                    }
+                  />
+                </div>
+                <div className={styles.smartToggles}>
+                  <ToggleSwitch
+                    checked={draft.prelockEnabled !== false}
+                    onChange={(prelockEnabled) => updateDraft({ prelockEnabled })}
+                    label={t('supply.prelock_enable')}
+                  />
+                  <Input
+                    label={t('supply.balance_reserve')}
+                    type="number"
+                    min={0}
+                    value={Math.round((draft.minBalanceReserveFen ?? 0) / 100)}
+                    onChange={(event) =>
+                      updateDraft({ minBalanceReserveFen: Number(event.target.value) * 100 })
+                    }
+                  />
+                </div>
+                <div className={styles.configFooter}>
+                  <ToggleSwitch
+                    checked={draft.defaultWebsockets}
+                    onChange={(defaultWebsockets) => updateDraft({ defaultWebsockets })}
+                    label={t('supply.default_websockets')}
+                  />
+                  <Button loading={action === 'save'} onClick={() => void save()}>
+                    {t('common.save')}
+                  </Button>
+                </div>
+              </article>
+            </section>
+          ) : null}
+
+          {activeTab === 'orders' ? (
+            <section className={styles.ordersGrid}>
+              <article className={`${styles.panel} ${styles.manualCard}`}>
+                <div className={styles.panelHeader}>
+                  <div>
+                    <h2>{t('supply.manual_title')}</h2>
+                    <p>{t('supply.manual_hint')}</p>
+                  </div>
+                </div>
+                <div className={styles.orderComposer}>
+                  <Input
+                    label={t('supply.quantity')}
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={manualQuantity}
+                    onChange={(event) => setManualQuantity(Number(event.target.value))}
+                  />
+                  <div className={styles.quoteBox}>
+                    <span>{t('supply.estimated_total')}</span>
+                    <strong>{inventory ? formatMoney(inventory.estimatedTotalFen) : '-'}</strong>
+                    <small>{t('supply.quote_hint')}</small>
+                  </div>
+                </div>
+                <Button
+                  fullWidth
+                  loading={action === 'replenish'}
+                  disabled={Boolean(status?.activeOrder)}
+                  onClick={() => void replenish()}
+                >
+                  {status?.activeOrder ? t('supply.order_in_progress') : t('supply.replenish_now')}
+                </Button>
+              </article>
+
+              <article className={styles.panel}>
+                <div className={styles.panelHeader}>
+                  <div>
+                    <h2>{t('supply.current_order')}</h2>
+                    <p>{t('supply.current_order_hint')}</p>
+                  </div>
+                  <IconTimer size={18} />
+                </div>
+                {status?.activeOrder ? (
+                  <OrderSummary
+                    order={status.activeOrder}
+                    dismissing={action === 'dismiss'}
+                    cancelling={action === 'cancel'}
+                    onDismissUncertain={dismissUncertain}
+                    onCancelOrder={cancelOrder}
+                  />
+                ) : (
+                  <div className={styles.empty}>{t('supply.no_active_order')}</div>
+                )}
+              </article>
+            </section>
+          ) : null}
+
+          {activeTab === 'history' ? (
+            <section className={styles.panel}>
+              <div className={styles.panelHeader}>
+                <div>
+                  <h2>{t('supply.history_title')}</h2>
+                  <p>{t('supply.history_hint')}</p>
+                </div>
+                <span className={styles.statusPill}>{orderCount}</span>
               </div>
-              <ToggleSwitch
-                checked={draft.smartEnabled !== false}
-                onChange={(smartEnabled) => updateDraft({ smartEnabled })}
-                label={t('supply.smart_enable')}
-              />
-            </div>
-            <div className={styles.formGrid}>
-              <Input
-                label={t('supply.healthy_minutes_target')}
-                type="number"
-                min={10}
-                max={1440}
-                value={draft.healthyMinutesTarget}
-                onChange={(event) =>
-                  updateDraft({ healthyMinutesTarget: Number(event.target.value) })
-                }
-              />
-              <Input
-                label={t('supply.warning_minutes')}
-                type="number"
-                min={5}
-                max={1440}
-                value={draft.warningMinutes}
-                onChange={(event) => updateDraft({ warningMinutes: Number(event.target.value) })}
-              />
-              <Input
-                label={t('supply.critical_minutes')}
-                type="number"
-                min={1}
-                max={1440}
-                value={draft.criticalMinutes}
-                onChange={(event) => updateDraft({ criticalMinutes: Number(event.target.value) })}
-              />
-              <Input
-                label={t('supply.prelock_max_quantity')}
-                type="number"
-                min={1}
-                max={100}
-                value={draft.prelockMaxQuantity}
-                onChange={(event) =>
-                  updateDraft({ prelockMaxQuantity: Number(event.target.value) })
-                }
-              />
-              <Input
-                label={t('supply.critical_confirm_rounds')}
-                type="number"
-                min={1}
-                max={5}
-                value={draft.criticalTakeConfirmRounds}
-                onChange={(event) =>
-                  updateDraft({ criticalTakeConfirmRounds: Number(event.target.value) })
-                }
-              />
-              <Input
-                label={t('supply.quota_snapshot_cache_ttl')}
-                type="number"
-                min={10}
-                max={600}
-                value={draft.authFilesCacheTTLSeconds}
-                onChange={(event) =>
-                  updateDraft({ authFilesCacheTTLSeconds: Number(event.target.value) })
-                }
-              />
-            </div>
-            <div className={styles.smartToggles}>
-              <ToggleSwitch
-                checked={draft.prelockEnabled !== false}
-                onChange={(prelockEnabled) => updateDraft({ prelockEnabled })}
-                label={t('supply.prelock_enable')}
-              />
-              <Input
-                label={t('supply.balance_reserve')}
-                type="number"
-                min={0}
-                value={Math.round((draft.minBalanceReserveFen ?? 0) / 100)}
-                onChange={(event) =>
-                  updateDraft({ minBalanceReserveFen: Number(event.target.value) * 100 })
-                }
-              />
-            </div>
-          </div>
-
-          <div className={styles.configFooter}>
-            <ToggleSwitch
-              checked={draft.defaultWebsockets}
-              onChange={(defaultWebsockets) => updateDraft({ defaultWebsockets })}
-              label={t('supply.default_websockets')}
-            />
-            <Button loading={action === 'save'} onClick={() => void save()}>
-              {t('common.save')}
-            </Button>
-          </div>
-        </article>
-
-        <aside className={styles.sideStack}>
-          <article className={styles.panel}>
-            <div className={styles.panelHeader}>
-              <div>
-                <h2>{t('supply.manual_title')}</h2>
-                <p>{t('supply.manual_hint')}</p>
+              <div className={styles.tableWrap}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>{t('supply.order_id')}</th>
+                      <th>{t('supply.product')}</th>
+                      <th>{t('supply.order_type')}</th>
+                      <th>{t('supply.quantity')}</th>
+                      <th>{t('supply.import_progress')}</th>
+                      <th>{t('supply.charged')}</th>
+                      <th>{t('common.status')}</th>
+                      <th>{t('supply.created_at')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(status?.orders ?? []).map((order) => (
+                      <tr key={order.orderId}>
+                        <td className={styles.mono}>{order.orderId}</td>
+                        <td>{order.product}</td>
+                        <td>{order.automatic ? t('supply.automatic') : t('supply.manual')}</td>
+                        <td>{order.requestedQuantity}</td>
+                        <td>
+                          {order.importedCount}/{order.itemCount || order.requestedQuantity}
+                        </td>
+                        <td>{formatMoney(order.chargedFen)}</td>
+                        <td>
+                          <span className={`${styles.statusPill} ${orderTone(order.status)}`}>
+                            {t(`supply.status_${order.status}`, { defaultValue: order.status })}
+                          </span>
+                        </td>
+                        <td>{formatTime(order.createdAtMs)}</td>
+                      </tr>
+                    ))}
+                    {!status?.orders?.length ? (
+                      <tr>
+                        <td colSpan={8} className={styles.emptyCell}>
+                          {t('supply.no_history')}
+                        </td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
               </div>
-            </div>
-            <Input
-              label={t('supply.quantity')}
-              type="number"
-              min={1}
-              max={100}
-              value={manualQuantity}
-              onChange={(event) => setManualQuantity(Number(event.target.value))}
-            />
-            <div className={styles.quoteBox}>
-              <span>{t('supply.estimated_total')}</span>
-              <strong>{inventory ? formatMoney(inventory.estimatedTotalFen) : '-'}</strong>
-              <small>{t('supply.quote_hint')}</small>
-            </div>
-            <Button
-              fullWidth
-              loading={action === 'replenish'}
-              disabled={Boolean(status?.activeOrder)}
-              onClick={() => void replenish()}
-            >
-              {status?.activeOrder ? t('supply.order_in_progress') : t('supply.replenish_now')}
-            </Button>
-          </article>
-
-          <article className={styles.panel}>
-            <div className={styles.panelHeader}>
-              <div>
-                <h2>{t('supply.current_order')}</h2>
-                <p>{t('supply.current_order_hint')}</p>
-              </div>
-              <IconTimer size={18} />
-            </div>
-            {status?.activeOrder ? (
-              <OrderSummary
-                order={status.activeOrder}
-                dismissing={action === 'dismiss'}
-                cancelling={action === 'cancel'}
-                onDismissUncertain={dismissUncertain}
-                onCancelOrder={cancelOrder}
-              />
-            ) : (
-              <div className={styles.empty}>{t('supply.no_active_order')}</div>
-            )}
-          </article>
-        </aside>
-      </section>
-
-      <section className={styles.panel}>
-        <div className={styles.panelHeader}>
-          <div>
-            <h2>{t('supply.history_title')}</h2>
-            <p>{t('supply.last_checked', { value: formatTime(overview?.checkedAtMs) })}</p>
-          </div>
-        </div>
-        <div className={styles.tableWrap}>
-          <table>
-            <thead>
-              <tr>
-                <th>{t('supply.order_id')}</th>
-                <th>{t('supply.product')}</th>
-                <th>{t('supply.order_type')}</th>
-                <th>{t('supply.quantity')}</th>
-                <th>{t('supply.import_progress')}</th>
-                <th>{t('supply.charged')}</th>
-                <th>{t('common.status')}</th>
-                <th>{t('supply.created_at')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(status?.orders ?? []).map((order) => (
-                <tr key={order.orderId}>
-                  <td className={styles.mono}>{order.orderId}</td>
-                  <td>{order.product}</td>
-                  <td>{order.automatic ? t('supply.automatic') : t('supply.manual')}</td>
-                  <td>{order.requestedQuantity}</td>
-                  <td>
-                    {order.importedCount}/{order.itemCount || order.requestedQuantity}
-                  </td>
-                  <td>{formatMoney(order.chargedFen)}</td>
-                  <td>
-                    <span className={`${styles.statusPill} ${orderTone(order.status)}`}>
-                      {t(`supply.status_${order.status}`, { defaultValue: order.status })}
-                    </span>
-                  </td>
-                  <td>{formatTime(order.createdAtMs)}</td>
-                </tr>
-              ))}
-              {!status?.orders?.length ? (
-                <tr>
-                  <td colSpan={8} className={styles.emptyCell}>
-                    {t('supply.no_history')}
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
+            </section>
+          ) : null}
         </div>
       </section>
     </div>
