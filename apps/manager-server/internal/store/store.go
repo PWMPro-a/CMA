@@ -333,6 +333,10 @@ func (s *Store) ActivateNextLegacySupplyRepair(ctx context.Context) (SupplyOrder
 	return s.SupplyOrders.ActivateNextLegacyRepair(ctx)
 }
 
+func (s *Store) ActivateNextUnsupportedSupplyRelease(ctx context.Context) (SupplyOrder, bool, error) {
+	return s.SupplyOrders.ActivateNextUnsupportedRelease(ctx)
+}
+
 func (s *Store) PromoteSupplyCreateAttempt(ctx context.Context, localOrderID string, order SupplyOrder) error {
 	return s.SupplyOrders.PromoteCreateAttempt(ctx, localOrderID, order)
 }

@@ -17,6 +17,7 @@ type Repository interface {
 	GetOpen(ctx context.Context) (model.SupplyOrder, bool, error)
 	GetLatestCompletedAutomatic(ctx context.Context) (model.SupplyOrder, bool, error)
 	ActivateNextLegacyRepair(ctx context.Context) (model.SupplyOrder, bool, error)
+	ActivateNextUnsupportedRelease(ctx context.Context) (model.SupplyOrder, bool, error)
 	PromoteCreateAttempt(ctx context.Context, localOrderID string, order model.SupplyOrder) error
 	ClaimTaking(ctx context.Context, orderID string, nowMS int64, leaseUntilMS int64) (bool, error)
 	Update(ctx context.Context, order model.SupplyOrder) error
@@ -160,6 +161,68 @@ func (r *repository) ActivateNextLegacyRepair(ctx context.Context) (model.Supply
 		next_retry_at_ms = null, imported_at_ms = null, updated_at_ms = ?
 		where order_id = ? and status = 'imported' and file_name like 'supply-%'`, now, orderID); err != nil {
 		return model.SupplyOrder{}, false, err
+	}
+	order, err := scanOrder(tx.QueryRowContext(ctx, orderSelect+` where order_id = ?`, orderID))
+	if err != nil {
+		return model.SupplyOrder{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.SupplyOrder{}, false, err
+	}
+	return order, true, nil
+}
+
+// ActivateNextUnsupportedRelease restores orders that an older manager version
+// marked released after the supplier rejected every cancellation endpoint. Those
+// orders remain reserved upstream and must stay available for a later pickup.
+func (r *repository) ActivateNextUnsupportedRelease(ctx context.Context) (model.SupplyOrder, bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.SupplyOrder{}, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var orderID string
+	err = tx.QueryRowContext(ctx, `select o.order_id from supply_orders o
+		where o.automatic = 1
+			and o.status = 'released'
+			and o.remote_status = 'release_unsupported'
+			and o.charged_fen = 0
+			and o.released_fen = 0
+			and o.item_count = 0
+			and o.imported_count = 0
+		order by o.created_at_ms asc, o.id asc limit 1`).Scan(&orderID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.SupplyOrder{}, false, nil
+	}
+	if err != nil {
+		return model.SupplyOrder{}, false, err
+	}
+
+	now := time.Now().UnixMilli()
+	result, err := tx.ExecContext(ctx, `update supply_orders set
+		status = case when ready_quantity > 0 or progress >= 100 then 'ready' else 'waiting_inventory' end,
+		completed_at_ms = null,
+		next_poll_at_ms = null,
+		last_error = 'restored: supplier did not confirm cancellation; the order remains reserved upstream',
+		updated_at_ms = ?
+		where order_id = ?
+			and automatic = 1
+			and status = 'released'
+			and remote_status = 'release_unsupported'
+			and charged_fen = 0
+			and released_fen = 0
+			and item_count = 0
+			and imported_count = 0`, now, orderID)
+	if err != nil {
+		return model.SupplyOrder{}, false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return model.SupplyOrder{}, false, err
+	}
+	if affected != 1 {
+		return model.SupplyOrder{}, false, nil
 	}
 	order, err := scanOrder(tx.QueryRowContext(ctx, orderSelect+` where order_id = ?`, orderID))
 	if err != nil {

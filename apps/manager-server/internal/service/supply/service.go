@@ -34,6 +34,11 @@ var (
 	ErrOrderNotCancellable = errors.New("supply order cannot be cancelled in its current state")
 )
 
+const (
+	remoteStatusReleaseUnsupported = "release_unsupported"
+	unsupportedReleaseHoldMessage  = "supplier cancellation was not confirmed; order remains reserved upstream and will be picked up and imported"
+)
+
 type Overview struct {
 	CheckedAtMS  int64                   `json:"checkedAtMs,omitempty"`
 	CPAAvailable int                     `json:"cpaAvailable"`
@@ -268,6 +273,11 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		return err
 	}
 	supplyCfg := cfg.Supply
+	if restored, restoredFound, err := s.store.ActivateNextUnsupportedSupplyRelease(ctx); err != nil {
+		return err
+	} else if restoredFound {
+		return s.processOrder(ctx, cfg, restored)
+	}
 	active, found, err := s.store.GetOpenSupplyOrder(ctx)
 	if err != nil {
 		return err
@@ -293,7 +303,6 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	} else if repairedFound {
 		return s.processOrder(ctx, cfg, repaired)
 	}
-
 	if allowCreate && manualQuantity == 0 && !managerconfigsvc.SupplyEnabled(supplyCfg) {
 		return nil
 	}
@@ -527,6 +536,10 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		return err
 	}
 
+	// A supplier that cannot confirm cancellation still holds the accounts. Once
+	// that condition has been observed, the only reliable terminal action is to
+	// take the ready order and import it instead of trying another local release.
+	unsupportedRelease := order.RemoteStatus == remoteStatusReleaseUnsupported
 	remote, err := s.supplyClient.GetOrder(ctx, credentials, order.OrderID, order.StatusURL)
 	if err != nil {
 		if isHTTPStatus(err, http.StatusConflict) {
@@ -535,6 +548,9 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		return s.updateOrderError(ctx, &order, err, cfg.Supply)
 	}
 	applyRemoteOrder(&order, remote, cfg.Supply)
+	if unsupportedRelease {
+		order.RemoteStatus = remoteStatusReleaseUnsupported
+	}
 	if isTerminalRemoteStatus(remote.Status) && !isSuccessfulRemoteStatus(remote.Status) {
 		order.Status = localOrderStatus(remote.Status)
 		order.CompletedAtMS = time.Now().UnixMilli()
@@ -544,11 +560,13 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		order.Status = "waiting_inventory"
 		return s.store.UpdateSupplyOrder(ctx, order)
 	}
-	if released, err := s.releaseAutomaticOrderIfCPASatisfied(ctx, cfg, &order, true); released || err != nil {
-		return err
+	if !unsupportedRelease {
+		if released, err := s.releaseAutomaticOrderIfCPASatisfied(ctx, cfg, &order, true); released || err != nil {
+			return err
+		}
 	}
 
-	if order.Automatic && smartSupplyEnabled(cfg.Supply) && !s.smartTakeAllowed(cfg.Supply, order.OrderID) {
+	if !unsupportedRelease && order.Automatic && smartSupplyEnabled(cfg.Supply) && !s.smartTakeAllowed(cfg.Supply, order.OrderID) {
 		resource := s.currentSmartResource(cfg.Supply)
 		resource.LockedOrderID = order.OrderID
 		resource.SuggestedAction = smartActionWaitLocked
@@ -626,6 +644,9 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 	}
 	switch order.Status {
 	case "creating", "create_uncertain", "taking", "importing", "partial":
+		return false, nil
+	}
+	if order.RemoteStatus == remoteStatusReleaseUnsupported {
 		return false, nil
 	}
 	if smartSupplyEnabled(cfg.Supply) {
@@ -724,16 +745,25 @@ func (s *Service) releaseAutomaticOrderIfCPASatisfied(ctx context.Context, cfg s
 }
 
 func (s *Service) releaseAutomaticOrder(ctx context.Context, cfg store.ManagerConfig, order *store.SupplyOrder, available int) error {
+	if order == nil {
+		return nil
+	}
 	released, err := s.supplyClient.ReleaseOrder(ctx, credentialsFromConfig(cfg.Supply), order.OrderID)
-	if err != nil && !errors.Is(err, supplyclient.ErrReleaseUnsupported) {
+	if errors.Is(err, supplyclient.ErrReleaseUnsupported) {
+		// A local release is meaningless without a supplier confirmation: the
+		// next processing round will pick up this still-reserved order instead.
+		order.RemoteStatus = remoteStatusReleaseUnsupported
+		order.LastError = unsupportedReleaseHoldMessage
+		order.CompletedAtMS = 0
+		order.NextPollAtMS = nextPollAt(cfg.Supply, 0)
+		s.resetCriticalConfirm(order.OrderID)
+		s.updateCPAOverview(available, cfg.Supply.TargetAvailableAccounts)
+		return s.store.UpdateSupplyOrder(ctx, *order)
+	}
+	if err != nil {
 		return s.updateOrderError(ctx, order, fmt.Errorf("release satisfied supply order: %w", err), cfg.Supply)
 	}
-	if err == nil {
-		applyRemoteOrder(order, released, cfg.Supply)
-	} else {
-		order.RemoteStatus = "release_unsupported"
-		order.LastError = "CPA usable capacity already satisfies target; supply release endpoint is unsupported, skipped pickup locally"
-	}
+	applyRemoteOrder(order, released, cfg.Supply)
 	order.Status = "released"
 	order.ItemCount = 0
 	order.ImportedCount = 0
@@ -742,9 +772,7 @@ func (s *Service) releaseAutomaticOrder(ctx context.Context, cfg store.ManagerCo
 	if order.RemoteStatus == "" {
 		order.RemoteStatus = "released"
 	}
-	if err == nil {
-		order.LastError = ""
-	}
+	order.LastError = ""
 	s.markAutomaticRelease()
 	s.resetCriticalConfirm(order.OrderID)
 	s.updateCPAOverview(available, cfg.Supply.TargetAvailableAccounts)
