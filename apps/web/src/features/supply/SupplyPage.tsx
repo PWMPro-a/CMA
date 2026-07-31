@@ -144,11 +144,11 @@ export function SupplyPage() {
   }, []);
 
   const load = useCallback(
-    async (quiet = false) => {
+    async (quiet = false, force = false) => {
       // Polling must never overlap an ongoing request or a state-changing
       // operation. Otherwise an earlier response can overwrite the newer
       // order/check result and make the workspace appear to jump backwards.
-      if (loadInFlightRef.current || (quiet && actionInFlightRef.current)) return;
+      if (loadInFlightRef.current || (quiet && actionInFlightRef.current && !force)) return;
       loadInFlightRef.current = true;
       const generation = ++refreshGenerationRef.current;
       if (!quiet) setLoading(true);
@@ -194,7 +194,8 @@ export function SupplyPage() {
   const runAction = async (
     kind: 'save' | 'check' | 'replenish' | 'dismiss' | 'cancel',
     operation: () => Promise<SupplyStatus>,
-    successMessage: string
+    successMessage: string,
+    refreshAfterSuccess = false
   ) => {
     // Invalidate a pending read before changing state. The action result is
     // authoritative and cannot be replaced by a response started earlier.
@@ -207,6 +208,12 @@ export function SupplyPage() {
         configDirtyRef.current = false;
       }
       applyStatus(result);
+      // Replenishment may create or advance an order while its action
+      // response is being generated. Read the status again immediately so
+      // capacity, inventory, balance and order cards show the latest state.
+      if (refreshAfterSuccess) {
+        await load(true, true);
+      }
       showNotification(successMessage, 'success');
     } catch (error) {
       showNotification(error instanceof Error ? error.message : t('common.unknown_error'), 'error');
@@ -237,7 +244,8 @@ export function SupplyPage() {
     runAction(
       'replenish',
       () => supplyApi.replenish(manualQuantity),
-      t('supply.replenish_started')
+      t('supply.replenish_started'),
+      true
     );
 
   const dismissUncertain = (order: SupplyOrder) => {
