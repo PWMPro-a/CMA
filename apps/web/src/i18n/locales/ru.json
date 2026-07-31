@@ -4450,6 +4450,7 @@
     "smart_reason_inventory_unavailable": "Сейчас нет запаса для блокировки",
     "smart_reason_inspection_quota_incomplete": "Проверка квоты покрыта не полностью; автопополнение приостановлено",
     "smart_reason_inspection_lease_incomplete": "Данные о сроке действия учётных данных поставщика неполные; автопополнение приостановлено",
+    "smart_reason_inspection_usability_incomplete": "Часть учётных данных не прошла проверку доступности; автопополнение приостановлено",
     "smart_reason_inspection_snapshot_incomplete": "Последняя проверка квоты не является полным снимком; автопополнение приостановлено",
     "smart_reason_inspection_snapshot_unavailable": "Нет доступного снимка проверки квоты; автопополнение приостановлено",
     "smart_reason_locked_but_not_critical": "Запас заблокирован, но состояние не критично",

@@ -4450,6 +4450,7 @@
     "smart_reason_inventory_unavailable": "目前無可鎖庫存",
     "smart_reason_inspection_quota_incomplete": "額度巡檢覆蓋不完整，自動補貨已暫停",
     "smart_reason_inspection_lease_incomplete": "供應憑證有效期證據不完整，自動補貨已暫停",
+    "smart_reason_inspection_usability_incomplete": "部分憑證未通過可用性驗證，自動補貨已暫停",
     "smart_reason_inspection_snapshot_incomplete": "最新額度巡檢不是全量完成快照，自動補貨已暫停",
     "smart_reason_inspection_snapshot_unavailable": "找不到可用的額度巡檢快照，自動補貨已暫停",
     "smart_reason_locked_but_not_critical": "已鎖庫存但未到緊急水位",

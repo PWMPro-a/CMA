@@ -4450,6 +4450,7 @@
     "smart_reason_inventory_unavailable": "当前无可锁库存",
     "smart_reason_inspection_quota_incomplete": "额度巡检覆盖不完整，自动补货已暂停",
     "smart_reason_inspection_lease_incomplete": "供应凭证有效期证据不完整，自动补货已暂停",
+    "smart_reason_inspection_usability_incomplete": "部分凭证未通过可用性验证，自动补货已暂停",
     "smart_reason_inspection_snapshot_incomplete": "最新额度巡检不是全量完成快照，自动补货已暂停",
     "smart_reason_inspection_snapshot_unavailable": "未找到可用的额度巡检快照，自动补货已暂停",
     "smart_reason_locked_but_not_critical": "已锁库存但未到紧急水位",

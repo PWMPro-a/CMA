@@ -4450,6 +4450,7 @@
     "smart_reason_inventory_unavailable": "No lockable inventory now",
     "smart_reason_inspection_quota_incomplete": "Quota inspection coverage is incomplete; automatic supply is paused",
     "smart_reason_inspection_lease_incomplete": "Supply credential lifetime evidence is incomplete; automatic supply is paused",
+    "smart_reason_inspection_usability_incomplete": "Some credentials did not pass usability verification; automatic supply is paused",
     "smart_reason_inspection_snapshot_incomplete": "The latest quota inspection is not a complete snapshot; automatic supply is paused",
     "smart_reason_inspection_snapshot_unavailable": "No usable quota inspection snapshot was found; automatic supply is paused",
     "smart_reason_locked_but_not_critical": "Inventory is locked but not critical",
