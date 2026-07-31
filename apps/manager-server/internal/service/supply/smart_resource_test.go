@@ -479,32 +479,25 @@ func TestSmartResourceUsesPersistedSupplyLeaseForCapacity(t *testing.T) {
 	}
 }
 
-func TestSmartResourceTreatsMissingSupplyLeaseAsKnownZeroCapacity(t *testing.T) {
+func TestSmartResourceUsesLiveQuotaProbeAfterSupplyLeaseExpires(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	usedPercent := 0.0
+	statusCode := http.StatusOK
 	service := New(nil, nil)
-	for minute := 0; minute < 30; minute++ {
-		service.recordSmartUsageEvents([]usage.Event{{
-			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
-			Provider:    "codex",
-			AuthIndex:   "missing-lease.json",
-			TotalTokens: 100,
-		}}, now)
-	}
 	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
 		Product: "oauth_30d",
 	}, inspectionQuotaSnapshot{
 		run: store.CodexInspectionRun{ProbeSetCount: 1, SampledCount: 1, FinishedAtMS: now.UnixMilli()},
 		results: []store.CodexInspectionResult{{
 			AccountKey: "missing-lease", FileName: "codex-supply-missing-lease.json", Provider: "codex", Action: "keep",
-			UsedPercent: &usedPercent,
+			Status: "error", StatusCode: &statusCode, UsedPercent: &usedPercent,
 		}},
 		generatedAt: now,
 	}, now)
 
-	if !resource.SnapshotFresh || resource.CapacityLifetimeCoverage != 0 || resource.CurrentCapacityRCU != 0 ||
-		resource.HealthLevel != smartHealthCritical || resource.SuggestedQuantity < 1 {
-		t.Fatalf("expired or missing supply lease must be a known zero-capacity signal: %#v", resource)
+	if !resource.SnapshotFresh || resource.CapacityLifetimeCoverage != 0 || resource.RawCapacityRCU != 4_400 ||
+		resource.CurrentCapacityRCU != 4_400 || resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 || resource.WeakAccounts != 0 {
+		t.Fatalf("a current successful quota probe must retain capacity after the delivery lease expires: %#v", resource)
 	}
 }
 

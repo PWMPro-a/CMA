@@ -356,12 +356,17 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		if smartSupplyManagedFileName(result.FileName) {
 			leaseRequired++
 			leaseExpiresAtMS, found := snapshot.leaseExpiresByFile[result.FileName]
-			if !found || leaseExpiresAtMS <= now.UnixMilli() {
-				resource.WeakAccounts++
-				continue
+			if found && leaseExpiresAtMS > now.UnixMilli() {
+				withActiveLease++
+				remainingMinutes = clampFloat(time.UnixMilli(leaseExpiresAtMS).Sub(now).Minutes(), 0, float64(smartUsefulAccountLifetimeMinutes()))
 			}
-			withActiveLease++
-			remainingMinutes = clampFloat(time.UnixMilli(leaseExpiresAtMS).Sub(now).Minutes(), 0, float64(smartUsefulAccountLifetimeMinutes()))
+			// A successful current quota probe is stronger evidence than the
+			// historical delivery lease. Supplier leases are useful for limiting
+			// freshly imported credentials before their first inspection, but an
+			// older credential that still returns a 2xx quota response must retain
+			// its verified capacity. Keep the missing lease visible through
+			// CapacityLifetimeCoverage instead of turning a working credential into
+			// zero capacity.
 		}
 		capacity := smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * remaining
 		if capacity <= 0 {
@@ -420,12 +425,9 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	}
 	quotaEvidenceIncomplete := eligible > 0 && withQuota != eligible
 	usabilityEvidenceIncomplete := usabilityRequired > 0 && withVerifiedUsability != usabilityRequired
-	// A managed file without an active delivery lease is a known exclusion, not
-	// missing inspection evidence. Its supplier one-hour validity is over (or it
-	// has no matching imported delivery record), so it contributes zero capacity
-	// while the remaining verified files still form a complete lower-bound plan.
-	// Treating this as a stale snapshot hid an otherwise reliable capacity and
-	// stopped replenishment exactly when expired supply files needed replacing.
+	// Delivery-lease coverage is retained as an observability signal. It does
+	// not override a current successful quota probe: live usability and quota
+	// evidence decide whether a credential contributes capacity.
 	for _, item := range capacityItems {
 		resource.RawCapacityRCU += item.capacityRCU
 	}
@@ -875,7 +877,21 @@ func inspectionResultUsabilityUnverified(result store.CodexInspectionResult) boo
 	}
 	status := strings.ToLower(strings.TrimSpace(result.Status))
 	state := strings.ToLower(strings.TrimSpace(result.State))
-	return status == "error" || state == "error"
+	if status != "error" && state != "error" {
+		return false
+	}
+	// The file's runtime status may lag behind a completed inspection. A fresh
+	// successful quota response with quota evidence proves the credential is
+	// usable now, so a stale `status=error` must not remove it from capacity.
+	// Failed probes still have no 2xx status (or no quota evidence) and remain
+	// excluded by the conservative path below.
+	if result.StatusCode != nil && *result.StatusCode >= 200 && *result.StatusCode < 300 &&
+		strings.TrimSpace(result.Error) == "" && strings.TrimSpace(result.ErrorKind) == "" &&
+		strings.TrimSpace(result.ErrorDetail) == "" {
+		_, hasQuota := inspectionResultRemainingQuotaFraction(result)
+		return !hasQuota
+	}
+	return true
 }
 
 func inspectionResultInCooldown(result store.CodexInspectionResult) bool {
