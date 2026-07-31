@@ -68,6 +68,80 @@ func quotaInspectionResult(usedPercent float64) store.CodexInspectionResult {
 	}
 }
 
+func float64Ptr(value float64) *float64 {
+	return &value
+}
+
+func quotaWindow(id string, usedPercent, limitWindowSeconds float64) model.CodexInspectionQuotaWindow {
+	return model.CodexInspectionQuotaWindow{
+		ID:                 id,
+		UsedPercent:        float64Ptr(usedPercent),
+		LimitWindowSeconds: float64Ptr(limitWindowSeconds),
+	}
+}
+
+func TestInspectionResultQuotaFractionUsesShortestNonMonthlyWindow(t *testing.T) {
+	result := store.CodexInspectionResult{
+		UsedPercent: float64Ptr(0),
+		QuotaWindows: []model.CodexInspectionQuotaWindow{
+			quotaWindow("five-hour", 95, smartQuotaFiveHourSeconds),
+			quotaWindow("weekly", 1, smartQuotaWeekSeconds),
+			quotaWindow("monthly", 0, 30*24*60*60),
+		},
+	}
+	remaining, ok := inspectionResultRemainingQuotaFraction(result)
+	if !ok || remaining < 0.049 || remaining > 0.051 {
+		t.Fatalf("remaining=%v ok=%v, want 0.05/true", remaining, ok)
+	}
+}
+
+func TestInspectionResultQuotaFractionUsesWeeklyWhenNoShorterWindowExists(t *testing.T) {
+	result := store.CodexInspectionResult{
+		QuotaWindows: []model.CodexInspectionQuotaWindow{
+			quotaWindow("weekly", 58, smartQuotaWeekSeconds),
+			quotaWindow("monthly", 0, 30*24*60*60),
+		},
+	}
+	remaining, ok := inspectionResultRemainingQuotaFraction(result)
+	if !ok || remaining < 0.419 || remaining > 0.421 {
+		t.Fatalf("remaining=%v ok=%v, want 0.42/true", remaining, ok)
+	}
+}
+
+func TestInspectionResultQuotaFractionDoesNotTreatMonthlyOnlyEvidenceAsCapacity(t *testing.T) {
+	result := store.CodexInspectionResult{
+		UsedPercent: float64Ptr(0),
+		QuotaWindows: []model.CodexInspectionQuotaWindow{
+			quotaWindow("monthly", 0, 30*24*60*60),
+		},
+	}
+	if remaining, ok := inspectionResultRemainingQuotaFraction(result); ok || remaining != 0 {
+		t.Fatalf("monthly-only result must not fall back to aggregate usage: remaining=%v ok=%v", remaining, ok)
+	}
+}
+
+func TestInspectionResultQuotaFractionRetainsLegacyAggregateFallback(t *testing.T) {
+	usedPercent := 63.0
+	remaining, ok := inspectionResultRemainingQuotaFraction(store.CodexInspectionResult{UsedPercent: &usedPercent})
+	if !ok || remaining < 0.369 || remaining > 0.371 {
+		t.Fatalf("remaining=%v ok=%v, want 0.37/true", remaining, ok)
+	}
+}
+
+func TestInspectionResultQuotaFractionUsesLowestRemainingAtSameShortestWindow(t *testing.T) {
+	result := store.CodexInspectionResult{
+		QuotaWindows: []model.CodexInspectionQuotaWindow{
+			quotaWindow("five-hour", 20, smartQuotaFiveHourSeconds),
+			quotaWindow("additional-five-hour", 80, smartQuotaFiveHourSeconds),
+			quotaWindow("weekly", 99, smartQuotaWeekSeconds),
+		},
+	}
+	remaining, ok := inspectionResultRemainingQuotaFraction(result)
+	if !ok || remaining < 0.199 || remaining > 0.201 {
+		t.Fatalf("remaining=%v ok=%v, want 0.2/true", remaining, ok)
+	}
+}
+
 func TestSmartResourceRecommendsPrelockFromUsageCapacity(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now()

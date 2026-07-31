@@ -9,6 +9,7 @@ import (
 	"time"
 
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
@@ -906,32 +907,102 @@ func smartSupplyManagedFileName(fileName string) bool {
 	return strings.HasPrefix(fileName, "codex-supply-") || strings.HasPrefix(fileName, "supply-")
 }
 
+const (
+	smartQuotaFiveHourSeconds = 5 * 60 * 60
+	smartQuotaWeekSeconds     = 7 * 24 * 60 * 60
+	smartQuotaMonthMinSeconds = 28 * 24 * 60 * 60
+	smartQuotaMonthMaxSeconds = 31 * 24 * 60 * 60
+)
+
+// inspectionResultRemainingQuotaFraction returns the capacity fraction that
+// can be used before the credential's next limiting quota window is
+// exhausted. Monthly allowance is deliberately excluded: it does not describe
+// the short-term capacity available to keep the pool serving requests.
+//
+// A credential can expose both five-hour and weekly limits. The shortest
+// window is the one that will block it first, so only that window contributes
+// to the supply capacity calculation. If multiple windows have the same
+// shortest duration, use the lowest remaining fraction as the conservative
+// bound. Results written before quota windows were persisted retain the legacy
+// UsedPercent fallback; an inspection that contains only excluded windows is
+// intentionally not treated as usable capacity evidence.
 func inspectionResultRemainingQuotaFraction(result store.CodexInspectionResult) (float64, bool) {
-	minimum := 1.0
+	if len(result.QuotaWindows) == 0 {
+		if result.UsedPercent == nil {
+			return 0, false
+		}
+		used := *result.UsedPercent
+		if used > 1 {
+			used /= 100
+		}
+		return clampFloat(1-used, 0, 1), true
+	}
+
+	shortestSeconds := math.MaxFloat64
+	remainingAtShortest := 1.0
 	found := false
 	for _, window := range result.QuotaWindows {
-		id := strings.ToLower(strings.TrimSpace(window.ID + " " + window.LabelKey))
-		if strings.Contains(id, "code-review") || window.UsedPercent == nil {
+		if inspectionQuotaWindowExcludedFromCapacity(window) || window.UsedPercent == nil {
 			continue
 		}
 		used := *window.UsedPercent
 		if used > 1 {
 			used /= 100
 		}
-		minimum = math.Min(minimum, clampFloat(1-used, 0, 1))
-		found = true
+		remaining := clampFloat(1-used, 0, 1)
+		seconds := inspectionQuotaWindowDurationSeconds(window)
+		switch {
+		case !found || seconds < shortestSeconds:
+			shortestSeconds = seconds
+			remainingAtShortest = remaining
+			found = true
+		case seconds == shortestSeconds:
+			remainingAtShortest = math.Min(remainingAtShortest, remaining)
+		}
 	}
 	if found {
-		return minimum, true
+		return remainingAtShortest, true
 	}
-	if result.UsedPercent == nil {
-		return 0, false
+	return 0, false
+}
+
+func inspectionQuotaWindowExcludedFromCapacity(window model.CodexInspectionQuotaWindow) bool {
+	metadata := strings.ToLower(strings.TrimSpace(window.ID + " " + window.LabelKey))
+	if strings.Contains(metadata, "code-review") ||
+		strings.Contains(metadata, "code_review") ||
+		strings.Contains(metadata, "monthly") ||
+		strings.Contains(metadata, "month") {
+		return true
 	}
-	used := *result.UsedPercent
-	if used > 1 {
-		used /= 100
+	if window.LimitWindowSeconds == nil || math.IsNaN(*window.LimitWindowSeconds) || math.IsInf(*window.LimitWindowSeconds, 0) {
+		return false
 	}
-	return clampFloat(1-used, 0, 1), true
+	seconds := *window.LimitWindowSeconds
+	return seconds >= smartQuotaMonthMinSeconds && seconds <= smartQuotaMonthMaxSeconds
+}
+
+func inspectionQuotaWindowDurationSeconds(window model.CodexInspectionQuotaWindow) float64 {
+	if window.LimitWindowSeconds != nil && !math.IsNaN(*window.LimitWindowSeconds) && !math.IsInf(*window.LimitWindowSeconds, 0) && *window.LimitWindowSeconds > 0 {
+		return *window.LimitWindowSeconds
+	}
+	metadata := strings.ToLower(strings.TrimSpace(window.ID + " " + window.LabelKey))
+	switch {
+	case strings.Contains(metadata, "five-hour"),
+		strings.Contains(metadata, "five_hour"),
+		strings.Contains(metadata, "5-hour"),
+		strings.Contains(metadata, "5_hour"):
+		return smartQuotaFiveHourSeconds
+	case strings.Contains(metadata, "weekly"),
+		strings.Contains(metadata, "seven-day"),
+		strings.Contains(metadata, "seven_day"),
+		strings.Contains(metadata, "7-day"),
+		strings.Contains(metadata, "7_day"):
+		return smartQuotaWeekSeconds
+	default:
+		// Keep unclassified windows usable for backward compatibility, but only
+		// after every duration that is known or can be inferred.
+		return math.MaxFloat64
+	}
 }
 
 func authSnapshotCacheUsable(snapshot authFileSnapshot, now time.Time, ttl time.Duration) bool {
