@@ -27,15 +27,21 @@ func (w *SupplyReplenishmentWorker) Start(ctx context.Context) {
 }
 
 func (w *SupplyReplenishmentWorker) run(ctx context.Context) {
-	timer := time.NewTimer(2 * time.Second)
+	initialDelay := 2 * time.Second
+	w.service.ScheduleAutomaticExecution(time.Now().Add(initialDelay))
+	timer := time.NewTimer(initialDelay)
 	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			_ = w.service.RunAutomatic(ctx)
-			timer.Reset(w.service.NextInterval(ctx))
+			startedAt := time.Now()
+			err := w.service.RunAutomatic(ctx)
+			finishedAt := time.Now()
+			nextInterval := w.service.NextInterval(ctx)
+			w.service.RecordAutomaticExecution(startedAt, finishedAt, finishedAt.Add(nextInterval), err)
+			timer.Reset(nextInterval)
 		}
 	}
 }

@@ -19,6 +19,41 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
+func TestAutomationExecutionTracksScheduledAndCompletedCycles(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Millisecond)
+	service.ScheduleAutomaticExecution(now.Add(2 * time.Second))
+	scheduled := service.currentAutomationExecution(true)
+	if scheduled.LastResult != "scheduled" || scheduled.NextExecutionAtMS != now.Add(2*time.Second).UnixMilli() {
+		t.Fatalf("scheduled automation = %#v", scheduled)
+	}
+
+	service.setSmartResource(SmartResource{
+		SuggestedAction: smartActionTakeLocked,
+		DecisionReason:  "critical_take_confirmed",
+	})
+	finishedAt := now.Add(300 * time.Millisecond)
+	nextAt := finishedAt.Add(15 * time.Second)
+	service.RecordAutomaticExecution(now, finishedAt, nextAt, nil)
+	completed := service.currentAutomationExecution(true)
+	if completed.LastResult != "completed" || completed.LastAction != smartActionTakeLocked ||
+		completed.LastReason != "critical_take_confirmed" || completed.LastError != "" ||
+		completed.IntervalSeconds != 15 || completed.NextExecutionAtMS != nextAt.UnixMilli() {
+		t.Fatalf("completed automation = %#v", completed)
+	}
+
+	service.RecordAutomaticExecution(now, finishedAt, nextAt, errors.New("supplier unavailable"))
+	failed := service.currentAutomationExecution(true)
+	if failed.LastResult != "failed" || failed.LastError == "" {
+		t.Fatalf("failed automation = %#v", failed)
+	}
+
+	disabled := service.currentAutomationExecution(false)
+	if disabled.Enabled || disabled.NextExecutionAtMS != 0 || disabled.IntervalSeconds != 0 {
+		t.Fatalf("disabled automation must not expose a future execution: %#v", disabled)
+	}
+}
+
 func TestAutomaticReplenishmentCreatesTakesAndImportsOrder(t *testing.T) {
 	var createCalls atomic.Int32
 	var takeCalls atomic.Int32

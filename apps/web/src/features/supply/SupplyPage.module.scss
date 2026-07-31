@@ -337,6 +337,89 @@
   line-height: 1.6;
 }
 
+.executionStrip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.executionCell {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 76%, transparent);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--bg-primary) 74%, var(--surface-subtle));
+}
+
+.executionCountdown {
+  border-color: color-mix(in srgb, var(--smart-tone) 32%, var(--border-color));
+  background:
+    radial-gradient(
+      circle at 0 0,
+      color-mix(in srgb, var(--smart-tone) 16%, transparent),
+      transparent 80%
+    ),
+    color-mix(in srgb, var(--bg-primary) 76%, var(--surface-subtle));
+}
+
+.executionIcon {
+  display: grid;
+  place-items: center;
+  width: 31px;
+  height: 31px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--smart-tone) 13%, transparent);
+  color: var(--smart-tone);
+}
+
+.executionCell > div:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.executionCell span,
+.executionCell small {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.executionCell strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 760;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.countdownValue {
+  color: var(--smart-tone) !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 21px !important;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.04em;
+}
+
+.executionError {
+  padding: 9px 10px;
+  border: 1px solid var(--failure-badge-border);
+  border-radius: var(--app-radius-sm);
+  background: var(--failure-badge-bg);
+  color: var(--failure-badge-text);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .decisionFooter,
 .miniMetricGrid,
 .summaryList {
@@ -639,6 +722,7 @@
   .formGrid,
   .smartToggles,
   .orderComposer,
+  .executionStrip,
   .decisionFooter,
   .miniMetricGrid,
   .summaryList {

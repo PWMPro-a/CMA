@@ -55,8 +55,26 @@ type Status struct {
 	Running       bool                      `json:"running"`
 	Overview      Overview                  `json:"overview"`
 	SmartResource SmartResource             `json:"smartResource"`
+	Automation    AutomationExecution       `json:"automation"`
 	ActiveOrder   *store.SupplyOrder        `json:"activeOrder,omitempty"`
 	Orders        []store.SupplyOrder       `json:"orders"`
+}
+
+// AutomationExecution is the in-memory execution timeline for the automatic
+// replenishment worker. It lets the management page show the exact next worker
+// wake-up rather than guessing from a configured interval. It is intentionally
+// not persisted: a process restart creates a new schedule immediately.
+type AutomationExecution struct {
+	Enabled           bool   `json:"enabled"`
+	Running           bool   `json:"running"`
+	NextExecutionAtMS int64  `json:"nextExecutionAtMs,omitempty"`
+	IntervalSeconds   int    `json:"intervalSeconds,omitempty"`
+	LastStartedAtMS   int64  `json:"lastStartedAtMs,omitempty"`
+	LastFinishedAtMS  int64  `json:"lastFinishedAtMs,omitempty"`
+	LastResult        string `json:"lastResult,omitempty"`
+	LastAction        string `json:"lastAction,omitempty"`
+	LastReason        string `json:"lastReason,omitempty"`
+	LastError         string `json:"lastError,omitempty"`
 }
 
 type Service struct {
@@ -79,6 +97,7 @@ type Service struct {
 	quotaRefreshMu     sync.Mutex
 	quotaSnapshot      inspectionQuotaSnapshot
 	smartResourceState SmartResource
+	automation         AutomationExecution
 
 	criticalConfirmMu        sync.Mutex
 	criticalConfirmRounds    map[string]int
@@ -142,6 +161,7 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		Running:       running,
 		Overview:      overview,
 		SmartResource: resource,
+		Automation:    s.currentAutomationExecution(managerconfigsvc.SupplyEnabled(cfg.Supply)),
 		Orders:        orders,
 	}
 	if found {
@@ -1360,6 +1380,67 @@ func (s *Service) setRunning(running bool) {
 	s.stateMu.Lock()
 	s.running = running
 	s.stateMu.Unlock()
+}
+
+// ScheduleAutomaticExecution publishes the worker's actual wake-up time. The
+// worker owns this value because it may be shortened for an order poll or a
+// critical capacity check; deriving it from configuration in the HTTP handler
+// would otherwise show a misleading countdown.
+func (s *Service) ScheduleAutomaticExecution(at time.Time) {
+	if s == nil {
+		return
+	}
+	s.stateMu.Lock()
+	s.automation.NextExecutionAtMS = at.UnixMilli()
+	if s.automation.LastResult == "" {
+		s.automation.LastResult = "scheduled"
+	}
+	s.stateMu.Unlock()
+}
+
+// RecordAutomaticExecution saves the result of a completed automatic cycle
+// and the next scheduled worker wake-up. This is a compact runtime snapshot,
+// so it has no database writes on the automatic replenishment hot path.
+func (s *Service) RecordAutomaticExecution(startedAt, finishedAt, nextAt time.Time, err error) {
+	if s == nil {
+		return
+	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	s.automation.LastStartedAtMS = startedAt.UnixMilli()
+	s.automation.LastFinishedAtMS = finishedAt.UnixMilli()
+	s.automation.NextExecutionAtMS = nextAt.UnixMilli()
+	s.automation.IntervalSeconds = max(0, int(math.Ceil(nextAt.Sub(finishedAt).Seconds())))
+	s.automation.LastAction = s.smartResourceState.SuggestedAction
+	s.automation.LastReason = s.smartResourceState.DecisionReason
+	if err != nil {
+		s.automation.LastResult = "failed"
+		s.automation.LastError = safeError(err)
+		return
+	}
+	s.automation.LastResult = "completed"
+	s.automation.LastError = ""
+}
+
+func (s *Service) currentAutomationExecution(enabled bool) AutomationExecution {
+	if s == nil {
+		return AutomationExecution{Enabled: enabled}
+	}
+	s.stateMu.RLock()
+	status := s.automation
+	status.Running = s.running
+	s.stateMu.RUnlock()
+	status.Enabled = enabled
+	if !enabled {
+		// The worker remains alive so a later configuration change takes effect,
+		// but it has no automatic supply action scheduled while disabled.
+		status.NextExecutionAtMS = 0
+		status.IntervalSeconds = 0
+		if status.LastResult == "" || status.LastResult == "scheduled" {
+			status.LastResult = "disabled"
+		}
+	}
+	return status
 }
 
 func (s *Service) setOverview(overview Overview) {

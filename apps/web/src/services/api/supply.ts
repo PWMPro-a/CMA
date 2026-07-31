@@ -134,11 +134,25 @@ export interface SupplySmartResource {
   lockedConfirmRounds?: number;
 }
 
+export interface SupplyAutomationExecution {
+  enabled: boolean;
+  running: boolean;
+  nextExecutionAtMs?: number;
+  intervalSeconds?: number;
+  lastStartedAtMs?: number;
+  lastFinishedAtMs?: number;
+  lastResult?: 'scheduled' | 'completed' | 'failed' | 'disabled' | string;
+  lastAction?: string;
+  lastReason?: string;
+  lastError?: string;
+}
+
 export interface SupplyStatus {
   config: SupplyConfig;
   running: boolean;
   overview: SupplyOverview;
   smartResource: SupplySmartResource;
+  automation?: SupplyAutomationExecution;
   activeOrder?: SupplyOrder;
   orders: SupplyOrder[];
 }

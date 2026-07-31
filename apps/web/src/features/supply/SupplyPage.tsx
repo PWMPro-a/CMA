@@ -78,6 +78,18 @@ const formatMinutes = (value?: number) => {
 const formatTime = (value?: number) =>
   value && value > 0 ? new Date(value).toLocaleString() : '-';
 
+const formatCountdown = (targetMs?: number, nowMs = Date.now()) => {
+  if (!targetMs || targetMs <= 0) return '-';
+  const totalSeconds = Math.max(0, Math.ceil((targetMs - nowMs) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+};
+
 const clampPercent = (value: number) => Math.min(100, Math.max(0, value));
 
 const shortOrderId = (value?: string) => {
@@ -120,6 +132,7 @@ export function SupplyPage() {
   const [manualQuantity, setManualQuantity] = useState(10);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<SupplyWorkspaceTab>('overview');
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [action, setAction] = useState<
     'save' | 'check' | 'replenish' | 'dismiss' | 'cancel' | null
   >(null);
@@ -190,6 +203,11 @@ export function SupplyPage() {
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [load]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const runAction = async (
     kind: 'save' | 'check' | 'replenish' | 'dismiss' | 'cancel',
@@ -282,6 +300,7 @@ export function SupplyPage() {
   const inventory = overview?.inventory;
   const balance = overview?.balance;
   const smart = status?.smartResource;
+  const automation = status?.automation;
   const autoSupplyEnabled = status?.config.enabled ?? draft.enabled ?? false;
   const smartModeEnabled = smart?.enabled ?? draft.smartEnabled !== false;
   const activeOrder = status?.activeOrder;
@@ -309,6 +328,44 @@ export function SupplyPage() {
       ? t('supply.snapshot_fresh')
       : t('supply.snapshot_stale')
     : t('supply.no_snapshot');
+  const nextExecutionCountdown = !autoSupplyEnabled
+    ? t('supply.automation_disabled_short')
+    : automation?.running || status?.running
+      ? t('supply.automation_running')
+      : automation?.nextExecutionAtMs
+        ? formatCountdown(automation.nextExecutionAtMs, nowMs)
+        : t('supply.automation_waiting');
+  const nextExecutionDetail = !autoSupplyEnabled
+    ? t('supply.automation_disabled_detail')
+    : automation?.nextExecutionAtMs
+      ? t('supply.automation_next_execution_detail', {
+          value: formatTime(automation.nextExecutionAtMs),
+          seconds: automation.intervalSeconds ?? draft.checkIntervalSeconds,
+        })
+      : t('supply.automation_waiting_detail');
+  const lastExecutionResult = automation?.lastResult || 'scheduled';
+  const lastExecutionAction = automation?.lastAction || suggestedAction;
+  const lastExecutionReason = automation?.lastReason || decisionReason;
+  const lastExecutionDetail = automation?.lastFinishedAtMs
+    ? t('supply.automation_last_execution_detail', {
+        value: formatTime(automation.lastFinishedAtMs),
+      })
+    : t('supply.automation_no_execution');
+  const lastExecutionActionLabel = t(`supply.smart_action_${lastExecutionAction}`, {
+    defaultValue: lastExecutionAction,
+  });
+  const lastExecutionReasonLabel = t(`supply.smart_reason_${lastExecutionReason}`, {
+    defaultValue: lastExecutionReason,
+  });
+  const lastExecutionContext = `${lastExecutionDetail} · ${lastExecutionActionLabel}`;
+  const lastExecutionTooltip = `${lastExecutionContext} · ${lastExecutionReasonLabel}`;
+  const activeOrderDetail = activeOrder
+    ? activeOrder.nextPollAtMs && activeOrder.nextPollAtMs > nowMs
+      ? t('supply.automation_order_poll_detail', {
+          value: formatCountdown(activeOrder.nextPollAtMs, nowMs),
+        })
+      : t('supply.automation_order_processing_detail')
+    : t('supply.automation_no_active_order_detail');
 
   const metrics = useMemo(
     () => {
@@ -544,6 +601,53 @@ export function SupplyPage() {
                     })}
                   </p>
                 </div>
+                <div className={styles.executionStrip} aria-live="polite">
+                  <div className={`${styles.executionCell} ${styles.executionCountdown}`}>
+                    <div className={styles.executionIcon}>
+                      <IconTimer size={17} />
+                    </div>
+                    <div>
+                      <span>{t('supply.automation_next_execution')}</span>
+                      <strong className={styles.countdownValue}>{nextExecutionCountdown}</strong>
+                      <small title={nextExecutionDetail}>{nextExecutionDetail}</small>
+                    </div>
+                  </div>
+                  <div className={styles.executionCell}>
+                    <div className={styles.executionIcon}>
+                      <IconRefreshCw size={17} />
+                    </div>
+                    <div>
+                      <span>{t('supply.automation_last_execution')}</span>
+                      <strong>
+                        {t(`supply.automation_result_${lastExecutionResult}`, {
+                          defaultValue: lastExecutionResult,
+                        })}
+                      </strong>
+                      <small title={lastExecutionTooltip}>{lastExecutionContext}</small>
+                    </div>
+                  </div>
+                  <div className={styles.executionCell}>
+                    <div className={styles.executionIcon}>
+                      <IconInbox size={17} />
+                    </div>
+                    <div>
+                      <span>{t('supply.automation_order_execution')}</span>
+                      <strong>
+                        {activeOrder
+                          ? t(`supply.status_${activeOrder.status}`, {
+                              defaultValue: activeOrder.status,
+                            })
+                          : t('supply.no_active_order_short')}
+                      </strong>
+                      <small title={activeOrderDetail}>{activeOrderDetail}</small>
+                    </div>
+                  </div>
+                </div>
+                {automation?.lastError ? (
+                  <div className={styles.executionError}>
+                    {t('supply.automation_last_error')}: {automation.lastError}
+                  </div>
+                ) : null}
                 <div className={styles.decisionFooter}>
                   <div>
                     <span>{t('supply.suggested_quantity')}</span>
