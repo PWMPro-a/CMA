@@ -393,6 +393,7 @@ func Migrate(db *sql.DB) error {
 			imported_count integer not null default 0,
 			last_error text,
 			next_poll_at_ms integer,
+			supplier_retry_until_ms integer,
 			completed_at_ms integer,
 			created_at_ms integer not null,
 			updated_at_ms integer not null
@@ -490,6 +491,7 @@ func ensureSupplyOrderColumns(db *sql.DB) error {
 		{name: "progress", definition: "integer not null default 0"},
 		{name: "status_url", definition: "text"},
 		{name: "take_url", definition: "text"},
+		{name: "supplier_retry_until_ms", definition: "integer"},
 	} {
 		if _, ok := existing[column.name]; ok {
 			continue

@@ -53,6 +53,25 @@ func TestAutomationExecutionTracksScheduledAndCompletedCycles(t *testing.T) {
 	}
 }
 
+func TestEmergencyOrderProcessingHonorsSupplierRetryDeadline(t *testing.T) {
+	service := New(nil, nil)
+	resource := SmartResource{
+		EffectiveHealthyMinutes: 40,
+		CriticalMinutes:         5,
+		EstimatedSustainMinutes: 10,
+		ConsumeRCUPerMinute:     100,
+		CapacityGapRCU:          3_000,
+	}
+	order := store.SupplyOrder{Automatic: true, Status: "waiting_inventory"}
+	if !service.emergencyOrderProcessingAllowed(store.ManagerSupplyConfig{}, order, resource) {
+		t.Fatal("emergency order without a supplier retry deadline should bypass local poll pacing")
+	}
+	order.SupplierRetryUntilMS = time.Now().Add(10 * time.Second).UnixMilli()
+	if service.emergencyOrderProcessingAllowed(store.ManagerSupplyConfig{}, order, resource) {
+		t.Fatal("supplier retry_after deadline must not be bypassed by emergency processing")
+	}
+}
+
 func TestAutomaticReplenishmentCreatesTakesAndImportsOrder(t *testing.T) {
 	var createCalls atomic.Int32
 	var takeCalls atomic.Int32

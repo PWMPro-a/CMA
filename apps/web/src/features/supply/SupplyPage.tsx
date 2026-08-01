@@ -107,6 +107,7 @@ const orderTone = (status: string) => {
 const smartTone = (resource?: SupplySmartResource) => {
   if (!resource?.enabled) return styles.warning;
   if (!resource.snapshotFresh) return styles.warning;
+  if (resource.emergencyShortage || resource.suggestedAction === 'emergency_replenish') return styles.error;
   if (resource.healthLevel === 'healthy') return styles.success;
   if (resource.healthLevel === 'critical') return styles.error;
   if (resource.healthLevel === 'warning') return styles.warning;
@@ -115,6 +116,7 @@ const smartTone = (resource?: SupplySmartResource) => {
 
 const smartPanelTone = (resource?: SupplySmartResource) => {
   if (!resource?.enabled || !resource.snapshotFresh) return styles.smartPanelWarning;
+  if (resource.emergencyShortage || resource.suggestedAction === 'emergency_replenish') return styles.smartPanelCritical;
   if (resource.healthLevel === 'healthy') return styles.smartPanelHealthy;
   if (resource.healthLevel === 'critical') return styles.smartPanelCritical;
   if (resource.healthLevel === 'warning') return styles.smartPanelWarning;
@@ -347,10 +349,17 @@ export function SupplyPage() {
         })
       : t('supply.automation_order_processing_detail')
     : t('supply.automation_no_active_order_detail');
-  const demandStrategy = t(`supply.demand_strategy_${demandTrend}`, {
-    defaultValue: demandTrend,
+  const emergencyShortage = smart?.emergencyShortage || suggestedAction === 'emergency_replenish';
+  const displayDemandStrategy = emergencyShortage ? 'emergency' : demandTrend;
+  const demandStrategy = t(`supply.demand_strategy_${displayDemandStrategy}`, {
+    defaultValue: displayDemandStrategy,
   });
-  const demandBasis = t(`supply.demand_basis_${demandTrend}`, {
+  const demandBasisKey = emergencyShortage
+    ? 'emergency'
+    : demandTrend === 'falling' && (smart?.capacityGapRcu ?? 0) > 0
+      ? 'falling_target_gap'
+      : demandTrend;
+  const demandBasis = t(`supply.demand_basis_${demandBasisKey}`, {
     defaultValue: t('supply.demand_basis_unknown'),
   });
 

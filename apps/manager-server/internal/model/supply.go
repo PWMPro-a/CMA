@@ -18,9 +18,12 @@ type SupplyOrder struct {
 	ImportedCount     int    `json:"importedCount"`
 	LastError         string `json:"lastError,omitempty"`
 	NextPollAtMS      int64  `json:"nextPollAtMs,omitempty"`
-	CompletedAtMS     int64  `json:"completedAtMs,omitempty"`
-	CreatedAtMS       int64  `json:"createdAtMs"`
-	UpdatedAtMS       int64  `json:"updatedAtMs"`
+	// SupplierRetryUntilMS is distinct from the regular poll deadline so an
+	// emergency cycle skips only local pacing, never retry_after_seconds.
+	SupplierRetryUntilMS int64 `json:"supplierRetryUntilMs,omitempty"`
+	CompletedAtMS        int64 `json:"completedAtMs,omitempty"`
+	CreatedAtMS          int64 `json:"createdAtMs"`
+	UpdatedAtMS          int64 `json:"updatedAtMs"`
 }
 
 type SupplyImportItem struct {

@@ -247,6 +247,18 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 		if order.Status == "creating" || order.Status == "create_uncertain" {
 			return time.Minute
 		}
+		if wait := time.Until(time.UnixMilli(order.SupplierRetryUntilMS)); wait > 0 {
+			if wait > time.Minute {
+				return time.Minute
+			}
+			return wait
+		}
+		resource := s.currentSmartResource(cfg.Supply)
+		if s.emergencyOrderProcessingAllowed(cfg.Supply, order, resource) {
+			// The supplier has not requested a retry delay. Keep emergency order
+			// reconciliation responsive without spinning the worker.
+			return 3 * time.Second
+		}
 		if wait := time.Until(time.UnixMilli(order.NextPollAtMS)); wait > 0 {
 			if wait > time.Minute {
 				return time.Minute
@@ -263,6 +275,9 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 		return time.Minute
 	}
 	resource := s.currentSmartResource(cfg.Supply)
+	if smartEmergencyShortage(resource) {
+		return time.Second
+	}
 	seconds := smartAutomaticCheckIntervalSeconds(cfg.Supply, resource)
 	return time.Duration(seconds) * time.Second
 }
@@ -298,7 +313,14 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 				return err
 			}
 		}
-		if !force && active.NextPollAtMS > time.Now().UnixMilli() {
+		nowMS := time.Now().UnixMilli()
+		// retry_after_seconds is a supplier contract, not a local cooldown. A
+		// manual check may refresh the dashboard but must not poll the order
+		// ahead of this deadline either.
+		if active.SupplierRetryUntilMS > nowMS {
+			return nil
+		}
+		if !force && active.NextPollAtMS > nowMS && !s.emergencyOrderProcessingAllowed(cfg.Supply, active, s.currentSmartResource(cfg.Supply)) {
 			return nil
 		}
 		return s.processOrder(ctx, cfg, active)
@@ -335,7 +357,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	if manualQuantity == 0 {
 		if recent, recentFound, err := s.store.GetLatestCompletedAutomaticSupplyOrder(ctx); err != nil {
 			return err
-		} else if recentFound && time.Since(time.UnixMilli(recent.CompletedAtMS)) < automaticSettleWindow(supplyCfg) {
+		} else if recentFound && !smartEmergencyShortage(resource) && time.Since(time.UnixMilli(recent.CompletedAtMS)) < automaticSettleWindow(supplyCfg) {
 			s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
 			return nil
 		}
@@ -355,7 +377,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			if resource.SuggestedAction == smartActionHealthy || resource.HealthLevel == smartHealthHealthy {
 				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
 			}
-			if s.automaticCreateCooldownActive(supplyCfg, resource) {
+			if !smartEmergencyShortage(resource) && s.automaticCreateCooldownActive(supplyCfg, resource) {
 				s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
 				return nil
 			}
@@ -486,19 +508,20 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		return fmt.Errorf("%w: %v", ErrCreateUncertain, err)
 	}
 	order := store.SupplyOrder{
-		OrderID:           remote.ID,
-		Product:           supplyCfg.Product,
-		RequestedQuantity: quantity,
-		Automatic:         manualQuantity == 0,
-		Status:            localOrderStatus(remote.Status),
-		RemoteStatus:      remote.Status,
-		ReadyQuantity:     remote.ReadyQuantity,
-		Progress:          remote.Progress,
-		StatusURL:         remote.StatusURL,
-		TakeURL:           remote.TakeURL,
-		ChargedFen:        remote.ChargedFen,
-		ReleasedFen:       remote.ReleasedFen,
-		NextPollAtMS:      nextPollAt(supplyCfg, remote.RetryAfterSeconds),
+		OrderID:              remote.ID,
+		Product:              supplyCfg.Product,
+		RequestedQuantity:    quantity,
+		Automatic:            manualQuantity == 0,
+		Status:               localOrderStatus(remote.Status),
+		RemoteStatus:         remote.Status,
+		ReadyQuantity:        remote.ReadyQuantity,
+		Progress:             remote.Progress,
+		StatusURL:            remote.StatusURL,
+		TakeURL:              remote.TakeURL,
+		ChargedFen:           remote.ChargedFen,
+		ReleasedFen:          remote.ReleasedFen,
+		NextPollAtMS:         nextPollAt(supplyCfg, remote.RetryAfterSeconds),
+		SupplierRetryUntilMS: supplierRetryUntilMS(remote.RetryAfterSeconds),
 	}
 	if err := s.store.PromoteSupplyCreateAttempt(ctx, attempt.OrderID, order); err != nil {
 		attempt.Status = "create_uncertain"
@@ -667,6 +690,13 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 		resource.LockedOrderID = order.OrderID
 		resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
 		if resource.HealthLevel != smartHealthHealthy && resource.CapacityGapRCU > 0 {
+			if smartEmergencyShortage(resource) {
+				resource.EmergencyShortage = true
+				resource.SuggestedAction = smartActionEmergencyReplenish
+				resource.DecisionReason = "emergency_capacity_shortage"
+				s.setSmartResource(resource)
+				return false, nil
+			}
 			if resource.HealthLevel != smartHealthCritical {
 				resource.SuggestedAction = smartActionTakeLocked
 				resource.DecisionReason = "low_water_take_ready"
@@ -994,10 +1024,15 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 	if quantity <= 0 {
 		return quantity, ""
 	}
-	if resource.DemandTrend == smartDemandTrendFalling {
+	if smartEmergencyShortage(resource) {
+		limit := smartAutomaticOrderQuantityLimit(cfg, resource)
+		minimum := min(smartPrelockMinQuantity(cfg), limit)
+		return clampInt(quantity, minimum, limit), "emergency_capacity_shortage"
+	}
+	if resource.DemandTrend == smartDemandTrendFalling && !smartEmergencyShortage(resource) {
 		return 0, "demand_falling_observe"
 	}
-	if resource.DemandTrend == smartDemandTrendRising {
+	if resource.DemandTrend == smartDemandTrendRising && !smartEmergencyShortage(resource) {
 		return min(quantity, smartRisingObservationQuantity(cfg, resource)), "demand_rising_observe"
 	}
 	maxQuantity := smartAutomaticOrderQuantityLimit(cfg, resource)
@@ -1082,7 +1117,7 @@ func sameSupplyProduct(a string, b string) bool {
 }
 
 func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, resource SmartResource) int {
-	if resource.DemandTrend == smartDemandTrendFalling {
+	if resource.DemandTrend == smartDemandTrendFalling && !smartEmergencyShortage(resource) {
 		return 0
 	}
 	quantity := resource.SuggestedQuantity
@@ -1104,7 +1139,7 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	if cfg.DailyMaxReplenishQuantity > 0 {
 		quantity = min(quantity, cfg.DailyMaxReplenishQuantity)
 	}
-	if resource.DemandTrend == smartDemandTrendRising {
+	if resource.DemandTrend == smartDemandTrendRising && !smartEmergencyShortage(resource) {
 		quantity = min(quantity, smartRisingObservationQuantity(cfg, resource))
 	}
 	return clampInt(quantity, 1, 100)
@@ -1184,6 +1219,9 @@ func smartAutomaticCheckIntervalSeconds(cfg store.ManagerSupplyConfig, resource 
 	if seconds <= 0 {
 		seconds = 60
 	}
+	if smartEmergencyShortage(resource) {
+		return 1
+	}
 	if smartResourceAtOrBelowWarning(resource) {
 		seconds = min(seconds, smartCreateCooldownForResource(cfg, resource))
 	}
@@ -1221,6 +1259,9 @@ func (s *Service) smartCriticalTakeConfirmed(cfg store.ManagerSupplyConfig, orde
 
 func (s *Service) smartTakeAllowed(cfg store.ManagerSupplyConfig, orderID string) bool {
 	resource := s.currentSmartResource(cfg)
+	if smartEmergencyShortage(resource) {
+		return true
+	}
 	if resource.SuggestedAction == smartActionTakeLocked {
 		switch resource.DecisionReason {
 		case "critical_take_confirmed", "critical_take_confirmed_stale_lower_bound", "supply_plenty_small_take", "low_water_take_ready", "low_water_take_ready_stale_lower_bound":
@@ -1436,7 +1477,23 @@ func applyRemoteOrder(order *store.SupplyOrder, remote supplyclient.Order, cfg s
 		order.TakeURL = remote.TakeURL
 	}
 	order.NextPollAtMS = nextPollAt(cfg, remote.RetryAfterSeconds)
+	order.SupplierRetryUntilMS = supplierRetryUntilMS(remote.RetryAfterSeconds)
 	order.LastError = ""
+}
+
+func supplierRetryUntilMS(retryAfterSeconds int) int64 {
+	if retryAfterSeconds <= 0 {
+		return 0
+	}
+	return time.Now().Add(time.Duration(retryAfterSeconds) * time.Second).UnixMilli()
+}
+
+func (s *Service) emergencyOrderProcessingAllowed(cfg store.ManagerSupplyConfig, order store.SupplyOrder, resource SmartResource) bool {
+	if !order.Automatic || !smartSupplyEnabled(cfg) || order.Status == "taking" ||
+		order.Status == "creating" || order.Status == "create_uncertain" || order.SupplierRetryUntilMS > time.Now().UnixMilli() {
+		return false
+	}
+	return smartEmergencyShortage(resource)
 }
 
 func (s *Service) cancelOrder(ctx context.Context, order *store.SupplyOrder, err error) error {

@@ -107,6 +107,7 @@ export interface SupplySmartResource {
   effectiveHealthyMinutesTarget: number;
   accountLifetimeMinutes: number;
   estimatedSustainMinutes: number;
+  emergencyShortage?: boolean;
   healthyMinutesTarget: number;
   warningMinutes: number;
   criticalMinutes: number;

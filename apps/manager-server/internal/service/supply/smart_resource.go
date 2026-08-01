@@ -16,17 +16,18 @@ import (
 )
 
 const (
-	smartActionHealthy          = "healthy"
-	smartActionPrelock          = "prelock"
-	smartActionWaitLocked       = "wait_locked"
-	smartActionReleaseLocked    = "release_locked"
-	smartActionTakeLocked       = "take_locked"
-	smartActionBalanceBlocked   = "balance_blocked"
-	smartActionInventoryBlocked = "inventory_blocked"
-	smartActionConfigError      = "config_error"
-	smartActionSnapshotStale    = "snapshot_stale"
-	smartActionManualReview     = "manual_review"
-	smartActionObserveDemand    = "observe_demand"
+	smartActionHealthy            = "healthy"
+	smartActionPrelock            = "prelock"
+	smartActionWaitLocked         = "wait_locked"
+	smartActionReleaseLocked      = "release_locked"
+	smartActionTakeLocked         = "take_locked"
+	smartActionBalanceBlocked     = "balance_blocked"
+	smartActionInventoryBlocked   = "inventory_blocked"
+	smartActionConfigError        = "config_error"
+	smartActionSnapshotStale      = "snapshot_stale"
+	smartActionManualReview       = "manual_review"
+	smartActionObserveDemand      = "observe_demand"
+	smartActionEmergencyReplenish = "emergency_replenish"
 
 	smartHealthHealthy  = "healthy"
 	smartHealthWarning  = "warning"
@@ -84,13 +85,16 @@ type SmartResource struct {
 	// only its monthly quota window. The quota selector always prefers a shorter
 	// window; monthly data is used only as the fallback when no short window is
 	// present. The delivery lease still bounds its usable lifetime.
-	LeaseEstimatedAccounts     int     `json:"leaseEstimatedAccounts,omitempty"`
-	LeaseEstimatedCapacityRCU  float64 `json:"leaseEstimatedCapacityRcu,omitempty"`
-	TargetAvailableAccounts    int     `json:"-"`
-	ConfiguredHealthyMinutes   int     `json:"configuredHealthyMinutesTarget,omitempty"`
-	EffectiveHealthyMinutes    int     `json:"effectiveHealthyMinutesTarget"`
-	AccountLifetimeMinutes     int     `json:"accountLifetimeMinutes"`
-	EstimatedSustainMinutes    float64 `json:"estimatedSustainMinutes"`
+	LeaseEstimatedAccounts    int     `json:"leaseEstimatedAccounts,omitempty"`
+	LeaseEstimatedCapacityRCU float64 `json:"leaseEstimatedCapacityRcu,omitempty"`
+	TargetAvailableAccounts   int     `json:"-"`
+	ConfiguredHealthyMinutes  int     `json:"configuredHealthyMinutesTarget,omitempty"`
+	EffectiveHealthyMinutes   int     `json:"effectiveHealthyMinutesTarget"`
+	AccountLifetimeMinutes    int     `json:"accountLifetimeMinutes"`
+	EstimatedSustainMinutes   float64 `json:"estimatedSustainMinutes"`
+	// EmergencyShortage marks a runway shortfall that takes precedence over
+	// normal demand-trend observation.
+	EmergencyShortage          bool    `json:"emergencyShortage"`
 	HealthyMinutesTarget       int     `json:"healthyMinutesTarget"`
 	WarningMinutes             int     `json:"warningMinutes"`
 	CriticalMinutes            int     `json:"criticalMinutes"`
@@ -648,13 +652,22 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 		resource.SuggestedAction = smartActionPrelock
 		resource.DecisionReason = "capacity_below_target"
 	}
-	if resource.DemandTrend == smartDemandTrendFalling {
+	emergency := smartEmergencyShortage(*resource)
+	resource.EmergencyShortage = emergency
+	if emergency {
+		// A critically short runway must not be hidden by a transient demand
+		// drop. Local cooldowns and observation batching are bypassed by the
+		// worker, while supplier and budget guards remain in effect.
+		resource.HealthLevel = smartHealthCritical
+		resource.SuggestedAction = smartActionEmergencyReplenish
+		resource.DecisionReason = "emergency_capacity_shortage"
+	}
+	if resource.DemandTrend == smartDemandTrendFalling && !emergency {
 		// One completed low-minute sample is sufficient to stop creating more
-		// short-lived credentials. Keep the calculated health level visible, but
-		// pause new purchases while existing reservations follow their normal
-		// minimum-hold and release checks.
+		// short-lived credentials while the buffer remains above the emergency
+		// runway. Keep the target deficit visible instead of reporting healthy.
 		resource.SuggestedAction = smartActionObserveDemand
-		resource.DecisionReason = "demand_falling_observe"
+		resource.DecisionReason = "capacity_below_target_falling_observe"
 		return
 	}
 
@@ -677,7 +690,7 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 	batchLimit := smartAutomaticOrderQuantityLimit(cfg, *resource)
 	minimumQuantity := min(smartPrelockMinQuantity(cfg), batchLimit)
 	resource.SuggestedQuantity = clampInt(int(math.Ceil(gapForOrder/unitForNew)), minimumQuantity, batchLimit)
-	if resource.DemandTrend == smartDemandTrendRising {
+	if resource.DemandTrend == smartDemandTrendRising && !emergency {
 		resource.SuggestedQuantity = min(resource.SuggestedQuantity, smartRisingObservationQuantity(cfg, *resource))
 		resource.DecisionReason = "demand_rising_observe"
 	}
@@ -1307,6 +1320,20 @@ func smartResourceAtOrBelowWarning(resource SmartResource) bool {
 		resource.EstimatedSustainMinutes <= float64(resource.WarningMinutes)
 }
 
+// smartEmergencyShortage is narrower than merely being below the healthy
+// target. New credentials are short-lived, so a normal target deficit may
+// observe a falling one-minute sample. At or below half of the usable health
+// runway, or an explicitly higher critical line, there is too little buffer to
+// wait for that observation.
+func smartEmergencyShortage(resource SmartResource) bool {
+	if resource.ConsumeRCUPerMinute <= 0 || resource.CapacityGapRCU <= 0 ||
+		resource.EffectiveHealthyMinutes <= 0 || resource.EstimatedSustainMinutes < 0 {
+		return false
+	}
+	threshold := max(resource.CriticalMinutes, max(1, resource.EffectiveHealthyMinutes/2))
+	return resource.EstimatedSustainMinutes <= float64(threshold)
+}
+
 // smartPartialInspectionCapacityDeficitAllowed permits a bounded purchase
 // from the verified capacity lower bound when usability/quota evidence is
 // incomplete. It deliberately excludes missing snapshots and old evidence;
@@ -1353,7 +1380,7 @@ func smartReplenishBatchLimit(cfg store.ManagerSupplyConfig) int {
 // active safety cap so a configured 15-account recovery batch is not silently
 // reduced by a smaller routine-prelock setting such as 7.
 func smartAutomaticOrderQuantityLimit(cfg store.ManagerSupplyConfig, resource SmartResource) int {
-	if smartResourceAtOrBelowWarning(resource) {
+	if smartEmergencyShortage(resource) || smartResourceAtOrBelowWarning(resource) {
 		return smartReplenishBatchLimit(cfg)
 	}
 	limit := smartReplenishBatchLimit(cfg)
@@ -1397,6 +1424,9 @@ func smartCreateCooldownSeconds(cfg store.ManagerSupplyConfig) int {
 // store, daily limits and balance limits still apply.
 func smartCreateCooldownForResource(cfg store.ManagerSupplyConfig, resource SmartResource) int {
 	cooldown := smartCreateCooldownSeconds(cfg)
+	if smartEmergencyShortage(resource) {
+		return 0
+	}
 	if !smartResourceAtOrBelowWarning(resource) {
 		return cooldown
 	}
@@ -1756,7 +1786,7 @@ func round2(value float64) float64 {
 }
 
 func supplySmartActionPriority(action string) int {
-	order := []string{smartActionHealthy, smartActionObserveDemand, smartActionPrelock, smartActionWaitLocked, smartActionReleaseLocked, smartActionTakeLocked, smartActionBalanceBlocked, smartActionInventoryBlocked, smartActionConfigError, smartActionSnapshotStale, smartActionManualReview}
+	order := []string{smartActionHealthy, smartActionObserveDemand, smartActionPrelock, smartActionWaitLocked, smartActionReleaseLocked, smartActionTakeLocked, smartActionEmergencyReplenish, smartActionBalanceBlocked, smartActionInventoryBlocked, smartActionConfigError, smartActionSnapshotStale, smartActionManualReview}
 	for index, item := range order {
 		if item == action {
 			return index

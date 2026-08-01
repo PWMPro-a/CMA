@@ -62,16 +62,16 @@ func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model
 	statement := `insert into supply_orders (
 		order_id, product, requested_quantity, automatic, status, remote_status,
 		ready_quantity, progress, status_url, take_url, charged_fen, released_fen,
-		item_count, imported_count, last_error, next_poll_at_ms, completed_at_ms,
+		item_count, imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms,
 		created_at_ms, updated_at_ms
-	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	if isOpenOrderStatus(order.Status) {
 		statement = `insert into supply_orders (
 			order_id, product, requested_quantity, automatic, status, remote_status,
 			ready_quantity, progress, status_url, take_url, charged_fen, released_fen,
-			item_count, imported_count, last_error, next_poll_at_ms, completed_at_ms,
+			item_count, imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms,
 			created_at_ms, updated_at_ms
-		) select ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		) select ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		where not exists (select 1 from supply_orders where status in (` + openOrderStatusClause + `))`
 	}
 	result, err := r.db.ExecContext(ctx, statement,
@@ -79,7 +79,7 @@ func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model
 		nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress, nullString(order.StatusURL),
 		nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen, order.ItemCount,
 		order.ImportedCount, nullString(order.LastError), nullPositive(order.NextPollAtMS),
-		nullPositive(order.CompletedAtMS), order.CreatedAtMS, order.UpdatedAtMS,
+		nullPositive(order.SupplierRetryUntilMS), nullPositive(order.CompletedAtMS), order.CreatedAtMS, order.UpdatedAtMS,
 	)
 	if err != nil {
 		return model.SupplyOrder{}, err
@@ -245,11 +245,11 @@ func (r *repository) PromoteCreateAttempt(ctx context.Context, localOrderID stri
 	result, err := r.db.ExecContext(ctx, `update supply_orders set
 		order_id = ?, status = ?, remote_status = ?, ready_quantity = ?, progress = ?,
 		status_url = ?, take_url = ?, charged_fen = ?, released_fen = ?, last_error = null,
-		next_poll_at_ms = ?, completed_at_ms = ?, updated_at_ms = ?
+		next_poll_at_ms = ?, supplier_retry_until_ms = ?, completed_at_ms = ?, updated_at_ms = ?
 		where order_id = ? and status = 'creating'`,
 		order.OrderID, order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
 		nullString(order.StatusURL), nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen,
-		nullPositive(order.NextPollAtMS), nullPositive(order.CompletedAtMS), order.UpdatedAtMS, localOrderID,
+		nullPositive(order.NextPollAtMS), nullPositive(order.SupplierRetryUntilMS), nullPositive(order.CompletedAtMS), order.UpdatedAtMS, localOrderID,
 	)
 	if err != nil {
 		return err
@@ -297,11 +297,11 @@ func (r *repository) Update(ctx context.Context, order model.SupplyOrder) error 
 	_, err := r.db.ExecContext(ctx, `update supply_orders set
 		status = ?, remote_status = ?, ready_quantity = ?, progress = ?, status_url = ?,
 		take_url = ?, charged_fen = ?, released_fen = ?, item_count = ?, imported_count = ?,
-		last_error = ?, next_poll_at_ms = ?, completed_at_ms = ?, updated_at_ms = ? where order_id = ?`,
+		last_error = ?, next_poll_at_ms = ?, supplier_retry_until_ms = ?, completed_at_ms = ?, updated_at_ms = ? where order_id = ?`,
 		order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
 		nullString(order.StatusURL), nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen,
 		order.ItemCount, order.ImportedCount, nullString(order.LastError), nullPositive(order.NextPollAtMS),
-		nullPositive(order.CompletedAtMS), order.UpdatedAtMS, order.OrderID,
+		nullPositive(order.SupplierRetryUntilMS), nullPositive(order.CompletedAtMS), order.UpdatedAtMS, order.OrderID,
 	)
 	return err
 }
@@ -444,7 +444,7 @@ func (r *repository) Counts(ctx context.Context, orderID string) (int, int, erro
 
 const orderSelect = `select id, order_id, product, requested_quantity, automatic, status, remote_status,
 	ready_quantity, progress, status_url, take_url, charged_fen, released_fen, item_count,
-	imported_count, last_error, next_poll_at_ms, completed_at_ms, created_at_ms, updated_at_ms
+	imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms, created_at_ms, updated_at_ms
 	from supply_orders`
 
 type scanner interface{ Scan(...any) error }
@@ -453,11 +453,11 @@ func scanOrder(row scanner) (model.SupplyOrder, error) {
 	var order model.SupplyOrder
 	var automatic int
 	var remoteStatus, statusURL, takeURL, lastError sql.NullString
-	var nextPollAtMS, completedAtMS sql.NullInt64
+	var nextPollAtMS, supplierRetryUntilMS, completedAtMS sql.NullInt64
 	err := row.Scan(&order.ID, &order.OrderID, &order.Product, &order.RequestedQuantity, &automatic,
 		&order.Status, &remoteStatus, &order.ReadyQuantity, &order.Progress, &statusURL, &takeURL,
 		&order.ChargedFen, &order.ReleasedFen, &order.ItemCount,
-		&order.ImportedCount, &lastError, &nextPollAtMS, &completedAtMS, &order.CreatedAtMS, &order.UpdatedAtMS)
+		&order.ImportedCount, &lastError, &nextPollAtMS, &supplierRetryUntilMS, &completedAtMS, &order.CreatedAtMS, &order.UpdatedAtMS)
 	if err != nil {
 		return model.SupplyOrder{}, err
 	}
@@ -467,6 +467,7 @@ func scanOrder(row scanner) (model.SupplyOrder, error) {
 	order.TakeURL = takeURL.String
 	order.LastError = lastError.String
 	order.NextPollAtMS = nextPollAtMS.Int64
+	order.SupplierRetryUntilMS = supplierRetryUntilMS.Int64
 	order.CompletedAtMS = completedAtMS.Int64
 	return order, nil
 }

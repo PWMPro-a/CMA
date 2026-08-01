@@ -489,6 +489,38 @@ func TestSmartLowWaterUsesRecoveryBatchCapAndShortCooldown(t *testing.T) {
 	}
 }
 
+func TestSmartEmergencyShortageRemovesLocalCreateCooldownAndCheckDelay(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		ReplenishBatchSize:    15,
+		PrelockMinQuantity:    1,
+		PrelockMaxQuantity:    7,
+		CreateCooldownSeconds: 120,
+		CheckIntervalSeconds:  60,
+	}
+	emergency := SmartResource{
+		EffectiveHealthyMinutes: 40,
+		CriticalMinutes:         5,
+		EstimatedSustainMinutes: 20,
+		ConsumeRCUPerMinute:     500,
+		CapacityGapRCU:          10_000,
+	}
+	if !smartEmergencyShortage(emergency) {
+		t.Fatalf("20 minute runway for a 40 minute target must be emergency: %#v", emergency)
+	}
+	if got := smartCreateCooldownForResource(cfg, emergency); got != 0 {
+		t.Fatalf("emergency create cooldown=%d, want 0", got)
+	}
+	if got := smartAutomaticCheckIntervalSeconds(cfg, emergency); got != 1 {
+		t.Fatalf("emergency check interval=%d, want 1", got)
+	}
+
+	buffered := emergency
+	buffered.EstimatedSustainMinutes = 32
+	if smartEmergencyShortage(buffered) {
+		t.Fatalf("32 minute runway for a 40 minute target must remain buffered observation: %#v", buffered)
+	}
+}
+
 func TestWarmSmartUsageRestoresDemandWindowAndExcludesFailedRequestRPM(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
@@ -1329,7 +1361,9 @@ func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *t
 	if err != nil {
 		t.Fatalf("get status: %v", err)
 	}
-	if status.SmartResource.SupplyPressureLevel != smartSupplyPressurePlenty || status.SmartResource.DecisionReason != "low_water_critical_full_batch" {
+	if status.SmartResource.SupplyPressureLevel != smartSupplyPressurePlenty ||
+		status.SmartResource.SuggestedAction != smartActionEmergencyReplenish ||
+		status.SmartResource.DecisionReason != "emergency_capacity_shortage" {
 		t.Fatalf("smart resource = %#v", status.SmartResource)
 	}
 }
@@ -1402,7 +1436,9 @@ func TestSmartAutomaticKeepsFullBatchWhenSupplyIsScarce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get status: %v", err)
 	}
-	if status.SmartResource.SupplyPressureLevel != smartSupplyPressureScarce || status.SmartResource.DecisionReason != "low_water_critical_full_batch" {
+	if status.SmartResource.SupplyPressureLevel != smartSupplyPressureScarce ||
+		status.SmartResource.SuggestedAction != smartActionEmergencyReplenish ||
+		status.SmartResource.DecisionReason != "emergency_capacity_shortage" {
 		t.Fatalf("smart resource = %#v", status.SmartResource)
 	}
 }
@@ -1506,7 +1542,7 @@ func TestSmartReadySmallOrderTakesWhenSupplyIsPlentyBeforeCritical(t *testing.T)
 	}
 }
 
-func TestSmartReadyOrderWaitsForCriticalConfirmRoundsBeforeTake(t *testing.T) {
+func TestSmartEmergencyReadyOrderTakesWithoutConfirmationRounds(t *testing.T) {
 	var takeCalls atomic.Int32
 	var uploadCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1590,22 +1626,8 @@ func TestSmartReadyOrderWaitsForCriticalConfirmRoundsBeforeTake(t *testing.T) {
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
-	if takeCalls.Load() != 0 {
-		t.Fatalf("take should wait for confirmation, calls=%d", takeCalls.Load())
-	}
-	order, found, err := st.GetSupplyOrder(context.Background(), "order-critical")
-	if err != nil || !found {
-		t.Fatalf("load order found=%v err=%v", found, err)
-	}
-	order.NextPollAtMS = 0
-	if err := st.UpdateSupplyOrder(context.Background(), order); err != nil {
-		t.Fatalf("reset poll: %v", err)
-	}
-	if err := service.RunAutomatic(context.Background()); err != nil {
-		t.Fatalf("second run: %v", err)
-	}
 	if takeCalls.Load() != 1 || uploadCalls.Load() != 1 {
-		t.Fatalf("calls take=%d upload=%d", takeCalls.Load(), uploadCalls.Load())
+		t.Fatalf("emergency ready order must take immediately, take=%d upload=%d", takeCalls.Load(), uploadCalls.Load())
 	}
 }
 
@@ -1781,7 +1803,7 @@ func TestSmartDemandFallingPausesOrdersWhileKeepingCapacityHealthVisible(t *test
 		NewAccountConfidence: 1,
 	}
 	resource := SmartResource{
-		CurrentCapacityRCU:      100,
+		CurrentCapacityRCU:      300,
 		ConsumeRCUPerMinute:     10,
 		UnitCapacityRCU:         80,
 		EffectiveHealthyMinutes: 40,
@@ -1792,7 +1814,7 @@ func TestSmartDemandFallingPausesOrdersWhileKeepingCapacityHealthVisible(t *test
 
 	recalculateSmartResourceCapacityPlan(cfg, &resource)
 	if resource.HealthLevel != smartHealthWarning || resource.SuggestedAction != smartActionObserveDemand ||
-		resource.DecisionReason != "demand_falling_observe" || resource.SuggestedQuantity != 0 {
+		resource.DecisionReason != "capacity_below_target_falling_observe" || resource.SuggestedQuantity != 0 || resource.EmergencyShortage {
 		t.Fatalf("falling demand decision = %#v", resource)
 	}
 	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); got != 0 {
@@ -1821,8 +1843,8 @@ func TestSmartDemandRisingCapsFirstOrderToObservationBatch(t *testing.T) {
 		NewAccountConfidence: 1,
 	}
 	resource := SmartResource{
-		CurrentCapacityRCU:      0,
-		ConsumeRCUPerMinute:     1_000,
+		CurrentCapacityRCU:      11_000,
+		ConsumeRCUPerMinute:     500,
 		UnitCapacityRCU:         80,
 		EffectiveHealthyMinutes: 40,
 		WarningMinutes:          15,
@@ -1836,6 +1858,48 @@ func TestSmartDemandRisingCapsFirstOrderToObservationBatch(t *testing.T) {
 	}
 	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); got != 3 {
 		t.Fatalf("rising demand create quantity = %d, want 3", got)
+	}
+}
+
+func TestSmartEmergencyShortageOverridesTrendObservation(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Product:              "oauth_30d",
+		HealthyMinutesTarget: 40,
+		WarningMinutes:       15,
+		CriticalMinutes:      5,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   3,
+		ReplenishBatchSize:   10,
+		NewAccountConfidence: 1,
+	}
+	falling := SmartResource{
+		CurrentCapacityRCU:      100,
+		ConsumeRCUPerMinute:     10,
+		UnitCapacityRCU:         80,
+		EffectiveHealthyMinutes: 40,
+		WarningMinutes:          15,
+		CriticalMinutes:         5,
+		DemandTrend:             smartDemandTrendFalling,
+	}
+	recalculateSmartResourceCapacityPlan(cfg, &falling)
+	if !falling.EmergencyShortage || falling.SuggestedAction != smartActionEmergencyReplenish ||
+		falling.DecisionReason != "emergency_capacity_shortage" || falling.SuggestedQuantity != 1 {
+		t.Fatalf("falling emergency should bypass observation: %#v", falling)
+	}
+	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, falling); got != 1 {
+		t.Fatalf("falling emergency quantity=%d, want 1", got)
+	}
+	if got, reason := smartPrelockQuantityForSupplyPressure(cfg, falling, smartSupplyPressure{level: smartSupplyPressurePlenty}, 10); got != 10 || reason != "emergency_capacity_shortage" {
+		t.Fatalf("emergency pressure adjustment=%d/%q, want full emergency batch", got, reason)
+	}
+
+	rising := falling
+	rising.CurrentCapacityRCU = 0
+	rising.ConsumeRCUPerMinute = 1_000
+	rising.DemandTrend = smartDemandTrendRising
+	recalculateSmartResourceCapacityPlan(cfg, &rising)
+	if !rising.EmergencyShortage || rising.SuggestedQuantity != 10 || rising.SuggestedAction != smartActionEmergencyReplenish {
+		t.Fatalf("rising emergency should bypass 1-3 observation cap: %#v", rising)
 	}
 }
 
