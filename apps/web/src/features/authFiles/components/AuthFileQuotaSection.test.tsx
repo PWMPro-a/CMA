@@ -150,10 +150,19 @@ describe('AuthFileQuotaSection Codex quota scoping', () => {
     expect(text).toContain('auth_files.account_usage_requests');
     expect(text).toContain('12,345');
     expect(text).toContain('auth_files.account_usage_tokens');
-    expect(text).toContain('9.9M Tokens');
+    expect(text).toContain('9.88M Tokens');
     expect(text.indexOf('auth_files.account_usage_requests')).toBeLessThan(
       text.indexOf('codex_quota.idle')
     );
+  });
+
+  it('keeps two decimal places for million-token usage', () => {
+    const renderer = renderSection(null, {
+      requests: 76,
+      totalTokens: 2_550_969,
+    });
+
+    expect(getText(renderer.root)).toContain('2.55M Tokens');
   });
 
   it('reads matching stored Codex quota by auth file identity key', () => {

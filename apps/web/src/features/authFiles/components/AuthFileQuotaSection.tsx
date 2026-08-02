@@ -18,7 +18,6 @@ import {
 import type { AuthFileItem } from '@/types';
 import { getStatusFromError } from '@/utils/quota';
 import { formatNumber } from '@/utils/format';
-import { formatCompactNumber } from '@/utils/usage';
 import {
   isRuntimeOnlyAuthFile,
   resolveQuotaErrorMessage,
@@ -29,6 +28,19 @@ import type { AuthFileUsageSummary } from '@/features/authFiles/model/authFileUs
 import styles from '@/features/authFiles/AuthFilesPage.module.scss';
 
 type QuotaState = { status?: string; error?: string; errorStatus?: number } | undefined;
+
+const formatTokenUsage = (value: number): string => {
+  const tokens = Number(value);
+  if (!Number.isFinite(tokens) || tokens <= 0) return '0';
+
+  if (tokens >= 1_000_000) {
+    return `${(tokens / 1_000_000).toFixed(2).replace(/\.?0+$/, '')}M`;
+  }
+  if (tokens >= 1_000) {
+    return `${(tokens / 1_000).toFixed(2).replace(/\.?0+$/, '')}K`;
+  }
+  return formatNumber(Math.round(tokens));
+};
 type InlineQuotaConfig = {
   i18nPrefix: string;
   getStoreKey?: (file: AuthFileItem) => string;
@@ -153,7 +165,7 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
           <span className={styles.accountUsageMetric}>
             <span className={styles.accountUsageLabel}>{t('auth_files.account_usage_tokens')}</span>
             <span className={styles.accountUsageValue}>
-              {formatCompactNumber(accountUsage.totalTokens)} Tokens
+              {formatTokenUsage(accountUsage.totalTokens)} Tokens
             </span>
           </span>
         </div>

@@ -596,6 +596,37 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
     });
   });
 
+  it('loads account usage from the embedded Manager base when the feature probe is unavailable', async () => {
+    mocks.list.mockReturnValue([
+      {
+        name: 'codex-usage-fallback.json',
+        type: 'codex',
+        authIndex: 'fallback-1',
+        account: 'fallback@example.com',
+      },
+    ]);
+    setManagerServiceBase('');
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<AuthFilesPage />);
+    });
+
+    await vi.waitFor(() => {
+      expect(mocks.getAccountHistory).toHaveBeenCalledWith(
+        'http://manager.local:18317',
+        'test-key',
+        expect.objectContaining({ include_cost: false }),
+        expect.any(AbortSignal)
+      );
+    });
+    expect(mocks.getActiveQuotaCooldowns).not.toHaveBeenCalled();
+
+    await act(async () => {
+      renderer!.unmount();
+    });
+  });
+
   it('queries usage only for the current page of cards', async () => {
     mocks.list.mockReturnValue(
       Array.from({ length: 12 }, (_, index) => ({

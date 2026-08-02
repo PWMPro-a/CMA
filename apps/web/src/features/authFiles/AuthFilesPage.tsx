@@ -254,6 +254,9 @@ type QuotaCooldownState = {
 const getQuotaCooldownContextKey = (managerServiceBase: string, managementKey: string): string =>
   `${managerServiceBase}\u0000${managementKey}`;
 
+const getAccountUsageContextKey = (serviceBase: string, managementKey: string): string =>
+  `${serviceBase}\u0000${managementKey}`;
+
 const ACCOUNT_USAGE_CACHE_TTL_MS = 55_000;
 const ACCOUNT_USAGE_CACHE_RETENTION_MS = 5 * 60_000;
 
@@ -293,6 +296,13 @@ export function AuthFilesPage() {
   const setCodexQuota = useQuotaStore((state) => state.setCodexQuota);
   const featureAvailability = usePanelFeatureAvailability();
   const managerServiceBase = featureAvailability.managerServiceBase;
+  // The auth-files page is served by Manager itself. Account history is a
+  // same-origin, read-only endpoint, so keep it available if the optional
+  // feature probe is temporarily unavailable (for example while config is
+  // reloading). This avoids hiding accumulated token usage behind the probe.
+  const accountUsageServiceBase =
+    managerServiceBase ||
+    (featureAvailability.panelHostMode === 'manager_embedded' ? featureAvailability.panelBase : '');
   const pageTransitionLayer = usePageTransitionLayer();
   const isCurrentLayer = pageTransitionLayer ? pageTransitionLayer.status === 'current' : true;
   const navigate = useNavigate();
@@ -381,7 +391,7 @@ export function AuthFilesPage() {
   const accountActionContextRef = useRef({ managerServiceBase, managementKey });
   const cooldownRecoveryContextRef = useRef({ managerServiceBase, managementKey });
   const headerSnapshotContextRef = useRef({ managerServiceBase, managementKey });
-  const accountUsageContextRef = useRef({ managerServiceBase, managementKey });
+  const accountUsageContextRef = useRef({ serviceBase: accountUsageServiceBase, managementKey });
 
   const {
     files,
@@ -1034,16 +1044,16 @@ export function AuthFilesPage() {
 
   useLayoutEffect(() => {
     const prev = accountUsageContextRef.current;
-    if (prev.managerServiceBase === managerServiceBase && prev.managementKey === managementKey) {
+    if (prev.serviceBase === accountUsageServiceBase && prev.managementKey === managementKey) {
       return;
     }
-    accountUsageContextRef.current = { managerServiceBase, managementKey };
+    accountUsageContextRef.current = { serviceBase: accountUsageServiceBase, managementKey };
     accountUsageReqId.current += 1;
     accountUsageAbortRef.current?.abort();
     accountUsageAbortRef.current = null;
     accountUsageCacheRef.current.clear();
     setAccountUsageByAuthFile((current) => (current.size === 0 ? current : new Map()));
-  }, [managerServiceBase, managementKey]);
+  }, [accountUsageServiceBase, managementKey]);
 
   useLayoutEffect(() => {
     const prev = headerSnapshotContextRef.current;
@@ -1528,7 +1538,7 @@ export function AuthFilesPage() {
     };
 
     renderCachedUsage();
-    if (!managerServiceBase || visibleAccountUsageTargets.length === 0) {
+    if (!accountUsageServiceBase || visibleAccountUsageTargets.length === 0) {
       accountUsageAbortRef.current?.abort();
       accountUsageAbortRef.current = null;
       return;
@@ -1543,11 +1553,11 @@ export function AuthFilesPage() {
     accountUsageAbortRef.current?.abort();
     const controller = new AbortController();
     accountUsageAbortRef.current = controller;
-    const contextKey = getQuotaCooldownContextKey(managerServiceBase, managementKey);
+    const contextKey = getAccountUsageContextKey(accountUsageServiceBase, managementKey);
 
     try {
       const response = await monitoringAnalyticsApi.getAccountHistory(
-        managerServiceBase,
+        accountUsageServiceBase,
         managementKey,
         {
           accounts: staleTargets.map((target) => target.request),
@@ -1559,8 +1569,8 @@ export function AuthFilesPage() {
         controller.signal.aborted ||
         id !== accountUsageReqId.current ||
         contextKey !==
-          getQuotaCooldownContextKey(
-            accountUsageContextRef.current.managerServiceBase,
+          getAccountUsageContextKey(
+            accountUsageContextRef.current.serviceBase,
             accountUsageContextRef.current.managementKey
           )
       ) {
@@ -1584,7 +1594,7 @@ export function AuthFilesPage() {
     } finally {
       if (accountUsageAbortRef.current === controller) accountUsageAbortRef.current = null;
     }
-  }, [managementKey, managerServiceBase, visibleAccountUsageTargets]);
+  }, [accountUsageServiceBase, managementKey, visibleAccountUsageTargets]);
 
   useEffect(() => {
     if (!isCurrentLayer) return;
@@ -1599,7 +1609,9 @@ export function AuthFilesPage() {
     () => {
       void loadVisibleAccountUsage();
     },
-    isCurrentLayer && managerServiceBase && visibleAccountUsageTargets.length > 0 ? 60_000 : null
+    isCurrentLayer && accountUsageServiceBase && visibleAccountUsageTargets.length > 0
+      ? 60_000
+      : null
   );
   const selectablePageItems = useMemo(
     () => pageItems.filter((file) => !isRuntimeOnlyAuthFile(file)),
