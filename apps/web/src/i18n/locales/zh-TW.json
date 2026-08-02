@@ -912,6 +912,8 @@
     "prefix_proxy_saved_success": "已更新驗證檔案「{{name}}」",
     "quota_refresh_success": "已重新整理「{{name}}」的配額",
     "quota_refresh_failed": "重新整理「{{name}}」的配額失敗：{{message}}",
+    "account_usage_requests": "請求次數",
+    "account_usage_tokens": "用量",
     "import_defaults_title": "匯入預設設定",
     "import_defaults_hint": "只補齊來源檔案未宣告的欄位，已明確設定的帳號不會被覆蓋。",
     "import_default_websockets_label": "預設啟用 WS",

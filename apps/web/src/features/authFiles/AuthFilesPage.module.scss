@@ -627,6 +627,37 @@
   border-top: 1px dashed color-mix(in srgb, var(--border-color) 82%, transparent);
 }
 
+.accountUsageSummary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 12px;
+  min-width: 0;
+  padding: 0 1px;
+  flex-wrap: wrap;
+}
+
+.accountUsageMetric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.accountUsageLabel {
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.accountUsageValue {
+  color: var(--text-secondary);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
 .quotaRow {
   display: flex;
   flex-direction: column;

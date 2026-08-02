@@ -2,6 +2,7 @@ import { act } from 'react';
 import { create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthFileItem, CodexQuotaState } from '@/types';
+import type { AuthFileUsageSummary } from '@/features/authFiles/model/authFileUsage';
 import { AuthFileQuotaSection } from './AuthFileQuotaSection';
 
 const { mocks } = vi.hoisted(() => {
@@ -12,7 +13,9 @@ const { mocks } = vi.hoisted(() => {
   quotaStoreState.setCodexQuota = vi.fn((updater: unknown) => {
     const current = quotaStoreState.codexQuota as Record<string, unknown>;
     quotaStoreState.codexQuota =
-      typeof updater === 'function' ? (updater as (prev: typeof current) => typeof current)(current) : updater;
+      typeof updater === 'function'
+        ? (updater as (prev: typeof current) => typeof current)(current)
+        : updater;
   });
 
   return {
@@ -98,7 +101,10 @@ const findButtonByText = (renderer: ReactTestRenderer, text: string) => {
   return button;
 };
 
-const renderSection = (quotaOverride?: CodexQuotaState | null) => {
+const renderSection = (
+  quotaOverride?: CodexQuotaState | null,
+  accountUsage?: AuthFileUsageSummary
+) => {
   let renderer!: ReactTestRenderer;
   act(() => {
     renderer = create(
@@ -107,6 +113,7 @@ const renderSection = (quotaOverride?: CodexQuotaState | null) => {
         quotaType="codex"
         disableControls={false}
         quotaOverride={quotaOverride}
+        accountUsage={accountUsage}
       />
     );
   });
@@ -131,6 +138,22 @@ describe('AuthFileQuotaSection Codex quota scoping', () => {
 
     expect(text).toContain('codex_quota.idle');
     expect(text).not.toContain('codex_quota.plan_pro');
+  });
+
+  it('shows request count and token usage above the quota content', () => {
+    const renderer = renderSection(null, {
+      requests: 12_345,
+      totalTokens: 9_876_543,
+    });
+    const text = getText(renderer.root);
+
+    expect(text).toContain('auth_files.account_usage_requests');
+    expect(text).toContain('12,345');
+    expect(text).toContain('auth_files.account_usage_tokens');
+    expect(text).toContain('9.9M Tokens');
+    expect(text.indexOf('auth_files.account_usage_requests')).toBeLessThan(
+      text.indexOf('codex_quota.idle')
+    );
   });
 
   it('reads matching stored Codex quota by auth file identity key', () => {

@@ -912,6 +912,8 @@
     "prefix_proxy_saved_success": "Updated login file \"{{name}}\" successfully",
     "quota_refresh_success": "Quota refreshed for \"{{name}}\"",
     "quota_refresh_failed": "Failed to refresh quota for \"{{name}}\": {{message}}",
+    "account_usage_requests": "Requests",
+    "account_usage_tokens": "Usage",
     "import_defaults_title": "Import defaults",
     "import_defaults_hint": "Only fills fields omitted by the source; explicit account settings are preserved.",
     "import_default_websockets_label": "Enable WS by default",

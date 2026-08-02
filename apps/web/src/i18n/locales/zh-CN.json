@@ -912,6 +912,8 @@
     "prefix_proxy_saved_success": "已更新认证文件 \"{{name}}\"",
     "quota_refresh_success": "已刷新 \"{{name}}\" 的额度",
     "quota_refresh_failed": "刷新 \"{{name}}\" 的额度失败：{{message}}",
+    "account_usage_requests": "请求次数",
+    "account_usage_tokens": "用量",
     "import_defaults_title": "导入默认配置",
     "import_defaults_hint": "仅补齐源文件未声明的字段，已明确配置的账号不会被覆盖。",
     "import_default_websockets_label": "默认开启 WS",

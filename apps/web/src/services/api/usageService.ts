@@ -681,6 +681,47 @@ export interface MonitoringAnalyticsRequest {
   include?: MonitoringAnalyticsInclude;
 }
 
+export interface MonitoringAccountHistoryTarget {
+  account_key?: string;
+  account_snapshot?: string;
+  auth_label_snapshot?: string;
+  auth_index?: string;
+  source?: string;
+}
+
+export interface MonitoringAccountHistoryRequest {
+  accounts: MonitoringAccountHistoryTarget[];
+  catch_up?: boolean;
+  include_cost?: boolean;
+}
+
+export interface MonitoringAccountHistoryCheckpoint {
+  last_event_id: number;
+  latest_id: number;
+  pending: boolean;
+  processed: number;
+}
+
+export interface MonitoringAccountHistoryItem {
+  account_key: string;
+  matched: boolean;
+  total_requests: number;
+  success_calls: number;
+  failure_calls: number;
+  total_tokens: number;
+  total_cost: number;
+  success_rate: number | null;
+  first_seen_ms?: number | null;
+  last_seen_ms?: number | null;
+  sync_status: string;
+}
+
+export interface MonitoringAccountHistoryResponse {
+  generated_at_ms: number;
+  checkpoint: MonitoringAccountHistoryCheckpoint;
+  items: MonitoringAccountHistoryItem[];
+}
+
 export interface MonitoringAnalyticsSummary {
   total_calls: number;
   success_calls: number;
@@ -2150,6 +2191,54 @@ export const dashboardApi = {
 };
 
 export const monitoringAnalyticsApi = {
+  getAccountHistory: async (
+    base: string,
+    managementKey: string | undefined,
+    request: MonitoringAccountHistoryRequest,
+    signal?: AbortSignal
+  ): Promise<MonitoringAccountHistoryResponse> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return {
+        generated_at_ms: Date.now(),
+        checkpoint: {
+          last_event_id: 0,
+          latest_id: 0,
+          pending: false,
+          processed: 0,
+        },
+        items: request.accounts.map((account) => ({
+          account_key:
+            account.account_key ||
+            account.account_snapshot ||
+            account.auth_label_snapshot ||
+            account.source ||
+            account.auth_index ||
+            '-',
+          matched: false,
+          total_requests: 0,
+          success_calls: 0,
+          failure_calls: 0,
+          total_tokens: 0,
+          total_cost: 0,
+          success_rate: null,
+          sync_status: 'empty',
+        })),
+      };
+    }
+
+    return withUsageServiceError(async () => {
+      const response = await axios.post<MonitoringAccountHistoryResponse>(
+        buildUrl(base, '/v0/management/monitoring/account-history'),
+        request,
+        {
+          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+          signal,
+        }
+      );
+      return response.data;
+    });
+  },
   getHeaderSnapshots: async (
     base: string,
     managementKey: string | undefined,

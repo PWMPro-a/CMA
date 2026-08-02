@@ -23,6 +23,7 @@ const { mocks } = vi.hoisted(() => {
       getActiveQuotaCooldowns: vi.fn(),
       listAccountActionCandidates: vi.fn(),
       getHeaderSnapshots: vi.fn(),
+      getAccountHistory: vi.fn(),
       apiCallRequest: vi.fn(),
       handleDeleteAll: vi.fn(),
       batchDelete: vi.fn(),
@@ -104,6 +105,7 @@ vi.mock('@/services/api/usageService', () => ({
   },
   monitoringAnalyticsApi: {
     getHeaderSnapshots: mocks.getHeaderSnapshots,
+    getAccountHistory: mocks.getAccountHistory,
   },
 }));
 
@@ -271,6 +273,7 @@ vi.mock('@/features/authFiles/components/AuthFileCard', () => ({
       reasonCode?: string;
       autoDisabledAtMs?: number;
     } | null;
+    accountUsage?: { requests: number; totalTokens: number };
     codexDisplayQuota?: {
       status?: string;
       planType?: string | null;
@@ -296,6 +299,8 @@ vi.mock('@/features/authFiles/components/AuthFileCard', () => ({
         data-account-action={props.accountActionCandidate?.actionType ?? ''}
         data-account-reason={props.accountActionCandidate?.reasonCode ?? ''}
         data-account-auto-disabled-at={String(props.accountActionCandidate?.autoDisabledAtMs ?? '')}
+        data-account-usage-requests={String(props.accountUsage?.requests ?? '')}
+        data-account-usage-tokens={String(props.accountUsage?.totalTokens ?? '')}
         data-codex-quota-status={props.codexDisplayQuota?.status ?? ''}
         data-codex-quota-plan={props.codexDisplayQuota?.planType ?? ''}
         data-codex-quota-observed={String(
@@ -437,6 +442,7 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
     mocks.listCodexInspectionRuns.mockReset();
     mocks.getCodexInspectionRun.mockReset();
     mocks.getHeaderSnapshots.mockReset();
+    mocks.getAccountHistory.mockReset();
     mocks.listAccountActionCandidates.mockReset();
     mocks.apiCallRequest.mockReset();
     mocks.handleDeleteAll.mockReset();
@@ -468,6 +474,28 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
       to_ms: 1_700_000_000_000,
       items: [],
     });
+    mocks.getAccountHistory.mockImplementation(
+      async (_base: string, _key: string, request: { accounts: unknown[] }) => ({
+        generated_at_ms: 1_700_000_000_000,
+        checkpoint: {
+          last_event_id: 0,
+          latest_id: 0,
+          pending: false,
+          processed: 0,
+        },
+        items: request.accounts.map(() => ({
+          account_key: '-',
+          matched: false,
+          total_requests: 0,
+          success_calls: 0,
+          failure_calls: 0,
+          total_tokens: 0,
+          total_cost: 0,
+          success_rate: null,
+          sync_status: 'empty',
+        })),
+      })
+    );
 
     setManagerServiceBase('http://manager.local:18317');
   });
@@ -500,6 +528,105 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
         'data-quota-cooldown'
       ]
     ).toBe('');
+  });
+
+  it('loads account request and token usage in one batched history request', async () => {
+    mocks.list.mockReturnValue([
+      {
+        name: 'codex-usage.json',
+        type: 'codex',
+        authIndex: 'auth-usage-1',
+        account: 'usage@example.com',
+        label: 'Usage account',
+      },
+    ]);
+    mocks.getActiveQuotaCooldowns.mockResolvedValue([]);
+    mocks.getAccountHistory.mockResolvedValue({
+      generated_at_ms: 1_700_000_000_000,
+      checkpoint: {
+        last_event_id: 8,
+        latest_id: 8,
+        pending: false,
+        processed: 1,
+      },
+      items: [
+        {
+          account_key: 'usage@example.com',
+          matched: true,
+          total_requests: 632,
+          success_calls: 620,
+          failure_calls: 12,
+          total_tokens: 12_400_000,
+          total_cost: 0,
+          success_rate: 0.98,
+          sync_status: 'ready',
+        },
+      ],
+    });
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<AuthFilesPage />);
+    });
+
+    await vi.waitFor(() => {
+      const card = renderer!.root.findByProps({ 'data-auth-card': 'codex-usage.json' });
+      expect(card.props['data-account-usage-requests']).toBe('632');
+      expect(card.props['data-account-usage-tokens']).toBe('12400000');
+    });
+    expect(mocks.getAccountHistory).toHaveBeenCalledWith(
+      'http://manager.local:18317',
+      'test-key',
+      {
+        accounts: [
+          {
+            account_snapshot: 'usage@example.com',
+            auth_label_snapshot: 'Usage account',
+            auth_index: 'auth-usage-1',
+            source: '',
+          },
+        ],
+        include_cost: false,
+      },
+      expect.any(AbortSignal)
+    );
+
+    await act(async () => {
+      renderer!.unmount();
+    });
+  });
+
+  it('queries usage only for the current page of cards', async () => {
+    mocks.list.mockReturnValue(
+      Array.from({ length: 12 }, (_, index) => ({
+        name: `codex-page-${index}.json`,
+        type: 'codex',
+        authIndex: `auth-page-${index}`,
+        account: `page-${index}@example.com`,
+      }))
+    );
+    mocks.getActiveQuotaCooldowns.mockResolvedValue([]);
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<AuthFilesPage />);
+    });
+
+    await vi.waitFor(() => {
+      expect(mocks.getAccountHistory).toHaveBeenCalled();
+    });
+    const request = mocks.getAccountHistory.mock.calls[
+      mocks.getAccountHistory.mock.calls.length - 1
+    ]?.[2] as {
+      accounts: unknown[];
+      include_cost?: boolean;
+    };
+    expect(request.accounts).toHaveLength(9);
+    expect(request.include_cost).toBe(false);
+
+    await act(async () => {
+      renderer!.unmount();
+    });
   });
 
   it('shows an active xAI quota cooldown badge', async () => {

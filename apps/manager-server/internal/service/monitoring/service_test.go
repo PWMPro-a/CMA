@@ -1981,6 +1981,39 @@ func TestAccountHistoryEmptyTargetDoesNotMatchAnonymousBucket(t *testing.T) {
 	}
 }
 
+func TestBuildAccountHistoryTotalsCanSkipCostCalculation(t *testing.T) {
+	rows := []store.AccountHistoryRollupRow{
+		{
+			AccountKey:   "usage@example.com",
+			Model:        "priced-model",
+			BillingModel: "priced-model",
+			Calls:        3,
+			SuccessCalls: 2,
+			FailureCalls: 1,
+			InputTokens:  1_000_000,
+			OutputTokens: 500_000,
+			TotalTokens:  1_500_000,
+			FirstSeenMS:  100,
+			LastSeenMS:   200,
+		},
+	}
+	prices := map[string]store.ModelPrice{
+		"priced-model": {Prompt: 1, Completion: 2},
+	}
+
+	totals := buildAccountHistoryTotals(rows, prices, false)
+	total := totals["usage@example.com"]
+	if total == nil {
+		t.Fatal("missing account total")
+	}
+	if total.requests != 3 || total.totalTokens != 1_500_000 {
+		t.Fatalf("usage total = %#v", total)
+	}
+	if total.cost != 0 {
+		t.Fatalf("cost = %v, want 0 when include_cost is false", total.cost)
+	}
+}
+
 func TestAnalyticsHourlyRollupMatchesRawCoreComparisonAndTimeline(t *testing.T) {
 	db := newMonitoringTestStore(t)
 	ctx := context.Background()

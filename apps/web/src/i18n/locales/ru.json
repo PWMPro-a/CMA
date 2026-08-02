@@ -909,6 +909,8 @@
     "quota_refresh_hint": "Обновить квоту только для этих учётных данных",
     "quota_refresh_success": "Квота для \"{{name}}\" обновлена",
     "quota_refresh_failed": "Не удалось обновить квоту для \"{{name}}\": {{message}}",
+    "account_usage_requests": "Запросы",
+    "account_usage_tokens": "Использование",
     "import_defaults_title": "Настройки импорта по умолчанию",
     "import_defaults_hint": "Заполняются только отсутствующие поля; явные настройки аккаунта сохраняются.",
     "import_default_websockets_label": "Включать WS по умолчанию",

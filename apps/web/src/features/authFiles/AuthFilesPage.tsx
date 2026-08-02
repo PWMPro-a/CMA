@@ -128,6 +128,11 @@ import {
   selectAccountActionCandidate,
 } from '@/features/authFiles/model/accountAutomationPresentation';
 import {
+  buildAuthFileUsageTargets,
+  getAuthFileUsageKey,
+  type AuthFileUsageSummary,
+} from '@/features/authFiles/model/authFileUsage';
+import {
   createCodexInspectionConnectionFingerprint,
   loadCodexInspectionLastRun,
 } from '@/features/monitoring/codexInspection';
@@ -248,6 +253,34 @@ type QuotaCooldownState = {
 const getQuotaCooldownContextKey = (managerServiceBase: string, managementKey: string): string =>
   `${managerServiceBase}\u0000${managementKey}`;
 
+const ACCOUNT_USAGE_CACHE_TTL_MS = 55_000;
+const ACCOUNT_USAGE_CACHE_RETENTION_MS = 5 * 60_000;
+
+type AuthFileUsageCacheEntry = {
+  summary: AuthFileUsageSummary;
+  fetchedAtMs: number;
+};
+
+const normalizeUsageCount = (value: unknown): number => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.round(parsed);
+};
+
+const accountUsageMapsEqual = (
+  left: Map<string, AuthFileUsageSummary>,
+  right: Map<string, AuthFileUsageSummary>
+): boolean => {
+  if (left.size !== right.size) return false;
+  for (const [key, value] of left) {
+    const other = right.get(key);
+    if (!other || other.requests !== value.requests || other.totalTokens !== value.totalTokens) {
+      return false;
+    }
+  }
+  return true;
+};
+
 export function AuthFilesPage() {
   const { t } = useTranslation();
   const showNotification = useNotificationStore((state) => state.showNotification);
@@ -314,6 +347,9 @@ export function AuthFilesPage() {
   );
   const [headerSnapshots, setHeaderSnapshots] = useState<UsageHeaderSnapshot[]>([]);
   const [headerSnapshotGeneratedAtMs, setHeaderSnapshotGeneratedAtMs] = useState(0);
+  const [accountUsageByAuthFile, setAccountUsageByAuthFile] = useState<
+    Map<string, AuthFileUsageSummary>
+  >(new Map());
   const floatingBatchActionsRef = useRef<HTMLDivElement>(null);
   const batchActionAnimationRef = useRef<AnimationPlaybackControlsWithThen | null>(null);
   const previousSelectionCountRef = useRef(0);
@@ -334,6 +370,9 @@ export function AuthFilesPage() {
   const cooldownReqId = useRef(0);
   const accountActionReqId = useRef(0);
   const headerSnapshotReqId = useRef(0);
+  const accountUsageReqId = useRef(0);
+  const accountUsageCacheRef = useRef<Map<string, AuthFileUsageCacheEntry>>(new Map());
+  const accountUsageAbortRef = useRef<AbortController | null>(null);
   // Tracks the context identity so the layout effect can detect cross-context
   // transitions synchronously (before passive effects fire) and invalidate any
   // in-flight request that belongs to the old context.
@@ -341,6 +380,7 @@ export function AuthFilesPage() {
   const accountActionContextRef = useRef({ managerServiceBase, managementKey });
   const cooldownRecoveryContextRef = useRef({ managerServiceBase, managementKey });
   const headerSnapshotContextRef = useRef({ managerServiceBase, managementKey });
+  const accountUsageContextRef = useRef({ managerServiceBase, managementKey });
 
   const {
     files,
@@ -992,6 +1032,19 @@ export function AuthFilesPage() {
   }, [managerServiceBase, managementKey]);
 
   useLayoutEffect(() => {
+    const prev = accountUsageContextRef.current;
+    if (prev.managerServiceBase === managerServiceBase && prev.managementKey === managementKey) {
+      return;
+    }
+    accountUsageContextRef.current = { managerServiceBase, managementKey };
+    accountUsageReqId.current += 1;
+    accountUsageAbortRef.current?.abort();
+    accountUsageAbortRef.current = null;
+    accountUsageCacheRef.current.clear();
+    setAccountUsageByAuthFile((current) => (current.size === 0 ? current : new Map()));
+  }, [managerServiceBase, managementKey]);
+
+  useLayoutEffect(() => {
     const prev = headerSnapshotContextRef.current;
     if (prev.managerServiceBase === managerServiceBase && prev.managementKey === managementKey) {
       return;
@@ -1438,6 +1491,107 @@ export function AuthFilesPage() {
   const { subscriptions: antigravitySubscriptions, refreshSubscription } =
     useAntigravitySubscriptions();
   const pageHasInlineQuotaCards = !compactMode && pageItems.some(hasInlineQuotaLayout);
+  const visibleAccountUsageTargets = useMemo(
+    () =>
+      compactMode
+        ? []
+        : buildAuthFileUsageTargets(pageItems.filter((file) => hasInlineQuotaLayout(file))),
+    [compactMode, pageItems]
+  );
+
+  const loadVisibleAccountUsage = useCallback(async () => {
+    const id = ++accountUsageReqId.current;
+    const nowMs = Date.now();
+    const cache = accountUsageCacheRef.current;
+    for (const [key, entry] of cache) {
+      if (nowMs - entry.fetchedAtMs > ACCOUNT_USAGE_CACHE_RETENTION_MS) cache.delete(key);
+    }
+
+    const renderCachedUsage = () => {
+      const next = new Map<string, AuthFileUsageSummary>();
+      visibleAccountUsageTargets.forEach((target) => {
+        const cached = cache.get(target.key);
+        if (cached) next.set(target.key, cached.summary);
+      });
+      setAccountUsageByAuthFile((current) =>
+        accountUsageMapsEqual(current, next) ? current : next
+      );
+    };
+
+    renderCachedUsage();
+    if (!managerServiceBase || visibleAccountUsageTargets.length === 0) {
+      accountUsageAbortRef.current?.abort();
+      accountUsageAbortRef.current = null;
+      return;
+    }
+
+    const staleTargets = visibleAccountUsageTargets.filter((target) => {
+      const cached = cache.get(target.key);
+      return !cached || nowMs - cached.fetchedAtMs >= ACCOUNT_USAGE_CACHE_TTL_MS;
+    });
+    if (staleTargets.length === 0) return;
+
+    accountUsageAbortRef.current?.abort();
+    const controller = new AbortController();
+    accountUsageAbortRef.current = controller;
+    const contextKey = getQuotaCooldownContextKey(managerServiceBase, managementKey);
+
+    try {
+      const response = await monitoringAnalyticsApi.getAccountHistory(
+        managerServiceBase,
+        managementKey,
+        {
+          accounts: staleTargets.map((target) => target.request),
+          include_cost: false,
+        },
+        controller.signal
+      );
+      if (
+        controller.signal.aborted ||
+        id !== accountUsageReqId.current ||
+        contextKey !==
+          getQuotaCooldownContextKey(
+            accountUsageContextRef.current.managerServiceBase,
+            accountUsageContextRef.current.managementKey
+          )
+      ) {
+        return;
+      }
+
+      const fetchedAtMs = Date.now();
+      staleTargets.forEach((target, index) => {
+        const item = response.items?.[index];
+        cache.set(target.key, {
+          fetchedAtMs,
+          summary: {
+            requests: normalizeUsageCount(item?.total_requests),
+            totalTokens: normalizeUsageCount(item?.total_tokens),
+          },
+        });
+      });
+      renderCachedUsage();
+    } catch {
+      // Account usage is a passive Manager enhancement; cached values remain usable.
+    } finally {
+      if (accountUsageAbortRef.current === controller) accountUsageAbortRef.current = null;
+    }
+  }, [managementKey, managerServiceBase, visibleAccountUsageTargets]);
+
+  useEffect(() => {
+    if (!isCurrentLayer) return;
+    void loadVisibleAccountUsage();
+    return () => {
+      accountUsageAbortRef.current?.abort();
+      accountUsageAbortRef.current = null;
+    };
+  }, [isCurrentLayer, loadVisibleAccountUsage]);
+
+  useInterval(
+    () => {
+      void loadVisibleAccountUsage();
+    },
+    isCurrentLayer && managerServiceBase && visibleAccountUsageTargets.length > 0 ? 60_000 : null
+  );
   const selectablePageItems = useMemo(
     () => pageItems.filter((file) => !isRuntimeOnlyAuthFile(file)),
     [pageItems]
@@ -2115,6 +2269,7 @@ export function AuthFilesPage() {
                       onRefreshAntigravitySubscription={refreshSubscription}
                       quotaCooldown={getQuotaCooldownForFile(file)}
                       accountActionCandidate={getAccountActionForFile(file)}
+                      accountUsage={accountUsageByAuthFile.get(getAuthFileUsageKey(file))}
                       onShowModels={showModels}
                       onReauth={(targetFile) =>
                         resolveAuthProvider(targetFile) === 'xai'

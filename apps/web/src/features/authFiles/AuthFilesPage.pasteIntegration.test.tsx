@@ -30,6 +30,7 @@ const { mocks } = vi.hoisted(() => {
       listCodexInspectionRuns: vi.fn(),
       getCodexInspectionRun: vi.fn(),
       getHeaderSnapshots: vi.fn(),
+      getAccountHistory: vi.fn(),
       deleteExcluded: vi.fn(async () => undefined),
       deleteModelAlias: vi.fn(async () => undefined),
       handleMappingUpdate: vi.fn(async () => undefined),
@@ -120,6 +121,7 @@ vi.mock('@/services/api/usageService', () => ({
   },
   monitoringAnalyticsApi: {
     getHeaderSnapshots: mocks.getHeaderSnapshots,
+    getAccountHistory: mocks.getAccountHistory,
   },
 }));
 
@@ -294,6 +296,7 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
     mocks.listCodexInspectionRuns.mockReset();
     mocks.getCodexInspectionRun.mockReset();
     mocks.getHeaderSnapshots.mockReset();
+    mocks.getAccountHistory.mockReset();
     mocks.connectionStatus = 'connected';
     mocks.codexQuota = {};
     mocks.panelFeatureAvailability = {
@@ -323,6 +326,28 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
       to_ms: 1_700_000_000_000,
       items: [],
     });
+    mocks.getAccountHistory.mockImplementation(
+      async (_base: string, _key: string, request: { accounts: unknown[] }) => ({
+        generated_at_ms: 1_700_000_000_000,
+        checkpoint: {
+          last_event_id: 0,
+          latest_id: 0,
+          pending: false,
+          processed: 0,
+        },
+        items: request.accounts.map(() => ({
+          account_key: '-',
+          matched: false,
+          total_requests: 0,
+          success_calls: 0,
+          failure_calls: 0,
+          total_tokens: 0,
+          total_cost: 0,
+          success_rate: null,
+          sync_status: 'empty',
+        })),
+      })
+    );
   });
 
   it('keeps Codex inspection status scoped to auth index for rows from the same file', async () => {

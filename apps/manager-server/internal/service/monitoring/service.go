@@ -214,8 +214,9 @@ type HeaderSnapshotsResponse struct {
 }
 
 type AccountHistoryRequest struct {
-	Accounts []AccountHistoryTarget `json:"accounts"`
-	CatchUp  bool                   `json:"catch_up"`
+	Accounts    []AccountHistoryTarget `json:"accounts"`
+	CatchUp     bool                   `json:"catch_up"`
+	IncludeCost *bool                  `json:"include_cost,omitempty"`
 }
 
 type AccountHistoryTarget struct {
@@ -1220,11 +1221,15 @@ func (s *Service) AccountHistory(ctx context.Context, req AccountHistoryRequest)
 	if err != nil {
 		return AccountHistoryResponse{}, err
 	}
-	prices, err := s.store.LoadModelPrices(ctx)
-	if err != nil {
-		return AccountHistoryResponse{}, err
+	includeCost := req.IncludeCost == nil || *req.IncludeCost
+	prices := map[string]store.ModelPrice(nil)
+	if includeCost {
+		prices, err = s.store.LoadModelPrices(ctx)
+		if err != nil {
+			return AccountHistoryResponse{}, err
+		}
 	}
-	totals := buildAccountHistoryTotals(rows, prices)
+	totals := buildAccountHistoryTotals(rows, prices, includeCost)
 	pending := latestID > checkpoint.LastEventID
 	items := make([]AccountHistoryItem, 0, len(req.Accounts))
 	for index := range req.Accounts {
@@ -2921,7 +2926,7 @@ func accountHistoryTargetKey(target AccountHistoryTarget) (string, bool) {
 	), true
 }
 
-func buildAccountHistoryTotals(rows []store.AccountHistoryRollupRow, prices map[string]store.ModelPrice) map[string]*accountHistoryTotal {
+func buildAccountHistoryTotals(rows []store.AccountHistoryRollupRow, prices map[string]store.ModelPrice, includeCost bool) map[string]*accountHistoryTotal {
 	totals := map[string]*accountHistoryTotal{}
 	for _, row := range rows {
 		total := totals[row.AccountKey]
@@ -2933,23 +2938,25 @@ func buildAccountHistoryTotals(rows []store.AccountHistoryRollupRow, prices map[
 		total.successCalls += row.SuccessCalls
 		total.failureCalls += row.FailureCalls
 		total.totalTokens += row.TotalTokens
-		total.cost += pricing.CostForModelCandidatesWithServiceTier(
-			[]string{row.BillingModel, row.Model},
-			row.ServiceTier,
-			pricing.ModelTokens{
-				InputTokens:             row.InputTokens,
-				OutputTokens:            row.OutputTokens,
-				CachedTokens:            row.CachedTokens,
-				CacheReadTokens:         row.CacheReadTokens,
-				CacheCreationTokens:     row.CacheCreationTokens,
-				LongInputTokens:         row.LongInputTokens,
-				LongOutputTokens:        row.LongOutputTokens,
-				LongCachedTokens:        row.LongCachedTokens,
-				LongCacheReadTokens:     row.LongCacheReadTokens,
-				LongCacheCreationTokens: row.LongCacheCreationTokens,
-			},
-			prices,
-		)
+		if includeCost {
+			total.cost += pricing.CostForModelCandidatesWithServiceTier(
+				[]string{row.BillingModel, row.Model},
+				row.ServiceTier,
+				pricing.ModelTokens{
+					InputTokens:             row.InputTokens,
+					OutputTokens:            row.OutputTokens,
+					CachedTokens:            row.CachedTokens,
+					CacheReadTokens:         row.CacheReadTokens,
+					CacheCreationTokens:     row.CacheCreationTokens,
+					LongInputTokens:         row.LongInputTokens,
+					LongOutputTokens:        row.LongOutputTokens,
+					LongCachedTokens:        row.LongCachedTokens,
+					LongCacheReadTokens:     row.LongCacheReadTokens,
+					LongCacheCreationTokens: row.LongCacheCreationTokens,
+				},
+				prices,
+			)
+		}
 		if total.firstSeenMS == 0 || (row.FirstSeenMS > 0 && row.FirstSeenMS < total.firstSeenMS) {
 			total.firstSeenMS = row.FirstSeenMS
 		}

@@ -39,6 +39,7 @@ import type { AntigravitySubscriptionState } from '@/features/authFiles/hooks/us
 import type { AuthFileCodexStatusBadge } from '@/features/authFiles/model/authFilesPageModel';
 import { getAccountAutomationPresentation } from '@/features/authFiles/model/accountAutomationPresentation';
 import { getQuotaCooldownPresentation } from '@/features/authFiles/model/quotaCooldownPresentation';
+import type { AuthFileUsageSummary } from '@/features/authFiles/model/authFileUsage';
 import type { AccountActionCandidate, QuotaCooldownInfo } from '@/services/api/usageService';
 import { AuthFileQuotaSection } from '@/features/authFiles/components/AuthFileQuotaSection';
 import styles from '@/features/authFiles/AuthFilesPage.module.scss';
@@ -62,6 +63,7 @@ export type AuthFileCardProps = {
   onRefreshAntigravitySubscription?: (file: AuthFileItem) => void;
   quotaCooldown?: QuotaCooldownInfo;
   accountActionCandidate?: AccountActionCandidate;
+  accountUsage?: AuthFileUsageSummary;
   onShowModels: (file: AuthFileItem) => void;
   onReauth?: (file: AuthFileItem) => void;
   onDownload: (name: string) => void;
@@ -127,6 +129,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
     onRefreshAntigravitySubscription,
     quotaCooldown,
     accountActionCandidate,
+    accountUsage,
     onShowModels,
     onReauth,
     onDownload,
@@ -655,6 +658,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
                 quotaType={quotaType}
                 disableControls={disableControls}
                 quotaOverride={quotaType === 'codex' ? (codexDisplayQuota ?? null) : undefined}
+                accountUsage={accountUsage}
               />
             )}
           </div>
