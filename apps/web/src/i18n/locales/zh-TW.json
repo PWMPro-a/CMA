@@ -2718,7 +2718,20 @@
           "switch_preview_model": "切換預覽模型",
           "switch_preview_model_desc": "配額耗盡時切換到預覽版本模型",
           "antigravity_credits": "Antigravity Credits 重試",
-          "antigravity_credits_desc": "Antigravity 回傳 quota_exhausted 429 時，使用 enabledCreditTypes=[\"GOOGLE_ONE_AI\"] 重試一次"
+          "antigravity_credits_desc": "Antigravity 回傳 quota_exhausted 429 時，使用 enabledCreditTypes=[\"GOOGLE_ONE_AI\"] 重試一次",
+          "tail_burst_title": "Codex 額度超限併發",
+          "tail_burst_desc": "額度接近耗盡時暫時提高該帳號的併發調度，失敗請求會切換健康帳號重試。",
+          "tail_burst_enabled": "啟用額度超限併發",
+          "tail_burst_enabled_desc": "僅在 Codex 憑證使用率達到閾值且尚未耗盡時啟用。",
+          "tail_burst_trigger_percent": "觸發使用率 (%)",
+          "tail_burst_trigger_percent_hint": "使用率達到此值後開始暫時併發調度；必須大於 0 且小於 100。",
+          "tail_burst_snapshot_ttl": "額度快照有效期",
+          "tail_burst_collector_interval": "額度採集間隔",
+          "tail_burst_collector_concurrency": "額度採集併發數",
+          "tail_burst_collector_timeout": "額度採集逾時",
+          "tail_burst_duration_hint": "Go duration 格式，例如 45s、1m。",
+          "tail_burst_tool_injection": "自動注入工具呼叫宣告",
+          "tail_burst_tool_injection_desc": "對沒有工具宣告的 Codex 請求補充工具呼叫宣告，協助額度超限併發調度保持協議一致。"
         },
         "streaming": {
           "title": "串流傳輸設定",
@@ -2836,6 +2849,8 @@
         "non_negative_integer": "請輸入非負整數",
         "integer": "請輸入整數",
         "retention_seconds_range": "請輸入 1 到 3600 之間的整數",
+        "tail_burst_trigger_percent_range": "請輸入大於 0 且小於 100 的使用率",
+        "tail_burst_collector_concurrency_range": "請輸入 1 到 16 之間的整數",
         "payload_invalid_number": "請輸入有效數字",
         "payload_invalid_boolean": "請選擇 true 或 false",
         "payload_invalid_json": "請輸入有效的 JSON"

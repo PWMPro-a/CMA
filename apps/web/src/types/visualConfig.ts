@@ -18,6 +18,8 @@ export type VisualConfigFieldPath =
   | 'maxRetryCredentials'
   | 'maxRetryInterval'
   | 'authAutoRefreshWorkers'
+  | 'codexTailBurstTriggerUsedPercent'
+  | 'codexTailBurstCollectorMaxConcurrency'
   | 'streaming.keepaliveSeconds'
   | 'streaming.bootstrapRetries'
   | 'streaming.nonstreamKeepaliveInterval';
@@ -26,7 +28,9 @@ export type VisualConfigValidationErrorCode =
   | 'port_range'
   | 'non_negative_integer'
   | 'integer'
-  | 'retention_seconds_range';
+  | 'retention_seconds_range'
+  | 'tail_burst_trigger_percent_range'
+  | 'tail_burst_collector_concurrency_range';
 
 export type VisualConfigValidationErrors = Partial<
   Record<VisualConfigFieldPath, VisualConfigValidationErrorCode>
@@ -149,6 +153,13 @@ export type VisualConfigValues = {
   codexHeaderUserAgent: string;
   codexHeaderBetaFeatures: string;
   codexIdentityConfuse: boolean;
+  codexTailBurstEnabled: boolean;
+  codexTailBurstTriggerUsedPercent: string;
+  codexTailBurstSnapshotTtl: string;
+  codexTailBurstCollectorInterval: string;
+  codexTailBurstCollectorMaxConcurrency: string;
+  codexTailBurstCollectorTimeout: string;
+  codexTailBurstToolInjectionEnabled: boolean;
   payloadDefaultRules: PayloadRule[];
   payloadDefaultRawRules: PayloadRule[];
   payloadOverrideRules: PayloadRule[];
@@ -223,6 +234,13 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   codexHeaderUserAgent: '',
   codexHeaderBetaFeatures: '',
   codexIdentityConfuse: false,
+  codexTailBurstEnabled: false,
+  codexTailBurstTriggerUsedPercent: '98',
+  codexTailBurstSnapshotTtl: '90s',
+  codexTailBurstCollectorInterval: '45s',
+  codexTailBurstCollectorMaxConcurrency: '4',
+  codexTailBurstCollectorTimeout: '8s',
+  codexTailBurstToolInjectionEnabled: false,
   payloadDefaultRules: [],
   payloadDefaultRawRules: [],
   payloadOverrideRules: [],

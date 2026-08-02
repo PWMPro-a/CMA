@@ -232,6 +232,14 @@ export function VisualConfigEditor({
     t,
     validationErrors?.authAutoRefreshWorkers
   );
+  const codexTailBurstTriggerPercentError = getValidationMessage(
+    t,
+    validationErrors?.codexTailBurstTriggerUsedPercent
+  );
+  const codexTailBurstCollectorConcurrencyError = getValidationMessage(
+    t,
+    validationErrors?.codexTailBurstCollectorMaxConcurrency
+  );
   const keepaliveError = getValidationMessage(t, validationErrors?.['streaming.keepaliveSeconds']);
   const bootstrapRetriesError = getValidationMessage(
     t,
@@ -332,7 +340,10 @@ export function VisualConfigEditor({
         title: t('config_management.visual.sections.quota.title'),
         description: t('config_management.visual.sections.quota.description'),
         icon: IconTimer,
-        errorCount: 0,
+        errorCount: countErrors([
+          'codexTailBurstTriggerUsedPercent',
+          'codexTailBurstCollectorMaxConcurrency',
+        ]),
       },
       {
         id: 'streaming',
@@ -1279,29 +1290,124 @@ export function VisualConfigEditor({
             title={t('config_management.visual.sections.quota.title')}
             description={t('config_management.visual.sections.quota.description')}
           >
-            <SectionGrid>
-              <ToggleRow
-                title={t('config_management.visual.sections.quota.switch_project')}
-                description={t('config_management.visual.sections.quota.switch_project_desc')}
-                checked={values.quotaSwitchProject}
-                disabled={disabled}
-                onChange={(quotaSwitchProject) => onChange({ quotaSwitchProject })}
-              />
-              <ToggleRow
-                title={t('config_management.visual.sections.quota.switch_preview_model')}
-                description={t('config_management.visual.sections.quota.switch_preview_model_desc')}
-                checked={values.quotaSwitchPreviewModel}
-                disabled={disabled}
-                onChange={(quotaSwitchPreviewModel) => onChange({ quotaSwitchPreviewModel })}
-              />
-              <ToggleRow
-                title={t('config_management.visual.sections.quota.antigravity_credits')}
-                description={t('config_management.visual.sections.quota.antigravity_credits_desc')}
-                checked={values.quotaAntigravityCredits}
-                disabled={disabled}
-                onChange={(quotaAntigravityCredits) => onChange({ quotaAntigravityCredits })}
-              />
-            </SectionGrid>
+            <SectionStack>
+              <SectionGrid>
+                <ToggleRow
+                  title={t('config_management.visual.sections.quota.switch_project')}
+                  description={t('config_management.visual.sections.quota.switch_project_desc')}
+                  checked={values.quotaSwitchProject}
+                  disabled={disabled}
+                  onChange={(quotaSwitchProject) => onChange({ quotaSwitchProject })}
+                />
+                <ToggleRow
+                  title={t('config_management.visual.sections.quota.switch_preview_model')}
+                  description={t(
+                    'config_management.visual.sections.quota.switch_preview_model_desc'
+                  )}
+                  checked={values.quotaSwitchPreviewModel}
+                  disabled={disabled}
+                  onChange={(quotaSwitchPreviewModel) => onChange({ quotaSwitchPreviewModel })}
+                />
+                <ToggleRow
+                  title={t('config_management.visual.sections.quota.antigravity_credits')}
+                  description={t(
+                    'config_management.visual.sections.quota.antigravity_credits_desc'
+                  )}
+                  checked={values.quotaAntigravityCredits}
+                  disabled={disabled}
+                  onChange={(quotaAntigravityCredits) => onChange({ quotaAntigravityCredits })}
+                />
+              </SectionGrid>
+
+              <SectionSubsection
+                title={t('config_management.visual.sections.quota.tail_burst_title')}
+                description={t('config_management.visual.sections.quota.tail_burst_desc')}
+              >
+                <SectionGrid>
+                  <ToggleRow
+                    title={t('config_management.visual.sections.quota.tail_burst_enabled')}
+                    description={t(
+                      'config_management.visual.sections.quota.tail_burst_enabled_desc'
+                    )}
+                    checked={values.codexTailBurstEnabled}
+                    disabled={disabled}
+                    onChange={(codexTailBurstEnabled) => onChange({ codexTailBurstEnabled })}
+                  />
+                  <Input
+                    label={t('config_management.visual.sections.quota.tail_burst_trigger_percent')}
+                    type="number"
+                    min="1"
+                    max="99.99"
+                    step="0.01"
+                    value={values.codexTailBurstTriggerUsedPercent}
+                    onChange={(event) =>
+                      onChange({ codexTailBurstTriggerUsedPercent: event.target.value })
+                    }
+                    disabled={disabled || !values.codexTailBurstEnabled}
+                    hint={t(
+                      'config_management.visual.sections.quota.tail_burst_trigger_percent_hint'
+                    )}
+                    error={codexTailBurstTriggerPercentError}
+                  />
+                  <Input
+                    label={t('config_management.visual.sections.quota.tail_burst_snapshot_ttl')}
+                    value={values.codexTailBurstSnapshotTtl}
+                    onChange={(event) =>
+                      onChange({ codexTailBurstSnapshotTtl: event.target.value })
+                    }
+                    disabled={disabled || !values.codexTailBurstEnabled}
+                    hint={t('config_management.visual.sections.quota.tail_burst_duration_hint')}
+                  />
+                  <Input
+                    label={t(
+                      'config_management.visual.sections.quota.tail_burst_collector_interval'
+                    )}
+                    value={values.codexTailBurstCollectorInterval}
+                    onChange={(event) =>
+                      onChange({ codexTailBurstCollectorInterval: event.target.value })
+                    }
+                    disabled={disabled || !values.codexTailBurstEnabled}
+                    hint={t('config_management.visual.sections.quota.tail_burst_duration_hint')}
+                  />
+                  <Input
+                    label={t(
+                      'config_management.visual.sections.quota.tail_burst_collector_concurrency'
+                    )}
+                    type="number"
+                    min="1"
+                    max="16"
+                    value={values.codexTailBurstCollectorMaxConcurrency}
+                    onChange={(event) =>
+                      onChange({ codexTailBurstCollectorMaxConcurrency: event.target.value })
+                    }
+                    disabled={disabled || !values.codexTailBurstEnabled}
+                    error={codexTailBurstCollectorConcurrencyError}
+                  />
+                  <Input
+                    label={t(
+                      'config_management.visual.sections.quota.tail_burst_collector_timeout'
+                    )}
+                    value={values.codexTailBurstCollectorTimeout}
+                    onChange={(event) =>
+                      onChange({ codexTailBurstCollectorTimeout: event.target.value })
+                    }
+                    disabled={disabled || !values.codexTailBurstEnabled}
+                    hint={t('config_management.visual.sections.quota.tail_burst_duration_hint')}
+                  />
+                  <ToggleRow
+                    title={t('config_management.visual.sections.quota.tail_burst_tool_injection')}
+                    description={t(
+                      'config_management.visual.sections.quota.tail_burst_tool_injection_desc'
+                    )}
+                    checked={values.codexTailBurstToolInjectionEnabled}
+                    disabled={disabled || !values.codexTailBurstEnabled}
+                    onChange={(codexTailBurstToolInjectionEnabled) =>
+                      onChange({ codexTailBurstToolInjectionEnabled })
+                    }
+                  />
+                </SectionGrid>
+              </SectionSubsection>
+            </SectionStack>
           </ConfigSection>
 
           <ConfigSection

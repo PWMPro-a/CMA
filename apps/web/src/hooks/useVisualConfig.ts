@@ -331,6 +331,49 @@ function parseDisableImageGenerationMode(raw: unknown): DisableImageGenerationMo
   return 'false';
 }
 
+function getTailBurstCollectorConcurrencyError(
+  value: string
+): 'tail_burst_collector_concurrency_range' | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (!/^\d+$/.test(trimmed)) return 'tail_burst_collector_concurrency_range';
+  const parsed = Number(trimmed);
+  return parsed >= 1 && parsed <= 16 ? undefined : 'tail_burst_collector_concurrency_range';
+}
+
+function getTailBurstTriggerPercentError(
+  value: string
+): 'tail_burst_trigger_percent_range' | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed > 0 && parsed < 100
+    ? undefined
+    : 'tail_burst_trigger_percent_range';
+}
+
+function readTailBurstTriggerPercent(value: unknown): string {
+  const ratio = Number(value);
+  if (!Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) return '98';
+  return String(Number((ratio * 100).toFixed(4)));
+}
+
+function readTailBurstDuration(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value : fallback;
+}
+
+function setTailBurstTriggerRatioInDoc(doc: YamlDocument, path: YamlPath, value: string): void {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    if (docHas(doc, path)) doc.deleteIn(path);
+    return;
+  }
+  const percent = Number(trimmed);
+  if (Number.isFinite(percent) && percent > 0 && percent < 100) {
+    doc.setIn(path, percent / 100);
+  }
+}
+
 export function getVisualConfigValidationErrors(
   values: VisualConfigValues
 ): VisualConfigValidationErrors {
@@ -346,6 +389,12 @@ export function getVisualConfigValidationErrors(
     maxRetryCredentials: getNonNegativeIntegerError(values.maxRetryCredentials),
     maxRetryInterval: getNonNegativeIntegerError(values.maxRetryInterval),
     authAutoRefreshWorkers: getNonNegativeIntegerError(values.authAutoRefreshWorkers),
+    codexTailBurstTriggerUsedPercent: values.codexTailBurstEnabled
+      ? getTailBurstTriggerPercentError(values.codexTailBurstTriggerUsedPercent)
+      : undefined,
+    codexTailBurstCollectorMaxConcurrency: values.codexTailBurstEnabled
+      ? getTailBurstCollectorConcurrencyError(values.codexTailBurstCollectorMaxConcurrency)
+      : undefined,
     'streaming.keepaliveSeconds': getNonNegativeIntegerError(values.streaming.keepaliveSeconds),
     'streaming.bootstrapRetries': getNonNegativeIntegerError(values.streaming.bootstrapRetries),
     'streaming.nonstreamKeepaliveInterval': getNonNegativeIntegerError(
@@ -463,6 +512,13 @@ function getNextDirtyFields(
       'codexHeaderUserAgent',
       'codexHeaderBetaFeatures',
       'codexIdentityConfuse',
+      'codexTailBurstEnabled',
+      'codexTailBurstTriggerUsedPercent',
+      'codexTailBurstSnapshotTtl',
+      'codexTailBurstCollectorInterval',
+      'codexTailBurstCollectorMaxConcurrency',
+      'codexTailBurstCollectorTimeout',
+      'codexTailBurstToolInjectionEnabled',
     ] as Array<keyof VisualConfigValues>
   ).forEach(updateScalarDirty);
 
@@ -745,6 +801,13 @@ export function useVisualConfig() {
       const claudeHeaderDefaults = asRecord(parsed['claude-header-defaults']);
       const codexHeaderDefaults = asRecord(parsed['codex-header-defaults']);
       const codex = asRecord(parsed.codex);
+      const codexTailBurst = asRecord(codex?.['tail-burst'] ?? codex?.tailBurst);
+      const codexTailBurstCollector = asRecord(
+        codexTailBurst?.['quota-collector'] ?? codexTailBurst?.quotaCollector
+      );
+      const codexTailBurstToolInjection = asRecord(
+        codexTailBurst?.['tool-injection'] ?? codexTailBurst?.toolInjection
+      );
 
       const newValues: VisualConfigValues = {
         host: typeof parsed.host === 'string' ? parsed.host : '',
@@ -848,6 +911,28 @@ export function useVisualConfig() {
             ? codexHeaderDefaults['beta-features']
             : '',
         codexIdentityConfuse: Boolean(codex?.['identity-confuse'] ?? codex?.identityConfuse),
+        codexTailBurstEnabled: Boolean(codexTailBurst?.enabled),
+        codexTailBurstTriggerUsedPercent: readTailBurstTriggerPercent(
+          codexTailBurst?.['trigger-used-ratio'] ?? codexTailBurst?.triggerUsedRatio
+        ),
+        codexTailBurstSnapshotTtl: readTailBurstDuration(
+          codexTailBurst?.['snapshot-ttl'] ?? codexTailBurst?.snapshotTTL,
+          '90s'
+        ),
+        codexTailBurstCollectorInterval: readTailBurstDuration(
+          codexTailBurstCollector?.interval,
+          '45s'
+        ),
+        codexTailBurstCollectorMaxConcurrency: String(
+          codexTailBurstCollector?.['max-concurrency'] ??
+            codexTailBurstCollector?.maxConcurrency ??
+            4
+        ),
+        codexTailBurstCollectorTimeout: readTailBurstDuration(
+          codexTailBurstCollector?.timeout,
+          '8s'
+        ),
+        codexTailBurstToolInjectionEnabled: Boolean(codexTailBurstToolInjection?.enabled),
 
         quotaSwitchProject: Boolean(quotaExceeded?.['switch-project'] ?? false),
         quotaSwitchPreviewModel: Boolean(quotaExceeded?.['switch-preview-model'] ?? false),
@@ -1193,6 +1278,75 @@ export function useVisualConfig() {
           if (docHas(doc, codexIdentityConfuseLegacyPath)) {
             doc.deleteIn(codexIdentityConfuseLegacyPath);
           }
+          deleteIfMapEmpty(doc, ['codex']);
+        }
+
+        const codexTailBurstDirty =
+          isDirty('codexTailBurstEnabled') ||
+          isDirty('codexTailBurstTriggerUsedPercent') ||
+          isDirty('codexTailBurstSnapshotTtl') ||
+          isDirty('codexTailBurstCollectorInterval') ||
+          isDirty('codexTailBurstCollectorMaxConcurrency') ||
+          isDirty('codexTailBurstCollectorTimeout') ||
+          isDirty('codexTailBurstToolInjectionEnabled');
+        if (codexTailBurstDirty) {
+          ensureMapInDoc(doc, ['codex']);
+          ensureMapInDoc(doc, ['codex', 'tail-burst']);
+          if (isDirty('codexTailBurstEnabled')) {
+            doc.setIn(['codex', 'tail-burst', 'enabled'], values.codexTailBurstEnabled);
+          }
+          if (isDirty('codexTailBurstTriggerUsedPercent')) {
+            setTailBurstTriggerRatioInDoc(
+              doc,
+              ['codex', 'tail-burst', 'trigger-used-ratio'],
+              values.codexTailBurstTriggerUsedPercent
+            );
+          }
+          if (isDirty('codexTailBurstSnapshotTtl')) {
+            setStringInDoc(
+              doc,
+              ['codex', 'tail-burst', 'snapshot-ttl'],
+              values.codexTailBurstSnapshotTtl
+            );
+          }
+          const collectorDirty =
+            isDirty('codexTailBurstCollectorInterval') ||
+            isDirty('codexTailBurstCollectorMaxConcurrency') ||
+            isDirty('codexTailBurstCollectorTimeout');
+          if (collectorDirty) {
+            ensureMapInDoc(doc, ['codex', 'tail-burst', 'quota-collector']);
+            if (isDirty('codexTailBurstCollectorInterval')) {
+              setStringInDoc(
+                doc,
+                ['codex', 'tail-burst', 'quota-collector', 'interval'],
+                values.codexTailBurstCollectorInterval
+              );
+            }
+            if (isDirty('codexTailBurstCollectorMaxConcurrency')) {
+              setIntFromStringInDoc(
+                doc,
+                ['codex', 'tail-burst', 'quota-collector', 'max-concurrency'],
+                values.codexTailBurstCollectorMaxConcurrency
+              );
+            }
+            if (isDirty('codexTailBurstCollectorTimeout')) {
+              setStringInDoc(
+                doc,
+                ['codex', 'tail-burst', 'quota-collector', 'timeout'],
+                values.codexTailBurstCollectorTimeout
+              );
+            }
+            deleteIfMapEmpty(doc, ['codex', 'tail-burst', 'quota-collector']);
+          }
+          if (isDirty('codexTailBurstToolInjectionEnabled')) {
+            ensureMapInDoc(doc, ['codex', 'tail-burst', 'tool-injection']);
+            doc.setIn(
+              ['codex', 'tail-burst', 'tool-injection', 'enabled'],
+              values.codexTailBurstToolInjectionEnabled
+            );
+          }
+          deleteIfMapEmpty(doc, ['codex', 'tail-burst', 'tool-injection']);
+          deleteIfMapEmpty(doc, ['codex', 'tail-burst']);
           deleteIfMapEmpty(doc, ['codex']);
         }
 

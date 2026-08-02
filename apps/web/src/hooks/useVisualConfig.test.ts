@@ -356,6 +356,8 @@ describe('useVisualConfig', () => {
 
     expect(harness.getCurrent().visualValues.quotaSwitchProject).toBe(false);
     expect(harness.getCurrent().visualValues.quotaSwitchPreviewModel).toBe(false);
+    expect(harness.getCurrent().visualValues.codexTailBurstEnabled).toBe(false);
+    expect(harness.getCurrent().visualValues.codexTailBurstToolInjectionEnabled).toBe(false);
     expect(harness.getCurrent().visualValues.wsAuth).toBe(true);
 
     const parsed = parseYaml(harness.getCurrent().applyVisualChangesToYaml(yaml)) as Record<
@@ -363,6 +365,7 @@ describe('useVisualConfig', () => {
       unknown
     >;
     expect(parsed['quota-exceeded']).toBeUndefined();
+    expect(parsed.codex).toBeUndefined();
     expect(parsed['ws-auth']).toBeUndefined();
 
     harness.unmount();
@@ -555,6 +558,110 @@ describe('useVisualConfig', () => {
     expect(parsed['gpt-image-2-base-model']).toBe('gpt-5.4-mini');
     expect(parsed['video-result-auth-cache-ttl']).toBe('3h');
 
+    harness.unmount();
+  });
+
+  it('reads and writes Codex tail-burst controls without changing unrelated Codex config', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = [
+      'codex:',
+      '  identity-confuse: true',
+      '  future-option: preserve-me',
+      '  tail-burst:',
+      '    enabled: true',
+      '    trigger-used-ratio: 0.98',
+      '    snapshot-ttl: 90s',
+      '    quota-collector:',
+      '      interval: 45s',
+      '      max-concurrency: 4',
+      '      timeout: 8s',
+      '      future-collector-option: preserve-me',
+      '    tool-injection:',
+      '      enabled: true',
+      '',
+    ].join('\n');
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+    });
+
+    expect(harness.getCurrent().visualValues).toEqual(
+      expect.objectContaining({
+        codexIdentityConfuse: true,
+        codexTailBurstEnabled: true,
+        codexTailBurstTriggerUsedPercent: '98',
+        codexTailBurstSnapshotTtl: '90s',
+        codexTailBurstCollectorInterval: '45s',
+        codexTailBurstCollectorMaxConcurrency: '4',
+        codexTailBurstCollectorTimeout: '8s',
+        codexTailBurstToolInjectionEnabled: true,
+      })
+    );
+
+    act(() => {
+      harness.getCurrent().setVisualValues({
+        codexTailBurstTriggerUsedPercent: '98.5',
+        codexTailBurstSnapshotTtl: '2m',
+        codexTailBurstCollectorInterval: '30s',
+        codexTailBurstCollectorMaxConcurrency: '6',
+        codexTailBurstCollectorTimeout: '10s',
+        codexTailBurstToolInjectionEnabled: false,
+      });
+    });
+
+    const parsed = parseYaml(harness.getCurrent().applyVisualChangesToYaml(yaml)) as {
+      codex?: {
+        'identity-confuse'?: boolean;
+        'future-option'?: string;
+        'tail-burst'?: {
+          'trigger-used-ratio'?: number;
+          'snapshot-ttl'?: string;
+          'quota-collector'?: {
+            interval?: string;
+            'max-concurrency'?: number;
+            timeout?: string;
+            'future-collector-option'?: string;
+          };
+          'tool-injection'?: { enabled?: boolean };
+        };
+      };
+    };
+
+    expect(parsed.codex?.['identity-confuse']).toBe(true);
+    expect(parsed.codex?.['future-option']).toBe('preserve-me');
+    expect(parsed.codex?.['tail-burst']).toEqual(
+      expect.objectContaining({
+        enabled: true,
+        'trigger-used-ratio': 0.985,
+        'snapshot-ttl': '2m',
+        'tool-injection': { enabled: false },
+      })
+    );
+    expect(parsed.codex?.['tail-burst']?.['quota-collector']).toEqual({
+      interval: '30s',
+      'max-concurrency': 6,
+      timeout: '10s',
+      'future-collector-option': 'preserve-me',
+    });
+
+    harness.unmount();
+  });
+
+  it('validates Codex tail-burst trigger percentage and collector concurrency', () => {
+    const harness = mountUseVisualConfig();
+
+    act(() => {
+      harness.getCurrent().setVisualValues({
+        codexTailBurstEnabled: true,
+        codexTailBurstTriggerUsedPercent: '100',
+        codexTailBurstCollectorMaxConcurrency: '17',
+      });
+    });
+
+    expect(harness.getCurrent().visualValidationErrors).toMatchObject({
+      codexTailBurstTriggerUsedPercent: 'tail_burst_trigger_percent_range',
+      codexTailBurstCollectorMaxConcurrency: 'tail_burst_collector_concurrency_range',
+    });
     harness.unmount();
   });
 });

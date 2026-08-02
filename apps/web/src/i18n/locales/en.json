@@ -2718,7 +2718,20 @@
           "switch_preview_model": "Switch to Preview Model",
           "switch_preview_model_desc": "Switch to preview model version when quota is exceeded",
           "antigravity_credits": "Antigravity Credits Retry",
-          "antigravity_credits_desc": "Retry once with enabledCreditTypes=[\"GOOGLE_ONE_AI\"] when Antigravity returns quota_exhausted 429"
+          "antigravity_credits_desc": "Retry once with enabledCreditTypes=[\"GOOGLE_ONE_AI\"] when Antigravity returns quota_exhausted 429",
+          "tail_burst_title": "Codex tail-burst concurrency",
+          "tail_burst_desc": "Temporarily increase scheduling concurrency as a Codex credential nears quota exhaustion; failed requests retry on healthy credentials.",
+          "tail_burst_enabled": "Enable tail-burst concurrency",
+          "tail_burst_enabled_desc": "Applies only while a Codex credential reaches the threshold but is not fully exhausted.",
+          "tail_burst_trigger_percent": "Trigger usage (%)",
+          "tail_burst_trigger_percent_hint": "Start temporary concurrent scheduling at this usage percentage; it must be greater than 0 and less than 100.",
+          "tail_burst_snapshot_ttl": "Quota snapshot TTL",
+          "tail_burst_collector_interval": "Quota collection interval",
+          "tail_burst_collector_concurrency": "Quota collection concurrency",
+          "tail_burst_collector_timeout": "Quota collection timeout",
+          "tail_burst_duration_hint": "Go duration format, for example 45s or 1m.",
+          "tail_burst_tool_injection": "Inject tool-call declaration",
+          "tail_burst_tool_injection_desc": "Add a tool-call declaration to Codex requests without one so tail-burst scheduling keeps a consistent protocol shape."
         },
         "streaming": {
           "title": "Streaming Configuration",
@@ -2836,6 +2849,8 @@
         "non_negative_integer": "Enter a non-negative whole number",
         "integer": "Enter a whole number",
         "retention_seconds_range": "Enter an integer between 1 and 3600",
+        "tail_burst_trigger_percent_range": "Enter a usage percentage greater than 0 and less than 100",
+        "tail_burst_collector_concurrency_range": "Enter an integer between 1 and 16",
         "payload_invalid_number": "Enter a valid number",
         "payload_invalid_boolean": "Choose true or false",
         "payload_invalid_json": "Enter valid JSON"

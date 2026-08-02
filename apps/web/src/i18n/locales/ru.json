@@ -2718,7 +2718,20 @@
           "switch_preview_model": "Переключить на preview-модель",
           "switch_preview_model_desc": "Переключаться на preview-версию модели при превышении квоты",
           "antigravity_credits": "Повтор Antigravity Credits",
-          "antigravity_credits_desc": "При ответе Antigravity quota_exhausted 429 повторять запрос один раз с enabledCreditTypes=[\"GOOGLE_ONE_AI\"]"
+          "antigravity_credits_desc": "При ответе Antigravity quota_exhausted 429 повторять запрос один раз с enabledCreditTypes=[\"GOOGLE_ONE_AI\"]",
+          "tail_burst_title": "Параллельность Codex при исчерпании квоты",
+          "tail_burst_desc": "Временно повышает параллельность для учётной записи Codex перед исчерпанием квоты; неудачные запросы повторяются через здоровые учётные записи.",
+          "tail_burst_enabled": "Включить параллельность при исчерпании квоты",
+          "tail_burst_enabled_desc": "Работает только когда использование учётной записи Codex достигло порога, но квота ещё не исчерпана.",
+          "tail_burst_trigger_percent": "Порог использования (%)",
+          "tail_burst_trigger_percent_hint": "Временное параллельное планирование начинается с этого процента; значение должно быть больше 0 и меньше 100.",
+          "tail_burst_snapshot_ttl": "TTL снимка квоты",
+          "tail_burst_collector_interval": "Интервал сбора квоты",
+          "tail_burst_collector_concurrency": "Параллельность сбора квоты",
+          "tail_burst_collector_timeout": "Тайм-аут сбора квоты",
+          "tail_burst_duration_hint": "Формат Go duration, например 45s или 1m.",
+          "tail_burst_tool_injection": "Добавлять объявление вызова инструмента",
+          "tail_burst_tool_injection_desc": "Добавляет объявление вызова инструмента в запросы Codex без него, чтобы сохранить единый формат протокола для tail-burst планирования."
         },
         "streaming": {
           "title": "Настройки стриминга",
@@ -2836,6 +2849,8 @@
         "non_negative_integer": "Введите неотрицательное целое число",
         "integer": "Введите целое число",
         "retention_seconds_range": "Введите целое число от 1 до 3600",
+        "tail_burst_trigger_percent_range": "Введите процент использования больше 0 и меньше 100",
+        "tail_burst_collector_concurrency_range": "Введите целое число от 1 до 16",
         "payload_invalid_number": "Введите корректное число",
         "payload_invalid_boolean": "Выберите true или false",
         "payload_invalid_json": "Введите корректный JSON"
