@@ -81,6 +81,20 @@ export interface AgentIdentityRecoveryConfig {
   concurrency: number;
   history_limit: number;
 }
+
+// CodexQuotaSnapshot is an in-memory usage sample supplied by the CPA runtime.
+// It is deliberately independent from the browser-side "refresh quota" request:
+// the runtime collects it asynchronously and includes it in the normal auth-file
+// list payload.
+export interface CodexQuotaSnapshot {
+  used_ratio?: number;
+  remaining_ratio?: number;
+  window?: string;
+  sampled_at?: string | number;
+  expires_at?: string | number;
+  generation?: number;
+}
+
 export interface AuthFileItem {
   id?: string;
   name: string;
@@ -103,6 +117,8 @@ export interface AuthFileItem {
   geminiVirtualProject?: string;
   recent_requests?: RecentRequestBucket[];
   recentRequests?: RecentRequestBucket[];
+  codex_quota_snapshots?: Record<string, CodexQuotaSnapshot>;
+  codexQuotaSnapshots?: Record<string, CodexQuotaSnapshot>;
   agent_identity_registration?: AgentIdentityRegistrationStatus;
   agentIdentityRegistration?: AgentIdentityRegistrationStatus;
   [key: string]: unknown;

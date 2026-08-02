@@ -1,6 +1,7 @@
 import type { TFunction } from 'i18next';
-import type { AuthFileItem, CodexQuotaState } from '@/types';
+import type { AuthFileItem, CodexQuotaSnapshot, CodexQuotaState } from '@/types';
 import type { UsageHeaderSnapshot } from '@/services/api/usageService';
+import { normalizeAuthIndex } from '@/utils/authIndex';
 import {
   normalizePlanType,
   resolveCodexChatgptAccountId,
@@ -147,6 +148,107 @@ const normalizeNumber = (value: unknown): number | null => {
   if (!trimmed) return null;
   const parsed = Number(trimmed);
   return Number.isFinite(parsed) ? parsed : null;
+};
+
+const readSnapshotTimestampMs = (value: unknown): number | null => {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    // JSON timestamps are normally milliseconds here. Accept a seconds value
+    // as well so an older runtime response cannot make a fresh snapshot vanish.
+    return value < 10_000_000_000 ? Math.round(value * 1000) : Math.round(value);
+  }
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const readCollectorUsedPercent = (value: unknown): number | null => {
+  const ratio = normalizeNumber(value);
+  if (ratio === null || ratio < 0 || ratio > 1) return null;
+  return ratio * 100;
+};
+
+const collectorSnapshotWindow = (
+  snapshot: CodexQuotaSnapshot,
+  t: TFunction
+): CodexQuotaState['windows'][number] | null => {
+  const usedPercent = readCollectorUsedPercent(snapshot.used_ratio);
+  if (usedPercent === null) return null;
+  const window = String(snapshot.window ?? '')
+    .trim()
+    .toLowerCase();
+  if (window === 'primary') {
+    return {
+      id: 'five-hour',
+      label: t('codex_quota.primary_window'),
+      labelKey: 'codex_quota.primary_window',
+      usedPercent,
+      // The collector expiry is a cache freshness deadline, not a quota reset.
+      resetLabel: '-',
+      limitWindowSeconds: CODEX_FIVE_HOUR_WINDOW_SECONDS,
+    };
+  }
+  if (window === 'secondary') {
+    return {
+      id: 'weekly',
+      label: t('codex_quota.secondary_window'),
+      labelKey: 'codex_quota.secondary_window',
+      usedPercent,
+      resetLabel: '-',
+      limitWindowSeconds: CODEX_WEEKLY_WINDOW_SECONDS,
+    };
+  }
+  return {
+    id: 'runtime-usage',
+    label: t('codex_quota.observed_window', { defaultValue: 'Current usage' }),
+    usedPercent,
+    resetLabel: '-',
+  };
+};
+
+// buildCodexQuotaStateFromCollectorSnapshot projects the single runtime
+// collector response into the existing quota card model. It performs no I/O;
+// the snapshot arrives as part of the normal auth-files list response.
+export const buildCodexQuotaStateFromCollectorSnapshot = (
+  file: AuthFileItem,
+  t: TFunction,
+  nowMs = Date.now()
+): CodexQuotaState | undefined => {
+  const rawSnapshots = file.codex_quota_snapshots ?? file.codexQuotaSnapshots;
+  if (!rawSnapshots || typeof rawSnapshots !== 'object') return undefined;
+
+  const candidates = Object.entries(rawSnapshots)
+    .map(([model, snapshot]) => ({ model, snapshot }))
+    .filter(
+      (entry): entry is { model: string; snapshot: CodexQuotaSnapshot } =>
+        Boolean(entry.snapshot) && typeof entry.snapshot === 'object'
+    )
+    .map((entry) => ({
+      ...entry,
+      sampledAtMs: readSnapshotTimestampMs(entry.snapshot.sampled_at) ?? 0,
+      expiresAtMs: readSnapshotTimestampMs(entry.snapshot.expires_at),
+    }))
+    .filter((entry) => entry.expiresAtMs !== null && entry.expiresAtMs > nowMs)
+    // The collector writes the all-model sample under "*". Prefer it for a
+    // list card; only use a model-specific sample if no shared sample exists.
+    .sort(
+      (left, right) =>
+        Number(right.model === '*') - Number(left.model === '*') ||
+        right.sampledAtMs - left.sampledAtMs
+    );
+  const candidate = candidates[0];
+  if (!candidate) return undefined;
+
+  const quotaWindow = collectorSnapshotWindow(candidate.snapshot, t);
+  if (!quotaWindow) return undefined;
+
+  return {
+    status: 'success',
+    windows: [quotaWindow],
+    authFileKey: getAuthFileCodexInspectionKeyForFile(file),
+    authFileName: file.name,
+    authIndex: normalizeAuthIndex(readAuthFileAuthIndex(file)),
+    fetchedAtMs: candidate.sampledAtMs || undefined,
+  };
 };
 
 const formatObservedRecoverLabel = (value: number | null) => {

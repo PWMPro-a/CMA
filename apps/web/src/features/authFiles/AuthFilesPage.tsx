@@ -99,6 +99,7 @@ import {
   authFileMatchesCodexPlanFilter,
   authFileMatchesCodexStatusFilter,
   buildAuthFileCodexInspectionMap,
+  buildCodexQuotaStateFromCollectorSnapshot,
   buildWildcardSearch,
   compareAuthFileName,
   compareAuthFileNote,
@@ -1160,9 +1161,17 @@ export function AuthFilesPage() {
     (file: AuthFileItem): CodexQuotaState | undefined => {
       if (resolveAuthProvider(file) !== 'codex') return undefined;
       const storeKey = getAuthFileCodexInspectionKeyForFile(file);
-      return getAuthFileScopedCodexQuota(file, codexQuota[storeKey] ?? codexQuota[file.name]);
+      const activeQuota = getAuthFileScopedCodexQuota(
+        file,
+        codexQuota[storeKey] ?? codexQuota[file.name]
+      );
+      // A manual browser refresh remains authoritative. When it has not run,
+      // render the runtime's asynchronous usage sample directly from the list
+      // response instead of starting one quota request per card.
+      if (activeQuota && activeQuota.status !== 'idle') return activeQuota;
+      return buildCodexQuotaStateFromCollectorSnapshot(file, t);
     },
-    [codexQuota]
+    [codexQuota, t]
   );
 
   useEffect(() => {

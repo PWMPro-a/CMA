@@ -5,6 +5,7 @@ import {
   authFileMatchesCodexPlanFilter,
   authFileMatchesCodexStatusFilter,
   buildAuthFileCodexInspectionMap,
+  buildCodexQuotaStateFromCollectorSnapshot,
   getAuthFileCodexInspectionKey,
   getAuthFileCodexStatus,
   getAuthFileNameFromSelectionKey,
@@ -52,6 +53,57 @@ const codexQuota = (overrides: Partial<CodexQuotaState> = {}): CodexQuotaState =
 });
 
 describe('auth file Codex status helpers', () => {
+  it('projects a fresh runtime quota snapshot without a per-card browser request', () => {
+    const file = codexFile({
+      codex_quota_snapshots: {
+        '*': {
+          used_ratio: 0.982,
+          window: 'secondary',
+          sampled_at: '2026-08-02T12:00:00.000Z',
+          expires_at: '2026-08-02T12:01:30.000Z',
+        },
+      },
+    });
+
+    const quota = buildCodexQuotaStateFromCollectorSnapshot(
+      file,
+      t,
+      Date.parse('2026-08-02T12:00:45.000Z')
+    );
+
+    expect(quota).toMatchObject({
+      status: 'success',
+      authFileKey: getAuthFileCodexInspectionKey(file.name, file.authIndex),
+      fetchedAtMs: Date.parse('2026-08-02T12:00:00.000Z'),
+    });
+    expect(quota?.windows).toEqual([
+      expect.objectContaining({
+        id: 'weekly',
+        usedPercent: 98.2,
+        resetLabel: '-',
+        limitWindowSeconds: 604_800,
+      }),
+    ]);
+  });
+
+  it('drops an expired runtime quota snapshot', () => {
+    const quota = buildCodexQuotaStateFromCollectorSnapshot(
+      codexFile({
+        codex_quota_snapshots: {
+          '*': {
+            used_ratio: 0.99,
+            window: 'primary',
+            expires_at: '2026-08-02T12:00:00.000Z',
+          },
+        },
+      }),
+      t,
+      Date.parse('2026-08-02T12:00:01.000Z')
+    );
+
+    expect(quota).toBeUndefined();
+  });
+
   it('detects weekly-limited Codex quota from the weekly quota window', () => {
     const status = getAuthFileCodexStatus(codexFile(), codexQuota());
 
