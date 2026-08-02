@@ -123,6 +123,47 @@ func TestRunPersistsLogsResultsAndDetail(t *testing.T) {
 	}
 }
 
+func TestRefreshSupplySnapshotIsReadOnlyAndCodexOnly(t *testing.T) {
+	deleteRequests := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"files":[{"name":"auth-a.json","auth_index":"auth-1","provider":"codex","account":"alice@example.com","status":"ok","state":"ready"}]}`))
+		case r.URL.Path == "/v0/management/api-call" && r.Method == http.MethodPost:
+			_, _ = w.Write([]byte(`{"status_code":402,"body":{"detail":{"code":"deactivated_workspace"}}}`))
+		case strings.HasPrefix(r.URL.Path, "/v0/management/auth-files") && r.Method == http.MethodDelete:
+			deleteRequests++
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	db := newCodexInspectionTestStore(t)
+	if err := db.SaveManagerConfig(context.Background(), newCodexInspectionManagerConfig(upstream.URL)); err != nil {
+		t.Fatalf("save manager config: %v", err)
+	}
+	svc := newCodexInspectionTestService(t, db)
+	if err := svc.RefreshSupplySnapshot(context.Background()); err != nil {
+		t.Fatalf("refresh supply snapshot: %v", err)
+	}
+	if deleteRequests != 0 {
+		t.Fatalf("read-only supply snapshot issued %d credential deletes", deleteRequests)
+	}
+	runs, err := db.ListCodexInspectionRuns(context.Background(), 1)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("list supply snapshot runs: runs=%#v err=%v", runs, err)
+	}
+	run := runs[0]
+	if run.TriggerType != model.CodexInspectionTriggerSupplySnapshot ||
+		run.Settings.AutoActionMode != model.CodexInspectionAutoActionNone ||
+		run.Settings.AutoRecoverEnabled ||
+		len(run.Settings.TargetProviders()) != 1 || run.Settings.TargetProviders()[0] != model.CodexInspectionTargetCodex {
+		t.Fatalf("unexpected read-only supply run settings: %#v", run)
+	}
+}
+
 func TestRunXAISkipsInferenceWhenDisabled(t *testing.T) {
 	requestedURLs := make([]string, 0, 2)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

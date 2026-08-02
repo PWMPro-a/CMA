@@ -4567,6 +4567,7 @@
     "smart_title": "智能资源统计",
     "snapshot_age": "账号快照 {{value}} 秒前",
     "snapshot_fresh": "快照有效",
+    "snapshot_refreshing": "快照自动刷新中",
     "snapshot_stale": "快照过期",
     "snapshot_status": "快照状态",
     "status_cancelled": "已取消",

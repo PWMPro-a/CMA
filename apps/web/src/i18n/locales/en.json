@@ -4567,6 +4567,7 @@
     "smart_title": "Smart resource statistics",
     "snapshot_age": "Account snapshot {{value}}s ago",
     "snapshot_fresh": "Snapshot fresh",
+    "snapshot_refreshing": "Refreshing snapshot automatically",
     "snapshot_stale": "Snapshot stale",
     "snapshot_status": "Snapshot status",
     "status_cancelled": "Cancelled",

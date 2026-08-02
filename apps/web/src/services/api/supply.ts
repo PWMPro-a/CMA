@@ -92,6 +92,8 @@ export interface SupplySmartResource {
   decisionReason: string;
   confidence: 'high' | 'medium' | 'low' | string;
   snapshotFresh: boolean;
+  snapshotRefreshInProgress?: boolean;
+  snapshotRefreshLastAttemptMs?: number;
   generatedAtMs: number;
   capacitySource: 'inspection_snapshot' | 'unavailable' | string;
   capacityCoverage: number;

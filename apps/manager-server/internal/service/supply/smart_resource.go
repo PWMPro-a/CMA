@@ -54,20 +54,22 @@ const (
 )
 
 type SmartResource struct {
-	Enabled                    bool    `json:"enabled"`
-	HealthLevel                string  `json:"healthLevel"`
-	SuggestedAction            string  `json:"suggestedAction"`
-	SuggestedQuantity          int     `json:"suggestedQuantity"`
-	DecisionReason             string  `json:"decisionReason"`
-	Confidence                 string  `json:"confidence"`
-	SnapshotFresh              bool    `json:"snapshotFresh"`
-	GeneratedAtMS              int64   `json:"generatedAtMs"`
-	CapacitySource             string  `json:"capacitySource"`
-	CapacityCoverage           float64 `json:"capacityCoverage"`
-	CapacityLifetimeCoverage   float64 `json:"capacityLifetimeCoverage"`
-	CapacitySnapshotAtMS       int64   `json:"capacitySnapshotAtMs"`
-	CapacitySnapshotAgeSeconds int     `json:"capacitySnapshotAgeSeconds"`
-	CapacitySnapshotRunID      int64   `json:"capacitySnapshotRunId,omitempty"`
+	Enabled                      bool    `json:"enabled"`
+	HealthLevel                  string  `json:"healthLevel"`
+	SuggestedAction              string  `json:"suggestedAction"`
+	SuggestedQuantity            int     `json:"suggestedQuantity"`
+	DecisionReason               string  `json:"decisionReason"`
+	Confidence                   string  `json:"confidence"`
+	SnapshotFresh                bool    `json:"snapshotFresh"`
+	SnapshotRefreshInProgress    bool    `json:"snapshotRefreshInProgress,omitempty"`
+	SnapshotRefreshLastAttemptMS int64   `json:"snapshotRefreshLastAttemptMs,omitempty"`
+	GeneratedAtMS                int64   `json:"generatedAtMs"`
+	CapacitySource               string  `json:"capacitySource"`
+	CapacityCoverage             float64 `json:"capacityCoverage"`
+	CapacityLifetimeCoverage     float64 `json:"capacityLifetimeCoverage"`
+	CapacitySnapshotAtMS         int64   `json:"capacitySnapshotAtMs"`
+	CapacitySnapshotAgeSeconds   int     `json:"capacitySnapshotAgeSeconds"`
+	CapacitySnapshotRunID        int64   `json:"capacitySnapshotRunId,omitempty"`
 	// These counts are informational only. Smart replenishment is driven by
 	// RCU capacity and burn rate, never by credential counts. They remain in
 	// the response so an older cached management page does not render its
@@ -291,15 +293,14 @@ func (s *Service) smartResource(ctx context.Context, cfg store.ManagerConfig, fo
 		resource.HealthLevel = smartHealthUnknown
 		resource.SuggestedAction = smartActionHealthy
 		resource.DecisionReason = "smart_disabled"
-		s.setSmartResource(resource)
-		return resource, nil
+		return s.publishSmartResource(resource), nil
 	}
 	quotaSnapshot, err := s.cachedInspectionQuotaSnapshot(ctx, cfg.Supply, forceAuthRefresh)
 	if err != nil && len(quotaSnapshot.results) == 0 {
 		resource := defaultSmartResource(cfg.Supply)
 		resource.SuggestedAction = smartActionSnapshotStale
 		resource.DecisionReason = "inspection_snapshot_unavailable"
-		s.setSmartResource(resource)
+		resource = s.publishSmartResource(resource)
 		// Missing quota evidence is an expected cold-start state. The automatic
 		// loop must pause quietly rather than repeatedly recording an operational
 		// error or falling back to credential counts.
@@ -310,8 +311,7 @@ func (s *Service) smartResource(ctx context.Context, cfg store.ManagerConfig, fo
 		resource.SnapshotFresh = false
 		resource.DecisionReason = "using_stale_inspection_snapshot"
 	}
-	s.setSmartResource(resource)
-	return resource, nil
+	return s.publishSmartResource(resource), nil
 }
 
 func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupplyConfig, snapshot inspectionQuotaSnapshot, now time.Time) SmartResource {
@@ -1247,7 +1247,7 @@ func (s *Service) currentSmartResource(cfg store.ManagerSupplyConfig) SmartResou
 	if resource.Enabled && resource.SnapshotFresh && (configChanged || capacityDecision) {
 		recalculateSmartResourceCapacityPlan(cfg, &resource)
 	}
-	return resource
+	return s.withInspectionSnapshotRefreshState(resource)
 }
 
 func (s *Service) setSmartResource(resource SmartResource) {

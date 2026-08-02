@@ -59,6 +59,13 @@ type Service struct {
 type RunRequest struct {
 	TriggerType string
 	TriggerKey  string
+	// ReadOnly keeps the inspection useful for capacity measurement while
+	// ensuring it never changes credentials as a side effect.
+	ReadOnly bool
+	// TargetTypes optionally narrows one run without changing the persisted
+	// inspection configuration. Smart supply uses this to refresh Codex quota
+	// evidence only, instead of probing unrelated provider accounts.
+	TargetTypes []string
 }
 
 type RunDetail struct {
@@ -206,6 +213,19 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (RunDetail, error) {
 	if err != nil {
 		return RunDetail{}, err
 	}
+	if targetTypes := model.NormalizeCodexInspectionTargetTypes(req.TargetTypes, ""); len(targetTypes) > 0 {
+		settings.TargetTypes = targetTypes
+		settings.TargetType = targetTypes[0]
+	}
+	if req.ReadOnly {
+		// Supply capacity refreshes must never delete, disable, or recover an
+		// account. A capacity snapshot also has to cover the full Codex pool;
+		// a configured sample would leave smart supply paused as incomplete.
+		// The run still persists quota evidence for the next supply status poll.
+		settings.AutoActionMode = model.CodexInspectionAutoActionNone
+		settings.AutoRecoverEnabled = false
+		settings.SampleSize = 0
+	}
 
 	triggerType := strings.TrimSpace(req.TriggerType)
 	if triggerType == "" {
@@ -308,6 +328,19 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (RunDetail, error) {
 		"actionErrors": failedActionOutcomes(actionOutcomes),
 	})
 	return s.GetRun(persistCtx, run.ID)
+}
+
+// RefreshSupplySnapshot runs a Codex-only, read-only inspection for smart
+// supply. It deliberately bypasses the normal inspection schedule: stale
+// capacity data needs a refresh even when periodic inspection is disabled.
+func (s *Service) RefreshSupplySnapshot(ctx context.Context) error {
+	_, err := s.Run(ctx, RunRequest{
+		TriggerType: model.CodexInspectionTriggerSupplySnapshot,
+		TriggerKey:  fmt.Sprintf("supply-%d", time.Now().UnixMilli()),
+		ReadOnly:    true,
+		TargetTypes: []string{model.CodexInspectionTargetCodex},
+	})
+	return err
 }
 
 func (s *Service) ListRuns(ctx context.Context, limit int) ([]model.CodexInspectionRun, error) {

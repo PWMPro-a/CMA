@@ -4567,6 +4567,7 @@
     "smart_title": "Умная статистика ресурсов",
     "snapshot_age": "Снимок аккаунтов {{value}} с назад",
     "snapshot_fresh": "Снимок актуален",
+    "snapshot_refreshing": "Снимок обновляется автоматически",
     "snapshot_stale": "Снимок устарел",
     "snapshot_status": "Статус снимка",
     "status_cancelled": "Отменён",

@@ -105,9 +105,24 @@ type Service struct {
 	smartResourceState SmartResource
 	automation         AutomationExecution
 
+	inspectionSnapshotRefreshMu sync.Mutex
+	inspectionSnapshotRefresh   inspectionSnapshotRefreshState
+
 	criticalConfirmMu       sync.Mutex
 	criticalConfirmRounds   map[string]int
 	lastAutomaticCreateAtMS int64
+}
+
+const (
+	staleInspectionSnapshotRefreshCooldown = 30 * time.Second
+	staleInspectionSnapshotRefreshTimeout  = 15 * time.Minute
+)
+
+type inspectionSnapshotRefreshState struct {
+	appCtx      context.Context
+	refresh     func(context.Context) error
+	running     bool
+	lastAttempt time.Time
 }
 
 func New(st *store.Store, managerConfig *managerconfigsvc.Service, httpClient ...*http.Client) *Service {
@@ -123,6 +138,91 @@ func New(st *store.Store, managerConfig *managerconfigsvc.Service, httpClient ..
 		smartBuckets:          make(map[int64]*smartUsageBucket),
 		criticalConfirmRounds: make(map[string]int),
 	}
+}
+
+// SetInspectionSnapshotRefresher connects smart supply with the Codex
+// inspection service. The refresher runs asynchronously so a status request
+// or automatic supply tick never waits for a full account scan.
+func (s *Service) SetInspectionSnapshotRefresher(appCtx context.Context, refresh func(context.Context) error) {
+	if s == nil {
+		return
+	}
+	if appCtx == nil {
+		appCtx = context.Background()
+	}
+	s.inspectionSnapshotRefreshMu.Lock()
+	s.inspectionSnapshotRefresh.appCtx = appCtx
+	s.inspectionSnapshotRefresh.refresh = refresh
+	s.inspectionSnapshotRefreshMu.Unlock()
+}
+
+func (s *Service) publishSmartResource(resource SmartResource) SmartResource {
+	if resource.Enabled && !resource.SnapshotFresh {
+		s.requestStaleInspectionSnapshotRefresh()
+	}
+	resource = s.withInspectionSnapshotRefreshState(resource)
+	s.setSmartResource(resource)
+	return resource
+}
+
+func (s *Service) requestStaleInspectionSnapshotRefresh() {
+	if s == nil {
+		return
+	}
+	now := time.Now()
+	s.inspectionSnapshotRefreshMu.Lock()
+	state := &s.inspectionSnapshotRefresh
+	if state.refresh == nil || state.running ||
+		(!state.lastAttempt.IsZero() && now.Sub(state.lastAttempt) < staleInspectionSnapshotRefreshCooldown) {
+		s.inspectionSnapshotRefreshMu.Unlock()
+		return
+	}
+	state.running = true
+	state.lastAttempt = now
+	appCtx := state.appCtx
+	refresh := state.refresh
+	s.inspectionSnapshotRefreshMu.Unlock()
+
+	go func() {
+		if appCtx == nil {
+			appCtx = context.Background()
+		}
+		refreshCtx, cancel := context.WithTimeout(appCtx, staleInspectionSnapshotRefreshTimeout)
+		err := refresh(refreshCtx)
+		cancel()
+
+		// A completed inspection is durable in the store. Drop the previous
+		// in-memory snapshot so the following 10-second UI poll reads the new
+		// quota result immediately instead of waiting for its cache TTL.
+		if err == nil {
+			s.invalidateInspectionQuotaSnapshot()
+		}
+		s.inspectionSnapshotRefreshMu.Lock()
+		s.inspectionSnapshotRefresh.running = false
+		s.inspectionSnapshotRefreshMu.Unlock()
+	}()
+}
+
+func (s *Service) withInspectionSnapshotRefreshState(resource SmartResource) SmartResource {
+	if s == nil {
+		return resource
+	}
+	s.inspectionSnapshotRefreshMu.Lock()
+	resource.SnapshotRefreshInProgress = s.inspectionSnapshotRefresh.running
+	if !s.inspectionSnapshotRefresh.lastAttempt.IsZero() {
+		resource.SnapshotRefreshLastAttemptMS = s.inspectionSnapshotRefresh.lastAttempt.UnixMilli()
+	}
+	s.inspectionSnapshotRefreshMu.Unlock()
+	return resource
+}
+
+func (s *Service) invalidateInspectionQuotaSnapshot() {
+	if s == nil {
+		return
+	}
+	s.quotaSnapshotMu.Lock()
+	s.quotaSnapshot = inspectionQuotaSnapshot{}
+	s.quotaSnapshotMu.Unlock()
 }
 
 func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {

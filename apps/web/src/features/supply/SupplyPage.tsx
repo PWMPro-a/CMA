@@ -309,7 +309,9 @@ export function SupplyPage() {
   const snapshotLabel = smart
     ? smart.snapshotFresh
       ? t('supply.snapshot_fresh')
-      : t('supply.snapshot_stale')
+      : smart.snapshotRefreshInProgress
+        ? t('supply.snapshot_refreshing')
+        : t('supply.snapshot_stale')
     : t('supply.no_snapshot');
   const nextExecutionCountdown = !autoSupplyEnabled
     ? t('supply.automation_disabled_short')

@@ -24,6 +24,9 @@ const (
 
 	CodexInspectionTriggerManual    = "manual"
 	CodexInspectionTriggerScheduled = "scheduled"
+	// CodexInspectionTriggerSupplySnapshot records the read-only inspection
+	// requested by smart supply when its capacity snapshot has expired.
+	CodexInspectionTriggerSupplySnapshot = "supply_snapshot"
 
 	CodexInspectionActionStatusNone        = "none"
 	CodexInspectionActionStatusPending     = "pending"

@@ -970,6 +970,106 @@ func TestGetStatusRefreshesSmartSnapshotWhenAutomaticSupplyDisabled(t *testing.T
 	}
 }
 
+func TestGetStatusStartsSingleFlightRefreshForStaleInspectionSnapshot(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	automaticSupplyEnabled := false
+	smartEnabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled:                  &automaticSupplyEnabled,
+			SmartEnabled:             &smartEnabled,
+			Product:                  "oauth_7d",
+			HealthyMinutesTarget:     40,
+			AuthFilesCacheTTLSeconds: 60,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(0))
+	runs, err := st.ListCodexInspectionRuns(context.Background(), 1)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("list seeded inspection runs: runs=%#v err=%v", runs, err)
+	}
+	staleRun := runs[0]
+	staleRun.FinishedAtMS = time.Now().Add(-21 * time.Minute).UnixMilli()
+	if err := st.UpdateCodexInspectionRun(context.Background(), staleRun); err != nil {
+		t.Fatalf("age inspection run: %v", err)
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	var refreshCalls atomic.Int32
+	service.SetInspectionSnapshotRefresher(context.Background(), func(context.Context) error {
+		refreshCalls.Add(1)
+		close(started)
+		<-release
+		latest, err := st.ListCodexInspectionRuns(context.Background(), 1)
+		if err != nil {
+			return err
+		}
+		updated := latest[0]
+		updated.FinishedAtMS = time.Now().UnixMilli()
+		if err := st.UpdateCodexInspectionRun(context.Background(), updated); err != nil {
+			return err
+		}
+		close(finished)
+		return nil
+	})
+
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("load stale status: %v", err)
+	}
+	if status.SmartResource.SnapshotFresh || !status.SmartResource.SnapshotRefreshInProgress {
+		t.Fatalf("stale status did not report the background refresh: %#v", status.SmartResource)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("stale status did not start an inspection refresh")
+	}
+
+	if _, err := service.GetStatus(context.Background(), 10); err != nil {
+		t.Fatalf("load while refresh is active: %v", err)
+	}
+	if calls := refreshCalls.Load(); calls != 1 {
+		t.Fatalf("stale status started %d refreshes, want one", calls)
+	}
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("background refresh did not finish")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		status, err = service.GetStatus(context.Background(), 10)
+		if err != nil {
+			t.Fatalf("load refreshed status: %v", err)
+		}
+		if status.SmartResource.SnapshotFresh {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("completed refresh did not invalidate stale quota cache: %#v", status.SmartResource)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestCurrentSmartResourceRecalculatesHealthForUpdatedWaterLevel(t *testing.T) {
 	service := New(nil, nil)
 	service.setSmartResource(SmartResource{
