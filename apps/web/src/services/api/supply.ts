@@ -30,6 +30,11 @@ export interface SupplyConfig {
   minBalanceReserveFen?: number;
   dailyMaxHoldFen?: number;
   dailyMaxReplenishQuantity?: number;
+  recoverySyncEnabled?: boolean;
+  recoveryAutoClaim?: boolean;
+  recoverySyncIntervalSeconds?: number;
+  recoveryClaimBatchSize?: number;
+  recoveryDisableOriginal?: boolean;
 }
 
 export interface SupplyInventory {
@@ -163,12 +168,191 @@ export interface SupplyAutomationExecution {
   lastError?: string;
 }
 
+export interface SupplyRecoverySummary {
+  enabled: boolean;
+  autoClaim: boolean;
+  running: boolean;
+  lastSyncAtMs?: number;
+  nextSyncAtMs?: number;
+  lastResult?: string;
+  lastError?: string;
+  seen: number;
+  claimable: number;
+  claimed: number;
+  imported: number;
+  refunded: number;
+  failed: number;
+  total: number;
+  importing: number;
+  storedImported: number;
+  storedRefunded: number;
+  storedFailed: number;
+}
+
+export interface SupplyRecovery {
+  id: number;
+  recoveryId: string;
+  product?: string;
+  deliveryStatus: string;
+  status: string;
+  originalFileName?: string;
+  originalAuthIndex?: string;
+  originalEmail?: string;
+  claimOrderId?: string;
+  itemCount: number;
+  importedCount: number;
+  refundedFen?: number;
+  lastError?: string;
+  lastSeenAtMs: number;
+  claimedAtMs?: number;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface SupplyRecoverySyncRequest {
+  force?: boolean;
+  autoClaim?: boolean;
+  limit?: number;
+  recoveryId?: string;
+}
+
+export interface SupplyReportRange {
+  fromMs: number;
+  toMs: number;
+  generatedAtMs: number;
+  days: number;
+  truncated: boolean;
+}
+
+export interface SupplyReportExecutive {
+  orders: number;
+  manualOrders: number;
+  automaticOrders: number;
+  recoveryOrders: number;
+  requestedAccounts: number;
+  importedAccounts: number;
+  chargedFen: number;
+  releasedFen: number;
+  netFen: number;
+  supplySpendFen: number;
+  supplyNetSpendFen: number;
+  averageUnitFen: number;
+  usageCalls: number;
+  usageTokens: number;
+  usageRevenue: number;
+  usageRevenueCurrency: string;
+  averageRevenuePerCall: number;
+  recoveries: number;
+  claimableRecoveries: number;
+  claimedRecoveries: number;
+  importedRecoveries: number;
+  refundedRecoveries: number;
+  failedRecoveries: number;
+  refundedFen: number;
+  recoveryClaimRate: number;
+  recoveryImportRate: number;
+  recoveryRefundRate: number;
+  importSuccessRate: number;
+}
+
+export interface SupplyReportDimensionStat {
+  key: string;
+  label?: string;
+  count: number;
+  orders: number;
+  recoveries: number;
+  quantity: number;
+  imported: number;
+  chargedFen: number;
+  releasedFen: number;
+  refundedFen: number;
+  successRate: number;
+}
+
+export interface SupplyReportTimelinePoint {
+  bucketMs: number;
+  label: string;
+  orders: number;
+  requested: number;
+  imported: number;
+  chargedFen: number;
+  usageCalls: number;
+  usageTokens: number;
+  usageRevenue: number;
+  recoveries: number;
+  recoveryClaimed: number;
+  recoveryImported: number;
+  recoveryRefunded: number;
+  importFailures: number;
+}
+
+export interface SupplyReportImportHealth {
+  items: number;
+  importedItems: number;
+  failedItems: number;
+  pendingItems: number;
+  retryingItems: number;
+  averageAttempts: number;
+  successRate: number;
+  expiringSoonItems: number;
+  expiredItems: number;
+}
+
+export interface SupplyReportTiming {
+  averageOrderFulfillmentSeconds: number;
+  averageRecoveryClaimSeconds: number;
+  averageRecoveryImportSeconds: number;
+  averageImportRegistrationSeconds: number;
+}
+
+export interface SupplyReportRiskBucket {
+  key: string;
+  label: string;
+  count: number;
+}
+
+export interface SupplyReportRisk {
+  openOrders: number;
+  unclaimedRecoveries: number;
+  importBacklogItems: number;
+  failedImportItems: number;
+  partialRecoveries: number;
+  staleClaimableRecoveries: number;
+  claimableAgeBuckets: SupplyReportRiskBucket[];
+}
+
+export interface SupplyReportUsageModelStat {
+  model: string;
+  billingModel: string;
+  serviceTier?: string;
+  calls: number;
+  successCalls: number;
+  tokens: number;
+  revenue: number;
+}
+
+export interface SupplyReport {
+  range: SupplyReportRange;
+  executive: SupplyReportExecutive;
+  importHealth: SupplyReportImportHealth;
+  timing: SupplyReportTiming;
+  risk: SupplyReportRisk;
+  timeline: SupplyReportTimelinePoint[];
+  products: SupplyReportDimensionStat[];
+  orderStatuses: SupplyReportDimensionStat[];
+  recoveryStatuses: SupplyReportDimensionStat[];
+  deliveryStatuses: SupplyReportDimensionStat[];
+  sources: SupplyReportDimensionStat[];
+  usageModels: SupplyReportUsageModelStat[];
+}
+
 export interface SupplyStatus {
   config: SupplyConfig;
   running: boolean;
   overview: SupplyOverview;
   smartResource: SupplySmartResource;
   automation?: SupplyAutomationExecution;
+  recovery?: SupplyRecoverySummary;
   activeOrder?: SupplyOrder;
   orders: SupplyOrder[];
 }
@@ -180,6 +364,19 @@ export const supplyApi = {
     apiClient.put('/supply/config', { config }),
 
   check: (): Promise<SupplyStatus> => apiClient.post('/supply/check'),
+
+  getReport: (
+    params: { fromMs?: number; toMs?: number; limit?: number } = {}
+  ): Promise<SupplyReport> => apiClient.get('/supply/reports', { params }),
+
+  listRecoveries: (params: { limit?: number; status?: string } = {}): Promise<SupplyRecovery[]> =>
+    apiClient.get('/supply/recoveries', { params }),
+
+  syncRecoveries: (payload: SupplyRecoverySyncRequest = {}): Promise<SupplyRecoverySummary> =>
+    apiClient.post('/supply/recoveries/sync', payload),
+
+  claimRecovery: (recoveryId: string): Promise<SupplyRecoverySummary> =>
+    apiClient.post(`/supply/recoveries/${encodeURIComponent(recoveryId)}/claim`),
 
   replenish: (quantity: number): Promise<SupplyStatus> =>
     apiClient.post('/supply/replenish', { quantity }),

@@ -3,6 +3,7 @@ package supply
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -30,6 +31,21 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result, err := h.App.SupplyService.DismissCreateUncertain(r.Context(), orderID)
+		h.writeResult(w, result, err)
+		return
+	}
+	if recoveryID, ok := claimRecoveryID(path); ok {
+		if r.Method != http.MethodPost {
+			response.MethodNotAllowed(w)
+			return
+		}
+		autoClaim := true
+		result, err := h.App.SupplyService.SyncRecoveries(r.Context(), supplysvc.RecoverySyncRequest{
+			Force:      true,
+			AutoClaim:  &autoClaim,
+			Limit:      1,
+			RecoveryID: recoveryID,
+		})
 		h.writeResult(w, result, err)
 		return
 	}
@@ -67,6 +83,55 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result, err := h.App.SupplyService.Check(r.Context())
+		h.writeResult(w, result, err)
+	case "/v0/management/supply/recoveries":
+		if r.Method != http.MethodGet {
+			response.MethodNotAllowed(w)
+			return
+		}
+		limit := 100
+		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+		result, err := h.App.SupplyService.ListRecoveries(r.Context(), limit, r.URL.Query().Get("status"))
+		h.writeResult(w, result, err)
+	case "/v0/management/supply/reports":
+		if r.Method != http.MethodGet {
+			response.MethodNotAllowed(w)
+			return
+		}
+		req := supplysvc.ReportRequest{}
+		if raw := strings.TrimSpace(r.URL.Query().Get("fromMs")); raw != "" {
+			if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil {
+				req.FromMS = parsed
+			}
+		}
+		if raw := strings.TrimSpace(r.URL.Query().Get("toMs")); raw != "" {
+			if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil {
+				req.ToMS = parsed
+			}
+		}
+		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+				req.Limit = parsed
+			}
+		}
+		result, err := h.App.SupplyService.Report(r.Context(), req)
+		h.writeResult(w, result, err)
+	case "/v0/management/supply/recoveries/sync":
+		if r.Method != http.MethodPost {
+			response.MethodNotAllowed(w)
+			return
+		}
+		var req supplysvc.RecoverySyncRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			response.Error(w, http.StatusBadRequest, err)
+			return
+		}
+		req.Force = true
+		result, err := h.App.SupplyService.SyncRecoveries(r.Context(), req)
 		h.writeResult(w, result, err)
 	case "/v0/management/supply/replenish":
 		if r.Method != http.MethodPost {
@@ -132,4 +197,14 @@ func dismissUncertainOrderID(path string) (string, bool) {
 	}
 	orderID := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix))
 	return orderID, orderID != "" && !strings.Contains(orderID, "/")
+}
+
+func claimRecoveryID(path string) (string, bool) {
+	const prefix = "/v0/management/supply/recoveries/"
+	const suffix = "/claim"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", false
+	}
+	recoveryID := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix))
+	return recoveryID, recoveryID != "" && !strings.Contains(recoveryID, "/")
 }

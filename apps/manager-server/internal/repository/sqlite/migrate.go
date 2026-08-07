@@ -417,6 +417,30 @@ func Migrate(db *sql.DB) error {
 		)`,
 		`create index if not exists idx_supply_import_items_pending on supply_import_items(order_id, status, next_retry_at_ms)`,
 		`create unique index if not exists idx_supply_import_items_order_key on supply_import_items(order_id, item_key)`,
+		`create table if not exists supply_recoveries (
+			id integer primary key autoincrement,
+			recovery_id text not null unique,
+			product text,
+			delivery_status text not null,
+			status text not null,
+			original_file_name text,
+			original_auth_index text,
+			original_email text,
+			claim_url text,
+			claim_order_id text,
+			item_count integer not null default 0,
+			imported_count integer not null default 0,
+			refunded_fen integer not null default 0,
+			last_error text,
+			raw_json text,
+			last_seen_at_ms integer not null,
+			claimed_at_ms integer,
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		)`,
+		`create index if not exists idx_supply_recoveries_status_updated on supply_recoveries(status, updated_at_ms)`,
+		`create index if not exists idx_supply_recoveries_delivery_status_updated on supply_recoveries(delivery_status, updated_at_ms)`,
+		`create index if not exists idx_supply_recoveries_claim_order on supply_recoveries(claim_order_id)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {

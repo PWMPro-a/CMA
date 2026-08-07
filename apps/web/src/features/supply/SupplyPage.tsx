@@ -17,6 +17,10 @@ import {
   supplyApi,
   type SupplyConfig,
   type SupplyOrder,
+  type SupplyReport,
+  type SupplyReportDimensionStat,
+  type SupplyReportUsageModelStat,
+  type SupplyRecovery,
   type SupplySmartResource,
   type SupplyStatus,
 } from '@/services/api';
@@ -51,16 +55,52 @@ const emptyConfig: SupplyConfig = {
   minBalanceReserveFen: 0,
   dailyMaxHoldFen: 0,
   dailyMaxReplenishQuantity: 0,
+  recoverySyncEnabled: true,
+  recoveryAutoClaim: true,
+  recoverySyncIntervalSeconds: 60,
+  recoveryClaimBatchSize: 20,
+  recoveryDisableOriginal: true,
 };
 
-type SupplyWorkspaceTab = 'overview' | 'automation' | 'orders' | 'history';
+type SupplyWorkspaceTab =
+  | 'overview'
+  | 'automation'
+  | 'orders'
+  | 'recoveries'
+  | 'reports'
+  | 'history';
 
 const SUPPLY_AUTO_REFRESH_MS = 10_000;
+const SUPPLY_REPORT_REFRESH_MS = 60_000;
+const REPORT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 const formatMoney = (fen?: number) => `¥${((fen ?? 0) / 100).toFixed(2)}`;
 
+const formatUsd = (value?: number) =>
+  typeof value === 'number' && Number.isFinite(value) ? `$${value.toFixed(2)}` : '$0.00';
+
 const formatNumber = (value?: number, digits = 1) =>
   typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '-';
+
+const formatInteger = (value?: number) =>
+  typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : '-';
+
+const formatPercent = (value?: number) =>
+  typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : '-';
+
+const formatTokens = (value?: number) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-';
+  if (Math.abs(value) >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (Math.abs(value) >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return value.toLocaleString();
+};
+
+const formatSeconds = (value?: number) => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return '-';
+  if (value >= 3600) return `${(value / 3600).toFixed(1)}h`;
+  if (value >= 60) return `${(value / 60).toFixed(1)}m`;
+  return `${value.toFixed(0)}s`;
+};
 
 const formatRcu = (value?: number, digits = 1) =>
   typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(digits)} RCU` : '-';
@@ -100,14 +140,16 @@ const shortOrderId = (value?: string) => {
 const orderTone = (status: string) => {
   if (status === 'completed' || status === 'released') return styles.success;
   if (status === 'failed' || status === 'cancelled' || status === 'dismissed') return styles.error;
-  if (status === 'partial' || status === 'create_uncertain') return styles.warning;
+  if (status === 'partial' || status === 'recovery_partial' || status === 'create_uncertain')
+    return styles.warning;
   return styles.active;
 };
 
 const smartTone = (resource?: SupplySmartResource) => {
   if (!resource?.enabled) return styles.warning;
   if (!resource.snapshotFresh) return styles.warning;
-  if (resource.emergencyShortage || resource.suggestedAction === 'emergency_replenish') return styles.error;
+  if (resource.emergencyShortage || resource.suggestedAction === 'emergency_replenish')
+    return styles.error;
   if (resource.healthLevel === 'healthy') return styles.success;
   if (resource.healthLevel === 'critical') return styles.error;
   if (resource.healthLevel === 'warning') return styles.warning;
@@ -116,7 +158,8 @@ const smartTone = (resource?: SupplySmartResource) => {
 
 const smartPanelTone = (resource?: SupplySmartResource) => {
   if (!resource?.enabled || !resource.snapshotFresh) return styles.smartPanelWarning;
-  if (resource.emergencyShortage || resource.suggestedAction === 'emergency_replenish') return styles.smartPanelCritical;
+  if (resource.emergencyShortage || resource.suggestedAction === 'emergency_replenish')
+    return styles.smartPanelCritical;
   if (resource.healthLevel === 'healthy') return styles.smartPanelHealthy;
   if (resource.healthLevel === 'critical') return styles.smartPanelCritical;
   if (resource.healthLevel === 'warning') return styles.smartPanelWarning;
@@ -128,11 +171,17 @@ export function SupplyPage() {
   const { showNotification, showConfirmation } = useNotificationStore();
   const [status, setStatus] = useState<SupplyStatus | null>(null);
   const [draft, setDraft] = useState<SupplyConfig>(emptyConfig);
+  const [recoveries, setRecoveries] = useState<SupplyRecovery[]>([]);
+  const [recoveriesLoading, setRecoveriesLoading] = useState(false);
+  const [report, setReport] = useState<SupplyReport | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
   const [manualQuantity, setManualQuantity] = useState(10);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<SupplyWorkspaceTab>('overview');
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const [action, setAction] = useState<'save' | 'check' | 'replenish' | 'dismiss' | null>(null);
+  const [action, setAction] = useState<
+    'save' | 'check' | 'replenish' | 'dismiss' | 'syncRecoveries' | 'claimRecovery' | null
+  >(null);
   const configDirtyRef = useRef(false);
   const loadInFlightRef = useRef(false);
   const actionInFlightRef = useRef(false);
@@ -182,6 +231,48 @@ export function SupplyPage() {
     [applyStatus, showNotification, t]
   );
 
+  const loadRecoveries = useCallback(
+    async (quiet = false) => {
+      if (!quiet) setRecoveriesLoading(true);
+      try {
+        const items = await supplyApi.listRecoveries({ limit: 100 });
+        setRecoveries(items);
+      } catch (error) {
+        if (!quiet) {
+          showNotification(
+            error instanceof Error ? error.message : t('supply.recovery_load_failed'),
+            'error'
+          );
+        }
+      } finally {
+        if (!quiet) setRecoveriesLoading(false);
+      }
+    },
+    [showNotification, t]
+  );
+
+  const loadReport = useCallback(
+    async (quiet = false) => {
+      if (!quiet) setReportLoading(true);
+      try {
+        const toMs = Date.now();
+        const fromMs = toMs - REPORT_WINDOW_MS;
+        const next = await supplyApi.getReport({ fromMs, toMs });
+        setReport(next);
+      } catch (error) {
+        if (!quiet) {
+          showNotification(
+            error instanceof Error ? error.message : t('supply.report_load_failed'),
+            'error'
+          );
+        }
+      } finally {
+        if (!quiet) setReportLoading(false);
+      }
+    },
+    [showNotification, t]
+  );
+
   useEffect(() => {
     let disposed = false;
     let timer: number | undefined;
@@ -205,6 +296,28 @@ export function SupplyPage() {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'recoveries') {
+      return undefined;
+    }
+    void loadRecoveries(true);
+    const timer = window.setInterval(() => {
+      void loadRecoveries(true);
+    }, SUPPLY_AUTO_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [activeTab, loadRecoveries]);
+
+  useEffect(() => {
+    if (activeTab !== 'reports') {
+      return undefined;
+    }
+    void loadReport(true);
+    const timer = window.setInterval(() => {
+      void loadReport(true);
+    }, SUPPLY_REPORT_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [activeTab, loadReport]);
 
   const runAction = async (
     kind: 'save' | 'check' | 'replenish' | 'dismiss',
@@ -263,6 +376,40 @@ export function SupplyPage() {
       true
     );
 
+  const syncRecoveries = async () => {
+    setAction('syncRecoveries');
+    try {
+      await supplyApi.syncRecoveries({ force: true, autoClaim: true, limit: 50 });
+      await Promise.all([
+        load(true, true),
+        loadRecoveries(true),
+        activeTab === 'reports' ? loadReport(true) : Promise.resolve(),
+      ]);
+      showNotification(t('supply.recovery_sync_success'), 'success');
+    } catch (error) {
+      showNotification(error instanceof Error ? error.message : t('common.unknown_error'), 'error');
+    } finally {
+      setAction(null);
+    }
+  };
+
+  const claimRecovery = async (recoveryId: string) => {
+    setAction('claimRecovery');
+    try {
+      await supplyApi.claimRecovery(recoveryId);
+      await Promise.all([
+        load(true, true),
+        loadRecoveries(true),
+        activeTab === 'reports' ? loadReport(true) : Promise.resolve(),
+      ]);
+      showNotification(t('supply.recovery_claim_success'), 'success');
+    } catch (error) {
+      showNotification(error instanceof Error ? error.message : t('common.unknown_error'), 'error');
+    } finally {
+      setAction(null);
+    }
+  };
+
   const dismissUncertain = (order: SupplyOrder) => {
     showConfirmation({
       title: t('supply.dismiss_uncertain_title'),
@@ -283,10 +430,12 @@ export function SupplyPage() {
   const balance = overview?.balance;
   const smart = status?.smartResource;
   const automation = status?.automation;
+  const recovery = status?.recovery;
   const autoSupplyEnabled = status?.config.enabled ?? draft.enabled ?? false;
   const smartModeEnabled = smart?.enabled ?? draft.smartEnabled !== false;
   const activeOrder = status?.activeOrder;
   const orderCount = status?.orders?.length ?? 0;
+  const recoveryCount = recovery?.total ?? recoveries.length;
   const healthLevel = smart?.healthLevel || 'unknown';
   const suggestedAction = smart?.suggestedAction || 'unknown';
   const decisionReason = smart?.decisionReason || 'unknown';
@@ -364,105 +513,281 @@ export function SupplyPage() {
   const demandBasis = t(`supply.demand_basis_${demandBasisKey}`, {
     defaultValue: t('supply.demand_basis_unknown'),
   });
+  const reportExecutive = report?.executive;
+  const reportImportHealth = report?.importHealth;
+  const reportTiming = report?.timing;
+  const reportRisk = report?.risk;
+  const reportRange = report?.range;
+  const reportRangeLabel = reportRange
+    ? t('supply.report_range_value', {
+        from: new Date(reportRange.fromMs).toLocaleDateString(),
+        to: new Date(reportRange.toMs).toLocaleDateString(),
+        days: reportRange.days,
+      })
+    : t('supply.report_range_default');
+  const reportFinanceMetrics = [
+    {
+      label: t('supply.report_supply_spend'),
+      value: formatMoney(reportExecutive?.supplySpendFen),
+      detail: t('supply.report_supply_spend_hint'),
+    },
+    {
+      label: t('supply.report_supply_net_spend'),
+      value: formatMoney(reportExecutive?.supplyNetSpendFen),
+      detail: t('supply.report_supply_net_spend_hint', {
+        released: formatMoney(reportExecutive?.releasedFen),
+        refunded: formatMoney(reportExecutive?.refundedFen),
+      }),
+    },
+    {
+      label: t('supply.report_usage_revenue'),
+      value: formatUsd(reportExecutive?.usageRevenue),
+      detail: t('supply.report_usage_revenue_hint', {
+        currency: reportExecutive?.usageRevenueCurrency || 'USD',
+      }),
+    },
+    {
+      label: t('supply.report_average_revenue_per_call'),
+      value: formatUsd(reportExecutive?.averageRevenuePerCall),
+      detail: t('supply.report_average_revenue_per_call_hint'),
+    },
+    {
+      label: t('supply.report_usage_calls'),
+      value: formatInteger(reportExecutive?.usageCalls),
+      detail: t('supply.report_successful_calls', {
+        value: formatInteger(
+          report?.usageModels?.reduce((sum, item) => sum + item.successCalls, 0)
+        ),
+      }),
+    },
+    {
+      label: t('supply.report_usage_tokens'),
+      value: formatTokens(reportExecutive?.usageTokens),
+      detail: t('supply.report_usage_tokens_hint'),
+    },
+    {
+      label: t('supply.report_average_unit_cost'),
+      value: formatMoney(reportExecutive?.averageUnitFen),
+      detail: t('supply.report_average_unit_cost_hint'),
+    },
+    {
+      label: t('supply.report_refunded_amount'),
+      value: formatMoney(reportExecutive?.refundedFen),
+      detail: t('supply.report_refunded_amount_hint'),
+    },
+  ];
+  const reportOperationsMetrics = [
+    {
+      label: t('supply.report_orders'),
+      value: formatInteger(reportExecutive?.orders),
+      detail: t('supply.report_orders_hint'),
+    },
+    {
+      label: t('supply.report_requested_accounts'),
+      value: formatInteger(reportExecutive?.requestedAccounts),
+      detail: t('supply.report_requested_accounts_hint'),
+    },
+    {
+      label: t('supply.report_imported_accounts'),
+      value: formatInteger(reportExecutive?.importedAccounts),
+      detail: t('supply.report_imported_accounts_hint'),
+    },
+    {
+      label: t('supply.report_recoveries'),
+      value: formatInteger(reportExecutive?.recoveries),
+      detail: t('supply.report_recoveries_hint'),
+    },
+    {
+      label: t('supply.report_recovery_claim_rate'),
+      value: formatPercent(reportExecutive?.recoveryClaimRate),
+      detail: t('supply.report_recovery_claim_rate_hint'),
+    },
+    {
+      label: t('supply.report_recovery_import_rate'),
+      value: formatPercent(reportExecutive?.recoveryImportRate),
+      detail: t('supply.report_recovery_import_rate_hint'),
+    },
+    {
+      label: t('supply.report_recovery_refund_rate'),
+      value: formatPercent(reportExecutive?.recoveryRefundRate),
+      detail: t('supply.report_recovery_refund_rate_hint'),
+    },
+    {
+      label: t('supply.report_import_success_rate'),
+      value: formatPercent(reportExecutive?.importSuccessRate),
+      detail: t('supply.report_import_success_rate_hint'),
+    },
+  ];
+  const reportProductMetrics = [
+    {
+      label: t('supply.report_avg_order_seconds'),
+      value: formatSeconds(reportTiming?.averageOrderFulfillmentSeconds),
+      detail: t('supply.report_avg_order_seconds_hint'),
+    },
+    {
+      label: t('supply.report_avg_recovery_claim_seconds'),
+      value: formatSeconds(reportTiming?.averageRecoveryClaimSeconds),
+      detail: t('supply.report_avg_recovery_claim_seconds_hint'),
+    },
+    {
+      label: t('supply.report_avg_recovery_import_seconds'),
+      value: formatSeconds(reportTiming?.averageRecoveryImportSeconds),
+      detail: t('supply.report_avg_recovery_import_seconds_hint'),
+    },
+    {
+      label: t('supply.report_avg_import_registration_seconds'),
+      value: formatSeconds(reportTiming?.averageImportRegistrationSeconds),
+      detail: t('supply.report_avg_import_registration_seconds_hint'),
+    },
+    {
+      label: t('supply.report_import_items'),
+      value: formatInteger(reportImportHealth?.items),
+      detail: t('supply.report_import_items_hint'),
+    },
+    {
+      label: t('supply.report_average_attempts'),
+      value: formatNumber(reportImportHealth?.averageAttempts),
+      detail: t('supply.report_average_attempts_hint'),
+    },
+    {
+      label: t('supply.report_expiring_soon_items'),
+      value: formatInteger(reportImportHealth?.expiringSoonItems),
+      detail: t('supply.report_expiring_soon_items_hint'),
+    },
+    {
+      label: t('supply.report_expired_items'),
+      value: formatInteger(reportImportHealth?.expiredItems),
+      detail: t('supply.report_expired_items_hint'),
+    },
+  ];
+  const reportRiskMetrics = [
+    {
+      label: t('supply.report_open_orders'),
+      value: formatInteger(reportRisk?.openOrders),
+      detail: t('supply.report_open_orders_hint'),
+    },
+    {
+      label: t('supply.report_unclaimed_recoveries'),
+      value: formatInteger(reportRisk?.unclaimedRecoveries),
+      detail: t('supply.report_unclaimed_recoveries_hint'),
+    },
+    {
+      label: t('supply.report_import_backlog_items'),
+      value: formatInteger(reportRisk?.importBacklogItems),
+      detail: t('supply.report_import_backlog_items_hint'),
+    },
+    {
+      label: t('supply.report_failed_import_items'),
+      value: formatInteger(reportRisk?.failedImportItems),
+      detail: t('supply.report_failed_import_items_hint'),
+    },
+    {
+      label: t('supply.report_partial_recoveries'),
+      value: formatInteger(reportRisk?.partialRecoveries),
+      detail: t('supply.report_partial_recoveries_hint'),
+    },
+    {
+      label: t('supply.report_stale_claimable_recoveries'),
+      value: formatInteger(reportRisk?.staleClaimableRecoveries),
+      detail: t('supply.report_stale_claimable_recoveries_hint'),
+    },
+  ];
 
-  const metrics = useMemo(
-    () => {
-      if (smart?.enabled ?? draft.smartEnabled !== false) {
-        return [
-          {
-            label: t('supply.effective_capacity_1h'),
-            value: formatRcu(smart?.currentCapacityRcu),
-            detail: t('supply.raw_capacity_waste_detail', {
-              raw: formatNumber(smart?.rawCapacityRcu ?? smart?.currentCapacityRcu),
-              waste: formatNumber(smart?.expiryWasteRiskRcu ?? 0),
-              minutes: smart?.accountLifetimeMinutes ?? 60,
-            }),
-            icon: <IconDatabaseZap size={18} />,
-            tone: 'teal',
-          },
-          {
-            label: t('supply.consume_rate'),
-            value: formatRcuRate(smart?.consumeRcuPerMinute),
-            detail: t('supply.consume_rate_detail', {
-              rpm: formatNumber(smart?.rpm30m),
-              tpm: formatNumber(smart?.tpm30m, 0),
-            }),
-            icon: <IconTrendingUp size={18} />,
-            tone: 'orange',
-          },
-          {
-            label: t('supply.estimated_depletion'),
-            value: formatMinutes(smart?.estimatedSustainMinutes),
-            detail: t('supply.effective_health_target_minutes', {
-              value:
-                smart?.effectiveHealthyMinutesTarget ??
-                smart?.healthyMinutesTarget ??
-                draft.healthyMinutesTarget,
-              configured:
-                smart?.configuredHealthyMinutesTarget ??
-                smart?.healthyMinutesTarget ??
-                draft.healthyMinutesTarget,
-            }),
-            icon: <IconTimer size={18} />,
-            tone: 'blue',
-          },
-          {
-            label: t('supply.available_balance'),
-            value: balance ? formatMoney(balance.availableFen) : '-',
-            detail: balance
-              ? t('supply.held_value', { value: formatMoney(balance.heldFen) })
-              : t('supply.supply_inventory_value', { value: inventory?.available ?? '-' }),
-            icon: <IconDollarSign size={18} />,
-            tone: 'violet',
-          },
-        ];
-      }
+  const metrics = useMemo(() => {
+    if (smart?.enabled ?? draft.smartEnabled !== false) {
       return [
         {
-          label: t('supply.cpa_available'),
-          value: overview?.cpaAvailable ?? '-',
-          detail: t('supply.target_value', {
-            value: overview?.cpaTarget ?? draft.targetAvailableAccounts,
+          label: t('supply.effective_capacity_1h'),
+          value: formatRcu(smart?.currentCapacityRcu),
+          detail: t('supply.raw_capacity_waste_detail', {
+            raw: formatNumber(smart?.rawCapacityRcu ?? smart?.currentCapacityRcu),
+            waste: formatNumber(smart?.expiryWasteRiskRcu ?? 0),
+            minutes: smart?.accountLifetimeMinutes ?? 60,
           }),
           icon: <IconDatabaseZap size={18} />,
           tone: 'teal',
         },
         {
-          label: t('supply.deficit'),
-          value: overview?.cpaDeficit ?? '-',
-          detail: t('supply.auto_order_hint'),
-          icon: <IconInbox size={18} />,
+          label: t('supply.consume_rate'),
+          value: formatRcuRate(smart?.consumeRcuPerMinute),
+          detail: t('supply.consume_rate_detail', {
+            rpm: formatNumber(smart?.rpm30m),
+            tpm: formatNumber(smart?.tpm30m, 0),
+          }),
+          icon: <IconTrendingUp size={18} />,
           tone: 'orange',
         },
         {
-          label: t('supply.supply_inventory'),
-          value: inventory?.available ?? '-',
-          detail: inventory?.needsProduction
-            ? t('supply.production_required', { value: inventory.missing })
-            : t('supply.ready_delivery'),
-          icon: <IconInbox size={18} />,
+          label: t('supply.estimated_depletion'),
+          value: formatMinutes(smart?.estimatedSustainMinutes),
+          detail: t('supply.effective_health_target_minutes', {
+            value:
+              smart?.effectiveHealthyMinutesTarget ??
+              smart?.healthyMinutesTarget ??
+              draft.healthyMinutesTarget,
+            configured:
+              smart?.configuredHealthyMinutesTarget ??
+              smart?.healthyMinutesTarget ??
+              draft.healthyMinutesTarget,
+          }),
+          icon: <IconTimer size={18} />,
           tone: 'blue',
         },
         {
           label: t('supply.available_balance'),
           value: balance ? formatMoney(balance.availableFen) : '-',
-          detail: balance ? t('supply.held_value', { value: formatMoney(balance.heldFen) }) : '-',
+          detail: balance
+            ? t('supply.held_value', { value: formatMoney(balance.heldFen) })
+            : t('supply.supply_inventory_value', { value: inventory?.available ?? '-' }),
           icon: <IconDollarSign size={18} />,
           tone: 'violet',
         },
       ];
-    },
-    [
-      balance,
-      draft.healthyMinutesTarget,
-      draft.smartEnabled,
-      draft.targetAvailableAccounts,
-      inventory,
-      overview,
-      smart,
-      t,
-    ]
-  );
+    }
+    return [
+      {
+        label: t('supply.cpa_available'),
+        value: overview?.cpaAvailable ?? '-',
+        detail: t('supply.target_value', {
+          value: overview?.cpaTarget ?? draft.targetAvailableAccounts,
+        }),
+        icon: <IconDatabaseZap size={18} />,
+        tone: 'teal',
+      },
+      {
+        label: t('supply.deficit'),
+        value: overview?.cpaDeficit ?? '-',
+        detail: t('supply.auto_order_hint'),
+        icon: <IconInbox size={18} />,
+        tone: 'orange',
+      },
+      {
+        label: t('supply.supply_inventory'),
+        value: inventory?.available ?? '-',
+        detail: inventory?.needsProduction
+          ? t('supply.production_required', { value: inventory.missing })
+          : t('supply.ready_delivery'),
+        icon: <IconInbox size={18} />,
+        tone: 'blue',
+      },
+      {
+        label: t('supply.available_balance'),
+        value: balance ? formatMoney(balance.availableFen) : '-',
+        detail: balance ? t('supply.held_value', { value: formatMoney(balance.heldFen) }) : '-',
+        icon: <IconDollarSign size={18} />,
+        tone: 'violet',
+      },
+    ];
+  }, [
+    balance,
+    draft.healthyMinutesTarget,
+    draft.smartEnabled,
+    draft.targetAvailableAccounts,
+    inventory,
+    overview,
+    smart,
+    t,
+  ]);
 
   const tabItems = useMemo<SegmentedTabItem<SupplyWorkspaceTab>[]>(
     () => [
@@ -478,6 +803,16 @@ export function SupplyPage() {
         ),
       },
       {
+        id: 'recoveries',
+        label: (
+          <span className={styles.tabLabel}>
+            {t('supply.tabs_recoveries')}
+            {recoveryCount > 0 ? <span className={styles.tabBadge}>{recoveryCount}</span> : null}
+          </span>
+        ),
+      },
+      { id: 'reports', label: t('supply.tabs_reports') },
+      {
         id: 'history',
         label: (
           <span className={styles.tabLabel}>
@@ -487,7 +822,7 @@ export function SupplyPage() {
         ),
       },
     ],
-    [activeOrder, orderCount, t]
+    [activeOrder, orderCount, recoveryCount, t]
   );
 
   if (loading && !status) {
@@ -593,7 +928,7 @@ export function SupplyPage() {
                     })}
                   </strong>
                   <p>
-                    {t('supply.decision_reason')}: {' '}
+                    {t('supply.decision_reason')}:{' '}
                     {t(`supply.smart_reason_${decisionReason}`, {
                       defaultValue: decisionReason,
                     })}
@@ -750,7 +1085,9 @@ export function SupplyPage() {
                 <div className={styles.panelHeader}>
                   <div>
                     <h2>{t('supply.supply_summary')}</h2>
-                    <p>{smartModeEnabled ? t('supply.smart_enabled') : t('supply.smart_disabled')}</p>
+                    <p>
+                      {smartModeEnabled ? t('supply.smart_enabled') : t('supply.smart_disabled')}
+                    </p>
                   </div>
                 </div>
                 <div className={styles.summaryList}>
@@ -777,7 +1114,9 @@ export function SupplyPage() {
                 <div className={styles.panelHeader}>
                   <div>
                     <h2>{t('supply.traffic_summary')}</h2>
-                    <p>{t('supply.usage_sample')}: {smart?.usageSampleMinutes ?? 0}m</p>
+                    <p>
+                      {t('supply.usage_sample')}: {smart?.usageSampleMinutes ?? 0}m
+                    </p>
                   </div>
                 </div>
                 <div className={styles.summaryList}>
@@ -903,6 +1242,54 @@ export function SupplyPage() {
                 </div>
               </article>
 
+              <article className={styles.panel}>
+                <div className={styles.panelHeader}>
+                  <div>
+                    <h2>{t('supply.recovery_config_title')}</h2>
+                    <p>{t('supply.recovery_config_hint')}</p>
+                  </div>
+                </div>
+                <div className={styles.formGrid}>
+                  <Input
+                    label={t('supply.recovery_sync_interval')}
+                    type="number"
+                    min={10}
+                    max={3600}
+                    value={draft.recoverySyncIntervalSeconds ?? 60}
+                    onChange={(event) =>
+                      updateDraft({ recoverySyncIntervalSeconds: Number(event.target.value) })
+                    }
+                  />
+                  <Input
+                    label={t('supply.recovery_claim_batch_size')}
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={draft.recoveryClaimBatchSize ?? 20}
+                    onChange={(event) =>
+                      updateDraft({ recoveryClaimBatchSize: Number(event.target.value) })
+                    }
+                  />
+                </div>
+                <div className={styles.smartToggles}>
+                  <ToggleSwitch
+                    checked={draft.recoverySyncEnabled !== false}
+                    onChange={(recoverySyncEnabled) => updateDraft({ recoverySyncEnabled })}
+                    label={t('supply.recovery_sync_enable')}
+                  />
+                  <ToggleSwitch
+                    checked={draft.recoveryAutoClaim !== false}
+                    onChange={(recoveryAutoClaim) => updateDraft({ recoveryAutoClaim })}
+                    label={t('supply.recovery_auto_claim')}
+                  />
+                  <ToggleSwitch
+                    checked={draft.recoveryDisableOriginal !== false}
+                    onChange={(recoveryDisableOriginal) => updateDraft({ recoveryDisableOriginal })}
+                    label={t('supply.recovery_disable_original')}
+                  />
+                </div>
+              </article>
+
               <article className={`${styles.panel} ${styles.fullSpan}`}>
                 <div className={styles.panelHeader}>
                   <div>
@@ -932,7 +1319,9 @@ export function SupplyPage() {
                     min={5}
                     max={1440}
                     value={draft.warningMinutes}
-                    onChange={(event) => updateDraft({ warningMinutes: Number(event.target.value) })}
+                    onChange={(event) =>
+                      updateDraft({ warningMinutes: Number(event.target.value) })
+                    }
                   />
                   <Input
                     label={t('supply.critical_minutes')}
@@ -1060,6 +1449,231 @@ export function SupplyPage() {
             </section>
           ) : null}
 
+          {activeTab === 'recoveries' ? (
+            <section className={styles.panel}>
+              <div className={styles.panelHeader}>
+                <div>
+                  <h2>{t('supply.recoveries_title')}</h2>
+                  <p>{t('supply.recoveries_hint')}</p>
+                </div>
+                <div className={styles.heroSummary}>
+                  <span
+                    className={`${styles.statusPill} ${recovery?.enabled ? styles.success : ''}`}
+                  >
+                    {recovery?.enabled ? t('common.enabled') : t('common.disabled')}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    loading={action === 'syncRecoveries' || recovery?.running}
+                    onClick={() => void syncRecoveries()}
+                  >
+                    <IconRefreshCw size={15} /> {t('supply.recovery_sync_now')}
+                  </Button>
+                </div>
+              </div>
+              <div className={styles.summaryList}>
+                <div>
+                  <span>{t('supply.recovery_next_sync')}</span>
+                  <strong>{formatCountdown(recovery?.nextSyncAtMs, nowMs)}</strong>
+                </div>
+                <div>
+                  <span>{t('supply.recovery_claimable')}</span>
+                  <strong>{recovery?.claimable ?? 0}</strong>
+                </div>
+                <div>
+                  <span>{t('supply.recovery_importing')}</span>
+                  <strong>{recovery?.importing ?? 0}</strong>
+                </div>
+                <div>
+                  <span>{t('supply.recovery_imported')}</span>
+                  <strong>{recovery?.storedImported ?? recovery?.imported ?? 0}</strong>
+                </div>
+                <div>
+                  <span>{t('supply.recovery_refunded')}</span>
+                  <strong>{recovery?.storedRefunded ?? recovery?.refunded ?? 0}</strong>
+                </div>
+                <div>
+                  <span>{t('supply.recovery_failed')}</span>
+                  <strong>{recovery?.storedFailed ?? recovery?.failed ?? 0}</strong>
+                </div>
+              </div>
+              {recovery?.lastError ? (
+                <div className={styles.errorBanner}>{recovery.lastError}</div>
+              ) : null}
+              <div className={styles.tableWrap}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>{t('supply.recovery_id')}</th>
+                      <th>{t('supply.product')}</th>
+                      <th>{t('supply.original_account')}</th>
+                      <th>{t('supply.delivery_status')}</th>
+                      <th>{t('common.status')}</th>
+                      <th>{t('supply.import_progress')}</th>
+                      <th>{t('supply.refunded')}</th>
+                      <th>{t('supply.updated_at')}</th>
+                      <th>{t('common.action')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recoveries.map((item) => (
+                      <tr key={item.recoveryId}>
+                        <td className={styles.mono}>{item.recoveryId}</td>
+                        <td>{item.product || '-'}</td>
+                        <td>{item.originalFileName || item.originalEmail || '-'}</td>
+                        <td>{item.deliveryStatus || '-'}</td>
+                        <td>
+                          <span className={`${styles.statusPill} ${orderTone(item.status)}`}>
+                            {t(`supply.recovery_status_${item.status}`, {
+                              defaultValue: item.status,
+                            })}
+                          </span>
+                        </td>
+                        <td>
+                          {item.importedCount}/{item.itemCount || 0}
+                        </td>
+                        <td>{item.refundedFen ? formatMoney(item.refundedFen) : '-'}</td>
+                        <td>{formatTime(item.updatedAtMs || item.lastSeenAtMs)}</td>
+                        <td>
+                          {item.status === 'claimable' ? (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              loading={action === 'claimRecovery'}
+                              onClick={() => void claimRecovery(item.recoveryId)}
+                            >
+                              {t('supply.recovery_claim_now')}
+                            </Button>
+                          ) : (
+                            '-'
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {!recoveries.length ? (
+                      <tr>
+                        <td colSpan={9} className={styles.emptyCell}>
+                          {recoveriesLoading ? t('common.loading') : t('supply.no_recoveries')}
+                        </td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
+
+          {activeTab === 'reports' ? (
+            <section className={styles.reportsGrid}>
+              <article className={`${styles.panel} ${styles.fullSpan}`}>
+                <div className={styles.panelHeader}>
+                  <div>
+                    <h2>{t('supply.reports_title')}</h2>
+                    <p>{t('supply.reports_hint')}</p>
+                  </div>
+                  <div className={styles.heroSummary}>
+                    <span className={styles.statusPill}>{reportRangeLabel}</span>
+                    {reportRange?.truncated ? (
+                      <span className={`${styles.statusPill} ${styles.warning}`}>
+                        {t('supply.report_truncated')}
+                      </span>
+                    ) : null}
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      loading={reportLoading}
+                      onClick={() => void loadReport()}
+                    >
+                      <IconRefreshCw size={15} /> {t('supply.report_refresh')}
+                    </Button>
+                  </div>
+                </div>
+                {!report ? (
+                  <div className={styles.empty}>
+                    {reportLoading ? t('common.loading') : t('supply.report_no_data')}
+                  </div>
+                ) : (
+                  <>
+                    <div className={styles.reportSectionHeader}>
+                      <span>{t('supply.report_finance')}</span>
+                      <small>{t('supply.report_finance_hint')}</small>
+                    </div>
+                    <ReportMetricCards items={reportFinanceMetrics} />
+                  </>
+                )}
+              </article>
+
+              {report ? (
+                <>
+                  <article className={styles.panel}>
+                    <div className={styles.panelHeader}>
+                      <div>
+                        <h2>{t('supply.report_operations')}</h2>
+                        <p>{t('supply.report_operations_hint')}</p>
+                      </div>
+                    </div>
+                    <ReportMetricCards items={reportOperationsMetrics} />
+                  </article>
+
+                  <article className={styles.panel}>
+                    <div className={styles.panelHeader}>
+                      <div>
+                        <h2>{t('supply.report_product_experience')}</h2>
+                        <p>{t('supply.report_product_experience_hint')}</p>
+                      </div>
+                    </div>
+                    <ReportMetricCards items={reportProductMetrics} />
+                  </article>
+
+                  <article className={`${styles.panel} ${styles.fullSpan}`}>
+                    <div className={styles.panelHeader}>
+                      <div>
+                        <h2>{t('supply.report_risk')}</h2>
+                        <p>{t('supply.report_risk_hint')}</p>
+                      </div>
+                    </div>
+                    <ReportMetricCards items={reportRiskMetrics} />
+                    <div className={styles.riskBucketGrid}>
+                      {(reportRisk?.claimableAgeBuckets ?? []).map((bucket) => (
+                        <div key={bucket.key}>
+                          <span>{bucket.label}</span>
+                          <strong>{formatInteger(bucket.count)}</strong>
+                        </div>
+                      ))}
+                    </div>
+                  </article>
+
+                  <div className={`${styles.dimensionGrid} ${styles.fullSpan}`}>
+                    <ReportDimensionTable
+                      title={t('supply.report_products')}
+                      rows={report.products}
+                    />
+                    <ReportDimensionTable
+                      title={t('supply.report_sources')}
+                      rows={report.sources}
+                    />
+                    <ReportDimensionTable
+                      title={t('supply.report_order_statuses')}
+                      rows={report.orderStatuses}
+                    />
+                    <ReportDimensionTable
+                      title={t('supply.report_recovery_statuses')}
+                      rows={report.recoveryStatuses}
+                    />
+                    <ReportDimensionTable
+                      title={t('supply.report_delivery_statuses')}
+                      rows={report.deliveryStatuses}
+                    />
+                  </div>
+
+                  <ReportUsageModelTable rows={report.usageModels} />
+                  <ReportTimelineTable rows={report.timeline} />
+                </>
+              ) : null}
+            </section>
+          ) : null}
+
           {activeTab === 'history' ? (
             <section className={styles.panel}>
               <div className={styles.panelHeader}>
@@ -1131,7 +1745,11 @@ function OrderSummary({
 }) {
   const { t } = useTranslation();
   const importing =
-    order.itemCount > 0 || order.status === 'importing' || order.status === 'partial';
+    order.itemCount > 0 ||
+    order.status === 'importing' ||
+    order.status === 'partial' ||
+    order.status === 'recovery_importing' ||
+    order.status === 'recovery_partial';
   const progressValue = importing
     ? (order.importedCount / Math.max(1, order.itemCount || order.requestedQuantity)) * 100
     : order.progress > 0
@@ -1190,5 +1808,187 @@ function OrderSummary({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function ReportMetricCards({
+  items,
+}: {
+  items: Array<{ label: string; value: string; detail: string }>;
+}) {
+  return (
+    <div className={styles.reportMetricGrid}>
+      {items.map((item) => (
+        <div key={item.label}>
+          <span>{item.label}</span>
+          <strong>{item.value}</strong>
+          <small>{item.detail}</small>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ReportDimensionTable({
+  title,
+  rows,
+}: {
+  title: string;
+  rows?: SupplyReportDimensionStat[];
+}) {
+  const { t } = useTranslation();
+  return (
+    <article className={styles.panel}>
+      <div className={styles.panelHeader}>
+        <div>
+          <h2>{title}</h2>
+          <p>{t('supply.report_dimension_hint')}</p>
+        </div>
+      </div>
+      <div className={styles.tableWrap}>
+        <table>
+          <thead>
+            <tr>
+              <th>{t('supply.report_name')}</th>
+              <th>{t('supply.report_count')}</th>
+              <th>{t('supply.quantity')}</th>
+              <th>{t('supply.report_imported')}</th>
+              <th>{t('supply.charged')}</th>
+              <th>{t('supply.report_released')}</th>
+              <th>{t('supply.refunded')}</th>
+              <th>{t('supply.report_success_rate')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(rows ?? []).map((row) => (
+              <tr key={row.key}>
+                <td className={styles.mono}>{row.label || row.key}</td>
+                <td>{formatInteger(row.count)}</td>
+                <td>{formatInteger(row.quantity || row.orders || row.recoveries)}</td>
+                <td>{formatInteger(row.imported)}</td>
+                <td>{row.chargedFen ? formatMoney(row.chargedFen) : '-'}</td>
+                <td>{row.releasedFen ? formatMoney(row.releasedFen) : '-'}</td>
+                <td>{row.refundedFen ? formatMoney(row.refundedFen) : '-'}</td>
+                <td>{formatPercent(row.successRate)}</td>
+              </tr>
+            ))}
+            {!rows?.length ? (
+              <tr>
+                <td colSpan={8} className={styles.emptyCell}>
+                  {t('supply.report_no_data')}
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+    </article>
+  );
+}
+
+function ReportUsageModelTable({ rows }: { rows?: SupplyReportUsageModelStat[] }) {
+  const { t } = useTranslation();
+  return (
+    <article className={`${styles.panel} ${styles.fullSpan}`}>
+      <div className={styles.panelHeader}>
+        <div>
+          <h2>{t('supply.report_usage_models')}</h2>
+          <p>{t('supply.report_usage_models_hint')}</p>
+        </div>
+      </div>
+      <div className={styles.tableWrap}>
+        <table>
+          <thead>
+            <tr>
+              <th>{t('supply.report_model')}</th>
+              <th>{t('supply.report_billing_model')}</th>
+              <th>{t('supply.report_service_tier')}</th>
+              <th>{t('supply.report_usage_calls')}</th>
+              <th>{t('supply.report_successful_calls_short')}</th>
+              <th>{t('supply.report_usage_tokens')}</th>
+              <th>{t('supply.report_usage_revenue')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(rows ?? []).map((row) => (
+              <tr key={`${row.model}:${row.billingModel}:${row.serviceTier || '-'}`}>
+                <td className={styles.mono}>{row.model}</td>
+                <td className={styles.mono}>{row.billingModel || row.model}</td>
+                <td>{row.serviceTier || '-'}</td>
+                <td>{formatInteger(row.calls)}</td>
+                <td>{formatInteger(row.successCalls)}</td>
+                <td>{formatTokens(row.tokens)}</td>
+                <td>{formatUsd(row.revenue)}</td>
+              </tr>
+            ))}
+            {!rows?.length ? (
+              <tr>
+                <td colSpan={7} className={styles.emptyCell}>
+                  {t('supply.report_no_data')}
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+    </article>
+  );
+}
+
+function ReportTimelineTable({ rows }: { rows?: SupplyReport['timeline'] }) {
+  const { t } = useTranslation();
+  return (
+    <article className={`${styles.panel} ${styles.fullSpan}`}>
+      <div className={styles.panelHeader}>
+        <div>
+          <h2>{t('supply.report_timeline')}</h2>
+          <p>{t('supply.report_timeline_hint')}</p>
+        </div>
+      </div>
+      <div className={styles.tableWrap}>
+        <table>
+          <thead>
+            <tr>
+              <th>{t('supply.report_date')}</th>
+              <th>{t('supply.report_orders')}</th>
+              <th>{t('supply.report_requested_accounts')}</th>
+              <th>{t('supply.report_imported_accounts')}</th>
+              <th>{t('supply.report_supply_spend')}</th>
+              <th>{t('supply.report_usage_calls')}</th>
+              <th>{t('supply.report_usage_tokens')}</th>
+              <th>{t('supply.report_usage_revenue')}</th>
+              <th>{t('supply.report_recoveries')}</th>
+              <th>{t('supply.report_import_failures')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(rows ?? []).map((row) => (
+              <tr key={row.bucketMs}>
+                <td>{row.label}</td>
+                <td>{formatInteger(row.orders)}</td>
+                <td>{formatInteger(row.requested)}</td>
+                <td>{formatInteger(row.imported)}</td>
+                <td>{formatMoney(row.chargedFen)}</td>
+                <td>{formatInteger(row.usageCalls)}</td>
+                <td>{formatTokens(row.usageTokens)}</td>
+                <td>{formatUsd(row.usageRevenue)}</td>
+                <td>
+                  {formatInteger(row.recoveries)} / {formatInteger(row.recoveryImported)} /{' '}
+                  {formatInteger(row.recoveryRefunded)}
+                </td>
+                <td>{formatInteger(row.importFailures)}</td>
+              </tr>
+            ))}
+            {!rows?.length ? (
+              <tr>
+                <td colSpan={10} className={styles.emptyCell}>
+                  {t('supply.report_no_data')}
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+    </article>
   );
 }

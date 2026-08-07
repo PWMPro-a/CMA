@@ -227,6 +227,53 @@ func TestClientUsesReturnedStatusAndTakeURLs(t *testing.T) {
 	}
 }
 
+func TestClientListsAndClaimsRecoveries(t *testing.T) {
+	var claimCalls atomic.Int32
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"token"}`))
+		case "/api/customer/recoveries":
+			if got := r.Header.Get("X-Customer-Token"); got != "token" {
+				t.Fatalf("recoveries token = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"payload":{"recoveries":[{"recovery_id":"recovery-1","delivery_status":"claimable","product":"oauth_30d","original_email":"old@example.com","auth_file_name":"old.json","auth_index":"auth-1","claim_url":"` + server.URL + `/api/customer/recoveries/recovery-1/claim?ticket=ticket-1"}]}}`))
+		case "/api/customer/recoveries/recovery-1/claim":
+			claimCalls.Add(1)
+			if got := r.URL.Query().Get("ticket"); got != "ticket-1" {
+				t.Fatalf("claim ticket = %q", got)
+			}
+			if got := r.Header.Get("X-Customer-Token"); got != "token" {
+				t.Fatalf("claim token = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"payload":{"accounts":[{"type":"oauth","credentials":{"access_token":"access","refresh_token":"refresh","email":"new@example.com","chatgpt_plan_type":"team"}}]}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	credentials := Credentials{BaseURL: server.URL, Username: "u", Password: "p"}
+	recoveries, err := client.Recoveries(context.Background(), credentials)
+	if err != nil {
+		t.Fatalf("recoveries: %v", err)
+	}
+	if len(recoveries) != 1 || recoveries[0].ID != "recovery-1" || recoveries[0].ClaimURL == "" ||
+		recoveries[0].OriginalAccount != "old.json" || recoveries[0].OriginalEmail != "old@example.com" ||
+		recoveries[0].OriginalAuthIndex != "auth-1" {
+		t.Fatalf("recoveries = %#v", recoveries)
+	}
+	claimed, err := client.ClaimRecovery(context.Background(), credentials, recoveries[0].ID, recoveries[0].ClaimURL)
+	if err != nil {
+		t.Fatalf("claim recovery: %v", err)
+	}
+	if claimCalls.Load() != 1 || claimed.Recovery.ID != "recovery-1" || len(claimed.Accounts) != 1 {
+		t.Fatalf("claimed=%#v claimCalls=%d", claimed, claimCalls.Load())
+	}
+}
+
 func TestClientRejectsCrossOriginOrderURL(t *testing.T) {
 	var leaked atomic.Int32
 	external := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

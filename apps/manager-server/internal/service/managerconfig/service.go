@@ -240,26 +240,31 @@ func (s *Service) DefaultManagerConfig() store.ManagerConfig {
 		},
 		CodexInspection: store.DefaultCodexInspectionConfig(),
 		Supply: store.ManagerSupplyConfig{
-			Enabled:                   BoolPtr(false),
-			BaseURL:                   "https://sogouedu.cc",
-			Product:                   "oauth_30d",
-			TargetAvailableAccounts:   100,
-			ReplenishBatchSize:        10,
-			CheckIntervalSeconds:      60,
-			PollIntervalSeconds:       3,
-			SmartEnabled:              BoolPtr(true),
-			HealthyMinutesTarget:      120,
-			WarningMinutes:            60,
-			CriticalMinutes:           30,
-			PrelockEnabled:            BoolPtr(true),
-			PrelockMinQuantity:        1,
-			PrelockMaxQuantity:        10,
-			CriticalTakeConfirmRounds: 2,
-			CreateCooldownSeconds:     120,
-			ReleaseCooldownSeconds:    60,
-			AuthFilesCacheTTLSeconds:  60,
-			MinHoldSeconds:            30,
-			NewAccountConfidence:      0.7,
+			Enabled:                     BoolPtr(false),
+			BaseURL:                     "https://sogouedu.cc",
+			Product:                     "oauth_30d",
+			TargetAvailableAccounts:     100,
+			ReplenishBatchSize:          10,
+			CheckIntervalSeconds:        60,
+			PollIntervalSeconds:         3,
+			SmartEnabled:                BoolPtr(true),
+			HealthyMinutesTarget:        120,
+			WarningMinutes:              60,
+			CriticalMinutes:             30,
+			PrelockEnabled:              BoolPtr(true),
+			PrelockMinQuantity:          1,
+			PrelockMaxQuantity:          10,
+			CriticalTakeConfirmRounds:   2,
+			CreateCooldownSeconds:       120,
+			ReleaseCooldownSeconds:      60,
+			AuthFilesCacheTTLSeconds:    60,
+			MinHoldSeconds:              30,
+			NewAccountConfidence:        0.7,
+			RecoverySyncEnabled:         BoolPtr(true),
+			RecoveryAutoClaim:           BoolPtr(true),
+			RecoverySyncIntervalSeconds: 60,
+			RecoveryClaimBatchSize:      20,
+			RecoveryDisableOriginal:     BoolPtr(true),
 		},
 	}
 }
@@ -361,6 +366,23 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	next.MinBalanceReserveFen = BoundedOptionalInt64(submitted.MinBalanceReserveFen, next.MinBalanceReserveFen, 100_000_000)
 	next.DailyMaxHoldFen = BoundedOptionalInt64(submitted.DailyMaxHoldFen, next.DailyMaxHoldFen, 100_000_000)
 	next.DailyMaxReplenishQuantity = BoundedOptionalInt(submitted.DailyMaxReplenishQuantity, next.DailyMaxReplenishQuantity, 10_000)
+	if submitted.RecoverySyncEnabled != nil {
+		next.RecoverySyncEnabled = BoolPtr(*submitted.RecoverySyncEnabled)
+	} else if next.RecoverySyncEnabled == nil {
+		next.RecoverySyncEnabled = BoolPtr(true)
+	}
+	if submitted.RecoveryAutoClaim != nil {
+		next.RecoveryAutoClaim = BoolPtr(*submitted.RecoveryAutoClaim)
+	} else if next.RecoveryAutoClaim == nil {
+		next.RecoveryAutoClaim = BoolPtr(true)
+	}
+	next.RecoverySyncIntervalSeconds = BoundedPositiveOrDefault(submitted.RecoverySyncIntervalSeconds, next.RecoverySyncIntervalSeconds, 60, 3600)
+	next.RecoveryClaimBatchSize = BoundedPositiveOrDefault(submitted.RecoveryClaimBatchSize, next.RecoveryClaimBatchSize, 20, 100)
+	if submitted.RecoveryDisableOriginal != nil {
+		next.RecoveryDisableOriginal = BoolPtr(*submitted.RecoveryDisableOriginal)
+	} else if next.RecoveryDisableOriginal == nil {
+		next.RecoveryDisableOriginal = BoolPtr(true)
+	}
 	next.PasswordConfigured = next.Password != ""
 	return next
 }

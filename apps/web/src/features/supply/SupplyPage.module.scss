@@ -245,7 +245,8 @@
 
 .overviewGrid,
 .automationGrid,
-.ordersGrid {
+.ordersGrid,
+.reportsGrid {
   display: grid;
   gap: 12px;
   min-width: 0;
@@ -575,6 +576,11 @@
   align-items: start;
 }
 
+.reportsGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
 .fullSpan {
   grid-column: 1 / -1;
 }
@@ -756,11 +762,91 @@
   text-align: center;
 }
 
+.reportSectionHeader {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.reportSectionHeader span {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.reportSectionHeader small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: right;
+}
+
+.reportMetricGrid,
+.riskBucketGrid {
+  display: grid;
+  gap: 8px;
+}
+
+.reportMetricGrid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.riskBucketGrid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.reportMetricGrid > div,
+.riskBucketGrid > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--bg-primary) 70%, var(--surface-subtle));
+}
+
+.reportMetricGrid span,
+.reportMetricGrid small,
+.riskBucketGrid span {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+}
+
+.reportMetricGrid span,
+.riskBucketGrid span {
+  white-space: nowrap;
+}
+
+.reportMetricGrid strong,
+.riskBucketGrid strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 18px;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dimensionGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  min-width: 0;
+}
+
 @media (max-width: 1180px) {
   .metricGrid,
   .overviewGrid,
   .automationGrid,
-  .ordersGrid {
+  .ordersGrid,
+  .reportsGrid,
+  .reportMetricGrid,
+  .dimensionGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -779,6 +865,7 @@
   .overviewGrid,
   .automationGrid,
   .ordersGrid,
+  .reportsGrid,
   .formGrid,
   .smartToggles,
   .orderComposer,
@@ -786,7 +873,10 @@
   .executionStrip,
   .decisionFooter,
   .miniMetricGrid,
-  .summaryList {
+  .summaryList,
+  .reportMetricGrid,
+  .riskBucketGrid,
+  .dimensionGrid {
     grid-template-columns: 1fr;
   }
 
@@ -813,12 +903,14 @@
   .panelHeader,
   .configFooter,
   .capacityOverview,
-  .demandStrategyHeader {
+  .demandStrategyHeader,
+  .reportSectionHeader {
     align-items: flex-start;
     flex-direction: column;
   }
 
-  .demandStrategyHeader small {
+  .demandStrategyHeader small,
+  .reportSectionHeader small {
     max-width: none;
     text-align: left;
   }

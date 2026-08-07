@@ -12,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/pricing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/supplyclient"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
@@ -58,6 +60,7 @@ type Status struct {
 	Overview      Overview                  `json:"overview"`
 	SmartResource SmartResource             `json:"smartResource"`
 	Automation    AutomationExecution       `json:"automation"`
+	Recovery      RecoverySummary           `json:"recovery"`
 	ActiveOrder   *store.SupplyOrder        `json:"activeOrder,omitempty"`
 	Orders        []store.SupplyOrder       `json:"orders"`
 }
@@ -77,6 +80,179 @@ type AutomationExecution struct {
 	LastAction        string `json:"lastAction,omitempty"`
 	LastReason        string `json:"lastReason,omitempty"`
 	LastError         string `json:"lastError,omitempty"`
+}
+
+type RecoverySummary struct {
+	Enabled        bool   `json:"enabled"`
+	AutoClaim      bool   `json:"autoClaim"`
+	Running        bool   `json:"running"`
+	LastSyncAtMS   int64  `json:"lastSyncAtMs,omitempty"`
+	NextSyncAtMS   int64  `json:"nextSyncAtMs,omitempty"`
+	LastResult     string `json:"lastResult,omitempty"`
+	LastError      string `json:"lastError,omitempty"`
+	Seen           int    `json:"seen"`
+	Claimable      int    `json:"claimable"`
+	Claimed        int    `json:"claimed"`
+	Imported       int    `json:"imported"`
+	Refunded       int    `json:"refunded"`
+	Failed         int    `json:"failed"`
+	Total          int    `json:"total"`
+	Importing      int    `json:"importing"`
+	StoredImported int    `json:"storedImported"`
+	StoredRefunded int    `json:"storedRefunded"`
+	StoredFailed   int    `json:"storedFailed"`
+}
+
+type RecoverySyncRequest struct {
+	Force      bool   `json:"force,omitempty"`
+	AutoClaim  *bool  `json:"autoClaim,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+	RecoveryID string `json:"recoveryId,omitempty"`
+}
+
+type RecoverySyncResult struct {
+	Seen      int `json:"seen"`
+	Claimable int `json:"claimable"`
+	Claimed   int `json:"claimed"`
+	Imported  int `json:"imported"`
+	Refunded  int `json:"refunded"`
+	Failed    int `json:"failed"`
+}
+
+type ReportRequest struct {
+	FromMS int64 `json:"fromMs,omitempty"`
+	ToMS   int64 `json:"toMs,omitempty"`
+	Limit  int   `json:"limit,omitempty"`
+}
+
+type ReportRange struct {
+	FromMS        int64 `json:"fromMs"`
+	ToMS          int64 `json:"toMs"`
+	GeneratedAtMS int64 `json:"generatedAtMs"`
+	Days          int   `json:"days"`
+	Truncated     bool  `json:"truncated"`
+}
+
+type ReportExecutive struct {
+	Orders                int     `json:"orders"`
+	ManualOrders          int     `json:"manualOrders"`
+	AutomaticOrders       int     `json:"automaticOrders"`
+	RecoveryOrders        int     `json:"recoveryOrders"`
+	RequestedAccounts     int     `json:"requestedAccounts"`
+	ImportedAccounts      int     `json:"importedAccounts"`
+	ChargedFen            int64   `json:"chargedFen"`
+	ReleasedFen           int64   `json:"releasedFen"`
+	NetFen                int64   `json:"netFen"`
+	SupplySpendFen        int64   `json:"supplySpendFen"`
+	SupplyNetSpendFen     int64   `json:"supplyNetSpendFen"`
+	AverageUnitFen        float64 `json:"averageUnitFen"`
+	UsageCalls            int64   `json:"usageCalls"`
+	UsageTokens           int64   `json:"usageTokens"`
+	UsageRevenue          float64 `json:"usageRevenue"`
+	UsageRevenueCurrency  string  `json:"usageRevenueCurrency"`
+	AverageRevenuePerCall float64 `json:"averageRevenuePerCall"`
+	Recoveries            int     `json:"recoveries"`
+	ClaimableRecoveries   int     `json:"claimableRecoveries"`
+	ClaimedRecoveries     int     `json:"claimedRecoveries"`
+	ImportedRecoveries    int     `json:"importedRecoveries"`
+	RefundedRecoveries    int     `json:"refundedRecoveries"`
+	FailedRecoveries      int     `json:"failedRecoveries"`
+	RefundedFen           int64   `json:"refundedFen"`
+	RecoveryClaimRate     float64 `json:"recoveryClaimRate"`
+	RecoveryImportRate    float64 `json:"recoveryImportRate"`
+	RecoveryRefundRate    float64 `json:"recoveryRefundRate"`
+	ImportSuccessRate     float64 `json:"importSuccessRate"`
+}
+
+type ReportDimensionStat struct {
+	Key         string  `json:"key"`
+	Label       string  `json:"label,omitempty"`
+	Count       int     `json:"count"`
+	Orders      int     `json:"orders"`
+	Recoveries  int     `json:"recoveries"`
+	Quantity    int     `json:"quantity"`
+	Imported    int     `json:"imported"`
+	ChargedFen  int64   `json:"chargedFen"`
+	ReleasedFen int64   `json:"releasedFen"`
+	RefundedFen int64   `json:"refundedFen"`
+	SuccessRate float64 `json:"successRate"`
+}
+
+type ReportUsageModelStat struct {
+	Model        string  `json:"model"`
+	BillingModel string  `json:"billingModel"`
+	ServiceTier  string  `json:"serviceTier,omitempty"`
+	Calls        int64   `json:"calls"`
+	SuccessCalls int64   `json:"successCalls"`
+	Tokens       int64   `json:"tokens"`
+	Revenue      float64 `json:"revenue"`
+}
+
+type ReportTimelinePoint struct {
+	BucketMS         int64   `json:"bucketMs"`
+	Label            string  `json:"label"`
+	Orders           int     `json:"orders"`
+	Requested        int     `json:"requested"`
+	Imported         int     `json:"imported"`
+	ChargedFen       int64   `json:"chargedFen"`
+	UsageCalls       int64   `json:"usageCalls"`
+	UsageTokens      int64   `json:"usageTokens"`
+	UsageRevenue     float64 `json:"usageRevenue"`
+	Recoveries       int     `json:"recoveries"`
+	RecoveryClaimed  int     `json:"recoveryClaimed"`
+	RecoveryImported int     `json:"recoveryImported"`
+	RecoveryRefunded int     `json:"recoveryRefunded"`
+	ImportFailures   int     `json:"importFailures"`
+}
+
+type ReportImportHealth struct {
+	Items             int     `json:"items"`
+	ImportedItems     int     `json:"importedItems"`
+	FailedItems       int     `json:"failedItems"`
+	PendingItems      int     `json:"pendingItems"`
+	RetryingItems     int     `json:"retryingItems"`
+	AverageAttempts   float64 `json:"averageAttempts"`
+	SuccessRate       float64 `json:"successRate"`
+	ExpiringSoonItems int     `json:"expiringSoonItems"`
+	ExpiredItems      int     `json:"expiredItems"`
+}
+
+type ReportTiming struct {
+	AverageOrderFulfillmentSeconds   float64 `json:"averageOrderFulfillmentSeconds"`
+	AverageRecoveryClaimSeconds      float64 `json:"averageRecoveryClaimSeconds"`
+	AverageRecoveryImportSeconds     float64 `json:"averageRecoveryImportSeconds"`
+	AverageImportRegistrationSeconds float64 `json:"averageImportRegistrationSeconds"`
+}
+
+type ReportRiskBucket struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	Count int    `json:"count"`
+}
+
+type ReportRisk struct {
+	OpenOrders               int                `json:"openOrders"`
+	UnclaimedRecoveries      int                `json:"unclaimedRecoveries"`
+	ImportBacklogItems       int                `json:"importBacklogItems"`
+	FailedImportItems        int                `json:"failedImportItems"`
+	PartialRecoveries        int                `json:"partialRecoveries"`
+	StaleClaimableRecoveries int                `json:"staleClaimableRecoveries"`
+	ClaimableAgeBuckets      []ReportRiskBucket `json:"claimableAgeBuckets"`
+}
+
+type Report struct {
+	Range            ReportRange            `json:"range"`
+	Executive        ReportExecutive        `json:"executive"`
+	ImportHealth     ReportImportHealth     `json:"importHealth"`
+	Timing           ReportTiming           `json:"timing"`
+	Risk             ReportRisk             `json:"risk"`
+	Timeline         []ReportTimelinePoint  `json:"timeline"`
+	Products         []ReportDimensionStat  `json:"products"`
+	OrderStatuses    []ReportDimensionStat  `json:"orderStatuses"`
+	RecoveryStatuses []ReportDimensionStat  `json:"recoveryStatuses"`
+	DeliveryStatuses []ReportDimensionStat  `json:"deliveryStatuses"`
+	Sources          []ReportDimensionStat  `json:"sources"`
+	UsageModels      []ReportUsageModelStat `json:"usageModels"`
 }
 
 type Service struct {
@@ -104,6 +280,8 @@ type Service struct {
 	quotaSnapshot      inspectionQuotaSnapshot
 	smartResourceState SmartResource
 	automation         AutomationExecution
+	recoveryMu         sync.Mutex
+	recoveryState      RecoverySummary
 
 	inspectionSnapshotRefreshMu sync.Mutex
 	inspectionSnapshotRefresh   inspectionSnapshotRefreshState
@@ -273,6 +451,7 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		Overview:      overview,
 		SmartResource: resource,
 		Automation:    s.currentAutomationExecution(managerconfigsvc.SupplyEnabled(cfg.Supply)),
+		Recovery:      s.currentRecoverySummary(ctx, cfg.Supply),
 		Orders:        orders,
 	}
 	if found {
@@ -338,6 +517,175 @@ func (s *Service) RunAutomatic(ctx context.Context) error {
 	return err
 }
 
+func (s *Service) SyncRecoveriesIfDue(ctx context.Context) (RecoverySummary, error) {
+	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		return RecoverySummary{}, err
+	}
+	summary := s.currentRecoverySummary(ctx, cfg.Supply)
+	if !summary.Enabled || !supplyCredentialsConfigured(cfg.Supply) {
+		return summary, nil
+	}
+	now := time.Now()
+	s.recoveryMu.Lock()
+	nextSyncAtMS := s.recoveryState.NextSyncAtMS
+	running := s.recoveryState.Running
+	s.recoveryMu.Unlock()
+	if running {
+		return summary, nil
+	}
+	if nextSyncAtMS > 0 && now.Before(time.UnixMilli(nextSyncAtMS)) {
+		return summary, nil
+	}
+	return s.SyncRecoveries(ctx, RecoverySyncRequest{})
+}
+
+func (s *Service) SyncRecoveries(ctx context.Context, req RecoverySyncRequest) (RecoverySummary, error) {
+	if s == nil || s.store == nil || s.managerConfig == nil || s.supplyClient == nil {
+		return RecoverySummary{}, ErrNotConfigured
+	}
+	s.recoveryMu.Lock()
+	if s.recoveryState.Running {
+		state := s.recoveryState
+		s.recoveryMu.Unlock()
+		return state, nil
+	}
+	s.recoveryState.Running = true
+	s.recoveryMu.Unlock()
+	defer func() {
+		s.recoveryMu.Lock()
+		s.recoveryState.Running = false
+		s.recoveryMu.Unlock()
+	}()
+
+	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		s.recordRecoveryError(ctx, cfg.Supply, err)
+		return RecoverySummary{}, err
+	}
+	if !recoverySyncEnabled(cfg.Supply) || !supplyCredentialsConfigured(cfg.Supply) {
+		summary := s.currentRecoverySummary(ctx, cfg.Supply)
+		s.recoveryMu.Lock()
+		s.recoveryState = summary
+		s.recoveryMu.Unlock()
+		return summary, nil
+	}
+	if err := s.requireCredentials(cfg.Supply); err != nil {
+		s.recordRecoveryError(ctx, cfg.Supply, err)
+		return RecoverySummary{}, err
+	}
+
+	limit := req.Limit
+	if limit <= 0 {
+		limit = recoveryClaimBatchSize(cfg.Supply)
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	autoClaim := recoveryAutoClaimEnabled(cfg.Supply)
+	if req.AutoClaim != nil {
+		autoClaim = *req.AutoClaim
+	}
+	recoveryID := strings.TrimSpace(req.RecoveryID)
+	if autoClaim && !cpaManagementConfigured(cfg) {
+		if recoveryID != "" {
+			err := errors.New("CPA connection is not configured")
+			s.recordRecoveryError(ctx, cfg.Supply, err)
+			return RecoverySummary{}, err
+		}
+		autoClaim = false
+	}
+	result, err := s.syncRecoveriesOnce(ctx, cfg, autoClaim, limit, recoveryID)
+	summary := s.currentRecoverySummary(ctx, cfg.Supply)
+	summary.Seen = result.Seen
+	summary.Claimable = result.Claimable
+	summary.Claimed = result.Claimed
+	summary.Imported = result.Imported
+	summary.Refunded = result.Refunded
+	summary.Failed = result.Failed
+	now := time.Now()
+	summary.LastSyncAtMS = now.UnixMilli()
+	summary.NextSyncAtMS = now.Add(recoverySyncInterval(cfg.Supply, err)).UnixMilli()
+	if err != nil {
+		summary.LastResult = "failed"
+		summary.LastError = safeError(err)
+	} else {
+		summary.LastResult = "completed"
+		summary.LastError = ""
+	}
+	s.recoveryMu.Lock()
+	s.recoveryState = summary
+	s.recoveryMu.Unlock()
+	return summary, err
+}
+
+func (s *Service) ListRecoveries(ctx context.Context, limit int, status string) ([]store.SupplyRecovery, error) {
+	if s == nil || s.store == nil {
+		return nil, ErrNotConfigured
+	}
+	return s.store.ListSupplyRecoveries(ctx, limit, status)
+}
+
+func (s *Service) Report(ctx context.Context, req ReportRequest) (Report, error) {
+	if s == nil || s.store == nil {
+		return Report{}, ErrNotConfigured
+	}
+	req = normalizeReportRequest(req)
+	orders, err := s.store.ListSupplyOrdersBetween(ctx, req.FromMS, req.ToMS, req.Limit)
+	if err != nil {
+		return Report{}, err
+	}
+	recoveries, err := s.store.ListSupplyRecoveriesBetween(ctx, req.FromMS, req.ToMS, req.Limit)
+	if err != nil {
+		return Report{}, err
+	}
+	items, err := s.store.ListSupplyImportItemsBetween(ctx, req.FromMS, req.ToMS, req.Limit)
+	if err != nil {
+		return Report{}, err
+	}
+	usageItems, err := s.store.ListImportedSupplyItemsOverlapping(ctx, req.FromMS, req.ToMS, req.Limit*2)
+	if err != nil {
+		return Report{}, err
+	}
+	modelStats, usageTimeline, err := s.supplyUsageStats(ctx, req, supplyUsageAuthFiles(usageItems))
+	if err != nil {
+		return Report{}, err
+	}
+	prices, err := s.store.LoadModelPrices(ctx)
+	if err != nil {
+		return Report{}, err
+	}
+	report := buildSupplyReport(req, orders, recoveries, items, time.Now())
+	applyUsageRevenueToReport(&report, modelStats, usageTimeline, prices)
+	report.Range.Truncated = len(orders) >= req.Limit || len(recoveries) >= req.Limit ||
+		len(items) >= req.Limit || len(usageItems) >= req.Limit*2
+	return report, nil
+}
+
+func (s *Service) withRecoveryInterval(base time.Duration, cfg store.ManagerSupplyConfig) time.Duration {
+	if base <= 0 {
+		base = time.Second
+	}
+	if !recoverySyncEnabled(cfg) || !supplyCredentialsConfigured(cfg) {
+		return base
+	}
+	s.recoveryMu.Lock()
+	nextSyncAtMS := s.recoveryState.NextSyncAtMS
+	running := s.recoveryState.Running
+	s.recoveryMu.Unlock()
+	if running || nextSyncAtMS <= 0 {
+		return base
+	}
+	wait := time.Until(time.UnixMilli(nextSyncAtMS))
+	if wait <= 0 {
+		return time.Second
+	}
+	if wait < base {
+		return wait
+	}
+	return base
+}
+
 func (s *Service) NextInterval(ctx context.Context) time.Duration {
 	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
 	if err != nil {
@@ -345,41 +693,41 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 	}
 	if order, found, err := s.store.GetOpenSupplyOrder(ctx); err == nil && found {
 		if order.Status == "creating" || order.Status == "create_uncertain" {
-			return time.Minute
+			return s.withRecoveryInterval(time.Minute, cfg.Supply)
 		}
 		if wait := time.Until(time.UnixMilli(order.SupplierRetryUntilMS)); wait > 0 {
 			if wait > time.Minute {
-				return time.Minute
+				return s.withRecoveryInterval(time.Minute, cfg.Supply)
 			}
-			return wait
+			return s.withRecoveryInterval(wait, cfg.Supply)
 		}
 		resource := s.currentSmartResource(cfg.Supply)
 		if s.emergencyOrderProcessingAllowed(cfg.Supply, order, resource) {
 			// The supplier has not requested a retry delay. Keep emergency order
 			// reconciliation responsive without spinning the worker.
-			return 3 * time.Second
+			return s.withRecoveryInterval(3*time.Second, cfg.Supply)
 		}
 		if wait := time.Until(time.UnixMilli(order.NextPollAtMS)); wait > 0 {
 			if wait > time.Minute {
-				return time.Minute
+				return s.withRecoveryInterval(time.Minute, cfg.Supply)
 			}
-			return wait
+			return s.withRecoveryInterval(wait, cfg.Supply)
 		}
 		seconds := cfg.Supply.PollIntervalSeconds
 		if seconds <= 0 {
 			seconds = 3
 		}
-		return time.Duration(seconds) * time.Second
+		return s.withRecoveryInterval(time.Duration(seconds)*time.Second, cfg.Supply)
 	}
 	if !managerconfigsvc.SupplyEnabled(cfg.Supply) {
-		return time.Minute
+		return s.withRecoveryInterval(time.Minute, cfg.Supply)
 	}
 	resource := s.currentSmartResource(cfg.Supply)
 	if smartEmergencyShortage(resource) {
-		return time.Second
+		return s.withRecoveryInterval(time.Second, cfg.Supply)
 	}
 	seconds := smartAutomaticCheckIntervalSeconds(cfg.Supply, resource)
-	return time.Duration(seconds) * time.Second
+	return s.withRecoveryInterval(time.Duration(seconds)*time.Second, cfg.Supply)
 }
 
 func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int, force bool) error {
@@ -887,7 +1235,11 @@ func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, orde
 		order.NextPollAtMS = 0
 		order.LastError = ""
 	} else {
-		order.Status = "partial"
+		if strings.HasPrefix(order.OrderID, "recovery-") {
+			order.Status = "recovery_partial"
+		} else {
+			order.Status = "partial"
+		}
 		order.NextPollAtMS = time.Now().Add(retryDelay(1)).UnixMilli()
 		if firstErr != nil {
 			order.LastError = safeError(firstErr)
@@ -980,6 +1332,565 @@ func supplyCredentialsConfigured(cfg store.ManagerSupplyConfig) bool {
 		strings.TrimSpace(cfg.Password) != ""
 }
 
+func cpaManagementConfigured(cfg store.ManagerConfig) bool {
+	return strings.TrimSpace(cfg.CPAConnection.CPABaseURL) != "" &&
+		strings.TrimSpace(cfg.CPAConnection.ManagementKey) != ""
+}
+
+func normalizeReportRequest(req ReportRequest) ReportRequest {
+	now := time.Now()
+	if req.ToMS <= 0 {
+		req.ToMS = now.UnixMilli()
+	}
+	if req.FromMS <= 0 {
+		req.FromMS = time.UnixMilli(req.ToMS).AddDate(0, 0, -30).UnixMilli()
+	}
+	if req.ToMS <= req.FromMS {
+		req.ToMS = time.UnixMilli(req.FromMS).Add(24 * time.Hour).UnixMilli()
+	}
+	maxRange := time.UnixMilli(req.ToMS).AddDate(-1, 0, 0).UnixMilli()
+	if req.FromMS < maxRange {
+		req.FromMS = maxRange
+	}
+	if req.Limit <= 0 || req.Limit > 10000 {
+		req.Limit = 5000
+	}
+	return req
+}
+
+func (s *Service) supplyUsageStats(ctx context.Context, req ReportRequest, authFiles []string) ([]store.ModelStat, []store.TimelinePoint, error) {
+	if len(authFiles) == 0 {
+		return nil, nil, nil
+	}
+	const chunkSize = 200
+	statsByKey := make(map[string]*store.ModelStat)
+	modelStats := make([]store.ModelStat, 0)
+	timeline := make([]store.TimelinePoint, 0)
+	for start := 0; start < len(authFiles); start += chunkSize {
+		end := start + chunkSize
+		if end > len(authFiles) {
+			end = len(authFiles)
+		}
+		filter := store.AnalyticsFilter{
+			FromMS:    req.FromMS,
+			ToMS:      req.ToMS,
+			AuthFiles: authFiles[start:end],
+		}
+		chunkStats, err := s.store.ModelStatsWithFilter(ctx, filter, 0)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, stat := range chunkStats {
+			key := strings.Join([]string{stat.Model, stat.BillingModel, stat.ServiceTier}, "\x00")
+			existing := statsByKey[key]
+			if existing == nil {
+				statCopy := stat
+				statsByKey[key] = &statCopy
+				modelStats = append(modelStats, statCopy)
+				continue
+			}
+			addReportModelStat(existing, stat)
+		}
+		chunkTimeline, err := s.store.TimelineWithFilter(ctx, filter, "day", time.Local)
+		if err != nil {
+			return nil, nil, err
+		}
+		timeline = append(timeline, chunkTimeline...)
+	}
+	for index := range modelStats {
+		key := strings.Join([]string{modelStats[index].Model, modelStats[index].BillingModel, modelStats[index].ServiceTier}, "\x00")
+		if merged := statsByKey[key]; merged != nil {
+			modelStats[index] = *merged
+		}
+	}
+	return modelStats, timeline, nil
+}
+
+func supplyUsageAuthFiles(items []store.SupplyImportItem) []string {
+	seen := make(map[string]struct{}, len(items))
+	authFiles := make([]string, 0, len(items))
+	for _, item := range items {
+		fileName := strings.TrimSpace(item.FileName)
+		if fileName == "" {
+			continue
+		}
+		if _, ok := seen[fileName]; ok {
+			continue
+		}
+		seen[fileName] = struct{}{}
+		authFiles = append(authFiles, fileName)
+	}
+	sort.Strings(authFiles)
+	return authFiles
+}
+
+func addReportModelStat(target *store.ModelStat, stat store.ModelStat) {
+	target.Calls += stat.Calls
+	target.SuccessCalls += stat.SuccessCalls
+	target.InputTokens += stat.InputTokens
+	target.OutputTokens += stat.OutputTokens
+	target.ReasoningTokens += stat.ReasoningTokens
+	target.CachedTokens += stat.CachedTokens
+	target.CacheReadTokens += stat.CacheReadTokens
+	target.CacheCreationTokens += stat.CacheCreationTokens
+	target.LongInputTokens += stat.LongInputTokens
+	target.LongOutputTokens += stat.LongOutputTokens
+	target.LongCachedTokens += stat.LongCachedTokens
+	target.LongCacheReadTokens += stat.LongCacheReadTokens
+	target.LongCacheCreationTokens += stat.LongCacheCreationTokens
+	target.TotalTokens += stat.TotalTokens
+}
+
+func buildSupplyReport(req ReportRequest, orders []store.SupplyOrder, recoveries []store.SupplyRecovery, items []store.SupplyImportItem, now time.Time) Report {
+	report := Report{
+		Range: ReportRange{
+			FromMS:        req.FromMS,
+			ToMS:          req.ToMS,
+			GeneratedAtMS: now.UnixMilli(),
+			Days:          max(1, int(math.Ceil(float64(req.ToMS-req.FromMS)/float64(24*time.Hour/time.Millisecond)))),
+		},
+		Risk: ReportRisk{ClaimableAgeBuckets: []ReportRiskBucket{
+			{Key: "lt_1h", Label: "<1h"},
+			{Key: "1_6h", Label: "1-6h"},
+			{Key: "6_24h", Label: "6-24h"},
+			{Key: "gt_24h", Label: ">24h"},
+		}},
+	}
+	report.Executive.UsageRevenueCurrency = "USD"
+	timeline := make(map[int64]*ReportTimelinePoint)
+	for bucket := reportDayBucketMS(req.FromMS); bucket < req.ToMS; bucket = reportNextDayBucketMS(bucket) {
+		ensureReportTimelinePoint(timeline, bucket)
+		if len(timeline) > 370 {
+			break
+		}
+	}
+	productStats := make(map[string]*ReportDimensionStat)
+	orderStatusStats := make(map[string]*ReportDimensionStat)
+	recoveryStatusStats := make(map[string]*ReportDimensionStat)
+	deliveryStatusStats := make(map[string]*ReportDimensionStat)
+	sourceStats := make(map[string]*ReportDimensionStat)
+
+	var orderFulfillmentTotal int64
+	var orderFulfillmentSamples int
+	for _, order := range orders {
+		source := reportOrderSource(order)
+		product := reportKey(order.Product)
+		status := reportKey(order.Status)
+		quantity := order.RequestedQuantity
+		if quantity <= 0 {
+			quantity = order.ItemCount
+		}
+		report.Executive.Orders++
+		report.Executive.RequestedAccounts += quantity
+		report.Executive.ImportedAccounts += order.ImportedCount
+		report.Executive.ChargedFen += order.ChargedFen
+		report.Executive.ReleasedFen += order.ReleasedFen
+		switch source {
+		case "manual":
+			report.Executive.ManualOrders++
+		case "recovery":
+			report.Executive.RecoveryOrders++
+		default:
+			report.Executive.AutomaticOrders++
+		}
+		if reportOpenOrderStatus(order.Status) {
+			report.Risk.OpenOrders++
+		}
+		if order.CompletedAtMS > 0 && order.CreatedAtMS > 0 && order.CompletedAtMS >= order.CreatedAtMS {
+			orderFulfillmentTotal += (order.CompletedAtMS - order.CreatedAtMS) / 1000
+			orderFulfillmentSamples++
+		}
+		for _, stat := range []*ReportDimensionStat{
+			reportDimension(productStats, product),
+			reportDimension(orderStatusStats, status),
+			reportDimension(sourceStats, source),
+		} {
+			stat.Count++
+			stat.Orders++
+			stat.Quantity += quantity
+			stat.Imported += order.ImportedCount
+			stat.ChargedFen += order.ChargedFen
+			stat.ReleasedFen += order.ReleasedFen
+		}
+		point := ensureReportTimelinePoint(timeline, reportDayBucketMS(order.CreatedAtMS))
+		point.Orders++
+		point.Requested += quantity
+		point.ChargedFen += order.ChargedFen
+	}
+
+	var recoveryClaimTotal int64
+	var recoveryClaimSamples int
+	var recoveryImportTotal int64
+	var recoveryImportSamples int
+	for _, recovery := range recoveries {
+		status := reportKey(recovery.Status)
+		product := reportKey(recovery.Product)
+		deliveryStatus := reportKey(recovery.DeliveryStatus)
+		report.Executive.Recoveries++
+		report.Executive.RefundedFen += recovery.RefundedFen
+		switch status {
+		case "claimable":
+			report.Executive.ClaimableRecoveries++
+			report.Risk.UnclaimedRecoveries++
+			reportAddClaimableAge(&report.Risk, recovery, now)
+		case "claiming", "importing", "partial", "imported", "claimed":
+			report.Executive.ClaimedRecoveries++
+		case "refunded":
+			report.Executive.RefundedRecoveries++
+		case "failed":
+			report.Executive.FailedRecoveries++
+		}
+		if status == "imported" {
+			report.Executive.ImportedRecoveries++
+		}
+		if status == "partial" {
+			report.Risk.PartialRecoveries++
+		}
+		if recovery.ClaimedAtMS > 0 {
+			start := reportFirstPositiveMS(recovery.CreatedAtMS, recovery.LastSeenAtMS)
+			if start > 0 && recovery.ClaimedAtMS >= start {
+				recoveryClaimTotal += (recovery.ClaimedAtMS - start) / 1000
+				recoveryClaimSamples++
+			}
+		}
+		if status == "imported" && recovery.UpdatedAtMS > 0 {
+			start := reportFirstPositiveMS(recovery.ClaimedAtMS, recovery.CreatedAtMS, recovery.LastSeenAtMS)
+			if start > 0 && recovery.UpdatedAtMS >= start {
+				recoveryImportTotal += (recovery.UpdatedAtMS - start) / 1000
+				recoveryImportSamples++
+			}
+		}
+		for _, stat := range []*ReportDimensionStat{
+			reportDimension(productStats, product),
+			reportDimension(recoveryStatusStats, status),
+			reportDimension(deliveryStatusStats, deliveryStatus),
+		} {
+			stat.Count++
+			stat.Recoveries++
+			stat.Imported += recovery.ImportedCount
+			stat.RefundedFen += recovery.RefundedFen
+		}
+		point := ensureReportTimelinePoint(timeline, reportDayBucketMS(reportFirstPositiveMS(recovery.CreatedAtMS, recovery.LastSeenAtMS, recovery.UpdatedAtMS)))
+		point.Recoveries++
+		if recovery.ClaimedAtMS > 0 || reportRecoveryClaimedStatus(status) {
+			point.RecoveryClaimed++
+		}
+		if status == "imported" {
+			point.RecoveryImported++
+		}
+		if status == "refunded" {
+			point.RecoveryRefunded++
+		}
+	}
+
+	var attempts int
+	var importRegistrationTotal int64
+	var importRegistrationSamples int
+	for _, item := range items {
+		status := strings.ToLower(strings.TrimSpace(item.Status))
+		report.ImportHealth.Items++
+		attempts += item.AttemptCount
+		switch status {
+		case "imported":
+			report.ImportHealth.ImportedItems++
+			if item.ImportedAtMS > 0 && item.CreatedAtMS > 0 && item.ImportedAtMS >= item.CreatedAtMS {
+				importRegistrationTotal += (item.ImportedAtMS - item.CreatedAtMS) / 1000
+				importRegistrationSamples++
+			}
+			if item.LeaseExpiresAtMS > 0 {
+				if item.LeaseExpiresAtMS <= now.UnixMilli() {
+					report.ImportHealth.ExpiredItems++
+				} else if item.LeaseExpiresAtMS <= now.Add(15*time.Minute).UnixMilli() {
+					report.ImportHealth.ExpiringSoonItems++
+				}
+			}
+		case "failed":
+			report.ImportHealth.FailedItems++
+			report.Risk.FailedImportItems++
+			report.Risk.ImportBacklogItems++
+			if item.NextRetryAtMS > now.UnixMilli() {
+				report.ImportHealth.RetryingItems++
+			}
+		default:
+			report.ImportHealth.PendingItems++
+			report.Risk.ImportBacklogItems++
+		}
+		point := ensureReportTimelinePoint(timeline, reportDayBucketMS(reportFirstPositiveMS(item.ImportedAtMS, item.UpdatedAtMS, item.CreatedAtMS)))
+		if status == "imported" {
+			point.Imported++
+		}
+		if status == "failed" {
+			point.ImportFailures++
+		}
+	}
+
+	report.Executive.NetFen = report.Executive.ChargedFen - report.Executive.ReleasedFen - report.Executive.RefundedFen
+	report.Executive.SupplySpendFen = report.Executive.ChargedFen
+	report.Executive.SupplyNetSpendFen = report.Executive.NetFen
+	report.Executive.AverageUnitFen = reportRatioFloat(float64(report.Executive.ChargedFen), float64(report.Executive.ImportedAccounts))
+	claimBase := report.Executive.ClaimableRecoveries + report.Executive.ClaimedRecoveries + report.Executive.FailedRecoveries
+	report.Executive.RecoveryClaimRate = reportRatio(float64(report.Executive.ClaimedRecoveries), float64(claimBase))
+	report.Executive.RecoveryImportRate = reportRatio(float64(report.Executive.ImportedRecoveries), float64(report.Executive.ClaimedRecoveries))
+	report.Executive.RecoveryRefundRate = reportRatio(float64(report.Executive.RefundedRecoveries), float64(report.Executive.Recoveries))
+	report.Executive.ImportSuccessRate = reportRatio(float64(report.ImportHealth.ImportedItems), float64(report.ImportHealth.Items))
+	report.ImportHealth.SuccessRate = report.Executive.ImportSuccessRate
+	report.ImportHealth.AverageAttempts = reportRatioFloat(float64(attempts), float64(report.ImportHealth.Items))
+	report.Timing.AverageOrderFulfillmentSeconds = reportRatioFloat(float64(orderFulfillmentTotal), float64(orderFulfillmentSamples))
+	report.Timing.AverageRecoveryClaimSeconds = reportRatioFloat(float64(recoveryClaimTotal), float64(recoveryClaimSamples))
+	report.Timing.AverageRecoveryImportSeconds = reportRatioFloat(float64(recoveryImportTotal), float64(recoveryImportSamples))
+	report.Timing.AverageImportRegistrationSeconds = reportRatioFloat(float64(importRegistrationTotal), float64(importRegistrationSamples))
+
+	report.Timeline = reportTimelinePoints(timeline)
+	report.Products = reportDimensionStats(productStats)
+	report.OrderStatuses = reportDimensionStats(orderStatusStats)
+	report.RecoveryStatuses = reportDimensionStats(recoveryStatusStats)
+	report.DeliveryStatuses = reportDimensionStats(deliveryStatusStats)
+	report.Sources = reportDimensionStats(sourceStats)
+	return report
+}
+
+func applyUsageRevenueToReport(report *Report, stats []store.ModelStat, timeline []store.TimelinePoint, prices map[string]store.ModelPrice) {
+	if report == nil {
+		return
+	}
+	models := make([]ReportUsageModelStat, 0, len(stats))
+	for _, stat := range stats {
+		revenue := reportCostForStat(stat, prices)
+		report.Executive.UsageCalls += stat.Calls
+		report.Executive.UsageTokens += stat.TotalTokens
+		report.Executive.UsageRevenue += revenue
+		models = append(models, ReportUsageModelStat{
+			Model:        stat.Model,
+			BillingModel: stat.BillingModel,
+			ServiceTier:  stat.ServiceTier,
+			Calls:        stat.Calls,
+			SuccessCalls: stat.SuccessCalls,
+			Tokens:       stat.TotalTokens,
+			Revenue:      reportRatioFloat(revenue, 1),
+		})
+	}
+	report.Executive.UsageRevenue = reportRatioFloat(report.Executive.UsageRevenue, 1)
+	report.Executive.AverageRevenuePerCall = reportRatioFloat(report.Executive.UsageRevenue, float64(report.Executive.UsageCalls))
+	sort.Slice(models, func(i, j int) bool {
+		if models[i].Revenue == models[j].Revenue {
+			if models[i].Calls == models[j].Calls {
+				return models[i].Model < models[j].Model
+			}
+			return models[i].Calls > models[j].Calls
+		}
+		return models[i].Revenue > models[j].Revenue
+	})
+	if len(models) > 20 {
+		models = models[:20]
+	}
+	report.UsageModels = models
+
+	timelineIndex := make(map[int64]int, len(report.Timeline))
+	for i := range report.Timeline {
+		timelineIndex[report.Timeline[i].BucketMS] = i
+	}
+	for _, point := range timeline {
+		bucket := reportDayBucketMS(point.BucketMS)
+		if bucket <= 0 {
+			continue
+		}
+		index, ok := timelineIndex[bucket]
+		if !ok {
+			report.Timeline = append(report.Timeline, ReportTimelinePoint{
+				BucketMS: bucket,
+				Label:    time.UnixMilli(bucket).Format("2006-01-02"),
+			})
+			index = len(report.Timeline) - 1
+			timelineIndex[bucket] = index
+		}
+		report.Timeline[index].UsageCalls += point.Calls
+		report.Timeline[index].UsageTokens += point.Tokens
+		report.Timeline[index].UsageRevenue += reportCostForTimelinePoint(point, prices)
+	}
+	for i := range report.Timeline {
+		report.Timeline[i].UsageRevenue = reportRatioFloat(report.Timeline[i].UsageRevenue, 1)
+	}
+	sort.Slice(report.Timeline, func(i, j int) bool { return report.Timeline[i].BucketMS < report.Timeline[j].BucketMS })
+}
+
+func reportCostForStat(stat store.ModelStat, prices map[string]store.ModelPrice) float64 {
+	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
+		InputTokens:             stat.InputTokens,
+		OutputTokens:            stat.OutputTokens,
+		CachedTokens:            stat.CachedTokens,
+		CacheReadTokens:         stat.CacheReadTokens,
+		CacheCreationTokens:     stat.CacheCreationTokens,
+		LongInputTokens:         stat.LongInputTokens,
+		LongOutputTokens:        stat.LongOutputTokens,
+		LongCachedTokens:        stat.LongCachedTokens,
+		LongCacheReadTokens:     stat.LongCacheReadTokens,
+		LongCacheCreationTokens: stat.LongCacheCreationTokens,
+	}, prices)
+}
+
+func reportCostForTimelinePoint(point store.TimelinePoint, prices map[string]store.ModelPrice) float64 {
+	return pricing.CostForModelCandidatesWithServiceTier([]string{point.BillingModel, point.Model}, point.ServiceTier, pricing.ModelTokens{
+		InputTokens:             point.InputTokens,
+		OutputTokens:            point.OutputTokens,
+		CachedTokens:            point.CachedTokens,
+		CacheReadTokens:         point.CacheReadTokens,
+		CacheCreationTokens:     point.CacheCreationTokens,
+		LongInputTokens:         point.LongInputTokens,
+		LongOutputTokens:        point.LongOutputTokens,
+		LongCachedTokens:        point.LongCachedTokens,
+		LongCacheReadTokens:     point.LongCacheReadTokens,
+		LongCacheCreationTokens: point.LongCacheCreationTokens,
+	}, prices)
+}
+
+func reportDimension(values map[string]*ReportDimensionStat, key string) *ReportDimensionStat {
+	key = reportKey(key)
+	if stat, ok := values[key]; ok {
+		return stat
+	}
+	stat := &ReportDimensionStat{Key: key, Label: key}
+	values[key] = stat
+	return stat
+}
+
+func reportDimensionStats(values map[string]*ReportDimensionStat) []ReportDimensionStat {
+	stats := make([]ReportDimensionStat, 0, len(values))
+	for _, stat := range values {
+		if stat.Quantity > 0 && stat.Recoveries > 0 {
+			stat.SuccessRate = reportRatio(float64(stat.Imported), float64(stat.Quantity+stat.Recoveries))
+		} else if stat.Quantity > 0 {
+			stat.SuccessRate = reportRatio(float64(stat.Imported), float64(stat.Quantity))
+		} else if stat.Recoveries > 0 {
+			stat.SuccessRate = reportRatio(float64(stat.Imported), float64(stat.Recoveries))
+		}
+		stats = append(stats, *stat)
+	}
+	sort.Slice(stats, func(i, j int) bool {
+		if stats[i].Count == stats[j].Count {
+			return stats[i].Key < stats[j].Key
+		}
+		return stats[i].Count > stats[j].Count
+	})
+	return stats
+}
+
+func reportTimelinePoints(values map[int64]*ReportTimelinePoint) []ReportTimelinePoint {
+	points := make([]ReportTimelinePoint, 0, len(values))
+	for _, point := range values {
+		points = append(points, *point)
+	}
+	sort.Slice(points, func(i, j int) bool { return points[i].BucketMS < points[j].BucketMS })
+	return points
+}
+
+func ensureReportTimelinePoint(values map[int64]*ReportTimelinePoint, bucketMS int64) *ReportTimelinePoint {
+	if bucketMS <= 0 {
+		bucketMS = reportDayBucketMS(time.Now().UnixMilli())
+	}
+	if point, ok := values[bucketMS]; ok {
+		return point
+	}
+	point := &ReportTimelinePoint{BucketMS: bucketMS, Label: time.UnixMilli(bucketMS).Format("2006-01-02")}
+	values[bucketMS] = point
+	return point
+}
+
+func reportDayBucketMS(value int64) int64 {
+	if value <= 0 {
+		return 0
+	}
+	t := time.UnixMilli(value)
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, t.Location()).UnixMilli()
+}
+
+func reportNextDayBucketMS(value int64) int64 {
+	if value <= 0 {
+		return reportDayBucketMS(time.Now().UnixMilli())
+	}
+	return time.UnixMilli(value).AddDate(0, 0, 1).UnixMilli()
+}
+
+func reportKey(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "unknown"
+	}
+	return value
+}
+
+func reportOrderSource(order store.SupplyOrder) string {
+	if strings.HasPrefix(order.OrderID, "recovery-") || order.RemoteStatus == "recovery_claimed" {
+		return "recovery"
+	}
+	if order.Automatic {
+		return "automatic"
+	}
+	return "manual"
+}
+
+func reportOpenOrderStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "creating", "create_uncertain", "created", "waiting_inventory", "ready", "taking", "importing", "partial", "recovery_importing", "recovery_partial":
+		return true
+	default:
+		return false
+	}
+}
+
+func reportRecoveryClaimedStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "claimed", "claiming", "importing", "partial", "imported":
+		return true
+	default:
+		return false
+	}
+}
+
+func reportAddClaimableAge(risk *ReportRisk, recovery store.SupplyRecovery, now time.Time) {
+	start := reportFirstPositiveMS(recovery.CreatedAtMS, recovery.LastSeenAtMS, recovery.UpdatedAtMS)
+	if start <= 0 {
+		return
+	}
+	age := now.Sub(time.UnixMilli(start))
+	switch {
+	case age < time.Hour:
+		risk.ClaimableAgeBuckets[0].Count++
+	case age < 6*time.Hour:
+		risk.ClaimableAgeBuckets[1].Count++
+		risk.StaleClaimableRecoveries++
+	case age < 24*time.Hour:
+		risk.ClaimableAgeBuckets[2].Count++
+		risk.StaleClaimableRecoveries++
+	default:
+		risk.ClaimableAgeBuckets[3].Count++
+		risk.StaleClaimableRecoveries++
+	}
+}
+
+func reportFirstPositiveMS(values ...int64) int64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func reportRatio(numerator float64, denominator float64) float64 {
+	if denominator <= 0 {
+		return 0
+	}
+	return math.Round((numerator/denominator)*10000) / 10000
+}
+
+func reportRatioFloat(numerator float64, denominator float64) float64 {
+	if denominator <= 0 {
+		return 0
+	}
+	return math.Round((numerator/denominator)*100) / 100
+}
+
 func (s *Service) fetchSupplyOverview(ctx context.Context, cfg store.ManagerSupplyConfig, quantity int) (supplyclient.Inventory, supplyclient.Balance, error) {
 	credentials := credentialsFromConfig(cfg)
 	inventory, err := s.supplyClient.Inventory(ctx, credentials, cfg.Product, quantity)
@@ -991,6 +1902,259 @@ func (s *Service) fetchSupplyOverview(ctx context.Context, cfg store.ManagerSupp
 		return supplyclient.Inventory{}, supplyclient.Balance{}, err
 	}
 	return inventory, balance, nil
+}
+
+func (s *Service) syncRecoveriesOnce(ctx context.Context, cfg store.ManagerConfig, autoClaim bool, limit int, recoveryID string) (RecoverySyncResult, error) {
+	var result RecoverySyncResult
+	var firstErr error
+	mergePendingResult := func(imported int, failed int, err error) {
+		result.Imported += imported
+		result.Failed += failed
+		if err != nil {
+			if failed == 0 {
+				result.Failed++
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	if imported, failed, err := s.processPendingRecoveryImports(ctx, cfg, limit); err != nil {
+		mergePendingResult(imported, failed, err)
+	} else {
+		mergePendingResult(imported, failed, nil)
+	}
+	credentials := credentialsFromConfig(cfg.Supply)
+	remoteRecoveries, err := s.supplyClient.Recoveries(ctx, credentials)
+	if err != nil {
+		if firstErr != nil {
+			return result, errors.Join(firstErr, err)
+		}
+		return result, err
+	}
+	localRecoveries := make([]store.SupplyRecovery, 0, len(remoteRecoveries))
+	for _, remote := range remoteRecoveries {
+		local := supplyRecoveryFromClient(remote)
+		if local.RecoveryID == "" {
+			continue
+		}
+		result.Seen++
+		if local.Status == "claimable" {
+			result.Claimable++
+		}
+		if local.Status == "refunded" {
+			result.Refunded++
+		}
+		localRecoveries = append(localRecoveries, local)
+	}
+	if _, err := s.store.UpsertSupplyRecoveries(ctx, localRecoveries); err != nil {
+		if firstErr != nil {
+			return result, errors.Join(firstErr, err)
+		}
+		return result, err
+	}
+	if !autoClaim {
+		if firstErr != nil {
+			return result, firstErr
+		}
+		return result, nil
+	}
+	var claimable []store.SupplyRecovery
+	if strings.TrimSpace(recoveryID) != "" {
+		if recovery, found, err := s.store.GetSupplyRecovery(ctx, recoveryID); err != nil {
+			if firstErr != nil {
+				return result, errors.Join(firstErr, err)
+			}
+			return result, err
+		} else if found && recovery.Status == "claimable" {
+			claimable = []store.SupplyRecovery{recovery}
+		}
+	} else {
+		var err error
+		claimable, err = s.store.ListClaimableSupplyRecoveries(ctx, limit)
+		if err != nil {
+			if firstErr != nil {
+				return result, errors.Join(firstErr, err)
+			}
+			return result, err
+		}
+	}
+	for _, candidate := range claimable {
+		recovery, claimed, err := s.store.ClaimSupplyRecoveryForProcessing(ctx, candidate.RecoveryID, time.Now().UnixMilli())
+		if err != nil {
+			result.Failed++
+			continue
+		}
+		if !claimed {
+			continue
+		}
+		if err := s.claimRecovery(ctx, cfg, recovery); err != nil {
+			result.Failed++
+			_ = s.store.MarkSupplyRecoveryFailed(ctx, recovery.RecoveryID, safeError(err))
+			continue
+		}
+		result.Claimed++
+	}
+	if imported, failed, err := s.processPendingRecoveryImports(ctx, cfg, limit); err != nil {
+		mergePendingResult(imported, failed, err)
+	} else {
+		mergePendingResult(imported, failed, nil)
+	}
+	if firstErr != nil {
+		return result, firstErr
+	}
+	return result, nil
+}
+
+func (s *Service) claimRecovery(ctx context.Context, cfg store.ManagerConfig, recovery store.SupplyRecovery) error {
+	claimed, err := s.supplyClient.ClaimRecovery(ctx, credentialsFromConfig(cfg.Supply), recovery.RecoveryID, recovery.ClaimURL)
+	if err != nil {
+		return err
+	}
+	normalized := make([]normalizedSupplyAccount, 0, len(claimed.Accounts))
+	for index, raw := range claimed.Accounts {
+		accounts, err := normalizeAccountPayloads(raw)
+		if err != nil {
+			return fmt.Errorf("recovery account %d format is unsupported: %w", index+1, err)
+		}
+		normalized = append(normalized, accounts...)
+	}
+	if len(normalized) == 0 {
+		return errors.New("recovery claim response did not include importable accounts")
+	}
+	orderID := recoveryOrderID(recovery.RecoveryID)
+	if _, found, err := s.store.GetSupplyOrder(ctx, orderID); err != nil {
+		return err
+	} else if !found {
+		product := firstNonEmptyString(recovery.Product, cfg.Supply.Product)
+		if product == "" {
+			product = "oauth_30d"
+		}
+		if _, err := s.store.CreateSupplyOrder(ctx, store.SupplyOrder{
+			OrderID:           orderID,
+			Product:           product,
+			RequestedQuantity: len(normalized),
+			Automatic:         true,
+			Status:            "recovery_importing",
+			RemoteStatus:      "recovery_claimed",
+			ItemCount:         len(normalized),
+		}); err != nil {
+			return err
+		}
+	}
+	items := make([]store.SupplyImportItem, 0, len(normalized))
+	seen := make(map[string]struct{}, len(normalized))
+	for _, account := range normalized {
+		if _, duplicate := seen[account.itemKey]; duplicate {
+			continue
+		}
+		seen[account.itemKey] = struct{}{}
+		items = append(items, store.SupplyImportItem{
+			OrderID:          orderID,
+			ItemKey:          account.itemKey,
+			FileName:         account.fileName,
+			PayloadJSON:      string(account.payload),
+			LeaseExpiresAtMS: account.leaseExpiresAtMS,
+		})
+	}
+	inserted, err := s.store.InsertSupplyImportItems(ctx, orderID, items)
+	if err != nil {
+		return err
+	}
+	if inserted == 0 && len(items) > 0 {
+		inserted = len(items)
+	}
+	if err := s.store.MarkSupplyRecoveryClaimed(ctx, recovery.RecoveryID, orderID, inserted, time.Now().UnixMilli()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) processPendingRecoveryImports(ctx context.Context, cfg store.ManagerConfig, limit int) (int, int, error) {
+	recoveries, err := s.store.ListImportPendingSupplyRecoveries(ctx, limit)
+	if err != nil {
+		return 0, 0, err
+	}
+	importedRecoveries := 0
+	failedRecoveries := 0
+	var firstErr error
+	for _, recovery := range recoveries {
+		if strings.TrimSpace(recovery.ClaimOrderID) == "" {
+			continue
+		}
+		order, found, err := s.store.GetSupplyOrder(ctx, recovery.ClaimOrderID)
+		if err != nil {
+			failedRecoveries++
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if !found {
+			err := fmt.Errorf("recovery import order %s was not found", recovery.ClaimOrderID)
+			_ = s.store.MarkSupplyRecoveryFailed(ctx, recovery.RecoveryID, safeError(err))
+			failedRecoveries++
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		err = s.importItems(ctx, cfg, &order)
+		total, imported, countsErr := s.store.SupplyImportCounts(ctx, recovery.ClaimOrderID)
+		if countsErr != nil {
+			failedRecoveries++
+			if firstErr == nil {
+				firstErr = countsErr
+			}
+			continue
+		}
+		if total > 0 && imported == total {
+			if markErr := s.store.MarkSupplyRecoveryImported(ctx, recovery.RecoveryID, imported); markErr != nil {
+				failedRecoveries++
+				if firstErr == nil {
+					firstErr = markErr
+				}
+				continue
+			}
+			importedRecoveries++
+			if disableErr := s.disableRecoveredOriginal(ctx, cfg, recovery); disableErr != nil {
+				message := "original account disable failed: " + safeError(disableErr)
+				_ = s.store.SetSupplyRecoveryLastError(ctx, recovery.RecoveryID, message)
+				failedRecoveries++
+				if firstErr == nil {
+					firstErr = errors.New(message)
+				}
+			}
+			continue
+		}
+		message := ""
+		if err != nil {
+			message = safeError(err)
+		}
+		if markErr := s.store.MarkSupplyRecoveryImportProgress(ctx, recovery.RecoveryID, total, imported, message); markErr != nil {
+			failedRecoveries++
+			if firstErr == nil {
+				firstErr = markErr
+			}
+			continue
+		}
+		if err != nil {
+			failedRecoveries++
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return importedRecoveries, failedRecoveries, firstErr
+}
+
+func (s *Service) disableRecoveredOriginal(ctx context.Context, cfg store.ManagerConfig, recovery store.SupplyRecovery) error {
+	if !recoveryDisableOriginalEnabled(cfg.Supply) || strings.TrimSpace(recovery.OriginalFileName) == "" ||
+		strings.TrimSpace(cfg.CPAConnection.CPABaseURL) == "" || strings.TrimSpace(cfg.CPAConnection.ManagementKey) == "" {
+		return nil
+	}
+	return s.authFiles.PatchDisabled(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey,
+		recovery.OriginalFileName, true, recovery.OriginalAuthIndex)
 }
 
 func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerConfig) (int, error) {
@@ -1473,6 +2637,41 @@ func (s *Service) currentAutomationExecution(enabled bool) AutomationExecution {
 	return status
 }
 
+func (s *Service) currentRecoverySummary(ctx context.Context, cfg store.ManagerSupplyConfig) RecoverySummary {
+	enabled := recoverySyncEnabled(cfg) && supplyCredentialsConfigured(cfg)
+	s.recoveryMu.Lock()
+	summary := s.recoveryState
+	s.recoveryMu.Unlock()
+	summary.Enabled = enabled
+	summary.AutoClaim = recoveryAutoClaimEnabled(cfg)
+	if s != nil && s.store != nil {
+		if stored, err := s.store.SupplyRecoverySummary(ctx); err == nil {
+			summary.Total = stored.Total
+			summary.Claimable = stored.Claimable
+			summary.Importing = stored.Importing
+			summary.StoredImported = stored.Imported
+			summary.StoredRefunded = stored.Refunded
+			summary.StoredFailed = stored.Failed
+		}
+	}
+	return summary
+}
+
+func (s *Service) recordRecoveryError(ctx context.Context, cfg store.ManagerSupplyConfig, err error) {
+	if err == nil {
+		return
+	}
+	summary := s.currentRecoverySummary(ctx, cfg)
+	now := time.Now()
+	summary.LastSyncAtMS = now.UnixMilli()
+	summary.NextSyncAtMS = now.Add(recoverySyncInterval(cfg, err)).UnixMilli()
+	summary.LastResult = "failed"
+	summary.LastError = safeError(err)
+	s.recoveryMu.Lock()
+	s.recoveryState = summary
+	s.recoveryMu.Unlock()
+}
+
 func (s *Service) setOverview(overview Overview) {
 	s.stateMu.Lock()
 	s.overview = overview
@@ -1552,6 +2751,108 @@ func sanitizeConfig(cfg store.ManagerSupplyConfig) store.ManagerSupplyConfig {
 
 func credentialsFromConfig(cfg store.ManagerSupplyConfig) supplyclient.Credentials {
 	return supplyclient.Credentials{BaseURL: cfg.BaseURL, Username: cfg.Username, Password: cfg.Password}
+}
+
+func recoverySyncEnabled(cfg store.ManagerSupplyConfig) bool {
+	return cfg.RecoverySyncEnabled == nil || *cfg.RecoverySyncEnabled
+}
+
+func recoveryAutoClaimEnabled(cfg store.ManagerSupplyConfig) bool {
+	return cfg.RecoveryAutoClaim == nil || *cfg.RecoveryAutoClaim
+}
+
+func recoveryDisableOriginalEnabled(cfg store.ManagerSupplyConfig) bool {
+	return cfg.RecoveryDisableOriginal == nil || *cfg.RecoveryDisableOriginal
+}
+
+func recoveryClaimBatchSize(cfg store.ManagerSupplyConfig) int {
+	if cfg.RecoveryClaimBatchSize > 0 {
+		return min(cfg.RecoveryClaimBatchSize, 100)
+	}
+	return 20
+}
+
+func recoverySyncInterval(cfg store.ManagerSupplyConfig, err error) time.Duration {
+	seconds := cfg.RecoverySyncIntervalSeconds
+	if seconds <= 0 {
+		seconds = 60
+	}
+	if err != nil {
+		if seconds < 60 {
+			seconds = 60
+		}
+		if seconds > 300 {
+			seconds = 300
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func supplyRecoveryFromClient(remote supplyclient.Recovery) store.SupplyRecovery {
+	status := supplyRecoveryStatus(remote)
+	originalFileName := strings.TrimSpace(remote.OriginalAccount)
+	if !strings.HasSuffix(strings.ToLower(originalFileName), ".json") {
+		originalFileName = ""
+	}
+	return store.SupplyRecovery{
+		RecoveryID:        strings.TrimSpace(remote.ID),
+		Product:           strings.TrimSpace(remote.Product),
+		DeliveryStatus:    strings.ToLower(strings.TrimSpace(remote.DeliveryStatus)),
+		Status:            status,
+		OriginalFileName:  originalFileName,
+		OriginalAuthIndex: strings.TrimSpace(remote.OriginalAuthIndex),
+		OriginalEmail:     strings.TrimSpace(remote.OriginalEmail),
+		ClaimURL:          strings.TrimSpace(remote.ClaimURL),
+		RefundedFen:       remote.RefundedFen,
+		RawJSON:           string(remote.Raw),
+		LastSeenAtMS:      time.Now().UnixMilli(),
+	}
+}
+
+func supplyRecoveryStatus(remote supplyclient.Recovery) string {
+	status := strings.ToLower(strings.TrimSpace(remote.DeliveryStatus))
+	switch status {
+	case "claimable", "ready", "available":
+		if strings.TrimSpace(remote.ClaimURL) != "" {
+			return "claimable"
+		}
+	case "refunded", "refund", "failed_refunded":
+		return "refunded"
+	case "claimed", "completed", "done":
+		return "claimed"
+	}
+	if remote.RefundedFen > 0 {
+		return "refunded"
+	}
+	return "seen"
+}
+
+func recoveryOrderID(recoveryID string) string {
+	recoveryID = strings.TrimSpace(recoveryID)
+	if recoveryID == "" {
+		return "recovery-unknown"
+	}
+	var builder strings.Builder
+	for _, r := range recoveryID {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(r)
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r == '-' || r == '_':
+			builder.WriteRune(r)
+		default:
+			builder.WriteRune('-')
+		}
+	}
+	value := strings.Trim(builder.String(), "-_")
+	if value == "" {
+		value = "unknown"
+	}
+	return "recovery-" + value
 }
 
 func applyRemoteOrder(order *store.SupplyOrder, remote supplyclient.Order, cfg store.ManagerSupplyConfig) {

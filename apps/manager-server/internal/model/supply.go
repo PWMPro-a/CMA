@@ -41,3 +41,25 @@ type SupplyImportItem struct {
 	CreatedAtMS      int64  `json:"createdAtMs"`
 	UpdatedAtMS      int64  `json:"updatedAtMs"`
 }
+
+type SupplyRecovery struct {
+	ID                int64  `json:"id"`
+	RecoveryID        string `json:"recoveryId"`
+	Product           string `json:"product,omitempty"`
+	DeliveryStatus    string `json:"deliveryStatus"`
+	Status            string `json:"status"`
+	OriginalFileName  string `json:"originalFileName,omitempty"`
+	OriginalAuthIndex string `json:"originalAuthIndex,omitempty"`
+	OriginalEmail     string `json:"originalEmail,omitempty"`
+	ClaimURL          string `json:"-"`
+	ClaimOrderID      string `json:"claimOrderId,omitempty"`
+	ItemCount         int    `json:"itemCount"`
+	ImportedCount     int    `json:"importedCount"`
+	RefundedFen       int64  `json:"refundedFen,omitempty"`
+	LastError         string `json:"lastError,omitempty"`
+	RawJSON           string `json:"-"`
+	LastSeenAtMS      int64  `json:"lastSeenAtMs"`
+	ClaimedAtMS       int64  `json:"claimedAtMs,omitempty"`
+	CreatedAtMS       int64  `json:"createdAtMs"`
+	UpdatedAtMS       int64  `json:"updatedAtMs"`
+}

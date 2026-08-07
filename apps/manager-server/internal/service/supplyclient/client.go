@@ -79,6 +79,23 @@ type TakeResult struct {
 	Pending              bool
 }
 
+type Recovery struct {
+	ID                string          `json:"id"`
+	DeliveryStatus    string          `json:"deliveryStatus"`
+	Product           string          `json:"product,omitempty"`
+	OriginalEmail     string          `json:"originalEmail,omitempty"`
+	OriginalAccount   string          `json:"originalAccount,omitempty"`
+	OriginalAuthIndex string          `json:"originalAuthIndex,omitempty"`
+	ClaimURL          string          `json:"claimUrl,omitempty"`
+	RefundedFen       int64           `json:"refundedFen,omitempty"`
+	Raw               json.RawMessage `json:"-"`
+}
+
+type RecoveryClaimResult struct {
+	Recovery Recovery
+	Accounts []json.RawMessage
+}
+
 type tokenState struct {
 	key       string
 	token     string
@@ -183,7 +200,7 @@ func (c *Client) Take(ctx context.Context, credentials Credentials, orderID stri
 	if len(takeURL) > 0 && strings.TrimSpace(takeURL[0]) != "" {
 		endpoint = strings.TrimSpace(takeURL[0])
 	}
-	value, status, err := c.doAuthenticatedWithTimeout(ctx, credentials, http.MethodPost, endpoint, map[string]any{}, c.takeTimeout)
+	value, status, err := c.doAuthenticatedWithTimeout(ctx, credentials, http.MethodPost, endpoint, nil, c.takeTimeout)
 	if err != nil {
 		return TakeResult{}, err
 	}
@@ -197,6 +214,42 @@ func (c *Client) Take(ctx context.Context, credentials Credentials, orderID stri
 		Accounts:             accounts,
 		ItemRemainingSeconds: orderItemRemainingSeconds(value),
 		Pending:              status == http.StatusAccepted,
+	}, nil
+}
+
+func (c *Client) Recoveries(ctx context.Context, credentials Credentials) ([]Recovery, error) {
+	value, _, err := c.doAuthenticated(ctx, credentials, http.MethodGet, "/api/customer/recoveries", nil)
+	if err != nil {
+		return nil, err
+	}
+	objects := recoveryObjects(value)
+	recoveries := make([]Recovery, 0, len(objects))
+	for _, object := range objects {
+		recovery := parseRecovery(object)
+		if recovery.ID == "" {
+			continue
+		}
+		recoveries = append(recoveries, recovery)
+	}
+	return recoveries, nil
+}
+
+func (c *Client) ClaimRecovery(ctx context.Context, credentials Credentials, recoveryID string, claimURL string) (RecoveryClaimResult, error) {
+	endpoint := strings.TrimSpace(claimURL)
+	if endpoint == "" {
+		endpoint = "/api/customer/recoveries/" + url.PathEscape(strings.TrimSpace(recoveryID)) + "/claim"
+	}
+	value, _, err := c.doAuthenticatedWithTimeout(ctx, credentials, http.MethodPost, endpoint, nil, c.takeTimeout)
+	if err != nil {
+		return RecoveryClaimResult{}, err
+	}
+	recovery := parseRecoveryValue(value)
+	if recovery.ID == "" {
+		recovery.ID = strings.TrimSpace(recoveryID)
+	}
+	return RecoveryClaimResult{
+		Recovery: recovery,
+		Accounts: rawAccounts(value),
 	}, nil
 }
 
@@ -426,6 +479,85 @@ func rawAccounts(value any) []json.RawMessage {
 		return nil
 	}
 	return find(value)
+}
+
+func recoveryObjects(value any) []map[string]any {
+	switch typed := value.(type) {
+	case []any:
+		result := make([]map[string]any, 0, len(typed))
+		for _, item := range typed {
+			if object, ok := item.(map[string]any); ok {
+				result = append(result, object)
+			}
+		}
+		return result
+	case map[string]any:
+		for _, key := range []string{"recoveries", "items", "data", "payload", "result"} {
+			child, ok := typed[key]
+			if !ok || child == nil {
+				continue
+			}
+			if result := recoveryObjects(child); len(result) > 0 {
+				return result
+			}
+		}
+		if stringValue(typed, "id", "recovery_id", "recoveryId") != "" || stringValue(typed, "claim_url", "claimUrl") != "" {
+			return []map[string]any{typed}
+		}
+	}
+	return nil
+}
+
+func parseRecoveryValue(value any) Recovery {
+	root, _ := value.(map[string]any)
+	if root == nil {
+		return Recovery{}
+	}
+	for _, key := range []string{"recovery", "data", "payload", "result"} {
+		if child, ok := root[key].(map[string]any); ok {
+			if recovery := parseRecoveryValue(child); recovery.ID != "" || recovery.DeliveryStatus != "" || recovery.ClaimURL != "" {
+				return recovery
+			}
+		}
+	}
+	return parseRecovery(root)
+}
+
+func parseRecovery(root map[string]any) Recovery {
+	if root == nil {
+		return Recovery{}
+	}
+	raw, _ := json.Marshal(root)
+	claimURL := stringValue(root, "claim_url", "claimUrl")
+	id := stringValue(root, "id", "recovery_id", "recoveryId")
+	if id == "" {
+		id = recoveryIDFromClaimURL(claimURL)
+	}
+	return Recovery{
+		ID:                id,
+		DeliveryStatus:    strings.ToLower(stringValue(root, "delivery_status", "deliveryStatus", "status")),
+		Product:           stringValue(root, "product"),
+		OriginalEmail:     stringValue(root, "original_email", "originalEmail", "account_email", "accountEmail", "email"),
+		OriginalAccount:   stringValue(root, "original_account", "originalAccount", "auth_file_name", "authFileName", "file_name", "fileName", "account"),
+		OriginalAuthIndex: stringValue(root, "original_auth_index", "originalAuthIndex", "auth_index", "authIndex"),
+		ClaimURL:          claimURL,
+		RefundedFen:       int64Value(root, "refunded_fen", "refundedFen", "refund_fen", "refundFen"),
+		Raw:               raw,
+	}
+}
+
+func recoveryIDFromClaimURL(claimURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(claimURL))
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	for index := 0; index < len(parts)-1; index++ {
+		if parts[index] == "recoveries" && parts[index+1] != "" {
+			return parts[index+1]
+		}
+	}
+	return ""
 }
 
 // orderItemRemainingSeconds reads the supplier's per-delivery validity from

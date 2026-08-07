@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
 func TestAutomationExecutionTracksScheduledAndCompletedCycles(t *testing.T) {
@@ -189,6 +191,463 @@ func TestAutomaticReplenishmentCreatesTakesAndImportsOrder(t *testing.T) {
 	}
 	if status.Config.Password != "" || !status.Config.PasswordConfigured {
 		t.Fatalf("sanitized config = %#v", status.Config)
+	}
+}
+
+func TestRecoverySyncClaimsImportsAndDisablesOriginalAccount(t *testing.T) {
+	var claimCalls atomic.Int32
+	var uploadCalls atomic.Int32
+	var disableCalls atomic.Int32
+	uploadedNames := sync.Map{}
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/recoveries" && r.Method == http.MethodGet:
+			if got := r.Header.Get("X-Customer-Token"); got != "customer-token" {
+				t.Fatalf("recoveries token = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"payload":{"recoveries":[{"id":"rec-1","delivery_status":"claimable","product":"oauth_30d","original_email":"old@example.com","original_account":"old.json","original_auth_index":"auth-1","claim_url":"` + server.URL + `/api/customer/recoveries/rec-1/claim?ticket=ticket-1"}]}}`))
+		case r.URL.Path == "/api/customer/recoveries/rec-1/claim" && r.Method == http.MethodPost:
+			claimCalls.Add(1)
+			if got := r.URL.Query().Get("ticket"); got != "ticket-1" {
+				t.Fatalf("claim ticket = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"payload":{"accounts":[{"type":"oauth","name":"replacement","platform":"openai","credentials":{"access_token":"access-new","refresh_token":"refresh-new","email":"new@example.com","chatgpt_account_id":"acct-new","chatgpt_plan_type":"team","workspace_id":"workspace-new"}}]}}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			if r.Header.Get("Authorization") != "Bearer management-key" {
+				t.Fatalf("management authorization = %q", r.Header.Get("Authorization"))
+			}
+			name := r.URL.Query().Get("name")
+			if name == "" {
+				_, _ = w.Write([]byte(`{"files":[{"name":"old.json","provider":"codex","disabled":false,"status":"ready"}]}`))
+				return
+			}
+			if _, ok := uploadedNames.Load(name); ok {
+				_, _ = w.Write([]byte(`{"files":[{"name":"` + name + `","provider":"codex","disabled":false,"status":"ready"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodPost:
+			uploadCalls.Add(1)
+			part, err := r.MultipartReader()
+			if err != nil {
+				t.Fatalf("multipart reader: %v", err)
+			}
+			for {
+				item, err := part.NextPart()
+				if err != nil {
+					break
+				}
+				if item.FormName() != "file" {
+					continue
+				}
+				uploadedNames.Store(item.FileName(), struct{}{})
+				data, _ := io.ReadAll(item)
+				var payload map[string]any
+				if err := json.Unmarshal(data, &payload); err != nil {
+					t.Fatalf("decode upload payload %s: %v", data, err)
+				}
+				if payload["type"] != "codex" || payload["access_token"] != "access-new" ||
+					payload["refresh_token"] != "refresh-new" || payload["email"] != "new@example.com" {
+					t.Fatalf("uploaded payload was not normalized replacement JSON: %#v", payload)
+				}
+				if _, nested := payload["credentials"]; nested {
+					t.Fatalf("uploaded payload still contains credentials wrapper: %#v", payload)
+				}
+			}
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.URL.Path == "/v0/management/auth-files/status" && r.Method == http.MethodPatch:
+			disableCalls.Add(1)
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode disable payload: %v", err)
+			}
+			if payload["name"] != "old.json" || payload["auth_index"] != "auth-1" || payload["disabled"] != true {
+				t.Fatalf("disable payload = %#v", payload)
+			}
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-recovery.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled:                     &enabled,
+			BaseURL:                     server.URL,
+			Username:                    "customer",
+			Password:                    "password",
+			Product:                     "oauth_30d",
+			PollIntervalSeconds:         1,
+			RecoverySyncEnabled:         &enabled,
+			RecoveryAutoClaim:           &enabled,
+			RecoverySyncIntervalSeconds: 60,
+			RecoveryClaimBatchSize:      10,
+			RecoveryDisableOriginal:     &enabled,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	autoClaim := true
+	summary, err := service.SyncRecoveries(context.Background(), RecoverySyncRequest{
+		Force:     true,
+		AutoClaim: &autoClaim,
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatalf("sync recoveries: %v", err)
+	}
+	if summary.Seen != 1 || summary.Claimed != 1 || summary.Imported != 1 ||
+		summary.StoredImported != 1 || summary.LastResult != "completed" {
+		t.Fatalf("summary = %#v", summary)
+	}
+	if claimCalls.Load() != 1 || uploadCalls.Load() != 1 || disableCalls.Load() != 1 {
+		t.Fatalf("calls claim=%d upload=%d disable=%d", claimCalls.Load(), uploadCalls.Load(), disableCalls.Load())
+	}
+	recoveries, err := service.ListRecoveries(context.Background(), 10, "")
+	if err != nil || len(recoveries) != 1 || recoveries[0].Status != "imported" ||
+		recoveries[0].ImportedCount != 1 || recoveries[0].ClaimOrderID != "recovery-rec-1" {
+		t.Fatalf("recoveries=%#v err=%v", recoveries, err)
+	}
+	order, found, err := st.GetSupplyOrder(context.Background(), "recovery-rec-1")
+	if err != nil || !found || order.Status != "completed" || order.ImportedCount != 1 {
+		t.Fatalf("recovery order=%#v found=%v err=%v", order, found, err)
+	}
+}
+
+func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-report.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().Truncate(time.Second)
+	fromMS := now.Add(-2 * time.Hour).UnixMilli()
+	toMS := now.Add(2 * time.Hour).UnixMilli()
+	orderCreated := now.Add(-45 * time.Minute)
+	completedAtMS := orderCreated.Add(3 * time.Minute).UnixMilli()
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID:           "order-report-1",
+		Product:           "oauth_30d",
+		RequestedQuantity: 2,
+		Automatic:         true,
+		Status:            "completed",
+		ChargedFen:        1200,
+		ReleasedFen:       200,
+		ItemCount:         2,
+		ImportedCount:     2,
+		CompletedAtMS:     completedAtMS,
+		CreatedAtMS:       orderCreated.UnixMilli(),
+	}); err != nil {
+		t.Fatalf("create supply order: %v", err)
+	}
+	if inserted, err := st.InsertSupplyImportItems(ctx, "order-report-1", []store.SupplyImportItem{
+		{OrderID: "order-report-1", ItemKey: "item-a", FileName: "codex-supply-a.json", PayloadJSON: `{"type":"codex"}`, LeaseExpiresAtMS: now.Add(10 * time.Minute).UnixMilli()},
+		{OrderID: "order-report-1", ItemKey: "item-b", FileName: "codex-supply-b.json", PayloadJSON: `{"type":"codex"}`, LeaseExpiresAtMS: now.Add(time.Hour).UnixMilli()},
+	}); err != nil || inserted != 2 {
+		t.Fatalf("insert import items inserted=%d err=%v", inserted, err)
+	}
+	items, err := st.ListPendingSupplyImportItems(ctx, "order-report-1", now.UnixMilli(), 10)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("pending items=%#v err=%v", items, err)
+	}
+	for _, item := range items {
+		if err := st.MarkSupplyImportItemImported(ctx, item.ID, now.Add(-30*time.Minute).UnixMilli()); err != nil {
+			t.Fatalf("mark item imported: %v", err)
+		}
+	}
+	if _, err := st.UpsertSupplyRecoveries(ctx, []store.SupplyRecovery{
+		{
+			RecoveryID:     "rec-imported",
+			Product:        "oauth_30d",
+			DeliveryStatus: "claimable",
+			Status:         "imported",
+			ItemCount:      1,
+			ImportedCount:  1,
+			LastSeenAtMS:   now.Add(-35 * time.Minute).UnixMilli(),
+			ClaimedAtMS:    now.Add(-34 * time.Minute).UnixMilli(),
+		},
+		{
+			RecoveryID:     "rec-refunded",
+			Product:        "oauth_30d",
+			DeliveryStatus: "refunded",
+			Status:         "refunded",
+			RefundedFen:    300,
+			LastSeenAtMS:   now.Add(-25 * time.Minute).UnixMilli(),
+		},
+	}); err != nil {
+		t.Fatalf("upsert recoveries: %v", err)
+	}
+	if err := st.SaveModelPrices(ctx, map[string]store.ModelPrice{
+		"gpt-report": {Prompt: 2, Completion: 4, Cache: 1},
+	}); err != nil {
+		t.Fatalf("save model prices: %v", err)
+	}
+	if _, err := st.InsertEvents(ctx, []usage.Event{
+		supplyReportEvent("usage-report-1", now.Add(-20*time.Minute).UnixMilli(), "gpt-report", "codex-supply-a.json", false, 1_000_000, 500_000, 0, 0, 0, 1_500_000, nil),
+		supplyReportEvent("usage-report-other", now.Add(-10*time.Minute).UnixMilli(), "gpt-report", "non-supply.json", false, 1_000_000, 500_000, 0, 0, 0, 1_500_000, nil),
+	}); err != nil {
+		t.Fatalf("insert usage event: %v", err)
+	}
+
+	report, err := New(st, nil).Report(ctx, ReportRequest{FromMS: fromMS, ToMS: toMS})
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	if report.Executive.Orders != 1 || report.Executive.AutomaticOrders != 1 ||
+		report.Executive.RequestedAccounts != 2 || report.Executive.ImportedAccounts != 2 {
+		t.Fatalf("executive order counts = %#v", report.Executive)
+	}
+	if report.Executive.ChargedFen != 1200 || report.Executive.ReleasedFen != 200 ||
+		report.Executive.RefundedFen != 300 || report.Executive.SupplySpendFen != 1200 ||
+		report.Executive.SupplyNetSpendFen != 700 || report.Executive.AverageUnitFen != 600 {
+		t.Fatalf("executive money = %#v", report.Executive)
+	}
+	if report.Executive.Recoveries != 2 || report.Executive.ImportedRecoveries != 1 ||
+		report.Executive.RefundedRecoveries != 1 || report.Executive.RecoveryClaimRate != 1 ||
+		report.Executive.RecoveryImportRate != 1 || report.Executive.RecoveryRefundRate != 0.5 {
+		t.Fatalf("executive recoveries = %#v", report.Executive)
+	}
+	if report.Executive.UsageCalls != 1 || report.Executive.UsageTokens != 1_500_000 ||
+		report.Executive.UsageRevenueCurrency != "USD" ||
+		math.Abs(report.Executive.UsageRevenue-4) > 0.000001 ||
+		math.Abs(report.Executive.AverageRevenuePerCall-4) > 0.000001 {
+		t.Fatalf("executive usage revenue = %#v", report.Executive)
+	}
+	if len(report.UsageModels) != 1 || report.UsageModels[0].Model != "gpt-report" ||
+		report.UsageModels[0].Calls != 1 || math.Abs(report.UsageModels[0].Revenue-4) > 0.000001 {
+		t.Fatalf("usage models = %#v", report.UsageModels)
+	}
+	if report.ImportHealth.Items != 2 || report.ImportHealth.ImportedItems != 2 ||
+		report.ImportHealth.ExpiringSoonItems != 1 || report.Executive.ImportSuccessRate != 1 {
+		t.Fatalf("import health = %#v executive=%#v", report.ImportHealth, report.Executive)
+	}
+	foundUsageTimeline := false
+	for _, point := range report.Timeline {
+		if point.UsageCalls == 1 {
+			foundUsageTimeline = point.UsageTokens == 1_500_000 && math.Abs(point.UsageRevenue-4) <= 0.000001
+		}
+	}
+	if !foundUsageTimeline {
+		t.Fatalf("timeline missing usage revenue: %#v", report.Timeline)
+	}
+	if len(report.Products) == 0 || len(report.Sources) == 0 || len(report.RecoveryStatuses) == 0 ||
+		len(report.DeliveryStatuses) == 0 || len(report.OrderStatuses) == 0 {
+		t.Fatalf("dimension stats were not populated: %#v", report)
+	}
+}
+
+func TestRecoverySyncImportsLocalPendingWhenSupplierRecoveriesFail(t *testing.T) {
+	var uploadCalls atomic.Int32
+	uploadedNames := sync.Map{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/recoveries" && r.Method == http.MethodGet:
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"message":"supplier recoveries temporarily unavailable"}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			name := r.URL.Query().Get("name")
+			if name == "" {
+				_, _ = w.Write([]byte(`{"files":[]}`))
+				return
+			}
+			if _, ok := uploadedNames.Load(name); ok {
+				_, _ = w.Write([]byte(`{"files":[{"name":"` + name + `","provider":"codex","disabled":false,"status":"ready"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodPost:
+			uploadCalls.Add(1)
+			part, err := r.MultipartReader()
+			if err != nil {
+				t.Fatalf("multipart reader: %v", err)
+			}
+			for {
+				item, err := part.NextPart()
+				if err != nil {
+					break
+				}
+				if item.FormName() == "file" {
+					uploadedNames.Store(item.FileName(), struct{}{})
+				}
+			}
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-recovery-local-pending.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	disabled := false
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			BaseURL:                 server.URL,
+			Username:                "customer",
+			Password:                "password",
+			Product:                 "oauth_30d",
+			RecoverySyncEnabled:     &enabled,
+			RecoveryAutoClaim:       &disabled,
+			RecoveryDisableOriginal: &disabled,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "recovery-local-pending", Product: "oauth_30d", RequestedQuantity: 1,
+		Automatic: true, Status: "recovery_importing", RemoteStatus: "recovery_claimed", ItemCount: 1,
+	}); err != nil {
+		t.Fatalf("create recovery order: %v", err)
+	}
+	if _, err := st.InsertSupplyImportItems(context.Background(), "recovery-local-pending", []store.SupplyImportItem{{
+		OrderID: "recovery-local-pending", ItemKey: "pending-key", FileName: "codex-supply-local.json",
+		PayloadJSON: `{"type":"oauth","platform":"openai","credentials":{"access_token":"access","refresh_token":"refresh","account_id":"account-local","email":"local@example.com"}}`,
+	}}); err != nil {
+		t.Fatalf("insert import item: %v", err)
+	}
+	if _, err := st.UpsertSupplyRecoveries(context.Background(), []store.SupplyRecovery{{
+		RecoveryID: "local-pending", Product: "oauth_30d", DeliveryStatus: "claimable", Status: "importing",
+		ClaimOrderID: "recovery-local-pending", ItemCount: 1, LastSeenAtMS: time.Now().UnixMilli(),
+	}}); err != nil {
+		t.Fatalf("upsert recovery: %v", err)
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	autoClaim := false
+	if _, err := service.SyncRecoveries(context.Background(), RecoverySyncRequest{AutoClaim: &autoClaim}); err == nil {
+		t.Fatal("sync should surface supplier recoveries failure after processing local pending imports")
+	}
+	if uploadCalls.Load() != 1 {
+		t.Fatalf("upload calls = %d, want 1", uploadCalls.Load())
+	}
+	order, found, err := st.GetSupplyOrder(context.Background(), "recovery-local-pending")
+	if err != nil || !found || order.Status != "completed" || order.ImportedCount != 1 {
+		t.Fatalf("order=%#v found=%v err=%v", order, found, err)
+	}
+	recovery, found, err := st.GetSupplyRecovery(context.Background(), "local-pending")
+	if err != nil || !found || recovery.Status != "imported" || recovery.ImportedCount != 1 {
+		t.Fatalf("recovery=%#v found=%v err=%v", recovery, found, err)
+	}
+}
+
+func TestSupplyRecoveryRefundedStatusOverridesLocalImportingState(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-recovery-refund.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	nowMS := time.Now().UnixMilli()
+	if _, err := st.UpsertSupplyRecoveries(context.Background(), []store.SupplyRecovery{{
+		RecoveryID: "rec-refund-priority", Product: "oauth_30d", DeliveryStatus: "claimable",
+		Status: "partial", ClaimOrderID: "recovery-rec-refund-priority", ItemCount: 2, ImportedCount: 1, LastSeenAtMS: nowMS,
+	}}); err != nil {
+		t.Fatalf("insert recovery: %v", err)
+	}
+	if _, err := st.UpsertSupplyRecoveries(context.Background(), []store.SupplyRecovery{{
+		RecoveryID: "rec-refund-priority", Product: "oauth_30d", DeliveryStatus: "refunded",
+		Status: "refunded", RefundedFen: 900, LastSeenAtMS: nowMS + 1,
+	}}); err != nil {
+		t.Fatalf("refund recovery: %v", err)
+	}
+	recovery, found, err := st.GetSupplyRecovery(context.Background(), "rec-refund-priority")
+	if err != nil || !found || recovery.Status != "refunded" || recovery.RefundedFen != 900 {
+		t.Fatalf("recovery=%#v found=%v err=%v", recovery, found, err)
+	}
+}
+
+func TestRecoveryIntervalCanDriveWorkerWhenAutoSupplyDisabled(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-recovery-interval.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		Supply: store.ManagerSupplyConfig{
+			BaseURL:                     "https://sogouedu.cc",
+			Username:                    "customer",
+			Password:                    "password",
+			Product:                     "oauth_30d",
+			RecoverySyncEnabled:         &enabled,
+			RecoverySyncIntervalSeconds: 10,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), nil)
+	service.recoveryState.NextSyncAtMS = time.Now().Add(10 * time.Second).UnixMilli()
+	if interval := service.NextInterval(context.Background()); interval > 11*time.Second {
+		t.Fatalf("interval = %s, want recovery interval to be honored", interval)
+	}
+}
+
+func TestRecoverySyncDoesNotClaimBeforeCPAConnectionIsConfigured(t *testing.T) {
+	var claimCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/recoveries" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"payload":{"recoveries":[{"id":"rec-wait","delivery_status":"claimable","claim_url":"/api/customer/recoveries/rec-wait/claim?ticket=ticket"}]}}`))
+		case r.URL.Path == "/api/customer/recoveries/rec-wait/claim":
+			claimCalls.Add(1)
+			t.Fatal("claim should wait until CPA management connection is configured")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-recovery-no-cpa.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		Supply: store.ManagerSupplyConfig{
+			BaseURL:             server.URL,
+			Username:            "customer",
+			Password:            "password",
+			Product:             "oauth_30d",
+			RecoverySyncEnabled: &enabled,
+			RecoveryAutoClaim:   &enabled,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	autoClaim := true
+	summary, err := service.SyncRecoveries(context.Background(), RecoverySyncRequest{AutoClaim: &autoClaim})
+	if err != nil {
+		t.Fatalf("sync recoveries: %v", err)
+	}
+	if summary.Seen != 1 || summary.Claimed != 0 || summary.Claimable != 1 || claimCalls.Load() != 0 {
+		t.Fatalf("summary=%#v claimCalls=%d", summary, claimCalls.Load())
 	}
 }
 
@@ -1054,5 +1513,45 @@ func TestHydrateOverviewIfNeededRestoresSupplierSnapshotAfterRestart(t *testing.
 	service.hydrateOverviewIfNeeded(context.Background(), cfg)
 	if inventoryCalls.Load() != 1 || balanceCalls.Load() != 1 {
 		t.Fatalf("complete overview must not refetch on each UI poll: inventory=%d balance=%d", inventoryCalls.Load(), balanceCalls.Load())
+	}
+}
+
+func supplyReportEvent(
+	hash string,
+	timestampMS int64,
+	model string,
+	authFile string,
+	failed bool,
+	inputTokens int64,
+	outputTokens int64,
+	reasoningTokens int64,
+	cachedTokens int64,
+	cacheTokens int64,
+	totalTokens int64,
+	latencyMS *int64,
+) usage.Event {
+	return usage.Event{
+		EventHash:        hash,
+		TimestampMS:      timestampMS,
+		Timestamp:        time.UnixMilli(timestampMS).UTC().Format(time.RFC3339Nano),
+		Model:            model,
+		Endpoint:         "POST /v1/chat/completions",
+		Method:           "POST",
+		Path:             "/v1/chat/completions",
+		AuthIndex:        "auth-1",
+		AuthFileSnapshot: authFile,
+		Source:           "ops@example.com",
+		SourceHash:       "source-hash",
+		APIKeyHash:       "api-key-hash",
+		AccountSnapshot:  "ops@example.com",
+		InputTokens:      inputTokens,
+		OutputTokens:     outputTokens,
+		ReasoningTokens:  reasoningTokens,
+		CachedTokens:     cachedTokens,
+		CacheTokens:      cacheTokens,
+		TotalTokens:      totalTokens,
+		LatencyMS:        latencyMS,
+		Failed:           failed,
+		CreatedAtMS:      timestampMS,
 	}
 }

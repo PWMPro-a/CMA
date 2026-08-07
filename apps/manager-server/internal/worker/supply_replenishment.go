@@ -37,6 +37,7 @@ func (w *SupplyReplenishmentWorker) run(ctx context.Context) {
 			return
 		case <-timer.C:
 			startedAt := time.Now()
+			_, _ = w.service.SyncRecoveriesIfDue(ctx)
 			err := w.service.RunAutomatic(ctx)
 			finishedAt := time.Now()
 			nextInterval := w.service.NextInterval(ctx)

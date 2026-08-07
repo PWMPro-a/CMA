@@ -22,7 +22,10 @@ type Repository interface {
 	ClaimTaking(ctx context.Context, orderID string, nowMS int64, leaseUntilMS int64) (bool, error)
 	Update(ctx context.Context, order model.SupplyOrder) error
 	List(ctx context.Context, limit int) ([]model.SupplyOrder, error)
+	ListBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyOrder, error)
 	InsertItems(ctx context.Context, orderID string, items []model.SupplyImportItem) (int, error)
+	ListItemsBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyImportItem, error)
+	ListImportedItemsOverlapping(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyImportItem, error)
 	ListPendingItems(ctx context.Context, orderID string, nowMS int64, limit int) ([]model.SupplyImportItem, error)
 	ListActiveImportedItems(ctx context.Context, nowMS int64) ([]model.SupplyImportItem, error)
 	MarkItemImported(ctx context.Context, id int64, importedAtMS int64) error
@@ -326,6 +329,31 @@ func (r *repository) List(ctx context.Context, limit int) ([]model.SupplyOrder, 
 	return orders, rows.Err()
 }
 
+func (r *repository) ListBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyOrder, error) {
+	if limit <= 0 || limit > 10000 {
+		limit = 5000
+	}
+	rows, err := r.db.QueryContext(ctx, orderSelect+` where
+		(created_at_ms >= ? and created_at_ms < ?) or
+		(updated_at_ms >= ? and updated_at_ms < ?) or
+		(coalesce(completed_at_ms, 0) >= ? and coalesce(completed_at_ms, 0) < ?)
+		order by created_at_ms desc, id desc limit ?`,
+		fromMS, toMS, fromMS, toMS, fromMS, toMS, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	orders := make([]model.SupplyOrder, 0)
+	for rows.Next() {
+		order, err := scanOrder(rows)
+		if err != nil {
+			return nil, err
+		}
+		orders = append(orders, order)
+	}
+	return orders, rows.Err()
+}
+
 func (r *repository) InsertItems(ctx context.Context, orderID string, items []model.SupplyImportItem) (int, error) {
 	if len(items) == 0 {
 		return 0, nil
@@ -357,6 +385,59 @@ func (r *repository) InsertItems(ctx context.Context, orderID string, items []mo
 		return 0, err
 	}
 	return inserted, nil
+}
+
+func (r *repository) ListItemsBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyImportItem, error) {
+	if limit <= 0 || limit > 10000 {
+		limit = 5000
+	}
+	rows, err := r.db.QueryContext(ctx, `select id, order_id, item_key, file_name, status,
+		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms, created_at_ms, updated_at_ms
+		from supply_import_items where
+		(created_at_ms >= ? and created_at_ms < ?) or
+		(updated_at_ms >= ? and updated_at_ms < ?) or
+		(coalesce(imported_at_ms, 0) >= ? and coalesce(imported_at_ms, 0) < ?)
+		order by created_at_ms desc, id desc limit ?`,
+		fromMS, toMS, fromMS, toMS, fromMS, toMS, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]model.SupplyImportItem, 0)
+	for rows.Next() {
+		item, err := r.scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *repository) ListImportedItemsOverlapping(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyImportItem, error) {
+	if limit <= 0 || limit > 20000 {
+		limit = 10000
+	}
+	rows, err := r.db.QueryContext(ctx, `select file_name, imported_at_ms, lease_expires_at_ms
+		from supply_import_items
+		where status = 'imported'
+			and coalesce(file_name, '') <> ''
+			and coalesce(imported_at_ms, 0) < ?
+			and (coalesce(lease_expires_at_ms, 0) = 0 or lease_expires_at_ms >= ?)
+		order by imported_at_ms desc, id desc limit ?`, toMS, fromMS, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]model.SupplyImportItem, 0)
+	for rows.Next() {
+		var item model.SupplyImportItem
+		if err := rows.Scan(&item.FileName, &item.ImportedAtMS, &item.LeaseExpiresAtMS); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (r *repository) ListPendingItems(ctx context.Context, orderID string, nowMS int64, limit int) ([]model.SupplyImportItem, error) {

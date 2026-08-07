@@ -20,6 +20,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/supplyorder"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/supplyrecovery"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageevent"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagerollup"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
@@ -38,6 +39,7 @@ type ManagerExternalUsageServiceConfig = model.ManagerExternalUsageServiceConfig
 type ManagerSupplyConfig = model.ManagerSupplyConfig
 type SupplyOrder = model.SupplyOrder
 type SupplyImportItem = model.SupplyImportItem
+type SupplyRecovery = model.SupplyRecovery
 type CodexInspectionRun = model.CodexInspectionRun
 type CodexInspectionResult = model.CodexInspectionResult
 type CodexInspectionLog = model.CodexInspectionLog
@@ -106,6 +108,7 @@ type Store struct {
 	ContainerOpsAudits   containeropsaudit.Repository
 	ContainerOpsUpgrades containeropsupgrade.Repository
 	SupplyOrders         supplyorder.Repository
+	SupplyRecoveries     supplyrecovery.Repository
 }
 
 func Open(path string, protector ...*security.Protector) (*Store, error) {
@@ -132,6 +135,7 @@ func New(db *sql.DB, protector ...*security.Protector) *Store {
 		ContainerOpsAudits:   containeropsaudit.New(db),
 		ContainerOpsUpgrades: containeropsupgrade.New(db),
 		SupplyOrders:         supplyorder.New(db, protector...),
+		SupplyRecoveries:     supplyrecovery.New(db, protector...),
 	}
 }
 
@@ -354,8 +358,20 @@ func (s *Store) ListSupplyOrders(ctx context.Context, limit int) ([]SupplyOrder,
 	return s.SupplyOrders.List(ctx, limit)
 }
 
+func (s *Store) ListSupplyOrdersBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]SupplyOrder, error) {
+	return s.SupplyOrders.ListBetween(ctx, fromMS, toMS, limit)
+}
+
 func (s *Store) InsertSupplyImportItems(ctx context.Context, orderID string, items []SupplyImportItem) (int, error) {
 	return s.SupplyOrders.InsertItems(ctx, orderID, items)
+}
+
+func (s *Store) ListSupplyImportItemsBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]SupplyImportItem, error) {
+	return s.SupplyOrders.ListItemsBetween(ctx, fromMS, toMS, limit)
+}
+
+func (s *Store) ListImportedSupplyItemsOverlapping(ctx context.Context, fromMS int64, toMS int64, limit int) ([]SupplyImportItem, error) {
+	return s.SupplyOrders.ListImportedItemsOverlapping(ctx, fromMS, toMS, limit)
 }
 
 func (s *Store) ListPendingSupplyImportItems(ctx context.Context, orderID string, nowMS int64, limit int) ([]SupplyImportItem, error) {
@@ -380,6 +396,62 @@ func (s *Store) UpdateSupplyImportItemFileName(ctx context.Context, id int64, fi
 
 func (s *Store) SupplyImportCounts(ctx context.Context, orderID string) (int, int, error) {
 	return s.SupplyOrders.Counts(ctx, orderID)
+}
+
+func (s *Store) UpsertSupplyRecoveries(ctx context.Context, recoveries []SupplyRecovery) (int, error) {
+	return s.SupplyRecoveries.UpsertMany(ctx, recoveries)
+}
+
+func (s *Store) GetSupplyRecovery(ctx context.Context, recoveryID string) (SupplyRecovery, bool, error) {
+	return s.SupplyRecoveries.Get(ctx, recoveryID)
+}
+
+func (s *Store) ListSupplyRecoveries(ctx context.Context, limit int, status string) ([]SupplyRecovery, error) {
+	return s.SupplyRecoveries.List(ctx, limit, status)
+}
+
+func (s *Store) ListSupplyRecoveriesBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]SupplyRecovery, error) {
+	return s.SupplyRecoveries.ListBetween(ctx, fromMS, toMS, limit)
+}
+
+func (s *Store) ListClaimableSupplyRecoveries(ctx context.Context, limit int) ([]SupplyRecovery, error) {
+	return s.SupplyRecoveries.ListClaimable(ctx, limit)
+}
+
+func (s *Store) ListImportPendingSupplyRecoveries(ctx context.Context, limit int) ([]SupplyRecovery, error) {
+	return s.SupplyRecoveries.ListImportPending(ctx, limit)
+}
+
+func (s *Store) ClaimSupplyRecoveryForProcessing(ctx context.Context, recoveryID string, nowMS int64) (SupplyRecovery, bool, error) {
+	return s.SupplyRecoveries.ClaimForProcessing(ctx, recoveryID, nowMS)
+}
+
+func (s *Store) MarkSupplyRecoveryClaimed(ctx context.Context, recoveryID string, claimOrderID string, itemCount int, claimedAtMS int64) error {
+	return s.SupplyRecoveries.MarkClaimed(ctx, recoveryID, claimOrderID, itemCount, claimedAtMS)
+}
+
+func (s *Store) MarkSupplyRecoveryImportProgress(ctx context.Context, recoveryID string, itemCount int, importedCount int, lastError string) error {
+	return s.SupplyRecoveries.MarkImportProgress(ctx, recoveryID, itemCount, importedCount, lastError)
+}
+
+func (s *Store) MarkSupplyRecoveryImported(ctx context.Context, recoveryID string, importedCount int) error {
+	return s.SupplyRecoveries.MarkImported(ctx, recoveryID, importedCount)
+}
+
+func (s *Store) MarkSupplyRecoveryRefunded(ctx context.Context, recoveryID string, refundedFen int64) error {
+	return s.SupplyRecoveries.MarkRefunded(ctx, recoveryID, refundedFen)
+}
+
+func (s *Store) MarkSupplyRecoveryFailed(ctx context.Context, recoveryID string, lastError string) error {
+	return s.SupplyRecoveries.MarkFailed(ctx, recoveryID, lastError)
+}
+
+func (s *Store) SetSupplyRecoveryLastError(ctx context.Context, recoveryID string, lastError string) error {
+	return s.SupplyRecoveries.SetLastError(ctx, recoveryID, lastError)
+}
+
+func (s *Store) SupplyRecoverySummary(ctx context.Context) (supplyrecovery.Summary, error) {
+	return s.SupplyRecoveries.Summary(ctx)
 }
 
 func (s *Store) ListCodexInspectionDisableOwnership(ctx context.Context) ([]CodexInspectionDisableOwnership, error) {

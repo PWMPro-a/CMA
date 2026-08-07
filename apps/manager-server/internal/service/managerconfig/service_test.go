@@ -67,3 +67,24 @@ func TestNormalizeSupplyConfigReplacesPasswordWhenIdentityChangesWithPassword(t 
 		t.Fatal("password should be configured")
 	}
 }
+
+func TestNormalizeSupplyConfigDefaultsRecoveryControls(t *testing.T) {
+	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{}, store.ManagerSupplyConfig{})
+	if next.RecoverySyncEnabled == nil || !*next.RecoverySyncEnabled {
+		t.Fatalf("recovery sync should default enabled: %#v", next.RecoverySyncEnabled)
+	}
+	if next.RecoveryAutoClaim == nil || !*next.RecoveryAutoClaim {
+		t.Fatalf("recovery auto claim should default enabled: %#v", next.RecoveryAutoClaim)
+	}
+	if next.RecoveryDisableOriginal == nil || !*next.RecoveryDisableOriginal {
+		t.Fatalf("recovery original disable should default enabled: %#v", next.RecoveryDisableOriginal)
+	}
+	if next.RecoverySyncIntervalSeconds != 60 || next.RecoveryClaimBatchSize != 20 {
+		t.Fatalf("recovery defaults = interval %d batch %d", next.RecoverySyncIntervalSeconds, next.RecoveryClaimBatchSize)
+	}
+	off := false
+	next = NormalizeSupplyConfig(store.ManagerSupplyConfig{RecoveryDisableOriginal: &off}, next)
+	if next.RecoveryDisableOriginal == nil || *next.RecoveryDisableOriginal {
+		t.Fatalf("submitted recovery original disable=false should be preserved: %#v", next.RecoveryDisableOriginal)
+	}
+}
