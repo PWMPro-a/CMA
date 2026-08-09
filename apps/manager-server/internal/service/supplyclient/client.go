@@ -75,8 +75,16 @@ type Order struct {
 type TakeResult struct {
 	Order                Order
 	Accounts             []json.RawMessage
+	OrderItems           []OrderItem
 	ItemRemainingSeconds []int64
 	Pending              bool
+}
+
+type OrderItem struct {
+	RemainingSeconds int64
+	HasRemaining     bool
+	BasePriceFen     int64
+	ChargedFen       int64
 }
 
 type Recovery struct {
@@ -209,10 +217,12 @@ func (c *Client) Take(ctx context.Context, credentials Credentials, orderID stri
 		order.ID = strings.TrimSpace(orderID)
 	}
 	accounts := rawAccounts(value)
+	items := orderItems(value)
 	return TakeResult{
 		Order:                order,
 		Accounts:             accounts,
-		ItemRemainingSeconds: orderItemRemainingSeconds(value),
+		OrderItems:           items,
+		ItemRemainingSeconds: orderItemRemainingSeconds(items),
 		Pending:              status == http.StatusAccepted,
 	}, nil
 }
@@ -560,31 +570,31 @@ func recoveryIDFromClaimURL(claimURL string) string {
 	return ""
 }
 
-// orderItemRemainingSeconds reads the supplier's per-delivery validity from
-// order.items.  It intentionally does not inspect arbitrary "items" arrays:
+// orderItems reads the supplier's per-delivery validity and price fields from
+// order.items. It intentionally does not inspect arbitrary "items" arrays:
 // account payloads may use that name too, and treating those as order items
-// would incorrectly shorten an imported account's lease.
-func orderItemRemainingSeconds(value any) []int64 {
+// would incorrectly assign leases or costs to imported accounts.
+func orderItems(value any) []OrderItem {
 	root, _ := value.(map[string]any)
 	if root == nil {
 		return nil
 	}
-	return findOrderItemRemainingSeconds(root)
+	return findOrderItems(root)
 }
 
-func findOrderItemRemainingSeconds(root map[string]any) []int64 {
+func findOrderItems(root map[string]any) []OrderItem {
 	if order, ok := root["order"].(map[string]any); ok {
-		if remaining, found := itemRemainingSeconds(order["items"]); found {
-			return remaining
+		if items, found := parseOrderItems(order["items"]); found {
+			return items
 		}
 	}
-	if remaining, found := itemRemainingSeconds(root["items"]); found && orderLike(root) {
-		return remaining
+	if items, found := parseOrderItems(root["items"]); found && orderLike(root) {
+		return items
 	}
 	for _, key := range []string{"data", "payload", "result"} {
 		if child, ok := root[key].(map[string]any); ok {
-			if remaining := findOrderItemRemainingSeconds(child); len(remaining) > 0 {
-				return remaining
+			if items := findOrderItems(child); len(items) > 0 {
+				return items
 			}
 		}
 	}
@@ -598,24 +608,45 @@ func orderLike(value map[string]any) bool {
 	return stringValue(value, "product") != "" && int64Value(value, "quantity", "requested_quantity", "requestedQuantity") > 0
 }
 
-func itemRemainingSeconds(value any) ([]int64, bool) {
+func parseOrderItems(value any) ([]OrderItem, bool) {
 	items, ok := value.([]any)
 	if !ok || len(items) == 0 {
 		return nil, false
 	}
-	remaining := make([]int64, 0, len(items))
+	result := make([]OrderItem, 0, len(items))
 	for _, item := range items {
 		object, ok := item.(map[string]any)
 		if !ok {
 			return nil, false
 		}
-		seconds, found := int64ValueOK(object, "remaining_seconds", "remainingSeconds")
-		if !found {
+		remainingSeconds, hasRemaining := int64ValueOK(object, "remaining_seconds", "remainingSeconds")
+		basePriceFen, hasBasePrice := int64ValueOK(object, "base_price_fen", "basePriceFen")
+		chargedFen, hasCharged := int64ValueOK(object, "charged_fen", "chargedFen")
+		if !hasRemaining && !hasBasePrice && !hasCharged {
 			return nil, false
 		}
-		remaining = append(remaining, seconds)
+		result = append(result, OrderItem{
+			RemainingSeconds: remainingSeconds,
+			HasRemaining:     hasRemaining,
+			BasePriceFen:     basePriceFen,
+			ChargedFen:       chargedFen,
+		})
 	}
-	return remaining, true
+	return result, true
+}
+
+func orderItemRemainingSeconds(items []OrderItem) []int64 {
+	if len(items) == 0 {
+		return nil
+	}
+	remaining := make([]int64, 0, len(items))
+	for _, item := range items {
+		if !item.HasRemaining {
+			return nil
+		}
+		remaining = append(remaining, item.RemainingSeconds)
+	}
+	return remaining
 }
 
 func primaryObject(value any) map[string]any {

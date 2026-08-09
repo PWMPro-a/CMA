@@ -129,7 +129,7 @@ func TestClientTakeReadsOrderedItemRemainingSeconds(t *testing.T) {
 		case "/api/customer/login":
 			_, _ = w.Write([]byte(`{"token":"token"}`))
 		case "/api/customer/pickup/orders/order-lease/take":
-			_, _ = w.Write([]byte(`{"order":{"id":"order-lease","status":"completed","items":[{"remaining_seconds":900},{"remaining_seconds":"1800"}]},"payload":{"accounts":[{"type":"codex","access_token":"a"},{"type":"codex","access_token":"b"}]}}`))
+			_, _ = w.Write([]byte(`{"order":{"id":"order-lease","status":"completed","items":[{"remaining_seconds":900,"base_price_fen":400,"charged_fen":100},{"remaining_seconds":"1800","base_price_fen":"400","charged_fen":"200"}]},"payload":{"accounts":[{"type":"codex","access_token":"a"},{"type":"codex","access_token":"b"}]}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -142,6 +142,10 @@ func TestClientTakeReadsOrderedItemRemainingSeconds(t *testing.T) {
 	}
 	if len(taken.Accounts) != 2 || len(taken.ItemRemainingSeconds) != 2 || taken.ItemRemainingSeconds[0] != 900 || taken.ItemRemainingSeconds[1] != 1800 {
 		t.Fatalf("take result = %#v", taken)
+	}
+	if len(taken.OrderItems) != 2 || taken.OrderItems[0].BasePriceFen != 400 || taken.OrderItems[0].ChargedFen != 100 ||
+		taken.OrderItems[1].BasePriceFen != 400 || taken.OrderItems[1].ChargedFen != 200 {
+		t.Fatalf("order item prices = %#v", taken.OrderItems)
 	}
 }
 

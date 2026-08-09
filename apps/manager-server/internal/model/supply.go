@@ -38,6 +38,8 @@ type SupplyImportItem struct {
 	NextRetryAtMS    int64  `json:"nextRetryAtMs,omitempty"`
 	ImportedAtMS     int64  `json:"importedAtMs,omitempty"`
 	LeaseExpiresAtMS int64  `json:"leaseExpiresAtMs,omitempty"`
+	BasePriceFen     int64  `json:"basePriceFen,omitempty"`
+	ChargedFen       int64  `json:"chargedFen,omitempty"`
 	CreatedAtMS      int64  `json:"createdAtMs"`
 	UpdatedAtMS      int64  `json:"updatedAtMs"`
 }

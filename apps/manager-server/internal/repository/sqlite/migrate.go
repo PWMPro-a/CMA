@@ -411,6 +411,8 @@ func Migrate(db *sql.DB) error {
 			next_retry_at_ms integer,
 			imported_at_ms integer,
 			lease_expires_at_ms integer,
+			base_price_fen integer not null default 0,
+			charged_fen integer not null default 0,
 			created_at_ms integer not null,
 			updated_at_ms integer not null,
 			foreign key(order_id) references supply_orders(order_id) on delete cascade
@@ -553,6 +555,16 @@ func ensureSupplyImportItemColumns(db *sql.DB) error {
 	}
 	if _, ok := existing["lease_expires_at_ms"]; !ok {
 		if _, err := db.Exec(`alter table supply_import_items add column lease_expires_at_ms integer`); err != nil {
+			return err
+		}
+	}
+	if _, ok := existing["base_price_fen"]; !ok {
+		if _, err := db.Exec(`alter table supply_import_items add column base_price_fen integer not null default 0`); err != nil {
+			return err
+		}
+	}
+	if _, ok := existing["charged_fen"]; !ok {
+		if _, err := db.Exec(`alter table supply_import_items add column charged_fen integer not null default 0`); err != nil {
 			return err
 		}
 	}

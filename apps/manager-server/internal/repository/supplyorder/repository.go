@@ -372,9 +372,10 @@ func (r *repository) InsertItems(ctx context.Context, orderID string, items []mo
 			return 0, err
 		}
 		result, err := tx.ExecContext(ctx, `insert or ignore into supply_import_items (
-			order_id, item_key, file_name, status, payload_json, attempt_count, lease_expires_at_ms, created_at_ms, updated_at_ms
-		) values (?, ?, ?, 'pending', ?, 0, ?, ?, ?)`, orderID, item.ItemKey, item.FileName, payload,
-			nullPositive(item.LeaseExpiresAtMS), now, now)
+			order_id, item_key, file_name, status, payload_json, attempt_count, lease_expires_at_ms,
+			base_price_fen, charged_fen, created_at_ms, updated_at_ms
+		) values (?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?, ?)`, orderID, item.ItemKey, item.FileName, payload,
+			nullPositive(item.LeaseExpiresAtMS), item.BasePriceFen, item.ChargedFen, now, now)
 		if err != nil {
 			return 0, err
 		}
@@ -394,7 +395,8 @@ func (r *repository) ListItems(ctx context.Context, limit int, status string) ([
 	}
 	status = strings.ToLower(strings.TrimSpace(status))
 	query := `select id, order_id, item_key, file_name, status,
-		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms, created_at_ms, updated_at_ms
+		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms,
+		base_price_fen, charged_fen, created_at_ms, updated_at_ms
 		from supply_import_items`
 	args := make([]any, 0, 2)
 	if status != "" && status != "all" {
@@ -424,7 +426,8 @@ func (r *repository) ListItemsBetween(ctx context.Context, fromMS int64, toMS in
 		limit = 5000
 	}
 	rows, err := r.db.QueryContext(ctx, `select id, order_id, item_key, file_name, status,
-		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms, created_at_ms, updated_at_ms
+		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms,
+		base_price_fen, charged_fen, created_at_ms, updated_at_ms
 		from supply_import_items where
 		(created_at_ms >= ? and created_at_ms < ?) or
 		(updated_at_ms >= ? and updated_at_ms < ?) or
@@ -451,7 +454,8 @@ func (r *repository) ListImportedItemsOverlapping(ctx context.Context, fromMS in
 		limit = 10000
 	}
 	rows, err := r.db.QueryContext(ctx, `select id, order_id, item_key, file_name, status,
-		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms, created_at_ms, updated_at_ms
+		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms,
+		base_price_fen, charged_fen, created_at_ms, updated_at_ms
 		from supply_import_items
 		where status = 'imported'
 			and coalesce(file_name, '') <> ''
@@ -478,7 +482,8 @@ func (r *repository) ListPendingItems(ctx context.Context, orderID string, nowMS
 		limit = 50
 	}
 	rows, err := r.db.QueryContext(ctx, `select id, order_id, item_key, file_name, status,
-		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms, created_at_ms, updated_at_ms
+		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms,
+		base_price_fen, charged_fen, created_at_ms, updated_at_ms
 		from supply_import_items
 		where order_id = ? and status in ('pending','failed') and coalesce(next_retry_at_ms, 0) <= ?
 		order by id asc limit ?`, orderID, nowMS, limit)
@@ -593,7 +598,7 @@ func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {
 	var nextRetryAtMS, importedAtMS, leaseExpiresAtMS sql.NullInt64
 	if err := row.Scan(&item.ID, &item.OrderID, &item.ItemKey, &item.FileName, &item.Status,
 		&payload, &lastError, &item.AttemptCount, &nextRetryAtMS, &importedAtMS, &leaseExpiresAtMS,
-		&item.CreatedAtMS, &item.UpdatedAtMS); err != nil {
+		&item.BasePriceFen, &item.ChargedFen, &item.CreatedAtMS, &item.UpdatedAtMS); err != nil {
 		return model.SupplyImportItem{}, err
 	}
 	unprotected, err := r.unprotect(payload)

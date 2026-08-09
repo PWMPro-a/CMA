@@ -137,6 +137,9 @@ const reportRangeForPreset = (preset: ReportRangePreset, now = new Date()) => {
 
 const formatMoney = (fen?: number) => `¥${((fen ?? 0) / 100).toFixed(2)}`;
 
+const hasSupplierCost = (basePriceFen?: number, chargedFen?: number) =>
+  (basePriceFen ?? 0) > 0 || (chargedFen ?? 0) > 0;
+
 const formatUsd = (value?: number) =>
   typeof value === 'number' && Number.isFinite(value) ? `$${value.toFixed(2)}` : '$0.00';
 
@@ -1715,6 +1718,7 @@ export function SupplyPage() {
                         <th>{t('supply.account_usage_calls')}</th>
                         <th>{t('supply.account_usage_tokens')}</th>
                         <th>{t('supply.account_usage_revenue')}</th>
+                        <th>{t('supply.account_supply_cost')}</th>
                         <th>{t('supply.account_last_used_at')}</th>
                         <th>{t('supply.account_lease_expires_at')}</th>
                         <th>{t('common.status')}</th>
@@ -1769,6 +1773,21 @@ export function SupplyPage() {
                           <td>{formatInteger(item.usageCalls)}</td>
                           <td>{formatTokens(item.usageTokens)}</td>
                           <td>{formatUsd(item.usageRevenue)}</td>
+                          <td>
+                            {hasSupplierCost(item.supplierBasePriceFen, item.supplierChargedFen) ? (
+                              <div className={styles.accountMeta}>
+                                <span>{formatMoney(item.supplierChargedFen)}</span>
+                                <small>
+                                  {t('supply.account_supply_cost_hint', {
+                                    base: formatMoney(item.supplierBasePriceFen),
+                                    released: formatMoney(item.supplierReleasedFen),
+                                  })}
+                                </small>
+                              </div>
+                            ) : (
+                              '-'
+                            )}
+                          </td>
                           <td>{formatTime(item.lastUsedAtMs)}</td>
                           <td>
                             {item.leaseExpiresAtMs
@@ -1786,7 +1805,7 @@ export function SupplyPage() {
                       ))}
                       {!accounts?.items?.length ? (
                         <tr>
-                          <td colSpan={10} className={styles.emptyCell}>
+                          <td colSpan={11} className={styles.emptyCell}>
                             {accountsLoading ? t('common.loading') : t('supply.no_accounts')}
                           </td>
                         </tr>

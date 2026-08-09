@@ -184,6 +184,9 @@ type SupplyAccountItem struct {
 	UsageTokens          int64   `json:"usageTokens"`
 	UsageRevenue         float64 `json:"usageRevenue"`
 	UsageRevenueCurrency string  `json:"usageRevenueCurrency"`
+	SupplierBasePriceFen int64   `json:"supplierBasePriceFen,omitempty"`
+	SupplierChargedFen   int64   `json:"supplierChargedFen,omitempty"`
+	SupplierReleasedFen  int64   `json:"supplierReleasedFen,omitempty"`
 	LastUsedAtMS         int64   `json:"lastUsedAtMs,omitempty"`
 	ImportedAtMS         int64   `json:"importedAtMs,omitempty"`
 	LeaseExpiresAtMS     int64   `json:"leaseExpiresAtMs,omitempty"`
@@ -352,6 +355,9 @@ type ReportAccountLedgerRow struct {
 	AllocatedChargedFen  int64   `json:"allocatedChargedFen"`
 	AllocatedReleasedFen int64   `json:"allocatedReleasedFen"`
 	AllocatedNetFen      int64   `json:"allocatedNetFen"`
+	SupplierBasePriceFen int64   `json:"supplierBasePriceFen,omitempty"`
+	SupplierChargedFen   int64   `json:"supplierChargedFen,omitempty"`
+	SupplierReleasedFen  int64   `json:"supplierReleasedFen,omitempty"`
 	UsageCalls           int64   `json:"usageCalls"`
 	UsageSuccessCalls    int64   `json:"usageSuccessCalls"`
 	UsageFailureCalls    int64   `json:"usageFailureCalls"`
@@ -1310,7 +1316,7 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	// item leases only when that expansion is exactly one-to-one; otherwise keep
 	// the payload lease (or the conservative one-hour default) instead of making
 	// an unverifiable association.
-	applySupplyOrderItemLeases(normalized, taken.ItemRemainingSeconds, time.Now())
+	applySupplyOrderItemDetails(normalized, taken.OrderItems, time.Now())
 	items := make([]store.SupplyImportItem, 0, len(normalized))
 	seenItemKeys := make(map[string]struct{}, len(normalized))
 	for _, account := range normalized {
@@ -1324,6 +1330,8 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 			FileName:         account.fileName,
 			PayloadJSON:      string(account.payload),
 			LeaseExpiresAtMS: account.leaseExpiresAtMS,
+			BasePriceFen:     account.basePriceFen,
+			ChargedFen:       account.chargedFen,
 		})
 	}
 	if len(items) == 0 {
@@ -1789,6 +1797,9 @@ func supplyAccountItemFromStore(item store.SupplyImportItem, order store.SupplyO
 		UsageTokens:          usage.Tokens,
 		UsageRevenue:         reportRatioFloat(usage.Revenue, 1),
 		UsageRevenueCurrency: "USD",
+		SupplierBasePriceFen: item.BasePriceFen,
+		SupplierChargedFen:   item.ChargedFen,
+		SupplierReleasedFen:  supplyItemReleasedFen(item.BasePriceFen, item.ChargedFen),
 		LastUsedAtMS:         usage.LastUsedAtMS,
 		ImportedAtMS:         item.ImportedAtMS,
 		LeaseExpiresAtMS:     item.LeaseExpiresAtMS,
@@ -2272,7 +2283,7 @@ func buildSupplyReport(req ReportRequest, orders []store.SupplyOrder, recoveries
 		}
 	}
 
-	report.Executive.NetFen = report.Executive.ChargedFen - report.Executive.ReleasedFen - report.Executive.RefundedFen
+	report.Executive.NetFen = report.Executive.ChargedFen - report.Executive.RefundedFen
 	report.Executive.SupplySpendFen = report.Executive.ChargedFen
 	report.Executive.SupplyNetSpendFen = report.Executive.NetFen
 	report.Executive.AverageUnitFen = reportRatioFloat(float64(report.Executive.ChargedFen), float64(report.Executive.ImportedAccounts))
@@ -2382,7 +2393,7 @@ func buildReportReconciliation(orders []store.SupplyOrder, recoveries []store.Su
 			ImportedCount:     order.ImportedCount,
 			ChargedFen:        order.ChargedFen,
 			ReleasedFen:       order.ReleasedFen,
-			NetFen:            order.ChargedFen - order.ReleasedFen,
+			NetFen:            order.ChargedFen,
 			CreatedAtMS:       order.CreatedAtMS,
 			CompletedAtMS:     order.CompletedAtMS,
 		}
@@ -2405,20 +2416,23 @@ func buildReportReconciliation(orders []store.SupplyOrder, recoveries []store.Su
 		}
 		usage := usageByFile[strings.TrimSpace(item.FileName)]
 		row := ReportAccountLedgerRow{
-			FileName:          item.FileName,
-			OrderID:           item.OrderID,
-			Source:            source,
-			Product:           product,
-			Status:            reportKey(item.Status),
-			AccountStatus:     supplyAccountStatusFromItem(item, now),
-			ImportedAtMS:      item.ImportedAtMS,
-			LeaseExpiresAtMS:  item.LeaseExpiresAtMS,
-			UsageCalls:        usage.Calls,
-			UsageSuccessCalls: usage.SuccessCalls,
-			UsageFailureCalls: usage.FailureCalls,
-			UsageTokens:       usage.Tokens,
-			UsageRevenue:      reportRatioFloat(usage.Revenue, 1),
-			LastUsedAtMS:      usage.LastUsedAtMS,
+			FileName:             item.FileName,
+			OrderID:              item.OrderID,
+			Source:               source,
+			Product:              product,
+			Status:               reportKey(item.Status),
+			AccountStatus:        supplyAccountStatusFromItem(item, now),
+			ImportedAtMS:         item.ImportedAtMS,
+			LeaseExpiresAtMS:     item.LeaseExpiresAtMS,
+			SupplierBasePriceFen: item.BasePriceFen,
+			SupplierChargedFen:   item.ChargedFen,
+			SupplierReleasedFen:  supplyItemReleasedFen(item.BasePriceFen, item.ChargedFen),
+			UsageCalls:           usage.Calls,
+			UsageSuccessCalls:    usage.SuccessCalls,
+			UsageFailureCalls:    usage.FailureCalls,
+			UsageTokens:          usage.Tokens,
+			UsageRevenue:         reportRatioFloat(usage.Revenue, 1),
+			LastUsedAtMS:         usage.LastUsedAtMS,
 		}
 		reconciliation.Accounts = append(reconciliation.Accounts, row)
 		index := len(reconciliation.Accounts) - 1
@@ -2434,15 +2448,18 @@ func buildReportReconciliation(orders []store.SupplyOrder, recoveries []store.Su
 		if !ok || len(indexes) == 0 {
 			continue
 		}
+		if applyExactSupplierAccountCosts(&reconciliation, indexes) {
+			continue
+		}
 		chargedParts := splitFenEvenly(order.ChargedFen, len(indexes))
 		releasedParts := splitFenEvenly(order.ReleasedFen, len(indexes))
 		for i, index := range indexes {
 			reconciliation.Accounts[index].AllocatedChargedFen = chargedParts[i]
 			reconciliation.Accounts[index].AllocatedReleasedFen = releasedParts[i]
-			reconciliation.Accounts[index].AllocatedNetFen = chargedParts[i] - releasedParts[i]
+			reconciliation.Accounts[index].AllocatedNetFen = chargedParts[i]
 			reconciliation.Summary.AccountAllocatedChargedFen += chargedParts[i]
 			reconciliation.Summary.AccountAllocatedReleasedFen += releasedParts[i]
-			reconciliation.Summary.AccountAllocatedNetFen += chargedParts[i] - releasedParts[i]
+			reconciliation.Summary.AccountAllocatedNetFen += chargedParts[i]
 		}
 	}
 	reconciliation.Summary.AccountUsageRevenue = reportRatioFloat(reconciliation.Summary.AccountUsageRevenue, 1)
@@ -2469,6 +2486,41 @@ func buildReportReconciliation(orders []store.SupplyOrder, recoveries []store.Su
 	reconciliation.Summary.AccountRows = len(reconciliation.Accounts)
 	reconciliation.Summary.RecoveryRows = len(reconciliation.Recoveries)
 	return reconciliation
+}
+
+func applyExactSupplierAccountCosts(reconciliation *ReportReconciliation, indexes []int) bool {
+	if reconciliation == nil || len(indexes) == 0 {
+		return false
+	}
+	for _, index := range indexes {
+		if index < 0 || index >= len(reconciliation.Accounts) {
+			return false
+		}
+		row := reconciliation.Accounts[index]
+		if row.SupplierBasePriceFen <= 0 && row.SupplierChargedFen <= 0 {
+			return false
+		}
+	}
+	for _, index := range indexes {
+		row := &reconciliation.Accounts[index]
+		row.AllocatedChargedFen = row.SupplierChargedFen
+		row.AllocatedReleasedFen = row.SupplierReleasedFen
+		row.AllocatedNetFen = row.SupplierChargedFen
+		reconciliation.Summary.AccountAllocatedChargedFen += row.AllocatedChargedFen
+		reconciliation.Summary.AccountAllocatedReleasedFen += row.AllocatedReleasedFen
+		reconciliation.Summary.AccountAllocatedNetFen += row.AllocatedNetFen
+	}
+	if reconciliation.Summary.AllocationMethod == "order_even_split_by_visible_accounts" {
+		reconciliation.Summary.AllocationMethod = "supplier_item_exact_else_order_even_split"
+	}
+	return true
+}
+
+func supplyItemReleasedFen(basePriceFen int64, chargedFen int64) int64 {
+	if basePriceFen <= chargedFen {
+		return 0
+	}
+	return basePriceFen - chargedFen
 }
 
 func splitFenEvenly(total int64, parts int) []int64 {
@@ -3893,6 +3945,8 @@ type normalizedSupplyAccount struct {
 	itemKey          string
 	fileName         string
 	leaseExpiresAtMS int64
+	basePriceFen     int64
+	chargedFen       int64
 }
 
 func normalizeAccountPayload(raw json.RawMessage) ([]byte, string, string, error) {
@@ -4074,6 +4128,24 @@ func supplyDeliveryLeaseExpiresAtMSFromSeconds(seconds int64, now time.Time) int
 	return now.Add(time.Duration(seconds) * time.Second).UnixMilli()
 }
 
+// applySupplyOrderItemDetails returns true only for an exact, ordered mapping
+// between supplier order items and CPA import files. A bundled delivery may
+// expand one supplied payload into many files, so a partial mapping would make
+// a valid account appear expired or receive another account's cost.
+func applySupplyOrderItemDetails(accounts []normalizedSupplyAccount, items []supplyclient.OrderItem, now time.Time) bool {
+	if len(accounts) == 0 || len(accounts) != len(items) {
+		return false
+	}
+	for index := range accounts {
+		if items[index].HasRemaining {
+			accounts[index].leaseExpiresAtMS = supplyDeliveryLeaseExpiresAtMSFromSeconds(items[index].RemainingSeconds, now)
+		}
+		accounts[index].basePriceFen = items[index].BasePriceFen
+		accounts[index].chargedFen = items[index].ChargedFen
+	}
+	return true
+}
+
 // applySupplyOrderItemLeases returns true only for an exact, ordered mapping
 // between supplier order items and CPA import files. A bundled delivery may
 // expand one supplied payload into many files, so a partial mapping would make
@@ -4082,10 +4154,11 @@ func applySupplyOrderItemLeases(accounts []normalizedSupplyAccount, remainingSec
 	if len(accounts) == 0 || len(accounts) != len(remainingSeconds) {
 		return false
 	}
-	for index := range accounts {
-		accounts[index].leaseExpiresAtMS = supplyDeliveryLeaseExpiresAtMSFromSeconds(remainingSeconds[index], now)
+	items := make([]supplyclient.OrderItem, 0, len(remainingSeconds))
+	for _, seconds := range remainingSeconds {
+		items = append(items, supplyclient.OrderItem{RemainingSeconds: seconds, HasRemaining: true})
 	}
-	return true
+	return applySupplyOrderItemDetails(accounts, items, now)
 }
 
 func normalizeAccountPayloadForImport(payloadJSON string) ([]byte, string, string, error) {

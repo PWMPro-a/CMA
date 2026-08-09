@@ -18,6 +18,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/supplyclient"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
@@ -359,8 +360,8 @@ func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 		t.Fatalf("create supply order: %v", err)
 	}
 	if inserted, err := st.InsertSupplyImportItems(ctx, "order-report-1", []store.SupplyImportItem{
-		{OrderID: "order-report-1", ItemKey: "item-a", FileName: "codex-supply-a.json", PayloadJSON: `{"type":"codex"}`, LeaseExpiresAtMS: now.Add(10 * time.Minute).UnixMilli()},
-		{OrderID: "order-report-1", ItemKey: "item-b", FileName: "codex-supply-b.json", PayloadJSON: `{"type":"codex"}`, LeaseExpiresAtMS: now.Add(time.Hour).UnixMilli()},
+		{OrderID: "order-report-1", ItemKey: "item-a", FileName: "codex-supply-a.json", PayloadJSON: `{"type":"codex"}`, LeaseExpiresAtMS: now.Add(10 * time.Minute).UnixMilli(), BasePriceFen: 700, ChargedFen: 500},
+		{OrderID: "order-report-1", ItemKey: "item-b", FileName: "codex-supply-b.json", PayloadJSON: `{"type":"codex"}`, LeaseExpiresAtMS: now.Add(time.Hour).UnixMilli(), BasePriceFen: 700, ChargedFen: 700},
 	}); err != nil || inserted != 2 {
 		t.Fatalf("insert import items inserted=%d err=%v", inserted, err)
 	}
@@ -417,8 +418,14 @@ func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 	}
 	if report.Executive.ChargedFen != 1200 || report.Executive.ReleasedFen != 200 ||
 		report.Executive.RefundedFen != 300 || report.Executive.SupplySpendFen != 1200 ||
-		report.Executive.SupplyNetSpendFen != 700 || report.Executive.AverageUnitFen != 600 {
+		report.Executive.SupplyNetSpendFen != 900 || report.Executive.AverageUnitFen != 600 {
 		t.Fatalf("executive money = %#v", report.Executive)
+	}
+	if report.Reconciliation.Summary.AllocationMethod != "supplier_item_exact_else_order_even_split" ||
+		report.Reconciliation.Summary.AccountAllocatedChargedFen != 1200 ||
+		report.Reconciliation.Summary.AccountAllocatedReleasedFen != 200 ||
+		report.Reconciliation.Summary.AccountAllocatedNetFen != 1200 {
+		t.Fatalf("reconciliation money = %#v", report.Reconciliation.Summary)
 	}
 	if report.Executive.Recoveries != 2 || report.Executive.ImportedRecoveries != 1 ||
 		report.Executive.RefundedRecoveries != 1 || report.Executive.RecoveryClaimRate != 1 ||
@@ -949,6 +956,16 @@ func TestSupplyOrderItemLeasesRequireExactExpandedAccountMapping(t *testing.T) {
 	if got, want := accounts[1].leaseExpiresAtMS, now.Add(30*time.Minute).UnixMilli(); got != want {
 		t.Fatalf("second lease = %d, want %d", got, want)
 	}
+	if !applySupplyOrderItemDetails(accounts, []supplyclient.OrderItem{
+		{RemainingSeconds: 600, HasRemaining: true, BasePriceFen: 400, ChargedFen: 100},
+		{RemainingSeconds: 1200, HasRemaining: true, BasePriceFen: 400, ChargedFen: 200},
+	}, now) {
+		t.Fatal("exactly expanded accounts should accept ordered item prices")
+	}
+	if accounts[0].basePriceFen != 400 || accounts[0].chargedFen != 100 ||
+		accounts[1].basePriceFen != 400 || accounts[1].chargedFen != 200 {
+		t.Fatalf("account costs were not assigned: %#v", accounts)
+	}
 	original := accounts[0].leaseExpiresAtMS
 	if applySupplyOrderItemLeases(accounts, []int64{300}, now) {
 		t.Fatal("mismatched order items must not be assigned to expanded accounts")
@@ -970,7 +987,7 @@ func TestTakeResponseSub2BundleIsExpandedAndUploadedAsCPACodex(t *testing.T) {
 			_, _ = w.Write([]byte(`{"id":"order-bundle","status":"ready","ready_quantity":2,"progress":100,"take_url":"/custom/take-bundle"}`))
 		case r.URL.Path == "/custom/take-bundle" && r.Method == http.MethodPost:
 			takeCalls.Add(1)
-			_, _ = w.Write([]byte(`{"order":{"id":"order-bundle","status":"completed","items":[{"remaining_seconds":900},{"remaining_seconds":1800}]},"payload":{"accounts":[{"type":"sub2api-data","exported_at":"2026-07-30T17:28:18Z","accounts":[{"name":"team-one","type":"oauth","platform":"openai","credentials":{"access_token":"access-one","refresh_token":"refresh-one","chatgpt_account_id":"account-one","email":"one@example.com","plan_type":"team"}},{"name":"team-two","type":"oauth","platform":"openai","credentials":{"session_access_token":"access-two","refresh_token":"refresh-two","account_id":"account-two","email":"two@example.com","chatgpt_plan_type":"team"}}]}]}}`))
+			_, _ = w.Write([]byte(`{"order":{"id":"order-bundle","status":"completed","items":[{"remaining_seconds":900,"base_price_fen":400,"charged_fen":100},{"remaining_seconds":1800,"base_price_fen":400,"charged_fen":200}]},"payload":{"accounts":[{"type":"sub2api-data","exported_at":"2026-07-30T17:28:18Z","accounts":[{"name":"team-one","type":"oauth","platform":"openai","credentials":{"access_token":"access-one","refresh_token":"refresh-one","chatgpt_account_id":"account-one","email":"one@example.com","plan_type":"team"}},{"name":"team-two","type":"oauth","platform":"openai","credentials":{"session_access_token":"access-two","refresh_token":"refresh-two","account_id":"account-two","email":"two@example.com","chatgpt_plan_type":"team"}}]}]}}`))
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
 			name := r.URL.Query().Get("name")
 			if name == "" {
@@ -1058,6 +1075,17 @@ func TestTakeResponseSub2BundleIsExpandedAndUploadedAsCPACodex(t *testing.T) {
 		if actualSeconds < expected-2 || actualSeconds > expected+1 {
 			t.Fatalf("item %d lease seconds=%d, want approximately %d; items=%#v", index, actualSeconds, expected, items)
 		}
+	}
+	importedItems, err := st.ListSupplyImportItems(context.Background(), 10, "imported")
+	if err != nil || len(importedItems) != 2 {
+		t.Fatalf("imported items=%#v err=%v", importedItems, err)
+	}
+	costs := map[int64]int64{}
+	for _, item := range importedItems {
+		costs[item.ChargedFen] = item.BasePriceFen
+	}
+	if costs[100] != 400 || costs[200] != 400 {
+		t.Fatalf("imported item costs=%#v items=%#v", costs, importedItems)
 	}
 }
 

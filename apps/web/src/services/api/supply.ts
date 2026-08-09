@@ -268,6 +268,9 @@ export interface SupplyAccountItem {
   usageTokens: number;
   usageRevenue: number;
   usageRevenueCurrency: string;
+  supplierBasePriceFen?: number;
+  supplierChargedFen?: number;
+  supplierReleasedFen?: number;
   lastUsedAtMs?: number;
   importedAtMs?: number;
   leaseExpiresAtMs?: number;
@@ -426,6 +429,9 @@ export interface SupplyReportAccountLedgerRow {
   allocatedChargedFen: number;
   allocatedReleasedFen: number;
   allocatedNetFen: number;
+  supplierBasePriceFen?: number;
+  supplierChargedFen?: number;
+  supplierReleasedFen?: number;
   usageCalls: number;
   usageSuccessCalls: number;
   usageFailureCalls: number;

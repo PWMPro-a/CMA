@@ -220,6 +220,10 @@ func TestEnsureSupplyImportItemColumnsBackfillsExistingEmptyLeases(t *testing.T)
 	if err := ensureSupplyImportItemColumns(db); err != nil {
 		t.Fatalf("retry supply import lease backfill: %v", err)
 	}
+	columns := migrationTableColumns(t, db, "supply_import_items")
+	if !columns["base_price_fen"] || !columns["charged_fen"] {
+		t.Fatalf("legacy supply import columns = %#v, want per-item price columns", columns)
+	}
 	rows, err := db.Query(`select id, lease_expires_at_ms from supply_import_items order by id`)
 	if err != nil {
 		t.Fatalf("read lease results: %v", err)
