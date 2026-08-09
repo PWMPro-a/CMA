@@ -593,18 +593,19 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		return Status{}, err
 	}
 	resource := s.currentSmartResource(cfg.Supply)
-	refreshSmartResource := resource.Enabled && !resource.SnapshotFresh
-	if resource.Enabled && resource.SnapshotFresh && s.newerCompletedSmartInspectionAvailable(ctx, resource.CapacitySnapshotRunID) {
+	if resource.Enabled && s.newerCompletedSmartInspectionAvailable(ctx, resource.CapacitySnapshotRunID) {
 		s.invalidateInspectionQuotaSnapshot()
-		refreshSmartResource = true
 	}
-	if refreshSmartResource {
+	if resource.Enabled {
 		// Automatic replenishment may be disabled while operators still need a
-		// current capacity view. Refresh the cold snapshot without placing orders.
+		// current capacity view. Rebuild from the cached inspection snapshot on
+		// every status poll so the usage window, account lease expiry and demand
+		// rate naturally move forward even when no new request arrives.
 		refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		refreshed, refreshErr := s.smartResource(refreshCtx, cfg, false)
 		cancel()
 		if refreshErr == nil {
+			preserveSmartResourceRuntimeState(&refreshed, resource)
 			resource = refreshed
 		} else {
 			resource = s.currentSmartResource(cfg.Supply)
@@ -622,6 +623,7 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		cancel()
 		if snapshotErr == nil || len(snapshot.files) > 0 {
 			applyAccountPoolStats(&resource, accountPoolStatsFromFiles(snapshot.files))
+			s.reconcileSmartAccountPoolGuard(cfg.Supply, &resource)
 			applySmartAccountQuantityEstimate(cfg.Supply, &resource)
 		}
 	}
@@ -3495,6 +3497,65 @@ func applyAccountPoolStats(resource *SmartResource, stats accountPoolStats) {
 		resource.HealthyAccounts = resource.AvailableAccounts
 	}
 	resource.WeakAccounts = max(0, resource.AvailableAccounts-resource.HealthyAccounts)
+}
+
+func preserveSmartResourceRuntimeState(resource *SmartResource, previous SmartResource) {
+	if resource == nil {
+		return
+	}
+	resource.PrelockedCapacityRCU = previous.PrelockedCapacityRCU
+	resource.LockedOrderID = previous.LockedOrderID
+	resource.LockedOrderAgeSeconds = previous.LockedOrderAgeSeconds
+	resource.LockedConfirmRounds = previous.LockedConfirmRounds
+	if previous.SupplyPressureLevel != "" {
+		resource.SupplyPressureLevel = previous.SupplyPressureLevel
+		resource.SupplyPressureReason = previous.SupplyPressureReason
+		resource.SupplyInventoryAvailable = previous.SupplyInventoryAvailable
+		resource.SupplyInventoryMissing = previous.SupplyInventoryMissing
+		resource.SupplyNeedsProduction = previous.SupplyNeedsProduction
+		resource.SupplyAvgFulfillSeconds = previous.SupplyAvgFulfillSeconds
+		resource.SupplyRecentWaiting = previous.SupplyRecentWaiting
+	}
+}
+
+func (s *Service) reconcileSmartAccountPoolGuard(cfg store.ManagerSupplyConfig, resource *SmartResource) {
+	if resource == nil || !smartSupplyStrategyConfigured(cfg) || !smartEmergencyBypassUsageRate(cfg) {
+		return
+	}
+	if resource.AvailableAccounts <= smartCriticalAvailableAccounts(cfg) {
+		applySmartEmergencyAvailability(cfg, resource, time.Now())
+		if resource.AvailableAccounts <= 0 {
+			startedAtMS := s.beginPoolVacuum()
+			resource.PoolVacuumActive = true
+			resource.PoolVacuumStartedAtMS = startedAtMS
+			resource.PoolVacuumDurationSeconds = max(0, int(time.Since(time.UnixMilli(startedAtMS)).Seconds()))
+		} else {
+			s.clearPoolVacuum()
+			resource.PoolVacuumActive = false
+			resource.PoolVacuumStartedAtMS = 0
+			resource.PoolVacuumDurationSeconds = 0
+		}
+		return
+	}
+	s.clearPoolVacuum()
+	if resource.EmergencyReason != "critical_available_accounts" && resource.EmergencyReason != "emergency_pool_vacuum" {
+		return
+	}
+	resource.EmergencyReason = ""
+	resource.PoolVacuumActive = false
+	resource.PoolVacuumStartedAtMS = 0
+	resource.PoolVacuumDurationSeconds = 0
+	if resource.DecisionReason == "critical_available_accounts" || resource.DecisionReason == "emergency_pool_vacuum" {
+		resource.EmergencyShortage = false
+		if resource.ConsumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling {
+			resource.HealthLevel = smartHealthUnknown
+			resource.SuggestedAction = smartActionSnapshotStale
+			resource.SuggestedQuantity = 0
+			resource.DecisionReason = "usage_rate_not_ready"
+			return
+		}
+		recalculateSmartResourceCapacityPlan(cfg, resource)
+	}
 }
 
 func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.ManagerConfig, resource *SmartResource) (int, int, string, bool, error) {

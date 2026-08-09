@@ -1091,6 +1091,54 @@ func TestGetStatusRefreshesSmartSnapshotWhenAutomaticSupplyDisabled(t *testing.T
 	}
 }
 
+func TestGetStatusRecomputesDemandWhenTrafficStops(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/auth-files" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"files":[
+			{"name":"ready-a.json","provider":"codex","status":"ready"},
+			{"name":"ready-b.json","provider":"codex","status":"ready"}
+		]}`))
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "status-demand-decay.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	automaticEnabled := false
+	smartEnabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &automaticEnabled, SmartEnabled: &smartEnabled, Product: "oauth_7d",
+			Strategy: managerconfigsvc.SupplyStrategyCostFirst, HealthyAvailableAccounts: 2,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(0))
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	service.setSmartResource(SmartResource{
+		Enabled: true, SnapshotFresh: true, GeneratedAtMS: time.Now().UnixMilli(),
+		CapacitySnapshotRunID: 1, ConsumeRCUPerMinute: 537.1,
+		RequestDemandRCUPerMinute: 208.9, TokenDemandRCUPerMinute: 537.1, DemandDriver: "tokens",
+	})
+
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	if status.SmartResource.ConsumeRCUPerMinute != 0 || status.SmartResource.RequestDemandRCUPerMinute != 0 ||
+		status.SmartResource.TokenDemandRCUPerMinute != 0 || status.SmartResource.DemandDriver != "none" ||
+		status.SmartResource.DecisionReason != "usage_rate_not_ready" {
+		t.Fatalf("status retained stale demand after traffic stopped: %#v", status.SmartResource)
+	}
+}
+
 func TestGetStatusStartsSingleFlightRefreshForStaleInspectionSnapshot(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
@@ -1508,6 +1556,68 @@ func TestStrongSupplySkipsCreateWithoutUsageAboveCriticalWaterline(t *testing.T)
 	}
 }
 
+func TestCostFirstDoesNotCreateCapacityOrderFromIdleDemandMemory(t *testing.T) {
+	var createCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":100,"missing":0,"needs_production":false,"estimated_total_fen":100}`))
+		case "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
+		case "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"files":[
+				{"name":"ready-a.json","provider":"codex","status":"ready"},
+				{"name":"ready-b.json","provider":"codex","status":"ready"}
+			]}`))
+		case "/api/customer/pickup/orders":
+			createCalls.Add(1)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "idle-demand-memory.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_7d",
+			Strategy: managerconfigsvc.SupplyStrategyCostFirst, CriticalAvailableAccounts: 0,
+			HealthyAvailableAccounts: 2, DefaultEmergencyMinAccounts: 1, VirtualDemandTTLMinutes: 15,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(0), quotaInspectionResult(0))
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	now := time.Now().Truncate(time.Minute)
+	service.recordSmartUsageEvents([]usage.Event{{
+		TimestampMS: now.Add(-10 * time.Minute).UnixMilli(), Provider: "codex", AuthIndex: "old-load", TotalTokens: 4_000_000,
+	}}, now)
+
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("run automatic: %v", err)
+	}
+	if createCalls.Load() != 0 {
+		t.Fatalf("idle demand memory created %d capacity orders", createCalls.Load())
+	}
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	if status.SmartResource.ConsumeRCUPerMinute != 0 || status.SmartResource.VirtualDemandRCUPerMinute <= 0 ||
+		status.SmartResource.SuggestedQuantity != 0 || status.ActiveOrder != nil {
+		t.Fatalf("idle demand memory status = %#v", status.SmartResource)
+	}
+}
+
 func TestSupplyStrategyVirtualDemandMemoryUsesConfiguredTTL(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Minute)
@@ -1531,7 +1641,8 @@ func TestSupplyStrategyVirtualDemandMemoryUsesConfiguredTTL(t *testing.T) {
 		Strategy:                 managerconfigsvc.SupplyStrategyStrongSupply,
 		VirtualDemandTTLMinutes:  60,
 		EmergencyBypassUsageRate: managerconfigsvc.BoolPtr(true),
-	}, &strong, now, 0); got != 1 || strong.DemandTrend != smartDemandTrendVirtual || strong.DecisionReason != "virtual_demand_memory" {
+	}, &strong, now, 0); got != 0 || strong.ConsumeRCUPerMinute != 0 || strong.VirtualDemandRCUPerMinute != 1 ||
+		strong.DemandPlanningRCUPerMinute != 1 || strong.DemandTrend != smartDemandTrendVirtual || strong.DecisionReason != "virtual_demand_memory" {
 		t.Fatalf("strong supply demand memory = %f, resource=%#v", got, strong)
 	}
 

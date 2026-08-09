@@ -997,17 +997,18 @@ func (s *Service) applySmartDemandMemory(cfg store.ManagerSupplyConfig, resource
 		return currentRCU
 	}
 	resource.VirtualDemandRCUPerMinute = round2(memoryRCU)
-	resource.ConsumeRCUPerMinute = round2(memoryRCU)
 	resource.DemandPlanningRCUPerMinute = round2(memoryRCU)
 	resource.DemandTrend = smartDemandTrendVirtual
 	resource.TargetCapacityRCU = round2(memoryRCU * float64(resource.EffectiveHealthyMinutes))
 	resource.RecommendedCapacityRCU = resource.TargetCapacityRCU
-	if resource.CurrentCapacityRCU > 0 {
-		resource.EstimatedSustainMinutes = round1(resource.CurrentCapacityRCU / memoryRCU)
-	}
+	resource.EstimatedSustainMinutes = 0
 	resource.CapacityGapRCU = round2(math.Max(0, resource.TargetCapacityRCU-resource.CurrentCapacityRCU-resource.PrelockedCapacityRCU))
 	resource.DecisionReason = "virtual_demand_memory"
-	return memoryRCU
+	// Demand memory is a low-water guard, not current traffic. Keep the actual
+	// rate at zero so an idle pool does not display stale consumption or size a
+	// normal capacity order from historical load. The account waterline may
+	// still request its small emergency batch when the pool is truly critical.
+	return currentRCU
 }
 
 func (s *Service) smartDemandMemory(now time.Time, ttl time.Duration, unit float64) (float64, int64, int) {
