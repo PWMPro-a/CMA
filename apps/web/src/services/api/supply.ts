@@ -123,6 +123,8 @@ export interface SupplySmartResource {
   schedulableAccounts: number;
   healthyAccounts: number;
   weakAccounts: number;
+  totalAccounts?: number;
+  disabledAccounts?: number;
   pendingInspectionAccounts?: number;
   pendingInspectionCapacityRcu?: number;
   estimatedRequiredAccounts?: number;
@@ -147,6 +149,9 @@ export interface SupplySmartResource {
   tpm1m: number;
   tpm5m: number;
   tpm10m: number;
+  requestDemandRcuPerMinute?: number;
+  tokenDemandRcuPerMinute?: number;
+  demandDriver?: 'requests' | 'tokens' | 'none' | string;
   consumeRcu1m: number;
   consumeRcu5m: number;
   consumeRcu10m: number;
@@ -188,6 +193,7 @@ export interface SupplySmartResource {
   virtualDemandTtlMinutes?: number;
   accountMaxRequestsBefore401?: number;
   accountMaxUsefulSecondsBefore401?: number;
+  estimatedNewAccountCapacityRcu?: number;
   riskAdjustedUnitCapacityRcu?: number;
 }
 

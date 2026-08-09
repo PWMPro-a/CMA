@@ -1015,6 +1015,9 @@ export function SupplyPage() {
           detail: t('supply.consume_rate_detail', {
             rpm: formatNumber(smart?.rpm30m),
             tpm: formatNumber(smart?.tpm30m, 0),
+            request: formatNumber(smart?.requestDemandRcuPerMinute),
+            token: formatNumber(smart?.tokenDemandRcuPerMinute),
+            driver: t(`supply.demand_driver_${smart?.demandDriver || 'none'}`),
           }),
           icon: <IconTrendingUp size={18} />,
           tone: 'orange',
@@ -1216,8 +1219,9 @@ export function SupplyPage() {
           <span>{t('supply.pool_available_accounts')}</span>
           <strong>{formatInteger(smart?.availableAccounts ?? overview?.cpaAvailable)}</strong>
           <small>
-            {t('supply.pool_schedulable_accounts_hint', {
-              value: formatInteger(smart?.schedulableAccounts),
+            {t('supply.pool_total_accounts_hint', {
+              total: formatInteger(smart?.totalAccounts ?? smart?.schedulableAccounts),
+              disabled: formatInteger(smart?.disabledAccounts),
             })}
           </small>
         </div>
@@ -1225,7 +1229,7 @@ export function SupplyPage() {
           <span>{t('supply.pool_healthy_accounts')}</span>
           <strong>{formatInteger(smart?.healthyAccounts)}</strong>
           <small>
-            {t('supply.pool_weak_accounts_hint', {
+            {t('supply.pool_unverified_accounts_hint', {
               value: formatInteger(smart?.weakAccounts),
             })}
           </small>

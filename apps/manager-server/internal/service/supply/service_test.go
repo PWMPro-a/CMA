@@ -158,6 +158,38 @@ func TestAutomaticSupplyGuardRequiresFreshBaselineAndSettledImports(t *testing.T
 	}
 }
 
+func TestAccountPoolStatsSeparateTotalAvailableHealthyAndDisabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/auth-files" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"files":[
+			{"name":"healthy.json","provider":"codex","status":"active"},
+			{"name":"unknown-quota.json","provider":"codex","status":"active"},
+			{"name":"disabled.json","provider":"codex","status":"disabled","disabled":true},
+			{"name":"xai.json","provider":"xai","status":"active"}
+		]}`))
+	}))
+	t.Cleanup(server.Close)
+	service := New(nil, nil, server.Client())
+	stats, err := service.countAccountPoolStats(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{
+			CPABaseURL:    server.URL,
+			ManagementKey: "management-key",
+		},
+	})
+	if err != nil {
+		t.Fatalf("count account pool: %v", err)
+	}
+	resource := SmartResource{HealthyAccounts: 1}
+	applyAccountPoolStats(&resource, stats)
+	if resource.TotalAccounts != 3 || resource.AvailableAccounts != 2 || resource.SchedulableAccounts != 2 ||
+		resource.HealthyAccounts != 1 || resource.WeakAccounts != 1 || resource.DisabledAccounts != 1 {
+		t.Fatalf("account pool statistics = %#v", resource)
+	}
+}
+
 func TestAutomaticReplenishmentCreatesTakesAndImportsOrder(t *testing.T) {
 	var createCalls atomic.Int32
 	var takeCalls atomic.Int32

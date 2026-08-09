@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -288,7 +287,8 @@ func TestSmartResourceExcludesInspectionErrorUntilUsabilityIsVerified(t *testing
 	if resource.SnapshotFresh || resource.DecisionReason != "inspection_usability_incomplete" || resource.SuggestedQuantity != 0 {
 		t.Fatalf("an inspection error must pause automation until availability is verified: %#v", resource)
 	}
-	if resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 || resource.WeakAccounts != 1 || resource.RawCapacityRCU != 2200 {
+	if resource.TotalAccounts != 2 || resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 ||
+		resource.DisabledAccounts != 1 || resource.WeakAccounts != 0 || resource.RawCapacityRCU != 2200 {
 		t.Fatalf("only the successfully verified credential may contribute capacity: %#v", resource)
 	}
 }
@@ -759,8 +759,8 @@ func TestSmartResourcePublishesInspectionCredentialCountsForCachedPanels(t *test
 		generatedAt: now,
 	}, now)
 
-	if resource.SchedulableAccounts != 4 || resource.AvailableAccounts != 2 ||
-		resource.HealthyAccounts != 2 || resource.WeakAccounts != 2 {
+	if resource.TotalAccounts != 4 || resource.SchedulableAccounts != 2 || resource.AvailableAccounts != 2 ||
+		resource.HealthyAccounts != 2 || resource.WeakAccounts != 0 || resource.DisabledAccounts != 2 {
 		t.Fatalf("inspection credential counts = %#v", resource)
 	}
 	encoded, err := json.Marshal(resource)
@@ -771,8 +771,9 @@ func TestSmartResourcePublishesInspectionCredentialCountsForCachedPanels(t *test
 	if err := json.Unmarshal(encoded, &payload); err != nil {
 		t.Fatalf("unmarshal smart resource: %v", err)
 	}
-	if payload["availableAccounts"] != float64(2) || payload["schedulableAccounts"] != float64(4) ||
-		payload["healthyAccounts"] != float64(2) || payload["weakAccounts"] != float64(2) {
+	if payload["totalAccounts"] != float64(4) || payload["availableAccounts"] != float64(2) ||
+		payload["schedulableAccounts"] != float64(2) || payload["healthyAccounts"] != float64(2) ||
+		payload["weakAccounts"] != float64(0) || payload["disabledAccounts"] != float64(2) {
 		t.Fatalf("serialized inspection counts = %#v", payload)
 	}
 }
@@ -1015,7 +1016,11 @@ func TestGetStatusRefreshesSmartSnapshotWhenAutomaticSupplyDisabled(t *testing.T
 				http.Error(w, "missing management key", http.StatusUnauthorized)
 				return
 			}
-			_, _ = w.Write([]byte(`{"files":[{"name":"ready.json","provider":"codex","status":"ready","remaining_rcu":100}]}`))
+			_, _ = w.Write([]byte(`{"files":[
+				{"name":"ready-a.json","provider":"codex","status":"ready","remaining_rcu":100},
+				{"name":"ready-b.json","provider":"codex","status":"ready","remaining_rcu":100},
+				{"name":"disabled.json","provider":"codex","status":"disabled","disabled":true}
+			]}`))
 		case "/api/customer/login", "/api/customer/inventory", "/api/customer/balance", "/api/customer/pickup/orders":
 			supplyRequests.Add(1)
 			http.Error(w, "supply request is unexpected", http.StatusInternalServerError)
@@ -1054,7 +1059,13 @@ func TestGetStatusRefreshesSmartSnapshotWhenAutomaticSupplyDisabled(t *testing.T
 	if !status.SmartResource.SnapshotFresh || status.SmartResource.CapacitySource != smartCapacitySourceInspection {
 		t.Fatalf("cold status should load the completed quota inspection snapshot: %#v", status.SmartResource)
 	}
-	if authFileRequests.Load() != 0 || supplyRequests.Load() != 0 {
+	if status.SmartResource.TotalAccounts != 3 || status.SmartResource.AvailableAccounts != 2 ||
+		status.SmartResource.HealthyAccounts != 1 || status.SmartResource.WeakAccounts != 1 ||
+		status.SmartResource.DisabledAccounts != 1 {
+		t.Fatalf("cold status did not combine live pool counts with inspection health: %#v", status.SmartResource)
+	}
+	firstRunID := status.SmartResource.CapacitySnapshotRunID
+	if authFileRequests.Load() != 1 || supplyRequests.Load() != 0 {
 		t.Fatalf("status refresh requests auth=%d supply=%d", authFileRequests.Load(), supplyRequests.Load())
 	}
 
@@ -1062,8 +1073,21 @@ func TestGetStatusRefreshesSmartSnapshotWhenAutomaticSupplyDisabled(t *testing.T
 	if err != nil {
 		t.Fatalf("second status: %v", err)
 	}
-	if !status.SmartResource.SnapshotFresh || authFileRequests.Load() != 0 || supplyRequests.Load() != 0 {
+	if !status.SmartResource.SnapshotFresh || authFileRequests.Load() != 1 || supplyRequests.Load() != 0 {
 		t.Fatalf("cached status should not refetch or create supply orders: status=%#v auth=%d supply=%d", status.SmartResource, authFileRequests.Load(), supplyRequests.Load())
+	}
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(25), quotaInspectionResult(50))
+	status, err = service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("status after newer inspection: %v", err)
+	}
+	if status.SmartResource.CapacitySnapshotRunID <= firstRunID || status.SmartResource.TotalAccounts != 3 ||
+		status.SmartResource.AvailableAccounts != 2 || status.SmartResource.HealthyAccounts != 2 ||
+		status.SmartResource.WeakAccounts != 0 || status.SmartResource.DisabledAccounts != 1 {
+		t.Fatalf("status did not adopt the newer completed inspection: %#v", status.SmartResource)
+	}
+	if authFileRequests.Load() != 1 || supplyRequests.Load() != 0 {
+		t.Fatalf("newer inspection refresh made upstream requests: auth=%d supply=%d", authFileRequests.Load(), supplyRequests.Load())
 	}
 }
 
@@ -1548,20 +1572,52 @@ func TestSupplyOrderTriggerReasonPreservesWaterlineAndVirtualDemandReasons(t *te
 	}
 }
 
-func TestRiskAdjustedAccountCapacityExpiresWithAccountAge(t *testing.T) {
+func Test401ChurnThresholdsDoNotChangeQuotaCapacityUnits(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
+		Product:                     "oauth_30d",
 		Strategy:                    managerconfigsvc.SupplyStrategyStrongSupply,
 		AccountMaxRequestsBefore401: 30,
 		AccountMaxUsefulSeconds401:  120,
+		NewAccountConfidence:        0.7,
 	}
-	if got := smartRiskAdjustedAccountCapacityRCU(cfg, 4_400, 80, 55, 0); got != 30 {
-		t.Fatalf("fresh risk capacity = %f", got)
+	if got := smartEstimatedNewAccountCapacityRCU(cfg); got != 3_080 {
+		t.Fatalf("new-account conservative quota capacity = %f", got)
 	}
-	if got := smartRiskAdjustedAccountCapacityRCU(cfg, 4_400, 80, 55, 110); math.Abs(got-13.3333333333) > 0.000001 {
-		t.Fatalf("110-second risk capacity = %f", got)
+}
+
+func Test401AgeDoesNotEraseVerifiedAccountQuotaCapacity(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	unused := 0.0
+	resource := New(nil, nil).buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product:                     "oauth_7d",
+		Strategy:                    managerconfigsvc.SupplyStrategyCostFirst,
+		AccountMaxRequestsBefore401: 50,
+		AccountMaxUsefulSeconds401:  180,
+	}, inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{
+			ProbeSetCount: 1,
+			SampledCount:  1,
+			StartedAtMS:   now.Add(-10 * time.Minute).UnixMilli(),
+			FinishedAtMS:  now.UnixMilli(),
+		},
+		results: []store.CodexInspectionResult{{
+			AccountKey: "aged-supply", FileName: "codex-supply-aged.json", Provider: "codex",
+			Status: "active", UsedPercent: &unused,
+		}},
+		activeImportItems: []store.SupplyImportItem{{
+			FileName:         "codex-supply-aged.json",
+			Status:           "imported",
+			ImportedAtMS:     now.Add(-5 * time.Minute).UnixMilli(),
+			LeaseExpiresAtMS: now.Add(30 * time.Minute).UnixMilli(),
+		}},
+		generatedAt: now,
+	}, now)
+
+	if resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 || resource.WeakAccounts != 0 {
+		t.Fatalf("risk lifetime must affect capacity, not account health counts: %#v", resource)
 	}
-	if got := smartRiskAdjustedAccountCapacityRCU(cfg, 4_400, 80, 55, 120); got != 0 {
-		t.Fatalf("expired risk capacity = %f", got)
+	if resource.RawCapacityRCU != 2_200 || resource.CurrentCapacityRCU != 2_200 {
+		t.Fatalf("a fresh successful inspection must retain verified quota capacity: %#v", resource)
 	}
 }
 
@@ -1694,8 +1750,8 @@ func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *t
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if createQuantity.Load() != 10 {
-		t.Fatalf("401 risk-adjusted emergency recovery should use the configured safety batch, quantity=%d", createQuantity.Load())
+	if createQuantity.Load() != 3 {
+		t.Fatalf("quota-capacity sizing should avoid inflating the emergency batch, quantity=%d", createQuantity.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
 	if err != nil {
@@ -2128,6 +2184,24 @@ func TestSmartDemandPlanUsesShortTermRateAndTrendWindows(t *testing.T) {
 				t.Fatalf("plan = %#v, want trend=%q consume=%v planning=%v", plan, tt.wantTrend, tt.wantConsume, tt.wantPlanning)
 			}
 		})
+	}
+}
+
+func TestApplySmartUsagePublishesTokenDrivenDemandBreakdown(t *testing.T) {
+	resource := SmartResource{}
+	applySmartUsage(&resource, smartUsageAggregate{
+		oneMinuteReady: true,
+		rpm1:           224,
+		tpm1:           16_555_789,
+		rpm5:           224,
+		tpm5:           16_555_789,
+		rpm10:          224,
+		tpm10:          16_555_789,
+	}, 40)
+
+	if resource.RequestDemandRCUPerMinute != 224 || resource.TokenDemandRCUPerMinute != 413.89 ||
+		resource.ConsumeRCUPerMinute != 413.89 || resource.DemandDriver != "tokens" {
+		t.Fatalf("token-driven demand breakdown = %#v", resource)
 	}
 }
 

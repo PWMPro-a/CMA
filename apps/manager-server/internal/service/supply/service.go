@@ -593,7 +593,12 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		return Status{}, err
 	}
 	resource := s.currentSmartResource(cfg.Supply)
-	if resource.Enabled && !resource.SnapshotFresh {
+	refreshSmartResource := resource.Enabled && !resource.SnapshotFresh
+	if resource.Enabled && resource.SnapshotFresh && s.newerCompletedSmartInspectionAvailable(ctx, resource.CapacitySnapshotRunID) {
+		s.invalidateInspectionQuotaSnapshot()
+		refreshSmartResource = true
+	}
+	if refreshSmartResource {
 		// Automatic replenishment may be disabled while operators still need a
 		// current capacity view. Refresh the cold snapshot without placing orders.
 		refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -603,6 +608,21 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 			resource = refreshed
 		} else {
 			resource = s.currentSmartResource(cfg.Supply)
+		}
+	}
+	// Capacity and credential counts have different consistency requirements.
+	// The latest completed inspection remains the source of truth for quota and
+	// health, while the live CPA auth-file list is the source of truth for how
+	// many Codex credentials currently exist and are enabled. Reuse the short
+	// auth-file cache so the ten-second dashboard poll does not scan the whole
+	// pool on every request.
+	if cpaManagementConfigured(cfg) {
+		authCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		snapshot, snapshotErr := s.cachedAuthFiles(authCtx, cfg, false)
+		cancel()
+		if snapshotErr == nil || len(snapshot.files) > 0 {
+			applyAccountPoolStats(&resource, accountPoolStatsFromFiles(snapshot.files))
+			applySmartAccountQuantityEstimate(cfg.Supply, &resource)
 		}
 	}
 	// Overview used to live only in process memory. Recreating the Manager
@@ -642,6 +662,26 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		status.ActiveOrder = &active
 	}
 	return status, nil
+}
+
+func (s *Service) newerCompletedSmartInspectionAvailable(ctx context.Context, currentRunID int64) bool {
+	if s == nil || s.store == nil {
+		return false
+	}
+	runs, err := s.store.ListCodexInspectionRuns(ctx, 20)
+	if err != nil {
+		return false
+	}
+	for _, run := range runs {
+		if run.ID <= currentRunID || run.Status != model.CodexInspectionStatusCompleted ||
+			!run.Settings.HasTargetProvider(model.CodexInspectionTargetCodex) {
+			continue
+		}
+		if run.ProbeSetCount > 0 || smartInspectionRunIsTrustedEmptySupplySnapshot(run) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) UpdateConfig(ctx context.Context, config store.ManagerSupplyConfig) (Status, error) {
@@ -1624,9 +1664,18 @@ func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, orde
 func (s *Service) refreshOverview(ctx context.Context, cfg store.ManagerConfig, quantity int) error {
 	available := 0
 	if smartSupplyEnabled(cfg.Supply) {
-		if _, err := s.smartResource(ctx, cfg, true); err != nil {
+		resource, err := s.smartResource(ctx, cfg, true)
+		if err != nil {
 			return err
 		}
+		poolStats, err := s.countAccountPoolStats(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		applyAccountPoolStats(&resource, poolStats)
+		applySmartAccountQuantityEstimate(cfg.Supply, &resource)
+		s.setSmartResource(resource)
+		available = poolStats.available
 	} else {
 		var err error
 		available, err = s.countAvailableAccounts(ctx, cfg)
@@ -3399,31 +3448,65 @@ func (s *Service) disableRecoveredOriginal(ctx context.Context, cfg store.Manage
 }
 
 func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerConfig) (int, error) {
+	stats, err := s.countAccountPoolStats(ctx, cfg)
+	return stats.available, err
+}
+
+type accountPoolStats struct {
+	total     int
+	available int
+}
+
+func (s *Service) countAccountPoolStats(ctx context.Context, cfg store.ManagerConfig) (accountPoolStats, error) {
 	if strings.TrimSpace(cfg.CPAConnection.CPABaseURL) == "" || strings.TrimSpace(cfg.CPAConnection.ManagementKey) == "" {
-		return 0, errors.New("CPA connection is not configured")
+		return accountPoolStats{}, errors.New("CPA connection is not configured")
 	}
-	count := 0
+	files := make([]cpaauthfiles.File, 0)
 	err := s.authFiles.Visit(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, func(file cpaauthfiles.File) (bool, error) {
-		if isAvailableCodexFile(file) {
-			count++
-		}
+		files = append(files, file)
 		return false, nil
 	})
-	return count, err
+	return accountPoolStatsFromFiles(files), err
+}
+
+func accountPoolStatsFromFiles(files []cpaauthfiles.File) accountPoolStats {
+	stats := accountPoolStats{}
+	for _, file := range files {
+		if !isCodexAuthFile(file) {
+			continue
+		}
+		stats.total++
+		if isAvailableCodexFile(file) {
+			stats.available++
+		}
+	}
+	return stats
+}
+
+func applyAccountPoolStats(resource *SmartResource, stats accountPoolStats) {
+	if resource == nil {
+		return
+	}
+	resource.TotalAccounts = max(0, stats.total)
+	resource.AvailableAccounts = max(0, stats.available)
+	resource.SchedulableAccounts = resource.AvailableAccounts
+	resource.DisabledAccounts = max(0, resource.TotalAccounts-resource.AvailableAccounts)
+	if resource.HealthyAccounts > resource.AvailableAccounts {
+		resource.HealthyAccounts = resource.AvailableAccounts
+	}
+	resource.WeakAccounts = max(0, resource.AvailableAccounts-resource.HealthyAccounts)
 }
 
 func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.ManagerConfig, resource *SmartResource) (int, int, string, bool, error) {
 	if resource == nil {
 		return 0, 0, "", false, nil
 	}
-	available, err := s.countAvailableAccounts(ctx, cfg)
+	poolStats, err := s.countAccountPoolStats(ctx, cfg)
 	if err != nil {
 		return 0, 0, "", false, err
 	}
-	resource.AvailableAccounts = available
-	if resource.HealthyAccounts > available {
-		resource.HealthyAccounts = available
-	}
+	applyAccountPoolStats(resource, poolStats)
+	available := poolStats.available
 	if !smartSupplyStrategyConfigured(cfg.Supply) || !smartEmergencyBypassUsageRate(cfg.Supply) {
 		return available, 0, "", true, nil
 	}
@@ -5133,12 +5216,16 @@ func isAvailableCodexFile(file cpaauthfiles.File) bool {
 	return isSmartCapacityCodexFile(file)
 }
 
+func isCodexAuthFile(file cpaauthfiles.File) bool {
+	provider := strings.ToLower(strings.TrimSpace(file.Provider))
+	return provider == "codex" || provider == "openai-codex"
+}
+
 func isSmartCapacityCodexFile(file cpaauthfiles.File) bool {
 	if file.Disabled {
 		return false
 	}
-	provider := strings.ToLower(strings.TrimSpace(file.Provider))
-	if provider != "codex" && provider != "openai-codex" {
+	if !isCodexAuthFile(file) {
 		return false
 	}
 	if boolField(file.Raw, "disabled", "expired", "revoked", "deleted") {
