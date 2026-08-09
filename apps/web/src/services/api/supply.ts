@@ -30,6 +30,7 @@ export interface SupplyConfig {
   minBalanceReserveFen?: number;
   dailyMaxHoldFen?: number;
   dailyMaxReplenishQuantity?: number;
+  revenueMultiplier?: number;
   recoverySyncEnabled?: boolean;
   recoveryAutoClaim?: boolean;
   recoverySyncIntervalSeconds?: number;
@@ -241,6 +242,7 @@ export interface SupplyAccountSummary {
   usageTokens: number;
   usageRevenue: number;
   usageRevenueCurrency: string;
+  revenueMultiplier: number;
   averageRevenuePerCall: number;
   lastUsedAtMs?: number;
   cpaStatusError?: string;
@@ -304,6 +306,7 @@ export interface SupplyReportExecutive {
   usageTokens: number;
   usageRevenue: number;
   usageRevenueCurrency: string;
+  revenueMultiplier: number;
   averageRevenuePerCall: number;
   recoveries: number;
   claimableRecoveries: number;

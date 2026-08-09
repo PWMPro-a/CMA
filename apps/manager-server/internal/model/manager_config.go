@@ -58,6 +58,7 @@ type ManagerSupplyConfig struct {
 	MinBalanceReserveFen        int64   `json:"minBalanceReserveFen,omitempty"`
 	DailyMaxHoldFen             int64   `json:"dailyMaxHoldFen,omitempty"`
 	DailyMaxReplenishQuantity   int     `json:"dailyMaxReplenishQuantity,omitempty"`
+	RevenueMultiplier           float64 `json:"revenueMultiplier,omitempty"`
 	RecoverySyncEnabled         *bool   `json:"recoverySyncEnabled,omitempty"`
 	RecoveryAutoClaim           *bool   `json:"recoveryAutoClaim,omitempty"`
 	RecoverySyncIntervalSeconds int     `json:"recoverySyncIntervalSeconds,omitempty"`

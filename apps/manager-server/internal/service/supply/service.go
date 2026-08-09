@@ -42,6 +42,7 @@ const (
 	// by its own order-expiry policy without any outbound cancellation request.
 	remoteStatusAutomaticReleasePending = "auto_release_pending"
 	automaticReleasePendingMessage      = "automatically released locally; supplier reservation will expire automatically"
+	defaultSupplyRevenueMultiplier      = 0.06
 )
 
 type Overview struct {
@@ -157,6 +158,7 @@ type SupplyAccountSummary struct {
 	UsageTokens           int64   `json:"usageTokens"`
 	UsageRevenue          float64 `json:"usageRevenue"`
 	UsageRevenueCurrency  string  `json:"usageRevenueCurrency"`
+	RevenueMultiplier     float64 `json:"revenueMultiplier"`
 	AverageRevenuePerCall float64 `json:"averageRevenuePerCall"`
 	LastUsedAtMS          int64   `json:"lastUsedAtMs,omitempty"`
 	CPAStatusError        string  `json:"cpaStatusError,omitempty"`
@@ -220,6 +222,7 @@ type ReportExecutive struct {
 	UsageTokens           int64   `json:"usageTokens"`
 	UsageRevenue          float64 `json:"usageRevenue"`
 	UsageRevenueCurrency  string  `json:"usageRevenueCurrency"`
+	RevenueMultiplier     float64 `json:"revenueMultiplier"`
 	AverageRevenuePerCall float64 `json:"averageRevenuePerCall"`
 	Recoveries            int     `json:"recoveries"`
 	ClaimableRecoveries   int     `json:"claimableRecoveries"`
@@ -781,6 +784,17 @@ func (s *Service) ListAccounts(ctx context.Context, req SupplyAccountsRequest) (
 	}
 	req = normalizeSupplyAccountsRequest(req)
 	statusFilter := strings.ToLower(strings.TrimSpace(req.Status))
+	var managerCfg store.ManagerConfig
+	var managerCfgErr error
+	managerCfgKnown := false
+	revenueMultiplier := defaultSupplyRevenueMultiplier
+	if s.managerConfig != nil {
+		managerCfg, _, _, managerCfgErr = s.managerConfig.ResolveManagerConfigWithSource(ctx)
+		if managerCfgErr == nil {
+			managerCfgKnown = true
+			revenueMultiplier = supplyRevenueMultiplier(managerCfg.Supply)
+		}
+	}
 	items, err := s.store.ListSupplyImportItems(ctx, supplyAccountListLimit(req, statusFilter), supplyImportStatusFilter(statusFilter))
 	if err != nil {
 		return SupplyAccountList{}, err
@@ -789,7 +803,7 @@ func (s *Service) ListAccounts(ctx context.Context, req SupplyAccountsRequest) (
 	if err != nil {
 		return SupplyAccountList{}, err
 	}
-	usageByFile, err := s.supplyAccountUsageByFile(ctx, ReportRequest{FromMS: req.FromMS, ToMS: req.ToMS}, supplyUsageAuthFiles(items), prices)
+	usageByFile, err := s.supplyAccountUsageByFile(ctx, ReportRequest{FromMS: req.FromMS, ToMS: req.ToMS}, supplyUsageAuthFiles(items), prices, revenueMultiplier)
 	if err != nil {
 		return SupplyAccountList{}, err
 	}
@@ -802,16 +816,15 @@ func (s *Service) ListAccounts(ctx context.Context, req SupplyAccountsRequest) (
 	cpaFiles := map[string]cpaauthfiles.File{}
 	cpaLookupKnown := false
 	if s.managerConfig != nil {
-		cfg, _, _, cfgErr := s.managerConfig.ResolveManagerConfigWithSource(ctx)
-		if cfgErr == nil && cpaManagementConfigured(cfg) {
-			snapshot, snapshotErr := s.cachedAuthFiles(ctx, cfg, false)
+		if managerCfgKnown && cpaManagementConfigured(managerCfg) {
+			snapshot, snapshotErr := s.cachedAuthFiles(ctx, managerCfg, false)
 			if snapshotErr != nil {
 				cpaStatusErr = safeError(snapshotErr)
 			}
 			cpaLookupKnown = snapshotErr == nil || len(snapshot.files) > 0
 			cpaFiles = supplyCPAFileMap(snapshot.files)
-		} else if cfgErr != nil {
-			cpaStatusErr = safeError(cfgErr)
+		} else if managerCfgErr != nil {
+			cpaStatusErr = safeError(managerCfgErr)
 		}
 	}
 
@@ -826,6 +839,7 @@ func (s *Service) ListAccounts(ctx context.Context, req SupplyAccountsRequest) (
 		},
 		Summary: SupplyAccountSummary{
 			UsageRevenueCurrency: "USD",
+			RevenueMultiplier:    revenueMultiplier,
 			CPAStatusError:       cpaStatusErr,
 		},
 		Items: make([]SupplyAccountItem, 0, min(len(items), req.Limit)),
@@ -878,8 +892,9 @@ func (s *Service) Report(ctx context.Context, req ReportRequest) (Report, error)
 	if err != nil {
 		return Report{}, err
 	}
+	revenueMultiplier := s.currentSupplyRevenueMultiplier(ctx)
 	reconciliationItems := mergeSupplyImportItems(items, usageItems)
-	accountUsage, err := s.supplyAccountUsageByFile(ctx, req, supplyUsageAuthFiles(reconciliationItems), prices)
+	accountUsage, err := s.supplyAccountUsageByFile(ctx, req, supplyUsageAuthFiles(reconciliationItems), prices, revenueMultiplier)
 	if err != nil {
 		return Report{}, err
 	}
@@ -888,7 +903,8 @@ func (s *Service) Report(ctx context.Context, req ReportRequest) (Report, error)
 		return Report{}, err
 	}
 	report := buildSupplyReport(req, orders, recoveries, items, time.Now())
-	applyUsageRevenueToReport(&report, modelStats, usageTimeline, prices)
+	report.Executive.RevenueMultiplier = revenueMultiplier
+	applyUsageRevenueToReport(&report, modelStats, usageTimeline, prices, revenueMultiplier)
 	report.Reconciliation = buildReportReconciliation(orders, recoveries, reconciliationItems, orderLookup, accountUsage, time.Now())
 	report.Range.Truncated = len(orders) >= req.Limit || len(recoveries) >= req.Limit ||
 		len(items) >= req.Limit || len(usageItems) >= req.Limit*2
@@ -1572,6 +1588,28 @@ func cpaManagementConfigured(cfg store.ManagerConfig) bool {
 		strings.TrimSpace(cfg.CPAConnection.ManagementKey) != ""
 }
 
+func (s *Service) currentSupplyRevenueMultiplier(ctx context.Context) float64 {
+	if s == nil || s.managerConfig == nil {
+		return defaultSupplyRevenueMultiplier
+	}
+	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		return defaultSupplyRevenueMultiplier
+	}
+	return supplyRevenueMultiplier(cfg.Supply)
+}
+
+func supplyRevenueMultiplier(cfg store.ManagerSupplyConfig) float64 {
+	value := cfg.RevenueMultiplier
+	if value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return defaultSupplyRevenueMultiplier
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
 func normalizeSupplyAccountsRequest(req SupplyAccountsRequest) SupplyAccountsRequest {
 	now := time.Now()
 	if req.ToMS <= 0 {
@@ -1678,7 +1716,7 @@ type supplyAccountUsage struct {
 	LastUsedAtMS int64
 }
 
-func (s *Service) supplyAccountUsageByFile(ctx context.Context, req ReportRequest, authFiles []string, prices map[string]store.ModelPrice) (map[string]supplyAccountUsage, error) {
+func (s *Service) supplyAccountUsageByFile(ctx context.Context, req ReportRequest, authFiles []string, prices map[string]store.ModelPrice, revenueMultiplier float64) (map[string]supplyAccountUsage, error) {
 	usageByFile := make(map[string]supplyAccountUsage)
 	if len(authFiles) == 0 {
 		return usageByFile, nil
@@ -1709,7 +1747,7 @@ func (s *Service) supplyAccountUsageByFile(ctx context.Context, req ReportReques
 			current.SuccessCalls += stat.SuccessCalls
 			current.FailureCalls += stat.FailureCalls
 			current.Tokens += stat.TotalTokens
-			current.Revenue += reportCostForCredentialStat(stat, prices)
+			current.Revenue += reportCostForCredentialStat(stat, prices, revenueMultiplier)
 			if stat.LastSeenMS > current.LastUsedAtMS {
 				current.LastUsedAtMS = stat.LastSeenMS
 			}
@@ -2308,13 +2346,13 @@ func buildSupplyReport(req ReportRequest, orders []store.SupplyOrder, recoveries
 	return report
 }
 
-func applyUsageRevenueToReport(report *Report, stats []store.ModelStat, timeline []store.TimelinePoint, prices map[string]store.ModelPrice) {
+func applyUsageRevenueToReport(report *Report, stats []store.ModelStat, timeline []store.TimelinePoint, prices map[string]store.ModelPrice, revenueMultiplier float64) {
 	if report == nil {
 		return
 	}
 	models := make([]ReportUsageModelStat, 0, len(stats))
 	for _, stat := range stats {
-		revenue := reportCostForStat(stat, prices)
+		revenue := reportCostForStat(stat, prices, revenueMultiplier)
 		report.Executive.UsageCalls += stat.Calls
 		report.Executive.UsageTokens += stat.TotalTokens
 		report.Executive.UsageRevenue += revenue
@@ -2364,7 +2402,7 @@ func applyUsageRevenueToReport(report *Report, stats []store.ModelStat, timeline
 		}
 		report.Timeline[index].UsageCalls += point.Calls
 		report.Timeline[index].UsageTokens += point.Tokens
-		report.Timeline[index].UsageRevenue += reportCostForTimelinePoint(point, prices)
+		report.Timeline[index].UsageRevenue += reportCostForTimelinePoint(point, prices, revenueMultiplier)
 	}
 	for i := range report.Timeline {
 		report.Timeline[i].UsageRevenue = reportRatioFloat(report.Timeline[i].UsageRevenue, 1)
@@ -2604,8 +2642,8 @@ func richerSupplyImportItem(current store.SupplyImportItem, candidate store.Supp
 	return current
 }
 
-func reportCostForStat(stat store.ModelStat, prices map[string]store.ModelPrice) float64 {
-	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
+func reportCostForStat(stat store.ModelStat, prices map[string]store.ModelPrice, revenueMultiplier float64) float64 {
+	return reportApplyRevenueMultiplier(pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
 		InputTokens:             stat.InputTokens,
 		OutputTokens:            stat.OutputTokens,
 		CachedTokens:            stat.CachedTokens,
@@ -2616,11 +2654,11 @@ func reportCostForStat(stat store.ModelStat, prices map[string]store.ModelPrice)
 		LongCachedTokens:        stat.LongCachedTokens,
 		LongCacheReadTokens:     stat.LongCacheReadTokens,
 		LongCacheCreationTokens: stat.LongCacheCreationTokens,
-	}, prices)
+	}, prices), revenueMultiplier)
 }
 
-func reportCostForCredentialStat(stat store.CredentialModelStat, prices map[string]store.ModelPrice) float64 {
-	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
+func reportCostForCredentialStat(stat store.CredentialModelStat, prices map[string]store.ModelPrice, revenueMultiplier float64) float64 {
+	return reportApplyRevenueMultiplier(pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
 		InputTokens:             stat.InputTokens,
 		OutputTokens:            stat.OutputTokens,
 		CachedTokens:            stat.CachedTokens,
@@ -2631,11 +2669,11 @@ func reportCostForCredentialStat(stat store.CredentialModelStat, prices map[stri
 		LongCachedTokens:        stat.LongCachedTokens,
 		LongCacheReadTokens:     stat.LongCacheReadTokens,
 		LongCacheCreationTokens: stat.LongCacheCreationTokens,
-	}, prices)
+	}, prices), revenueMultiplier)
 }
 
-func reportCostForTimelinePoint(point store.TimelinePoint, prices map[string]store.ModelPrice) float64 {
-	return pricing.CostForModelCandidatesWithServiceTier([]string{point.BillingModel, point.Model}, point.ServiceTier, pricing.ModelTokens{
+func reportCostForTimelinePoint(point store.TimelinePoint, prices map[string]store.ModelPrice, revenueMultiplier float64) float64 {
+	return reportApplyRevenueMultiplier(pricing.CostForModelCandidatesWithServiceTier([]string{point.BillingModel, point.Model}, point.ServiceTier, pricing.ModelTokens{
 		InputTokens:             point.InputTokens,
 		OutputTokens:            point.OutputTokens,
 		CachedTokens:            point.CachedTokens,
@@ -2646,7 +2684,11 @@ func reportCostForTimelinePoint(point store.TimelinePoint, prices map[string]sto
 		LongCachedTokens:        point.LongCachedTokens,
 		LongCacheReadTokens:     point.LongCacheReadTokens,
 		LongCacheCreationTokens: point.LongCacheCreationTokens,
-	}, prices)
+	}, prices), revenueMultiplier)
+}
+
+func reportApplyRevenueMultiplier(value float64, revenueMultiplier float64) float64 {
+	return value * supplyRevenueMultiplier(store.ManagerSupplyConfig{RevenueMultiplier: revenueMultiplier})
 }
 
 func reportDimension(values map[string]*ReportDimensionStat, key string) *ReportDimensionStat {

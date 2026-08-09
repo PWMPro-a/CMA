@@ -82,6 +82,9 @@ func TestNormalizeSupplyConfigDefaultsRecoveryControls(t *testing.T) {
 	if next.RecoverySyncIntervalSeconds != 60 || next.RecoveryClaimBatchSize != 20 {
 		t.Fatalf("recovery defaults = interval %d batch %d", next.RecoverySyncIntervalSeconds, next.RecoveryClaimBatchSize)
 	}
+	if next.RevenueMultiplier != 0.06 {
+		t.Fatalf("revenue multiplier = %f, want 0.06", next.RevenueMultiplier)
+	}
 	off := false
 	next = NormalizeSupplyConfig(store.ManagerSupplyConfig{RecoveryDisableOriginal: &off}, next)
 	if next.RecoveryDisableOriginal == nil || *next.RecoveryDisableOriginal {

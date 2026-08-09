@@ -434,12 +434,12 @@ func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 	}
 	if report.Executive.UsageCalls != 1 || report.Executive.UsageTokens != 1_500_000 ||
 		report.Executive.UsageRevenueCurrency != "USD" ||
-		math.Abs(report.Executive.UsageRevenue-4) > 0.000001 ||
-		math.Abs(report.Executive.AverageRevenuePerCall-4) > 0.000001 {
+		math.Abs(report.Executive.UsageRevenue-0.24) > 0.000001 ||
+		math.Abs(report.Executive.AverageRevenuePerCall-0.24) > 0.000001 {
 		t.Fatalf("executive usage revenue = %#v", report.Executive)
 	}
 	if len(report.UsageModels) != 1 || report.UsageModels[0].Model != "gpt-report" ||
-		report.UsageModels[0].Calls != 1 || math.Abs(report.UsageModels[0].Revenue-4) > 0.000001 {
+		report.UsageModels[0].Calls != 1 || math.Abs(report.UsageModels[0].Revenue-0.24) > 0.000001 {
 		t.Fatalf("usage models = %#v", report.UsageModels)
 	}
 	if report.ImportHealth.Items != 2 || report.ImportHealth.ImportedItems != 2 ||
@@ -449,7 +449,7 @@ func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 	foundUsageTimeline := false
 	for _, point := range report.Timeline {
 		if point.UsageCalls == 1 {
-			foundUsageTimeline = point.UsageTokens == 1_500_000 && math.Abs(point.UsageRevenue-4) <= 0.000001
+			foundUsageTimeline = point.UsageTokens == 1_500_000 && math.Abs(point.UsageRevenue-0.24) <= 0.000001
 		}
 	}
 	if !foundUsageTimeline {

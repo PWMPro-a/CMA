@@ -260,6 +260,7 @@ func (s *Service) DefaultManagerConfig() store.ManagerConfig {
 			AuthFilesCacheTTLSeconds:    60,
 			MinHoldSeconds:              30,
 			NewAccountConfidence:        0.7,
+			RevenueMultiplier:           0.06,
 			RecoverySyncEnabled:         BoolPtr(true),
 			RecoveryAutoClaim:           BoolPtr(true),
 			RecoverySyncIntervalSeconds: 60,
@@ -366,6 +367,7 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	next.MinBalanceReserveFen = BoundedOptionalInt64(submitted.MinBalanceReserveFen, next.MinBalanceReserveFen, 100_000_000)
 	next.DailyMaxHoldFen = BoundedOptionalInt64(submitted.DailyMaxHoldFen, next.DailyMaxHoldFen, 100_000_000)
 	next.DailyMaxReplenishQuantity = BoundedOptionalInt(submitted.DailyMaxReplenishQuantity, next.DailyMaxReplenishQuantity, 10_000)
+	next.RevenueMultiplier = BoundedFloatOrDefault(submitted.RevenueMultiplier, next.RevenueMultiplier, 0.06, 0.000001, 100)
 	if submitted.RecoverySyncEnabled != nil {
 		next.RecoverySyncEnabled = BoolPtr(*submitted.RecoverySyncEnabled)
 	} else if next.RecoverySyncEnabled == nil {

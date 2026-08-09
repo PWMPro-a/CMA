@@ -56,6 +56,7 @@ const emptyConfig: SupplyConfig = {
   minBalanceReserveFen: 0,
   dailyMaxHoldFen: 0,
   dailyMaxReplenishQuantity: 0,
+  revenueMultiplier: 0.06,
   recoverySyncEnabled: true,
   recoveryAutoClaim: true,
   recoverySyncIntervalSeconds: 60,
@@ -139,6 +140,11 @@ const formatMoney = (fen?: number) => `¥${((fen ?? 0) / 100).toFixed(2)}`;
 
 const hasSupplierCost = (basePriceFen?: number, chargedFen?: number) =>
   (basePriceFen ?? 0) > 0 || (chargedFen ?? 0) > 0;
+
+const formatMultiplier = (value?: number) => {
+  const multiplier = typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0.06;
+  return `${multiplier.toLocaleString(undefined, { maximumFractionDigits: 6 })}x`;
+};
 
 const formatUsd = (value?: number) =>
   typeof value === 'number' && Number.isFinite(value) ? `$${value.toFixed(2)}` : '$0.00';
@@ -549,6 +555,7 @@ export function SupplyPage() {
   const activeOrder = status?.activeOrder;
   const orderCount = status?.orders?.length ?? 0;
   const recoveryCount = recovery?.total ?? recoveries.length;
+  const revenueMultiplier = status?.config.revenueMultiplier ?? draft.revenueMultiplier ?? 0.06;
   const healthLevel = smart?.healthLevel || 'unknown';
   const suggestedAction = smart?.suggestedAction || 'unknown';
   const decisionReason = smart?.decisionReason || 'unknown';
@@ -643,6 +650,8 @@ export function SupplyPage() {
       })
     : selectedReportRangeLabel;
   const accountSummary = accounts?.summary;
+  const accountRevenueMultiplier = accountSummary?.revenueMultiplier ?? revenueMultiplier;
+  const reportRevenueMultiplier = reportExecutive?.revenueMultiplier ?? revenueMultiplier;
   const accountRange = accounts?.range;
   const accountRangeLabel = accountRange
     ? t('supply.report_range_value', {
@@ -701,6 +710,7 @@ export function SupplyPage() {
       value: formatUsd(accountSummary?.usageRevenue),
       detail: t('supply.account_usage_revenue_hint', {
         value: formatUsd(accountSummary?.averageRevenuePerCall),
+        multiplier: formatMultiplier(accountRevenueMultiplier),
       }),
     },
   ];
@@ -723,6 +733,7 @@ export function SupplyPage() {
       value: formatUsd(reportExecutive?.usageRevenue),
       detail: t('supply.report_usage_revenue_hint', {
         currency: reportExecutive?.usageRevenueCurrency || 'USD',
+        multiplier: formatMultiplier(reportRevenueMultiplier),
       }),
     },
     {
@@ -1392,6 +1403,17 @@ export function SupplyPage() {
                       onChange={(product) => updateDraft({ product })}
                     />
                   </div>
+                  <Input
+                    label={t('supply.revenue_multiplier')}
+                    type="number"
+                    min={0.000001}
+                    max={100}
+                    step={0.001}
+                    value={draft.revenueMultiplier ?? 0.06}
+                    onChange={(event) =>
+                      updateDraft({ revenueMultiplier: Number(event.target.value) })
+                    }
+                  />
                 </div>
               </article>
 
