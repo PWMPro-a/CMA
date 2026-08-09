@@ -4780,6 +4780,7 @@
     "account_file": "帳號檔案",
     "account_source": "來源",
     "account_status": "帳號狀態",
+    "account_status_reason_value": "原因：{{reason}}",
     "account_cpa_status": "CPA 狀態",
     "account_last_used_at": "最近使用",
     "account_lease_expires_at": "到期倒數",

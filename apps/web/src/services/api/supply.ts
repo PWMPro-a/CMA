@@ -255,6 +255,7 @@ export interface SupplyAccountItem {
   orderStatus?: string;
   status: string;
   accountStatus: string;
+  accountStatusReason?: string;
   cpaProvider?: string;
   cpaAccount?: string;
   cpaAccountId?: string;

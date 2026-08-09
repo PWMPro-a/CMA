@@ -4780,6 +4780,7 @@
     "account_file": "Файл аккаунта",
     "account_source": "Источник",
     "account_status": "Статус аккаунта",
+    "account_status_reason_value": "Причина: {{reason}}",
     "account_cpa_status": "Статус CPA",
     "account_last_used_at": "Последнее использование",
     "account_lease_expires_at": "До истечения",

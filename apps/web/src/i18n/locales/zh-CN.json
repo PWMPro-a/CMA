@@ -4780,6 +4780,7 @@
     "account_file": "账号文件",
     "account_source": "来源",
     "account_status": "账号状态",
+    "account_status_reason_value": "原因：{{reason}}",
     "account_cpa_status": "CPA 状态",
     "account_last_used_at": "最近使用",
     "account_lease_expires_at": "过期倒计时",

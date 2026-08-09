@@ -1740,13 +1740,25 @@ export function SupplyPage() {
                             </div>
                           </td>
                           <td>
-                            <span
-                              className={`${styles.statusPill} ${accountTone(item.accountStatus)}`}
-                            >
-                              {t(`supply.account_status_${item.accountStatus}`, {
-                                defaultValue: item.accountStatus,
-                              })}
-                            </span>
+                            <div className={styles.accountStatusCell}>
+                              <span
+                                className={`${styles.statusPill} ${accountTone(item.accountStatus)}`}
+                              >
+                                {t(`supply.account_status_${item.accountStatus}`, {
+                                  defaultValue: item.accountStatus,
+                                })}
+                              </span>
+                              {item.accountStatusReason ? (
+                                <small
+                                  className={styles.accountReason}
+                                  title={item.accountStatusReason}
+                                >
+                                  {t('supply.account_status_reason_value', {
+                                    reason: item.accountStatusReason,
+                                  })}
+                                </small>
+                              ) : null}
+                            </div>
                           </td>
                           <td>
                             <div className={styles.accountMeta}>

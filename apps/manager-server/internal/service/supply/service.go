@@ -171,6 +171,7 @@ type SupplyAccountItem struct {
 	OrderStatus          string  `json:"orderStatus,omitempty"`
 	Status               string  `json:"status"`
 	AccountStatus        string  `json:"accountStatus"`
+	AccountStatusReason  string  `json:"accountStatusReason,omitempty"`
 	CPAProvider          string  `json:"cpaProvider,omitempty"`
 	CPAAccount           string  `json:"cpaAccount,omitempty"`
 	CPAAccountID         string  `json:"cpaAccountId,omitempty"`
@@ -1765,6 +1766,7 @@ func supplyAccountItemFromStore(item store.SupplyImportItem, order store.SupplyO
 	if item.LeaseExpiresAtMS > 0 {
 		remainingSeconds = max(0, (item.LeaseExpiresAtMS-now.UnixMilli())/1000)
 	}
+	accountStatus := supplyAccountStatus(item, file, cpaLookupKnown, cpaFound, now)
 	return SupplyAccountItem{
 		ID:                   item.ID,
 		FileName:             item.FileName,
@@ -1773,7 +1775,8 @@ func supplyAccountItemFromStore(item store.SupplyImportItem, order store.SupplyO
 		Product:              product,
 		OrderStatus:          orderStatus,
 		Status:               reportKey(item.Status),
-		AccountStatus:        supplyAccountStatus(item, file, cpaLookupKnown, cpaFound, now),
+		AccountStatus:        accountStatus,
+		AccountStatusReason:  supplyAccountStatusReason(accountStatus, item, file, cpaLookupKnown, cpaFound, now),
 		CPAProvider:          file.Provider,
 		CPAAccount:           firstNonEmptyString(file.AccountSnapshot, textField(file.Raw, "account", "email", "username", "auth_label")),
 		CPAAccountID:         file.AccountID,
@@ -1815,6 +1818,142 @@ func supplyAccountStatus(item store.SupplyImportItem, file cpaauthfiles.File, cp
 		return "disabled"
 	}
 	return "active"
+}
+
+func supplyAccountStatusReason(accountStatus string, item store.SupplyImportItem, file cpaauthfiles.File, cpaLookupKnown bool, cpaFound bool, now time.Time) string {
+	accountStatus = reportKey(accountStatus)
+	switch accountStatus {
+	case "active":
+		return ""
+	case "failed":
+		return compactAccountStatusReason(firstNonEmptyString(item.LastError, "账号导入失败"))
+	case "pending":
+		return "等待导入到 CPA 认证文件"
+	case "expired":
+		if item.LeaseExpiresAtMS > 0 {
+			return fmt.Sprintf("账号有效期已于 %s 过期", time.UnixMilli(item.LeaseExpiresAtMS).In(time.Local).Format("2006-01-02 15:04:05"))
+		}
+		return "账号有效期已过期"
+	case "missing":
+		return "CPA 认证文件未找到，可能已被删除或导入未完成"
+	case "unknown":
+		if !cpaLookupKnown {
+			return "CPA 管理连接未配置或认证文件状态暂未获取"
+		}
+		if !cpaFound {
+			return "CPA 认证文件状态未知"
+		}
+		return "账号状态未知"
+	case "disabled":
+		if reason := supplyCPAUnavailableReason(file); reason != "" {
+			return reason
+		}
+		return "CPA 账号已停用或当前不可用"
+	default:
+		if status := reportKey(item.Status); status != "" && status != "imported" {
+			if item.LastError != "" {
+				return compactAccountStatusReason(item.LastError)
+			}
+			return fmt.Sprintf("导入状态为 %s", status)
+		}
+	}
+	return ""
+}
+
+func supplyCPAUnavailableReason(file cpaauthfiles.File) string {
+	if reason := cpaStatusReasonField(file.Raw,
+		"reason", "disabled_reason", "disabledReason", "disable_reason", "disableReason",
+		"status_reason", "statusReason", "last_error", "lastError", "error",
+		"error_message", "errorMessage", "status_message", "statusMessage", "message",
+		"quota_reason", "quotaReason", "invalid_reason", "invalidReason",
+		"error_kind", "errorKind", "header_error_kind", "headerErrorKind",
+	); reason != "" {
+		return compactAccountStatusReason(reason)
+	}
+	for _, key := range []string{"disabled", "expired", "revoked", "deleted"} {
+		if boolField(file.Raw, key) {
+			return fmt.Sprintf("CPA 标记 %s=true", key)
+		}
+	}
+	status := strings.ToLower(textField(file.Raw, "status", "state"))
+	switch status {
+	case "disabled", "inactive", "invalid", "expired", "revoked", "deleted":
+		return fmt.Sprintf("CPA 状态为 %s", status)
+	}
+	if smartAccountCapacityHardBlocked(file.Raw) {
+		if reason := cpaStatusReasonField(file.Raw, "runtime_status", "runtimeStatus", "status", "state", "last_error", "lastError"); reason != "" {
+			return compactAccountStatusReason("CPA 硬限制或鉴权失败：" + reason)
+		}
+		return "CPA 硬限制或鉴权失败"
+	}
+	if file.Disabled {
+		return "CPA 认证文件 disabled=true"
+	}
+	provider := strings.TrimSpace(file.Provider)
+	if provider != "" && !strings.EqualFold(provider, "codex") && !strings.EqualFold(provider, "openai-codex") {
+		return fmt.Sprintf("CPA provider=%s，非 codex 账号", provider)
+	}
+	return ""
+}
+
+func cpaStatusReasonField(values map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value, ok := values[key]
+		if !ok || value == nil {
+			continue
+		}
+		if text := cpaStatusReasonText(value); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func cpaStatusReasonText(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		text := strings.TrimSpace(typed)
+		switch strings.ToLower(text) {
+		case "", "<nil>", "nil", "null", "none", "false":
+			return ""
+		default:
+			return text
+		}
+	case json.Number:
+		return strings.TrimSpace(typed.String())
+	case bool:
+		return ""
+	case map[string]any:
+		return cpaStatusReasonField(typed,
+			"reason", "message", "error", "detail", "details", "description",
+			"status_reason", "statusReason", "status_message", "statusMessage",
+			"error_message", "errorMessage", "last_error", "lastError",
+		)
+	case []any:
+		for _, item := range typed {
+			if text := cpaStatusReasonText(item); text != "" {
+				return text
+			}
+		}
+		return ""
+	default:
+		text := strings.TrimSpace(fmt.Sprint(value))
+		if text == "<nil>" {
+			return ""
+		}
+		return text
+	}
+}
+
+func compactAccountStatusReason(reason string) string {
+	reason = strings.Join(strings.Fields(strings.TrimSpace(reason)), " ")
+	runes := []rune(reason)
+	if len(runes) <= 240 {
+		return reason
+	}
+	return string(runes[:240]) + "..."
 }
 
 func supplyAccountStatusFromItem(item store.SupplyImportItem, now time.Time) string {

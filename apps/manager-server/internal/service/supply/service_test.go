@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
@@ -467,6 +469,59 @@ func TestNormalizeReportRequestDefaultsToToday(t *testing.T) {
 	if from.Year() != to.Year() || from.YearDay() != to.YearDay() ||
 		from.Hour() != 0 || from.Minute() != 0 || from.Second() != 0 {
 		t.Fatalf("fromMs=%s should be start of the same local day as toMs=%s", from, to)
+	}
+}
+
+func TestSupplyAccountStatusReasonExplainsAbnormalStates(t *testing.T) {
+	now := time.Date(2026, 8, 9, 21, 45, 0, 0, time.Local)
+	failedReason := supplyAccountStatusReason("failed", store.SupplyImportItem{
+		Status:    "failed",
+		LastError: "upload rejected by CPA",
+	}, cpaauthfiles.File{}, false, false, now)
+	if failedReason != "upload rejected by CPA" {
+		t.Fatalf("failed reason = %q", failedReason)
+	}
+
+	expiredAt := now.Add(-time.Minute).UnixMilli()
+	expiredReason := supplyAccountStatusReason("expired", store.SupplyImportItem{
+		Status:           "imported",
+		LeaseExpiresAtMS: expiredAt,
+	}, cpaauthfiles.File{}, true, true, now)
+	if !strings.Contains(expiredReason, "过期") || !strings.Contains(expiredReason, "2026-08-09") {
+		t.Fatalf("expired reason = %q", expiredReason)
+	}
+
+	missingReason := supplyAccountStatusReason("missing", store.SupplyImportItem{
+		Status: "imported",
+	}, cpaauthfiles.File{}, true, false, now)
+	if !strings.Contains(missingReason, "未找到") {
+		t.Fatalf("missing reason = %q", missingReason)
+	}
+
+	disabledReason := supplyAccountStatusReason("disabled", store.SupplyImportItem{
+		Status: "imported",
+	}, cpaauthfiles.File{
+		Provider: "codex",
+		Disabled: true,
+		Raw: map[string]any{
+			"disabled_reason": "OAuth 401 reauthorization required",
+		},
+	}, true, true, now)
+	if disabledReason != "OAuth 401 reauthorization required" {
+		t.Fatalf("disabled reason = %q", disabledReason)
+	}
+
+	quotaReason := supplyAccountStatusReason("disabled", store.SupplyImportItem{
+		Status: "imported",
+	}, cpaauthfiles.File{
+		Provider: "codex",
+		Raw: map[string]any{
+			"status":     "ready",
+			"error_kind": "usage_limit_reached",
+		},
+	}, true, true, now)
+	if !strings.Contains(quotaReason, "usage_limit_reached") {
+		t.Fatalf("quota reason = %q", quotaReason)
 	}
 }
 

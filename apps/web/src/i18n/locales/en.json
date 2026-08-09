@@ -4780,6 +4780,7 @@
     "account_file": "Account file",
     "account_source": "Source",
     "account_status": "Account status",
+    "account_status_reason_value": "Reason: {{reason}}",
     "account_cpa_status": "CPA status",
     "account_last_used_at": "Last used",
     "account_lease_expires_at": "Expires in",

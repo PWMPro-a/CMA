@@ -673,6 +673,25 @@
   min-width: 0;
 }
 
+.accountStatusCell {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  max-width: 260px;
+  justify-items: start;
+}
+
+.accountReason {
+  display: block;
+  max-width: 260px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .accountStatusSelect {
   min-width: 152px;
 }
