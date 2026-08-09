@@ -24,6 +24,7 @@ import {
   type SupplyRecovery,
   type SupplySmartResource,
   type SupplyStatus,
+  type SupplyStrategy,
 } from '@/services/api';
 import { useNotificationStore } from '@/stores';
 import styles from './SupplyPage.module.scss';
@@ -35,6 +36,7 @@ const emptyConfig: SupplyConfig = {
   password: '',
   passwordConfigured: false,
   product: 'oauth_30d',
+  strategy: 'strong_supply',
   targetAvailableAccounts: 100,
   replenishBatchSize: 10,
   checkIntervalSeconds: 60,
@@ -57,6 +59,14 @@ const emptyConfig: SupplyConfig = {
   dailyMaxHoldFen: 0,
   dailyMaxReplenishQuantity: 0,
   revenueMultiplier: 0.06,
+  criticalAvailableAccounts: 2,
+  healthyAvailableAccounts: 10,
+  defaultEmergencyMinAccounts: 5,
+  virtualDemandTtlMinutes: 60,
+  accountMaxRequestsBefore401: 30,
+  accountMaxUsefulSecondsBefore401: 120,
+  emergencyBypassUsageRate: true,
+  recoveryTriggerOn401: true,
   recoverySyncEnabled: true,
   recoveryAutoClaim: true,
   recoverySyncIntervalSeconds: 60,
@@ -83,6 +93,54 @@ type AccountStatusFilter =
   | 'pending'
   | 'failed'
   | 'unknown';
+
+const SUPPLY_STRATEGIES: SupplyStrategy[] = ['strong_supply', 'balanced', 'cost_first', 'custom'];
+
+const SUPPLY_STRATEGY_PRESETS: Record<
+  Exclude<SupplyStrategy, 'custom'>,
+  Pick<
+    SupplyConfig,
+    | 'criticalAvailableAccounts'
+    | 'healthyAvailableAccounts'
+    | 'defaultEmergencyMinAccounts'
+    | 'virtualDemandTtlMinutes'
+    | 'accountMaxRequestsBefore401'
+    | 'accountMaxUsefulSecondsBefore401'
+    | 'emergencyBypassUsageRate'
+    | 'recoveryTriggerOn401'
+  >
+> = {
+  strong_supply: {
+    criticalAvailableAccounts: 2,
+    healthyAvailableAccounts: 10,
+    defaultEmergencyMinAccounts: 5,
+    virtualDemandTtlMinutes: 60,
+    accountMaxRequestsBefore401: 30,
+    accountMaxUsefulSecondsBefore401: 120,
+    emergencyBypassUsageRate: true,
+    recoveryTriggerOn401: true,
+  },
+  balanced: {
+    criticalAvailableAccounts: 1,
+    healthyAvailableAccounts: 5,
+    defaultEmergencyMinAccounts: 3,
+    virtualDemandTtlMinutes: 30,
+    accountMaxRequestsBefore401: 40,
+    accountMaxUsefulSecondsBefore401: 150,
+    emergencyBypassUsageRate: true,
+    recoveryTriggerOn401: true,
+  },
+  cost_first: {
+    criticalAvailableAccounts: 0,
+    healthyAvailableAccounts: 2,
+    defaultEmergencyMinAccounts: 1,
+    virtualDemandTtlMinutes: 15,
+    accountMaxRequestsBefore401: 50,
+    accountMaxUsefulSecondsBefore401: 180,
+    emergencyBypassUsageRate: true,
+    recoveryTriggerOn401: true,
+  },
+};
 
 const REPORT_RANGE_PRESETS: Array<{ id: ReportRangePreset; labelKey: string }> = [
   { id: 'today', labelKey: 'supply.report_range_today' },
@@ -142,7 +200,8 @@ const hasSupplierCost = (basePriceFen?: number, chargedFen?: number) =>
   (basePriceFen ?? 0) > 0 || (chargedFen ?? 0) > 0;
 
 const formatMultiplier = (value?: number) => {
-  const multiplier = typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0.06;
+  const multiplier =
+    typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0.06;
   return `${multiplier.toLocaleString(undefined, { maximumFractionDigits: 6 })}x`;
 };
 
@@ -273,13 +332,22 @@ export function SupplyPage() {
     setDraft((current) => ({ ...current, ...patch }));
   }, []);
 
+  const selectSupplyStrategy = useCallback((strategy: SupplyStrategy) => {
+    configDirtyRef.current = true;
+    setDraft((current) => ({
+      ...current,
+      ...(strategy === 'custom' ? {} : SUPPLY_STRATEGY_PRESETS[strategy]),
+      strategy,
+    }));
+  }, []);
+
   const applyStatus = useCallback((next: SupplyStatus) => {
     setStatus(next);
-    if (!configDirtyRef.current) {
+    if (!configDirtyRef.current && next.config) {
       setDraft({ ...next.config, password: '' });
     }
     setManualQuantity((current) =>
-      current > 0 ? current : Math.max(1, next.config.replenishBatchSize || 10)
+      current > 0 ? current : Math.max(1, next.config?.replenishBatchSize || 10)
     );
   }, []);
 
@@ -550,18 +618,23 @@ export function SupplyPage() {
   const smart = status?.smartResource;
   const automation = status?.automation;
   const recovery = status?.recovery;
-  const autoSupplyEnabled = status?.config.enabled ?? draft.enabled ?? false;
+  const autoSupplyEnabled = status?.config?.enabled ?? draft.enabled ?? false;
   const smartModeEnabled = smart?.enabled ?? draft.smartEnabled !== false;
   const activeOrder = status?.activeOrder;
   const orderCount = status?.orders?.length ?? 0;
   const recoveryCount = recovery?.total ?? recoveries.length;
-  const revenueMultiplier = status?.config.revenueMultiplier ?? draft.revenueMultiplier ?? 0.06;
+  const revenueMultiplier = status?.config?.revenueMultiplier ?? draft.revenueMultiplier ?? 0.06;
   const healthLevel = smart?.healthLevel || 'unknown';
   const suggestedAction = smart?.suggestedAction || 'unknown';
   const decisionReason = smart?.decisionReason || 'unknown';
   const confidence = smart?.confidence || 'low';
   const supplyPressureLevel = smart?.supplyPressureLevel || 'unknown';
   const demandTrend = smart?.demandTrend || 'unknown';
+  const currentStrategy = (smart?.strategy ||
+    status?.config?.strategy ||
+    draft.strategy ||
+    'strong_supply') as SupplyStrategy;
+  const draftStrategy = (draft.strategy || 'strong_supply') as SupplyStrategy;
   const effectiveHealthTargetMinutes =
     smart?.effectiveHealthyMinutesTarget ??
     smart?.healthyMinutesTarget ??
@@ -691,6 +764,13 @@ export function SupplyPage() {
       }),
     },
     {
+      label: t('supply.account_auth_401'),
+      value: formatInteger(accountSummary?.auth401Accounts),
+      detail: t('supply.account_auth_401_hint', {
+        quarantined: formatInteger(accountSummary?.autoQuarantined),
+      }),
+    },
+    {
       label: t('supply.account_usage_calls'),
       value: formatInteger(accountSummary?.usageCalls),
       detail: t('supply.account_usage_calls_hint', {
@@ -806,6 +886,38 @@ export function SupplyPage() {
       label: t('supply.report_import_success_rate'),
       value: formatPercent(reportExecutive?.importSuccessRate),
       detail: t('supply.report_import_success_rate_hint'),
+    },
+    {
+      label: t('supply.report_auth_401_accounts'),
+      value: formatInteger(reportExecutive?.auth401Accounts),
+      detail: t('supply.report_auth_401_events_hint', {
+        events: formatInteger(reportExecutive?.auth401Events),
+        rate: formatPercent(reportExecutive?.auth401Rate),
+      }),
+    },
+    {
+      label: t('supply.report_auto_quarantined'),
+      value: formatInteger(reportExecutive?.autoQuarantined),
+      detail: t('supply.report_auto_quarantined_hint'),
+    },
+    {
+      label: t('supply.report_emergency_replenishments'),
+      value: formatInteger(reportExecutive?.emergencyReplenishments),
+      detail: t('supply.report_vacuum_replenishments_hint', {
+        value: formatInteger(reportExecutive?.vacuumReplenishments),
+      }),
+    },
+    {
+      label: t('supply.report_virtual_demand_replenishments'),
+      value: formatInteger(reportExecutive?.virtualDemandReplenishments),
+      detail: t('supply.report_virtual_demand_replenishments_hint'),
+    },
+    {
+      label: t('supply.report_vacuum_total_duration'),
+      value: formatSeconds(reportExecutive?.vacuumTotalSeconds),
+      detail: t('supply.report_vacuum_average_recovery_hint', {
+        value: formatSeconds(reportExecutive?.averageVacuumRecoverySeconds),
+      }),
     },
   ];
   const reportProductMetrics = [
@@ -997,7 +1109,7 @@ export function SupplyPage() {
         label: (
           <span className={styles.tabLabel}>
             {t('supply.tabs_accounts')}
-            {accounts?.summary.total ? (
+            {accounts?.summary?.total ? (
               <span className={styles.tabBadge}>{accounts.summary.total}</span>
             ) : null}
           </span>
@@ -1023,13 +1135,21 @@ export function SupplyPage() {
         ),
       },
     ],
-    [accounts?.summary.total, activeOrder, orderCount, recoveryCount, t]
+    [accounts?.summary?.total, activeOrder, orderCount, recoveryCount, t]
   );
   const reportRangeItems = useMemo<SegmentedTabItem<ReportRangePreset>[]>(
     () =>
       REPORT_RANGE_PRESETS.map((preset) => ({
         id: preset.id,
         label: t(preset.labelKey),
+      })),
+    [t]
+  );
+  const supplyStrategyItems = useMemo<SegmentedTabItem<SupplyStrategy>[]>(
+    () =>
+      SUPPLY_STRATEGIES.map((strategy) => ({
+        id: strategy,
+        label: t(`supply.strategy_${strategy}`),
       })),
     [t]
   );
@@ -1088,6 +1208,52 @@ export function SupplyPage() {
           >
             <IconRefreshCw size={15} /> {t('supply.check_now')}
           </Button>
+        </div>
+      </section>
+
+      <section className={styles.poolSummaryGrid} aria-label={t('supply.pool_summary')}>
+        <div className={styles.poolSummaryItem}>
+          <span>{t('supply.pool_available_accounts')}</span>
+          <strong>{formatInteger(smart?.availableAccounts ?? overview?.cpaAvailable)}</strong>
+          <small>
+            {t('supply.pool_schedulable_accounts_hint', {
+              value: formatInteger(smart?.schedulableAccounts),
+            })}
+          </small>
+        </div>
+        <div className={styles.poolSummaryItem}>
+          <span>{t('supply.pool_healthy_accounts')}</span>
+          <strong>{formatInteger(smart?.healthyAccounts)}</strong>
+          <small>
+            {t('supply.pool_weak_accounts_hint', {
+              value: formatInteger(smart?.weakAccounts),
+            })}
+          </small>
+        </div>
+        <div className={styles.poolSummaryItem}>
+          <span>{t('supply.pool_pending_inspection')}</span>
+          <strong>{formatInteger(smart?.pendingInspectionAccounts ?? 0)}</strong>
+          <small>
+            {t('supply.pool_risk_capacity_hint', {
+              value: formatRcu(smart?.riskAdjustedUnitCapacityRcu),
+            })}
+          </small>
+        </div>
+        <div className={styles.poolSummaryItem}>
+          <span>{t('supply.pool_supply_strategy')}</span>
+          <strong>
+            {t(`supply.strategy_${currentStrategy}`, { defaultValue: currentStrategy })}
+          </strong>
+          <small>
+            {smart?.poolVacuumActive
+              ? t('supply.pool_vacuum_duration', {
+                  value: formatSeconds(smart.poolVacuumDurationSeconds),
+                })
+              : t('supply.pool_waterline_hint', {
+                  critical: smart?.criticalAvailableAccounts ?? draft.criticalAvailableAccounts,
+                  healthy: smart?.healthyAvailableAccounts ?? draft.healthyAvailableAccounts,
+                })}
+          </small>
         </div>
       </section>
 
@@ -1530,6 +1696,133 @@ export function SupplyPage() {
                     label={t('supply.smart_enable')}
                   />
                 </div>
+                <div className={styles.strategySelector}>
+                  <SegmentedTabs<SupplyStrategy>
+                    items={supplyStrategyItems}
+                    activeTab={draftStrategy}
+                    ariaLabel={t('supply.strategy_selector_aria')}
+                    onChange={selectSupplyStrategy}
+                    fullWidth
+                    equalWidth
+                  />
+                  <div className={styles.strategyDescription}>
+                    <strong>{t(`supply.strategy_${draftStrategy}`)}</strong>
+                    <span>{t(`supply.strategy_${draftStrategy}_description`)}</span>
+                    <small>{t(`supply.strategy_${draftStrategy}_scenario`)}</small>
+                  </div>
+                </div>
+                <div className={styles.strategyMetricGrid}>
+                  <div>
+                    <span>{t('supply.strategy_critical_accounts')}</span>
+                    <strong>{draft.criticalAvailableAccounts ?? 0}</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.strategy_healthy_accounts')}</span>
+                    <strong>{draft.healthyAvailableAccounts ?? 0}</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.strategy_emergency_min_accounts')}</span>
+                    <strong>{draft.defaultEmergencyMinAccounts ?? 0}</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.strategy_virtual_demand_ttl')}</span>
+                    <strong>{draft.virtualDemandTtlMinutes ?? 0}m</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.strategy_request_risk_limit')}</span>
+                    <strong>{draft.accountMaxRequestsBefore401 ?? 0}</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.strategy_time_risk_limit')}</span>
+                    <strong>{formatSeconds(draft.accountMaxUsefulSecondsBefore401)}</strong>
+                  </div>
+                </div>
+                {draftStrategy === 'custom' ? (
+                  <>
+                    <div className={styles.reportSectionHeader}>
+                      <span>{t('supply.strategy_custom_parameters')}</span>
+                      <small>{t('supply.strategy_custom_parameters_hint')}</small>
+                    </div>
+                    <div className={styles.formGrid}>
+                      <Input
+                        label={t('supply.strategy_critical_accounts')}
+                        type="number"
+                        min={0}
+                        max={1000}
+                        value={draft.criticalAvailableAccounts ?? 0}
+                        onChange={(event) =>
+                          updateDraft({ criticalAvailableAccounts: Number(event.target.value) })
+                        }
+                      />
+                      <Input
+                        label={t('supply.strategy_healthy_accounts')}
+                        type="number"
+                        min={draft.criticalAvailableAccounts ?? 0}
+                        max={10000}
+                        value={draft.healthyAvailableAccounts ?? 0}
+                        onChange={(event) =>
+                          updateDraft({ healthyAvailableAccounts: Number(event.target.value) })
+                        }
+                      />
+                      <Input
+                        label={t('supply.strategy_emergency_min_accounts')}
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={draft.defaultEmergencyMinAccounts ?? 1}
+                        onChange={(event) =>
+                          updateDraft({ defaultEmergencyMinAccounts: Number(event.target.value) })
+                        }
+                      />
+                      <Input
+                        label={t('supply.strategy_virtual_demand_ttl')}
+                        type="number"
+                        min={1}
+                        max={180}
+                        value={draft.virtualDemandTtlMinutes ?? 60}
+                        onChange={(event) =>
+                          updateDraft({ virtualDemandTtlMinutes: Number(event.target.value) })
+                        }
+                      />
+                      <Input
+                        label={t('supply.strategy_request_risk_limit')}
+                        type="number"
+                        min={1}
+                        max={100000}
+                        value={draft.accountMaxRequestsBefore401 ?? 30}
+                        onChange={(event) =>
+                          updateDraft({ accountMaxRequestsBefore401: Number(event.target.value) })
+                        }
+                      />
+                      <Input
+                        label={t('supply.strategy_time_risk_limit')}
+                        type="number"
+                        min={1}
+                        max={3600}
+                        value={draft.accountMaxUsefulSecondsBefore401 ?? 120}
+                        onChange={(event) =>
+                          updateDraft({
+                            accountMaxUsefulSecondsBefore401: Number(event.target.value),
+                          })
+                        }
+                      />
+                    </div>
+                    <div className={styles.smartToggles}>
+                      <ToggleSwitch
+                        checked={draft.emergencyBypassUsageRate !== false}
+                        onChange={(emergencyBypassUsageRate) =>
+                          updateDraft({ emergencyBypassUsageRate })
+                        }
+                        label={t('supply.strategy_emergency_bypass_usage')}
+                      />
+                      <ToggleSwitch
+                        checked={draft.recoveryTriggerOn401 !== false}
+                        onChange={(recoveryTriggerOn401) => updateDraft({ recoveryTriggerOn401 })}
+                        label={t('supply.strategy_recovery_trigger_401')}
+                      />
+                    </div>
+                  </>
+                ) : null}
                 <div className={styles.formGrid}>
                   <Input
                     label={t('supply.healthy_minutes_target')}
@@ -1738,6 +2031,8 @@ export function SupplyPage() {
                         <th>{t('supply.account_status')}</th>
                         <th>{t('supply.account_cpa_status')}</th>
                         <th>{t('supply.account_usage_calls')}</th>
+                        <th>{t('supply.account_auth_401')}</th>
+                        <th>{t('supply.account_recovery_status')}</th>
                         <th>{t('supply.account_usage_tokens')}</th>
                         <th>{t('supply.account_usage_revenue')}</th>
                         <th>{t('supply.account_supply_cost')}</th>
@@ -1793,6 +2088,44 @@ export function SupplyPage() {
                             </div>
                           </td>
                           <td>{formatInteger(item.usageCalls)}</td>
+                          <td>
+                            {item.auth401AtMs ? (
+                              <div className={styles.accountMeta}>
+                                <span>{formatTime(item.auth401AtMs)}</span>
+                                <small title={item.auth401Reason}>
+                                  {t('supply.account_auth_401_calls_hint', {
+                                    calls: formatInteger(item.auth401BeforeCalls),
+                                  })}
+                                  {item.autoDisabledAtMs
+                                    ? ` · ${t('supply.account_auto_quarantined_short')}`
+                                    : ''}
+                                </small>
+                                {item.auth401Reason ? (
+                                  <small className={styles.accountReason}>
+                                    {item.auth401Reason}
+                                  </small>
+                                ) : null}
+                              </div>
+                            ) : (
+                              '-'
+                            )}
+                          </td>
+                          <td>
+                            {item.recoveryStatus ? (
+                              <div className={styles.accountMeta}>
+                                <span
+                                  className={`${styles.statusPill} ${orderTone(item.recoveryStatus)}`}
+                                >
+                                  {t(`supply.recovery_status_${item.recoveryStatus}`, {
+                                    defaultValue: item.recoveryStatus,
+                                  })}
+                                </span>
+                                <small className={styles.mono}>{item.recoveryId || '-'}</small>
+                              </div>
+                            ) : (
+                              '-'
+                            )}
+                          </td>
                           <td>{formatTokens(item.usageTokens)}</td>
                           <td>{formatUsd(item.usageRevenue)}</td>
                           <td>
@@ -1827,7 +2160,7 @@ export function SupplyPage() {
                       ))}
                       {!accounts?.items?.length ? (
                         <tr>
-                          <td colSpan={11} className={styles.emptyCell}>
+                          <td colSpan={13} className={styles.emptyCell}>
                             {accountsLoading ? t('common.loading') : t('supply.no_accounts')}
                           </td>
                         </tr>
@@ -2053,6 +2386,16 @@ export function SupplyPage() {
                       rows={report.sources}
                     />
                     <ReportDimensionTable
+                      title={t('supply.report_strategies')}
+                      rows={report.strategies}
+                      labelKeyPrefix="supply.strategy_"
+                    />
+                    <ReportDimensionTable
+                      title={t('supply.report_trigger_reasons')}
+                      rows={report.triggerReasons}
+                      labelKeyPrefix="supply.smart_reason_"
+                    />
+                    <ReportDimensionTable
                       title={t('supply.report_order_statuses')}
                       rows={report.orderStatuses}
                     />
@@ -2221,8 +2564,8 @@ function ReportMetricCards({
 }) {
   return (
     <div className={styles.reportMetricGrid}>
-      {items.map((item) => (
-        <div key={item.label}>
+      {items.map((item, index) => (
+        <div key={`${item.label}:${index}`}>
           <span>{item.label}</span>
           <strong>{item.value}</strong>
           <small>{item.detail}</small>
@@ -2235,9 +2578,11 @@ function ReportMetricCards({
 function ReportDimensionTable({
   title,
   rows,
+  labelKeyPrefix,
 }: {
   title: string;
   rows?: SupplyReportDimensionStat[];
+  labelKeyPrefix?: string;
 }) {
   const { t } = useTranslation();
   return (
@@ -2265,7 +2610,12 @@ function ReportDimensionTable({
           <tbody>
             {(rows ?? []).map((row) => (
               <tr key={row.key}>
-                <td className={styles.mono}>{row.label || row.key}</td>
+                <td className={styles.mono}>
+                  {row.label ||
+                    (labelKeyPrefix
+                      ? t(`${labelKeyPrefix}${row.key}`, { defaultValue: row.key })
+                      : row.key)}
+                </td>
                 <td>{formatInteger(row.count)}</td>
                 <td>{formatInteger(row.quantity || row.orders || row.recoveries)}</td>
                 <td>{formatInteger(row.imported)}</td>
@@ -2421,6 +2771,8 @@ function ReportAccountLedgerTable({ rows }: { rows?: SupplyReport['reconciliatio
               <th>{t('supply.order_id')}</th>
               <th>{t('supply.account_source')}</th>
               <th>{t('supply.account_status')}</th>
+              <th>{t('supply.account_auth_401')}</th>
+              <th>{t('supply.account_auto_quarantined_at')}</th>
               <th>{t('supply.report_allocated_charged')}</th>
               <th>{t('supply.report_allocated_released')}</th>
               <th>{t('supply.report_allocated_net')}</th>
@@ -2448,6 +2800,8 @@ function ReportAccountLedgerTable({ rows }: { rows?: SupplyReport['reconciliatio
                     })}
                   </span>
                 </td>
+                <td>{formatTime(row.auth401AtMs)}</td>
+                <td>{formatTime(row.autoDisabledAtMs)}</td>
                 <td>{formatMoney(row.allocatedChargedFen)}</td>
                 <td>{formatMoney(row.allocatedReleasedFen)}</td>
                 <td>{formatMoney(row.allocatedNetFen)}</td>
@@ -2460,7 +2814,7 @@ function ReportAccountLedgerTable({ rows }: { rows?: SupplyReport['reconciliatio
             ))}
             {!rows?.length ? (
               <tr>
-                <td colSpan={12} className={styles.emptyCell}>
+                <td colSpan={14} className={styles.emptyCell}>
                   {t('supply.report_no_data')}
                 </td>
               </tr>
@@ -2488,6 +2842,8 @@ function ReportOrderLedgerTable({ rows }: { rows?: SupplyReport['reconciliation'
             <tr>
               <th>{t('supply.order_id')}</th>
               <th>{t('supply.account_source')}</th>
+              <th>{t('supply.report_strategy')}</th>
+              <th>{t('supply.report_trigger_reason')}</th>
               <th>{t('supply.product')}</th>
               <th>{t('common.status')}</th>
               <th>{t('supply.quantity')}</th>
@@ -2508,6 +2864,18 @@ function ReportOrderLedgerTable({ rows }: { rows?: SupplyReport['reconciliation'
                     defaultValue: row.source,
                   })}
                 </td>
+                <td>
+                  {row.strategy
+                    ? t(`supply.strategy_${row.strategy}`, { defaultValue: row.strategy })
+                    : '-'}
+                </td>
+                <td>
+                  {row.triggerReason
+                    ? t(`supply.smart_reason_${row.triggerReason}`, {
+                        defaultValue: row.triggerReason,
+                      })
+                    : '-'}
+                </td>
                 <td>{row.product}</td>
                 <td>
                   <span className={`${styles.statusPill} ${orderTone(row.status)}`}>
@@ -2525,7 +2893,7 @@ function ReportOrderLedgerTable({ rows }: { rows?: SupplyReport['reconciliation'
             ))}
             {!rows?.length ? (
               <tr>
-                <td colSpan={11} className={styles.emptyCell}>
+                <td colSpan={13} className={styles.emptyCell}>
                   {t('supply.report_no_data')}
                 </td>
               </tr>

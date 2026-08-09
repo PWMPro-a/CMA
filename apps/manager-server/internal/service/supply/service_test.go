@@ -58,6 +58,35 @@ func TestAutomationExecutionTracksScheduledAndCompletedCycles(t *testing.T) {
 	}
 }
 
+func TestSupplyAuth401CandidateOnlyAcceptsManagedSupplyAccounts(t *testing.T) {
+	nowMS := time.Now().UnixMilli()
+	event := usage.Event{
+		Failed:               true,
+		FailStatusCode:       http.StatusUnauthorized,
+		AuthFileSnapshot:     "codex-supply-account.json",
+		AuthIndex:            "7",
+		AuthProviderSnapshot: "codex",
+		AccountSnapshot:      "account@example.com",
+		TimestampMS:          nowMS - 1000,
+		FailSummary:          "upstream returned 401",
+	}
+	candidate, ok := supplyAuth401CandidateFromEvent(event, nowMS)
+	if !ok || candidate.FileName != event.AuthFileSnapshot || candidate.AuthIndex != "7" ||
+		candidate.SeenAtMS != event.TimestampMS || candidate.Provider != "codex" ||
+		candidate.FailureSummary != event.FailSummary || !strings.Contains(candidate.EvidenceJSON, `"statusCode":401`) {
+		t.Fatalf("401 candidate = %#v, ok=%v", candidate, ok)
+	}
+	event.AuthFileSnapshot = "manual-account.json"
+	if _, ok := supplyAuth401CandidateFromEvent(event, nowMS); ok {
+		t.Fatal("non-supply account must not enter the supplier recovery workflow")
+	}
+	event.AuthFileSnapshot = "supply-account.json"
+	event.FailStatusCode = http.StatusTooManyRequests
+	if _, ok := supplyAuth401CandidateFromEvent(event, nowMS); ok {
+		t.Fatal("non-401 failure must not enter the supplier recovery workflow")
+	}
+}
+
 func TestEmergencyOrderProcessingHonorsSupplierRetryDeadline(t *testing.T) {
 	service := New(nil, nil)
 	resource := SmartResource{
@@ -349,6 +378,8 @@ func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 		Product:           "oauth_30d",
 		RequestedQuantity: 2,
 		Automatic:         true,
+		Strategy:          managerconfigsvc.SupplyStrategyStrongSupply,
+		TriggerReason:     "emergency_pool_vacuum",
 		Status:            "completed",
 		ChargedFen:        1200,
 		ReleasedFen:       200,
@@ -407,6 +438,21 @@ func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert usage event: %v", err)
 	}
+	candidate, err := st.UpsertAccountActionCandidate(ctx, store.AccountActionCandidateUpsert{
+		ActionType:          "reauth",
+		Provider:            "codex",
+		AuthFileName:        "codex-supply-a.json",
+		ReasonCode:          "invalid_401",
+		Reason:              "supplier account returned 401",
+		AutoDisableEligible: true,
+		SeenAtMS:            now.Add(-15 * time.Minute).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("upsert 401 candidate: %v", err)
+	}
+	if err := st.MarkAccountActionCandidateAutoDisabled(ctx, candidate.ID, now.Add(-14*time.Minute).UnixMilli()); err != nil {
+		t.Fatalf("mark 401 candidate auto disabled: %v", err)
+	}
 
 	report, err := New(st, nil).Report(ctx, ReportRequest{FromMS: fromMS, ToMS: toMS})
 	if err != nil {
@@ -415,6 +461,12 @@ func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 	if report.Executive.Orders != 1 || report.Executive.AutomaticOrders != 1 ||
 		report.Executive.RequestedAccounts != 2 || report.Executive.ImportedAccounts != 2 {
 		t.Fatalf("executive order counts = %#v", report.Executive)
+	}
+	if report.Executive.EmergencyReplenishments != 1 || report.Executive.VacuumReplenishments != 1 ||
+		report.Executive.Auth401Accounts != 1 || report.Executive.Auth401Events != 1 ||
+		report.Executive.Auth401Rate != 1 || report.Executive.AutoQuarantined != 1 || report.Executive.VacuumTotalSeconds != 180 ||
+		report.Executive.AverageVacuumRecoverySeconds != 180 {
+		t.Fatalf("strategy and 401 metrics = %#v", report.Executive)
 	}
 	if report.Executive.ChargedFen != 1200 || report.Executive.ReleasedFen != 200 ||
 		report.Executive.RefundedFen != 300 || report.Executive.SupplySpendFen != 1200 ||
@@ -455,7 +507,8 @@ func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 	if !foundUsageTimeline {
 		t.Fatalf("timeline missing usage revenue: %#v", report.Timeline)
 	}
-	if len(report.Products) == 0 || len(report.Sources) == 0 || len(report.RecoveryStatuses) == 0 ||
+	if len(report.Products) == 0 || len(report.Strategies) == 0 || len(report.TriggerReasons) == 0 ||
+		len(report.Sources) == 0 || len(report.RecoveryStatuses) == 0 ||
 		len(report.DeliveryStatuses) == 0 || len(report.OrderStatuses) == 0 {
 		t.Fatalf("dimension stats were not populated: %#v", report)
 	}

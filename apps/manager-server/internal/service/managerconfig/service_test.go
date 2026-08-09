@@ -91,3 +91,63 @@ func TestNormalizeSupplyConfigDefaultsRecoveryControls(t *testing.T) {
 		t.Fatalf("submitted recovery original disable=false should be preserved: %#v", next.RecoveryDisableOriginal)
 	}
 }
+
+func TestNormalizeSupplyConfigAppliesSupplyStrategyPresets(t *testing.T) {
+	tests := []struct {
+		strategy                               string
+		critical, healthy, emergency, ttl      int
+		maxRequests, maxUsefulSecondsBefore401 int
+	}{
+		{SupplyStrategyStrongSupply, 2, 10, 5, 60, 30, 120},
+		{SupplyStrategyBalanced, 1, 5, 3, 30, 40, 150},
+		{SupplyStrategyCostFirst, 0, 2, 1, 15, 50, 180},
+	}
+	for _, test := range tests {
+		t.Run(test.strategy, func(t *testing.T) {
+			next := NormalizeSupplyConfig(store.ManagerSupplyConfig{Strategy: test.strategy}, store.ManagerSupplyConfig{})
+			if next.Strategy != test.strategy ||
+				next.CriticalAvailableAccounts != test.critical ||
+				next.HealthyAvailableAccounts != test.healthy ||
+				next.DefaultEmergencyMinAccounts != test.emergency ||
+				next.VirtualDemandTTLMinutes != test.ttl ||
+				next.AccountMaxRequestsBefore401 != test.maxRequests ||
+				next.AccountMaxUsefulSeconds401 != test.maxUsefulSecondsBefore401 {
+				t.Fatalf("strategy preset = %#v", next)
+			}
+			if next.EmergencyBypassUsageRate == nil || !*next.EmergencyBypassUsageRate ||
+				next.RecoveryTriggerOn401 == nil || !*next.RecoveryTriggerOn401 {
+				t.Fatalf("strategy safety switches = %#v/%#v", next.EmergencyBypassUsageRate, next.RecoveryTriggerOn401)
+			}
+		})
+	}
+
+	defaulted := NormalizeSupplyConfig(store.ManagerSupplyConfig{}, store.ManagerSupplyConfig{})
+	if defaulted.Strategy != SupplyStrategyStrongSupply {
+		t.Fatalf("default strategy = %q", defaulted.Strategy)
+	}
+}
+
+func TestNormalizeSupplyConfigPreservesCustomSupplyStrategy(t *testing.T) {
+	off := false
+	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{
+		Strategy:                    SupplyStrategyCustom,
+		CriticalAvailableAccounts:   4,
+		HealthyAvailableAccounts:    3,
+		DefaultEmergencyMinAccounts: 7,
+		VirtualDemandTTLMinutes:     45,
+		AccountMaxRequestsBefore401: 35,
+		AccountMaxUsefulSeconds401:  135,
+		EmergencyBypassUsageRate:    &off,
+		RecoveryTriggerOn401:        &off,
+	}, store.ManagerSupplyConfig{})
+	if next.Strategy != SupplyStrategyCustom || next.CriticalAvailableAccounts != 4 ||
+		next.HealthyAvailableAccounts != 4 || next.DefaultEmergencyMinAccounts != 7 ||
+		next.VirtualDemandTTLMinutes != 45 || next.AccountMaxRequestsBefore401 != 35 ||
+		next.AccountMaxUsefulSeconds401 != 135 {
+		t.Fatalf("custom strategy = %#v", next)
+	}
+	if next.EmergencyBypassUsageRate == nil || *next.EmergencyBypassUsageRate ||
+		next.RecoveryTriggerOn401 == nil || *next.RecoveryTriggerOn401 {
+		t.Fatalf("custom switches = %#v/%#v", next.EmergencyBypassUsageRate, next.RecoveryTriggerOn401)
+	}
+}

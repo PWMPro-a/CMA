@@ -37,6 +37,7 @@ type ManagerSupplyConfig struct {
 	Password                    string  `json:"password,omitempty"`
 	PasswordConfigured          bool    `json:"passwordConfigured,omitempty"`
 	Product                     string  `json:"product"`
+	Strategy                    string  `json:"strategy,omitempty"`
 	TargetAvailableAccounts     int     `json:"targetAvailableAccounts"`
 	ReplenishBatchSize          int     `json:"replenishBatchSize"`
 	CheckIntervalSeconds        int     `json:"checkIntervalSeconds"`
@@ -59,6 +60,14 @@ type ManagerSupplyConfig struct {
 	DailyMaxHoldFen             int64   `json:"dailyMaxHoldFen,omitempty"`
 	DailyMaxReplenishQuantity   int     `json:"dailyMaxReplenishQuantity,omitempty"`
 	RevenueMultiplier           float64 `json:"revenueMultiplier,omitempty"`
+	CriticalAvailableAccounts   int     `json:"criticalAvailableAccounts,omitempty"`
+	HealthyAvailableAccounts    int     `json:"healthyAvailableAccounts,omitempty"`
+	DefaultEmergencyMinAccounts int     `json:"defaultEmergencyMinAccounts,omitempty"`
+	VirtualDemandTTLMinutes     int     `json:"virtualDemandTtlMinutes,omitempty"`
+	AccountMaxRequestsBefore401 int     `json:"accountMaxRequestsBefore401,omitempty"`
+	AccountMaxUsefulSeconds401  int     `json:"accountMaxUsefulSecondsBefore401,omitempty"`
+	EmergencyBypassUsageRate    *bool   `json:"emergencyBypassUsageRate,omitempty"`
+	RecoveryTriggerOn401        *bool   `json:"recoveryTriggerOn401,omitempty"`
 	RecoverySyncEnabled         *bool   `json:"recoverySyncEnabled,omitempty"`
 	RecoveryAutoClaim           *bool   `json:"recoveryAutoClaim,omitempty"`
 	RecoverySyncIntervalSeconds int     `json:"recoverySyncIntervalSeconds,omitempty"`

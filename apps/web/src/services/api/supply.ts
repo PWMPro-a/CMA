@@ -1,6 +1,7 @@
 import { apiClient } from './client';
 
 export type SupplyProduct = 'oauth_30d' | 'oauth_7d';
+export type SupplyStrategy = 'strong_supply' | 'balanced' | 'cost_first' | 'custom';
 
 export interface SupplyConfig {
   enabled?: boolean;
@@ -9,6 +10,7 @@ export interface SupplyConfig {
   password?: string;
   passwordConfigured?: boolean;
   product: SupplyProduct | string;
+  strategy?: SupplyStrategy | string;
   targetAvailableAccounts: number;
   replenishBatchSize: number;
   checkIntervalSeconds: number;
@@ -31,6 +33,14 @@ export interface SupplyConfig {
   dailyMaxHoldFen?: number;
   dailyMaxReplenishQuantity?: number;
   revenueMultiplier?: number;
+  criticalAvailableAccounts?: number;
+  healthyAvailableAccounts?: number;
+  defaultEmergencyMinAccounts?: number;
+  virtualDemandTtlMinutes?: number;
+  accountMaxRequestsBefore401?: number;
+  accountMaxUsefulSecondsBefore401?: number;
+  emergencyBypassUsageRate?: boolean;
+  recoveryTriggerOn401?: boolean;
   recoverySyncEnabled?: boolean;
   recoveryAutoClaim?: boolean;
   recoverySyncIntervalSeconds?: number;
@@ -63,6 +73,8 @@ export interface SupplyOrder {
   product: string;
   requestedQuantity: number;
   automatic: boolean;
+  strategy?: string;
+  triggerReason?: string;
   status: string;
   remoteStatus?: string;
   readyQuantity: number;
@@ -107,6 +119,10 @@ export interface SupplySmartResource {
   capacitySnapshotAtMs: number;
   capacitySnapshotAgeSeconds: number;
   capacitySnapshotRunId?: number;
+  availableAccounts: number;
+  schedulableAccounts: number;
+  healthyAccounts: number;
+  weakAccounts: number;
   pendingInspectionAccounts?: number;
   pendingInspectionCapacityRcu?: number;
   leaseEstimatedAccounts?: number;
@@ -154,6 +170,22 @@ export interface SupplySmartResource {
   lockedOrderId?: string;
   lockedOrderAgeSeconds?: number;
   lockedConfirmRounds?: number;
+  strategy?: string;
+  criticalAvailableAccounts?: number;
+  healthyAvailableAccounts?: number;
+  emergencyMinAccounts?: number;
+  emergencyReason?: string;
+  poolVacuumActive?: boolean;
+  poolVacuumStartedAtMs?: number;
+  poolVacuumDurationSeconds?: number;
+  demandMemoryRcuPerMinute?: number;
+  demandMemoryLastSeenMs?: number;
+  demandMemoryAgeSeconds?: number;
+  virtualDemandRcuPerMinute?: number;
+  virtualDemandTtlMinutes?: number;
+  accountMaxRequestsBefore401?: number;
+  accountMaxUsefulSecondsBefore401?: number;
+  riskAdjustedUnitCapacityRcu?: number;
 }
 
 export interface SupplyAutomationExecution {
@@ -244,6 +276,8 @@ export interface SupplyAccountSummary {
   usageRevenueCurrency: string;
   revenueMultiplier: number;
   averageRevenuePerCall: number;
+  auth401Accounts: number;
+  autoQuarantined: number;
   lastUsedAtMs?: number;
   cpaStatusError?: string;
 }
@@ -277,6 +311,12 @@ export interface SupplyAccountItem {
   importedAtMs?: number;
   leaseExpiresAtMs?: number;
   remainingSeconds?: number;
+  auth401AtMs?: number;
+  auth401BeforeCalls?: number;
+  auth401Reason?: string;
+  autoDisabledAtMs?: number;
+  recoveryId?: string;
+  recoveryStatus?: string;
   attemptCount: number;
   lastError?: string;
   createdAtMs: number;
@@ -319,6 +359,15 @@ export interface SupplyReportExecutive {
   recoveryImportRate: number;
   recoveryRefundRate: number;
   importSuccessRate: number;
+  auth401Accounts: number;
+  auth401Events: number;
+  auth401Rate: number;
+  autoQuarantined: number;
+  emergencyReplenishments: number;
+  virtualDemandReplenishments: number;
+  vacuumReplenishments: number;
+  vacuumTotalSeconds: number;
+  averageVacuumRecoverySeconds: number;
 }
 
 export interface SupplyReportDimensionStat {
@@ -408,6 +457,8 @@ export interface SupplyReportReconciliationSummary {
 export interface SupplyReportOrderLedgerRow {
   orderId: string;
   source: string;
+  strategy?: string;
+  triggerReason?: string;
   product: string;
   status: string;
   requestedQuantity: number;
@@ -441,6 +492,8 @@ export interface SupplyReportAccountLedgerRow {
   usageTokens: number;
   usageRevenue: number;
   lastUsedAtMs?: number;
+  auth401AtMs?: number;
+  autoDisabledAtMs?: number;
 }
 
 export interface SupplyReportRecoveryLedgerRow {
@@ -484,6 +537,8 @@ export interface SupplyReport {
   reconciliation: SupplyReportReconciliation;
   timeline: SupplyReportTimelinePoint[];
   products: SupplyReportDimensionStat[];
+  strategies: SupplyReportDimensionStat[];
+  triggerReasons: SupplyReportDimensionStat[];
   orderStatuses: SupplyReportDimensionStat[];
   recoveryStatuses: SupplyReportDimensionStat[];
   deliveryStatuses: SupplyReportDimensionStat[];

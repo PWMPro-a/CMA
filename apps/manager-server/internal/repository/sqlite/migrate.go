@@ -381,6 +381,8 @@ func Migrate(db *sql.DB) error {
 			product text not null,
 			requested_quantity integer not null,
 			automatic integer not null default 0,
+			strategy text,
+			trigger_reason text,
 			status text not null,
 			remote_status text,
 			ready_quantity integer not null default 0,
@@ -518,6 +520,8 @@ func ensureSupplyOrderColumns(db *sql.DB) error {
 		{name: "status_url", definition: "text"},
 		{name: "take_url", definition: "text"},
 		{name: "supplier_retry_until_ms", definition: "integer"},
+		{name: "strategy", definition: "text"},
+		{name: "trigger_reason", definition: "text"},
 	} {
 		if _, ok := existing[column.name]; ok {
 			continue

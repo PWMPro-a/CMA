@@ -138,6 +138,46 @@
   gap: 10px;
 }
 
+.poolSummaryGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--border-color) 88%, transparent);
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--bg-primary) 96%, var(--surface-subtle));
+}
+
+.poolSummaryItem {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 10px 13px;
+  border-left: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+}
+
+.poolSummaryItem:first-child {
+  border-left: 0;
+}
+
+.poolSummaryItem span,
+.poolSummaryItem small {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.poolSummaryItem strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 18px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .metricCard {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -601,6 +641,65 @@
   gap: 12px;
 }
 
+.strategySelector {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.strategyDescription {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--primary-color);
+  background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
+}
+
+.strategyDescription strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.strategyDescription span,
+.strategyDescription small,
+.strategyMetricGrid span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.strategyDescription small {
+  text-align: right;
+}
+
+.strategyMetricGrid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.strategyMetricGrid > div {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 9px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--bg-primary) 74%, var(--surface-subtle));
+}
+
+.strategyMetricGrid strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .field {
   display: grid;
   align-content: start;
@@ -905,6 +1004,7 @@
 
 @media (max-width: 1180px) {
   .metricGrid,
+  .poolSummaryGrid,
   .overviewGrid,
   .automationGrid,
   .ordersGrid,
@@ -912,6 +1012,10 @@
   .reportMetricGrid,
   .dimensionGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .strategyMetricGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .decisionFooter {
@@ -926,6 +1030,7 @@
 
 @media (max-width: 820px) {
   .metricGrid,
+  .poolSummaryGrid,
   .overviewGrid,
   .automationGrid,
   .ordersGrid,
@@ -942,6 +1047,19 @@
   .riskBucketGrid,
   .dimensionGrid {
     grid-template-columns: 1fr;
+  }
+
+  .poolSummaryItem {
+    border-top: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+    border-left: 0;
+  }
+
+  .poolSummaryItem:first-child {
+    border-top: 0;
+  }
+
+  .strategyMetricGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .fullSpan {
@@ -971,6 +1089,14 @@
   .reportSectionHeader {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .strategyDescription {
+    grid-template-columns: 1fr;
+  }
+
+  .strategyDescription small {
+    text-align: left;
   }
 
   .demandStrategyHeader small,

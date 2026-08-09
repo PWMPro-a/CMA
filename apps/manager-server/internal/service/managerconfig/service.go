@@ -20,7 +20,24 @@ const (
 	SourceNone Source = ""
 	SourceEnv  Source = "env"
 	SourceDB   Source = "db"
+
+	SupplyStrategyStrongSupply = "strong_supply"
+	SupplyStrategyBalanced     = "balanced"
+	SupplyStrategyCostFirst    = "cost_first"
+	SupplyStrategyCustom       = "custom"
 )
+
+type supplyStrategyPreset struct {
+	Strategy                    string
+	CriticalAvailableAccounts   int
+	HealthyAvailableAccounts    int
+	DefaultEmergencyMinAccounts int
+	VirtualDemandTTLMinutes     int
+	AccountMaxRequestsBefore401 int
+	AccountMaxUsefulSeconds401  int
+	EmergencyBypassUsageRate    bool
+	RecoveryTriggerOn401        bool
+}
 
 type Response struct {
 	Config   store.ManagerConfig `json:"config"`
@@ -261,6 +278,15 @@ func (s *Service) DefaultManagerConfig() store.ManagerConfig {
 			MinHoldSeconds:              30,
 			NewAccountConfidence:        0.7,
 			RevenueMultiplier:           0.06,
+			Strategy:                    SupplyStrategyStrongSupply,
+			CriticalAvailableAccounts:   2,
+			HealthyAvailableAccounts:    10,
+			DefaultEmergencyMinAccounts: 5,
+			VirtualDemandTTLMinutes:     60,
+			AccountMaxRequestsBefore401: 30,
+			AccountMaxUsefulSeconds401:  120,
+			EmergencyBypassUsageRate:    BoolPtr(true),
+			RecoveryTriggerOn401:        BoolPtr(true),
 			RecoverySyncEnabled:         BoolPtr(true),
 			RecoveryAutoClaim:           BoolPtr(true),
 			RecoverySyncIntervalSeconds: 60,
@@ -326,6 +352,7 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	if value := strings.ToLower(strings.TrimSpace(submitted.Product)); value != "" {
 		next.Product = value
 	}
+	next.Strategy = NormalizeSupplyStrategy(ValueOr(submitted.Strategy, next.Strategy))
 	next.TargetAvailableAccounts = BoundedPositiveOrDefault(submitted.TargetAvailableAccounts, next.TargetAvailableAccounts, 100, 10000)
 	next.ReplenishBatchSize = BoundedPositiveOrDefault(submitted.ReplenishBatchSize, next.ReplenishBatchSize, 10, 100)
 	next.CheckIntervalSeconds = BoundedPositiveOrDefault(submitted.CheckIntervalSeconds, next.CheckIntervalSeconds, 60, 3600)
@@ -368,6 +395,7 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	next.DailyMaxHoldFen = BoundedOptionalInt64(submitted.DailyMaxHoldFen, next.DailyMaxHoldFen, 100_000_000)
 	next.DailyMaxReplenishQuantity = BoundedOptionalInt(submitted.DailyMaxReplenishQuantity, next.DailyMaxReplenishQuantity, 10_000)
 	next.RevenueMultiplier = BoundedFloatOrDefault(submitted.RevenueMultiplier, next.RevenueMultiplier, 0.06, 0.000001, 100)
+	next = NormalizeSupplyStrategyConfig(next, submitted)
 	if submitted.RecoverySyncEnabled != nil {
 		next.RecoverySyncEnabled = BoolPtr(*submitted.RecoverySyncEnabled)
 	} else if next.RecoverySyncEnabled == nil {
@@ -387,6 +415,98 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	}
 	next.PasswordConfigured = next.Password != ""
 	return next
+}
+
+func NormalizeSupplyStrategy(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case SupplyStrategyBalanced:
+		return SupplyStrategyBalanced
+	case SupplyStrategyCostFirst:
+		return SupplyStrategyCostFirst
+	case SupplyStrategyCustom:
+		return SupplyStrategyCustom
+	case SupplyStrategyStrongSupply, "":
+		return SupplyStrategyStrongSupply
+	default:
+		return SupplyStrategyStrongSupply
+	}
+}
+
+func NormalizeSupplyStrategyConfig(current store.ManagerSupplyConfig, submitted store.ManagerSupplyConfig) store.ManagerSupplyConfig {
+	current.Strategy = NormalizeSupplyStrategy(current.Strategy)
+	if current.Strategy != SupplyStrategyCustom {
+		preset := SupplyStrategyPreset(current.Strategy)
+		current.CriticalAvailableAccounts = preset.CriticalAvailableAccounts
+		current.HealthyAvailableAccounts = preset.HealthyAvailableAccounts
+		current.DefaultEmergencyMinAccounts = preset.DefaultEmergencyMinAccounts
+		current.VirtualDemandTTLMinutes = preset.VirtualDemandTTLMinutes
+		current.AccountMaxRequestsBefore401 = preset.AccountMaxRequestsBefore401
+		current.AccountMaxUsefulSeconds401 = preset.AccountMaxUsefulSeconds401
+		current.EmergencyBypassUsageRate = BoolPtr(preset.EmergencyBypassUsageRate)
+		current.RecoveryTriggerOn401 = BoolPtr(preset.RecoveryTriggerOn401)
+		return current
+	}
+	current.CriticalAvailableAccounts = clampInt(NonNegativeOrDefault(submitted.CriticalAvailableAccounts, current.CriticalAvailableAccounts, 2), 0, 1000)
+	current.HealthyAvailableAccounts = clampInt(NonNegativeOrDefault(submitted.HealthyAvailableAccounts, current.HealthyAvailableAccounts, 10), 0, 10000)
+	current.DefaultEmergencyMinAccounts = BoundedPositiveOrDefault(submitted.DefaultEmergencyMinAccounts, current.DefaultEmergencyMinAccounts, 5, 100)
+	current.VirtualDemandTTLMinutes = BoundedPositiveOrDefault(submitted.VirtualDemandTTLMinutes, current.VirtualDemandTTLMinutes, 60, 180)
+	current.AccountMaxRequestsBefore401 = BoundedPositiveOrDefault(submitted.AccountMaxRequestsBefore401, current.AccountMaxRequestsBefore401, 30, 100000)
+	current.AccountMaxUsefulSeconds401 = BoundedPositiveOrDefault(submitted.AccountMaxUsefulSeconds401, current.AccountMaxUsefulSeconds401, 120, 3600)
+	if submitted.EmergencyBypassUsageRate != nil {
+		current.EmergencyBypassUsageRate = BoolPtr(*submitted.EmergencyBypassUsageRate)
+	} else if current.EmergencyBypassUsageRate == nil {
+		current.EmergencyBypassUsageRate = BoolPtr(true)
+	}
+	if submitted.RecoveryTriggerOn401 != nil {
+		current.RecoveryTriggerOn401 = BoolPtr(*submitted.RecoveryTriggerOn401)
+	} else if current.RecoveryTriggerOn401 == nil {
+		current.RecoveryTriggerOn401 = BoolPtr(true)
+	}
+	if current.HealthyAvailableAccounts < current.CriticalAvailableAccounts {
+		current.HealthyAvailableAccounts = current.CriticalAvailableAccounts
+	}
+	return current
+}
+
+func SupplyStrategyPreset(strategy string) supplyStrategyPreset {
+	switch NormalizeSupplyStrategy(strategy) {
+	case SupplyStrategyBalanced:
+		return supplyStrategyPreset{
+			Strategy:                    SupplyStrategyBalanced,
+			CriticalAvailableAccounts:   1,
+			HealthyAvailableAccounts:    5,
+			DefaultEmergencyMinAccounts: 3,
+			VirtualDemandTTLMinutes:     30,
+			AccountMaxRequestsBefore401: 40,
+			AccountMaxUsefulSeconds401:  150,
+			EmergencyBypassUsageRate:    true,
+			RecoveryTriggerOn401:        true,
+		}
+	case SupplyStrategyCostFirst:
+		return supplyStrategyPreset{
+			Strategy:                    SupplyStrategyCostFirst,
+			CriticalAvailableAccounts:   0,
+			HealthyAvailableAccounts:    2,
+			DefaultEmergencyMinAccounts: 1,
+			VirtualDemandTTLMinutes:     15,
+			AccountMaxRequestsBefore401: 50,
+			AccountMaxUsefulSeconds401:  180,
+			EmergencyBypassUsageRate:    true,
+			RecoveryTriggerOn401:        true,
+		}
+	default:
+		return supplyStrategyPreset{
+			Strategy:                    SupplyStrategyStrongSupply,
+			CriticalAvailableAccounts:   2,
+			HealthyAvailableAccounts:    10,
+			DefaultEmergencyMinAccounts: 5,
+			VirtualDemandTTLMinutes:     60,
+			AccountMaxRequestsBefore401: 30,
+			AccountMaxUsefulSeconds401:  120,
+			EmergencyBypassUsageRate:    true,
+			RecoveryTriggerOn401:        true,
+		}
+	}
 }
 
 func ValidateSupplyConfig(cfg store.ManagerSupplyConfig) error {
@@ -509,6 +629,27 @@ func BoundedOptionalInt64(value int64, fallback int64, maximum int64) int64 {
 		return maximum
 	}
 	return result
+}
+
+func NonNegativeOrDefault(value int, fallback int, hardDefault int) int {
+	result := hardDefault
+	if fallback >= 0 {
+		result = fallback
+	}
+	if value >= 0 {
+		result = value
+	}
+	return result
+}
+
+func clampInt(value int, minimum int, maximum int) int {
+	if value < minimum {
+		return minimum
+	}
+	if value > maximum {
+		return maximum
+	}
+	return value
 }
 
 func ValueOr(value string, fallback string) string {

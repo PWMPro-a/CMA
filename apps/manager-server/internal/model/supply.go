@@ -6,6 +6,8 @@ type SupplyOrder struct {
 	Product           string `json:"product"`
 	RequestedQuantity int    `json:"requestedQuantity"`
 	Automatic         bool   `json:"automatic"`
+	Strategy          string `json:"strategy,omitempty"`
+	TriggerReason     string `json:"triggerReason,omitempty"`
 	Status            string `json:"status"`
 	RemoteStatus      string `json:"remoteStatus,omitempty"`
 	ReadyQuantity     int    `json:"readyQuantity"`

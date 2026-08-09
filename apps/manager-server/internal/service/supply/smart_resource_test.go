@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -693,13 +694,14 @@ func TestInspectionCapacityExcludesQuotaEvenWhenCooldownIsPresent(t *testing.T) 
 	}
 }
 
-func TestSmartAutomaticPausesWithoutInspectionSnapshotOrAuthFileRead(t *testing.T) {
+func TestSmartAutomaticPausesWithoutInspectionSnapshotAfterPoolCheck(t *testing.T) {
 	var authFileRequests atomic.Int32
 	var supplyRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v0/management/auth-files":
 			authFileRequests.Add(1)
+			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex"},{"name":"b.json","provider":"codex"},{"name":"c.json","provider":"codex"}]}`))
 		case "/api/customer/login", "/api/customer/inventory", "/api/customer/balance", "/api/customer/pickup/orders":
 			supplyRequests.Add(1)
 		default:
@@ -726,7 +728,7 @@ func TestSmartAutomaticPausesWithoutInspectionSnapshotOrAuthFileRead(t *testing.
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if authFileRequests.Load() != 0 || supplyRequests.Load() != 0 {
+	if authFileRequests.Load() != 1 || supplyRequests.Load() != 0 {
 		t.Fatalf("automatic pause made unexpected requests auth=%d supply=%d", authFileRequests.Load(), supplyRequests.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
@@ -1271,8 +1273,9 @@ func TestSmartResourceLimitsCapacityByOneHourExpiry(t *testing.T) {
 	}
 }
 
-func TestSmartAutomaticSkipsCreateWhenUsageRateNotReady(t *testing.T) {
+func TestStrongSupplyCreatesMinimumEmergencyOrderWhenPoolIsEmptyAndUsageRateNotReady(t *testing.T) {
 	var createCalls atomic.Int32
+	var createQuantity atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/api/customer/login":
@@ -1282,10 +1285,18 @@ func TestSmartAutomaticSkipsCreateWhenUsageRateNotReady(t *testing.T) {
 		case r.URL.Path == "/api/customer/balance":
 			_, _ = w.Write([]byte(`{"available_fen":10000}`))
 		case r.URL.Path == "/v0/management/auth-files":
-			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex","success":100,"failed":0},{"name":"b.json","provider":"codex","success":100,"failed":0}]}`))
+			_, _ = w.Write([]byte(`{"files":[]}`))
 		case r.URL.Path == "/api/customer/pickup/orders":
 			createCalls.Add(1)
-			t.Fatal("smart mode must not create from account count when burn rate is unavailable")
+			var payload struct {
+				Quantity int `json:"quantity"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode create payload: %v", err)
+			}
+			createQuantity.Store(int32(payload.Quantity))
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"order":{"id":"order-vacuum","status":"waiting_inventory","quantity":5},"status_url":"/api/customer/pickup/orders/order-vacuum"}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -1293,6 +1304,59 @@ func TestSmartAutomaticSkipsCreateWhenUsageRateNotReady(t *testing.T) {
 	defer server.Close()
 
 	st, err := store.Open(filepath.Join(t.TempDir(), "smart-no-usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password",
+			Product: "oauth_30d", TargetAvailableAccounts: 100, ReplenishBatchSize: 5,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(0))
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("run automatic: %v", err)
+	}
+	if createCalls.Load() != 1 || createQuantity.Load() != 5 {
+		t.Fatalf("create calls/quantity = %d/%d", createCalls.Load(), createQuantity.Load())
+	}
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	if status.ActiveOrder == nil || status.SmartResource.DecisionReason != "emergency_pool_vacuum" || !status.SmartResource.PoolVacuumActive {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
+func TestStrongSupplySkipsCreateWithoutUsageAboveCriticalWaterline(t *testing.T) {
+	var createCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex"},{"name":"b.json","provider":"codex"},{"name":"c.json","provider":"codex"}]}`))
+		case "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":10,"estimated_total_fen":100}`))
+		case "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":10000}`))
+		case "/api/customer/pickup/orders":
+			createCalls.Add(1)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "smart-no-usage-above-waterline.sqlite"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -1322,6 +1386,87 @@ func TestSmartAutomaticSkipsCreateWhenUsageRateNotReady(t *testing.T) {
 	}
 	if status.ActiveOrder != nil || status.SmartResource.DecisionReason != "usage_rate_not_ready" {
 		t.Fatalf("status = %#v", status)
+	}
+}
+
+func TestSupplyStrategyVirtualDemandMemoryUsesConfiguredTTL(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Minute)
+	service.recordSmartUsageEvents([]usage.Event{{
+		TimestampMS: now.Add(-40 * time.Minute).UnixMilli(),
+		Provider:    "codex",
+		AuthIndex:   "recent-demand.json",
+		TotalTokens: 80_000,
+	}}, now)
+
+	strong := defaultSmartResource(store.ManagerSupplyConfig{
+		Product:                     "oauth_30d",
+		Strategy:                    managerconfigsvc.SupplyStrategyStrongSupply,
+		VirtualDemandTTLMinutes:     60,
+		EmergencyBypassUsageRate:    managerconfigsvc.BoolPtr(true),
+		AccountMaxRequestsBefore401: 30,
+		AccountMaxUsefulSeconds401:  120,
+	})
+	if got := service.applySmartDemandMemory(store.ManagerSupplyConfig{
+		Product:                  "oauth_30d",
+		Strategy:                 managerconfigsvc.SupplyStrategyStrongSupply,
+		VirtualDemandTTLMinutes:  60,
+		EmergencyBypassUsageRate: managerconfigsvc.BoolPtr(true),
+	}, &strong, now, 0); got != 1 || strong.DemandTrend != smartDemandTrendVirtual || strong.DecisionReason != "virtual_demand_memory" {
+		t.Fatalf("strong supply demand memory = %f, resource=%#v", got, strong)
+	}
+
+	balanced := defaultSmartResource(store.ManagerSupplyConfig{
+		Product:                  "oauth_30d",
+		Strategy:                 managerconfigsvc.SupplyStrategyBalanced,
+		VirtualDemandTTLMinutes:  30,
+		EmergencyBypassUsageRate: managerconfigsvc.BoolPtr(true),
+	})
+	if got := service.applySmartDemandMemory(store.ManagerSupplyConfig{
+		Product:                  "oauth_30d",
+		Strategy:                 managerconfigsvc.SupplyStrategyBalanced,
+		VirtualDemandTTLMinutes:  30,
+		EmergencyBypassUsageRate: managerconfigsvc.BoolPtr(true),
+	}, &balanced, now, 0); got != 0 || balanced.VirtualDemandRCUPerMinute != 0 {
+		t.Fatalf("balanced demand memory should expire after 30 minutes: %f, resource=%#v", got, balanced)
+	}
+}
+
+func TestSupplyOrderTriggerReasonPreservesWaterlineAndVirtualDemandReasons(t *testing.T) {
+	if got := supplyOrderTriggerReason(SmartResource{
+		DecisionReason:            "emergency_capacity_shortage",
+		VirtualDemandRCUPerMinute: 2,
+		DemandTrend:               smartDemandTrendVirtual,
+	}, true); got != "virtual_demand_memory" {
+		t.Fatalf("virtual demand trigger reason = %q", got)
+	}
+	if got := supplyOrderTriggerReason(SmartResource{
+		DecisionReason:            "emergency_capacity_shortage",
+		EmergencyReason:           "emergency_pool_vacuum",
+		VirtualDemandRCUPerMinute: 2,
+		DemandTrend:               smartDemandTrendVirtual,
+	}, true); got != "emergency_pool_vacuum" {
+		t.Fatalf("waterline trigger reason = %q", got)
+	}
+	if got := supplyOrderTriggerReason(SmartResource{}, false); got != "manual" {
+		t.Fatalf("manual trigger reason = %q", got)
+	}
+}
+
+func TestRiskAdjustedAccountCapacityExpiresWithAccountAge(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Strategy:                    managerconfigsvc.SupplyStrategyStrongSupply,
+		AccountMaxRequestsBefore401: 30,
+		AccountMaxUsefulSeconds401:  120,
+	}
+	if got := smartRiskAdjustedAccountCapacityRCU(cfg, 4_400, 80, 55, 0); got != 30 {
+		t.Fatalf("fresh risk capacity = %f", got)
+	}
+	if got := smartRiskAdjustedAccountCapacityRCU(cfg, 4_400, 80, 55, 110); math.Abs(got-13.3333333333) > 0.000001 {
+		t.Fatalf("110-second risk capacity = %f", got)
+	}
+	if got := smartRiskAdjustedAccountCapacityRCU(cfg, 4_400, 80, 55, 120); got != 0 {
+		t.Fatalf("expired risk capacity = %f", got)
 	}
 }
 
@@ -1404,7 +1549,7 @@ func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *t
 		case r.URL.Path == "/api/customer/balance":
 			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
 		case r.URL.Path == "/v0/management/auth-files":
-			_, _ = w.Write([]byte(`{"files":[]}`))
+			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex"},{"name":"b.json","provider":"codex"},{"name":"c.json","provider":"codex"}]}`))
 		case r.URL.Path == "/api/customer/pickup/orders":
 			var payload struct {
 				Quantity int `json:"quantity"`
@@ -1454,8 +1599,8 @@ func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *t
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if createQuantity.Load() != 3 {
-		t.Fatalf("low-water recovery should retain the capacity-sized batch, quantity=%d", createQuantity.Load())
+	if createQuantity.Load() != 10 {
+		t.Fatalf("401 risk-adjusted emergency recovery should use the configured safety batch, quantity=%d", createQuantity.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
 	if err != nil {
@@ -1479,7 +1624,7 @@ func TestSmartAutomaticKeepsFullBatchWhenSupplyIsScarce(t *testing.T) {
 		case r.URL.Path == "/api/customer/balance":
 			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
 		case r.URL.Path == "/v0/management/auth-files":
-			_, _ = w.Write([]byte(`{"files":[]}`))
+			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex"},{"name":"b.json","provider":"codex"},{"name":"c.json","provider":"codex"}]}`))
 		case r.URL.Path == "/api/customer/pickup/orders":
 			var payload struct {
 				Quantity int `json:"quantity"`

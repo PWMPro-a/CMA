@@ -11,6 +11,7 @@ import (
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
+	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
@@ -51,6 +52,7 @@ const (
 	smartDemandTrendStable  = "stable"
 	smartDemandTrendRising  = "rising"
 	smartDemandTrendFalling = "falling"
+	smartDemandTrendVirtual = "virtual"
 )
 
 type SmartResource struct {
@@ -70,10 +72,8 @@ type SmartResource struct {
 	CapacitySnapshotAtMS         int64   `json:"capacitySnapshotAtMs"`
 	CapacitySnapshotAgeSeconds   int     `json:"capacitySnapshotAgeSeconds"`
 	CapacitySnapshotRunID        int64   `json:"capacitySnapshotRunId,omitempty"`
-	// These counts are informational only. Smart replenishment is driven by
-	// RCU capacity and burn rate, never by credential counts. They remain in
-	// the response so an older cached management page does not render its
-	// account-health summary as four misleading zeroes.
+	// These counts drive only the strategy waterline guard. Normal smart
+	// replenishment remains capacity- and burn-rate based.
 	AvailableAccounts   int `json:"availableAccounts"`
 	SchedulableAccounts int `json:"schedulableAccounts"`
 	HealthyAccounts     int `json:"healthyAccounts"`
@@ -96,46 +96,62 @@ type SmartResource struct {
 	EstimatedSustainMinutes   float64 `json:"estimatedSustainMinutes"`
 	// EmergencyShortage marks a runway shortfall that takes precedence over
 	// normal demand-trend observation.
-	EmergencyShortage          bool    `json:"emergencyShortage"`
-	HealthyMinutesTarget       int     `json:"healthyMinutesTarget"`
-	WarningMinutes             int     `json:"warningMinutes"`
-	CriticalMinutes            int     `json:"criticalMinutes"`
-	RPM30M                     float64 `json:"rpm30m"`
-	RPM5MPeak                  float64 `json:"rpm5mPeak"`
-	TPM30M                     float64 `json:"tpm30m"`
-	RPM1M                      float64 `json:"rpm1m"`
-	RPM5M                      float64 `json:"rpm5m"`
-	RPM10M                     float64 `json:"rpm10m"`
-	TPM1M                      float64 `json:"tpm1m"`
-	TPM5M                      float64 `json:"tpm5m"`
-	TPM10M                     float64 `json:"tpm10m"`
-	ConsumeRCU1M               float64 `json:"consumeRcu1m"`
-	ConsumeRCU5M               float64 `json:"consumeRcu5m"`
-	ConsumeRCU10M              float64 `json:"consumeRcu10m"`
-	DemandTrend                string  `json:"demandTrend"`
-	DemandPlanningRCUPerMinute float64 `json:"demandPlanningRcuPerMinute"`
-	ConsumeRCUPerMinute        float64 `json:"consumeRcuPerMinute"`
-	CurrentCapacityRCU         float64 `json:"currentCapacityRcu"`
-	RawCapacityRCU             float64 `json:"rawCapacityRcu,omitempty"`
-	TimeLimitedCapacityRCU     float64 `json:"timeLimitedCapacityRcu,omitempty"`
-	ExpiryWasteRiskRCU         float64 `json:"expiryWasteRiskRcu,omitempty"`
-	TargetCapacityRCU          float64 `json:"targetCapacityRcu"`
-	CapacityGapRCU             float64 `json:"capacityGapRcu"`
-	UnitCapacityRCU            float64 `json:"unitCapacityRcu"`
-	RecommendedCapacityRCU     float64 `json:"recommendedCapacityRcu"`
-	PrelockedCapacityRCU       float64 `json:"prelockedCapacityRcu,omitempty"`
-	SupplyPressureLevel        string  `json:"supplyPressureLevel,omitempty"`
-	SupplyPressureReason       string  `json:"supplyPressureReason,omitempty"`
-	SupplyInventoryAvailable   int     `json:"supplyInventoryAvailable,omitempty"`
-	SupplyInventoryMissing     int     `json:"supplyInventoryMissing,omitempty"`
-	SupplyNeedsProduction      bool    `json:"supplyNeedsProduction,omitempty"`
-	SupplyAvgFulfillSeconds    int     `json:"supplyAvgFulfillSeconds,omitempty"`
-	SupplyRecentWaiting        int     `json:"supplyRecentWaiting,omitempty"`
-	UsageSampleMinutes         int     `json:"usageSampleMinutes"`
-	AccountCacheAgeSeconds     int     `json:"accountCacheAgeSeconds"`
-	LockedOrderID              string  `json:"lockedOrderId,omitempty"`
-	LockedOrderAgeSeconds      int     `json:"lockedOrderAgeSeconds,omitempty"`
-	LockedConfirmRounds        int     `json:"lockedConfirmRounds,omitempty"`
+	EmergencyShortage           bool    `json:"emergencyShortage"`
+	HealthyMinutesTarget        int     `json:"healthyMinutesTarget"`
+	WarningMinutes              int     `json:"warningMinutes"`
+	CriticalMinutes             int     `json:"criticalMinutes"`
+	RPM30M                      float64 `json:"rpm30m"`
+	RPM5MPeak                   float64 `json:"rpm5mPeak"`
+	TPM30M                      float64 `json:"tpm30m"`
+	RPM1M                       float64 `json:"rpm1m"`
+	RPM5M                       float64 `json:"rpm5m"`
+	RPM10M                      float64 `json:"rpm10m"`
+	TPM1M                       float64 `json:"tpm1m"`
+	TPM5M                       float64 `json:"tpm5m"`
+	TPM10M                      float64 `json:"tpm10m"`
+	ConsumeRCU1M                float64 `json:"consumeRcu1m"`
+	ConsumeRCU5M                float64 `json:"consumeRcu5m"`
+	ConsumeRCU10M               float64 `json:"consumeRcu10m"`
+	DemandTrend                 string  `json:"demandTrend"`
+	DemandPlanningRCUPerMinute  float64 `json:"demandPlanningRcuPerMinute"`
+	ConsumeRCUPerMinute         float64 `json:"consumeRcuPerMinute"`
+	CurrentCapacityRCU          float64 `json:"currentCapacityRcu"`
+	RawCapacityRCU              float64 `json:"rawCapacityRcu,omitempty"`
+	TimeLimitedCapacityRCU      float64 `json:"timeLimitedCapacityRcu,omitempty"`
+	ExpiryWasteRiskRCU          float64 `json:"expiryWasteRiskRcu,omitempty"`
+	TargetCapacityRCU           float64 `json:"targetCapacityRcu"`
+	CapacityGapRCU              float64 `json:"capacityGapRcu"`
+	UnitCapacityRCU             float64 `json:"unitCapacityRcu"`
+	RecommendedCapacityRCU      float64 `json:"recommendedCapacityRcu"`
+	PrelockedCapacityRCU        float64 `json:"prelockedCapacityRcu,omitempty"`
+	SupplyPressureLevel         string  `json:"supplyPressureLevel,omitempty"`
+	SupplyPressureReason        string  `json:"supplyPressureReason,omitempty"`
+	SupplyInventoryAvailable    int     `json:"supplyInventoryAvailable,omitempty"`
+	SupplyInventoryMissing      int     `json:"supplyInventoryMissing,omitempty"`
+	SupplyNeedsProduction       bool    `json:"supplyNeedsProduction,omitempty"`
+	SupplyAvgFulfillSeconds     int     `json:"supplyAvgFulfillSeconds,omitempty"`
+	SupplyRecentWaiting         int     `json:"supplyRecentWaiting,omitempty"`
+	UsageSampleMinutes          int     `json:"usageSampleMinutes"`
+	AccountCacheAgeSeconds      int     `json:"accountCacheAgeSeconds"`
+	LockedOrderID               string  `json:"lockedOrderId,omitempty"`
+	LockedOrderAgeSeconds       int     `json:"lockedOrderAgeSeconds,omitempty"`
+	LockedConfirmRounds         int     `json:"lockedConfirmRounds,omitempty"`
+	Strategy                    string  `json:"strategy,omitempty"`
+	CriticalAvailableAccounts   int     `json:"criticalAvailableAccounts,omitempty"`
+	HealthyAvailableAccounts    int     `json:"healthyAvailableAccounts,omitempty"`
+	EmergencyMinAccounts        int     `json:"emergencyMinAccounts,omitempty"`
+	EmergencyReason             string  `json:"emergencyReason,omitempty"`
+	PoolVacuumActive            bool    `json:"poolVacuumActive,omitempty"`
+	PoolVacuumStartedAtMS       int64   `json:"poolVacuumStartedAtMs,omitempty"`
+	PoolVacuumDurationSeconds   int     `json:"poolVacuumDurationSeconds,omitempty"`
+	DemandMemoryRCUPerMinute    float64 `json:"demandMemoryRcuPerMinute,omitempty"`
+	DemandMemoryLastSeenMS      int64   `json:"demandMemoryLastSeenMs,omitempty"`
+	DemandMemoryAgeSeconds      int     `json:"demandMemoryAgeSeconds,omitempty"`
+	VirtualDemandRCUPerMinute   float64 `json:"virtualDemandRcuPerMinute,omitempty"`
+	VirtualDemandTTLMinutes     int     `json:"virtualDemandTtlMinutes,omitempty"`
+	AccountMaxRequestsBefore401 int     `json:"accountMaxRequestsBefore401,omitempty"`
+	AccountMaxUsefulSeconds401  int     `json:"accountMaxUsefulSecondsBefore401,omitempty"`
+	RiskAdjustedUnitCapacityRCU float64 `json:"riskAdjustedUnitCapacityRcu,omitempty"`
 }
 
 type smartUsageBucket struct {
@@ -176,44 +192,53 @@ type smartCapacityItem struct {
 func defaultSmartResource(cfg store.ManagerSupplyConfig) SmartResource {
 	configuredTarget := smartHealthyMinutesTarget(cfg)
 	effectiveTarget := smartEffectiveHealthyMinutesTarget(cfg)
+	strategy := managerconfigsvc.NormalizeSupplyStrategy(cfg.Strategy)
 	return SmartResource{
-		Enabled:                  smartSupplyEnabled(cfg),
-		HealthLevel:              smartHealthUnknown,
-		SuggestedAction:          smartActionSnapshotStale,
-		DecisionReason:           "snapshot_not_ready",
-		Confidence:               smartConfidenceLow,
-		SnapshotFresh:            false,
-		GeneratedAtMS:            time.Now().UnixMilli(),
-		CapacitySource:           smartCapacitySourceUnavailable,
-		DemandTrend:              smartDemandTrendUnknown,
-		CapacityLifetimeCoverage: 100,
-		TargetAvailableAccounts:  cfg.TargetAvailableAccounts,
-		ConfiguredHealthyMinutes: configuredTarget,
-		EffectiveHealthyMinutes:  effectiveTarget,
-		AccountLifetimeMinutes:   smartAccountLifetimeMinutes(),
-		HealthyMinutesTarget:     effectiveTarget,
-		WarningMinutes:           smartWarningMinutes(cfg),
-		CriticalMinutes:          smartCriticalMinutes(cfg),
-		UnitCapacityRCU:          smartProductUnitCapacity(cfg.Product),
+		Enabled:                     smartSupplyEnabled(cfg),
+		HealthLevel:                 smartHealthUnknown,
+		SuggestedAction:             smartActionSnapshotStale,
+		DecisionReason:              "snapshot_not_ready",
+		Confidence:                  smartConfidenceLow,
+		SnapshotFresh:               false,
+		GeneratedAtMS:               time.Now().UnixMilli(),
+		CapacitySource:              smartCapacitySourceUnavailable,
+		DemandTrend:                 smartDemandTrendUnknown,
+		CapacityLifetimeCoverage:    100,
+		TargetAvailableAccounts:     cfg.TargetAvailableAccounts,
+		ConfiguredHealthyMinutes:    configuredTarget,
+		EffectiveHealthyMinutes:     effectiveTarget,
+		AccountLifetimeMinutes:      smartAccountLifetimeMinutes(),
+		HealthyMinutesTarget:        effectiveTarget,
+		WarningMinutes:              smartWarningMinutes(cfg),
+		CriticalMinutes:             smartCriticalMinutes(cfg),
+		UnitCapacityRCU:             smartProductUnitCapacity(cfg.Product),
+		Strategy:                    strategy,
+		CriticalAvailableAccounts:   smartCriticalAvailableAccounts(cfg),
+		HealthyAvailableAccounts:    smartHealthyAvailableAccounts(cfg),
+		EmergencyMinAccounts:        smartEmergencyMinAccounts(cfg),
+		VirtualDemandTTLMinutes:     smartVirtualDemandTTLMinutes(cfg),
+		AccountMaxRequestsBefore401: smartAccountMaxRequestsBefore401(cfg),
+		AccountMaxUsefulSeconds401:  smartAccountMaxUsefulSecondsBefore401(cfg),
+		RiskAdjustedUnitCapacityRCU: round2(smartEstimatedNewAccountCapacityRCU(cfg)),
 	}
 }
 
-func (s *Service) HandleUsageEvents(ctx context.Context, _ collectorpkg.RuntimeConfig, events []usage.Event) {
+func (s *Service) HandleUsageEvents(ctx context.Context, runtimeCfg collectorpkg.RuntimeConfig, events []usage.Event) {
 	if s == nil || len(events) == 0 || ctx.Err() != nil {
 		return
 	}
 	s.recordSmartUsageEvents(events, time.Now())
+	s.handleSupplyAuth401Events(ctx, runtimeCfg, events)
 }
 
-// WarmSmartUsage restores the small rolling demand window after a Manager
-// restart. It reads one grouped 30-minute slice during startup only; runtime
-// collectors continue to update smartBuckets incrementally in memory.
+// WarmSmartUsage restores the longest configurable demand-memory window after
+// a Manager restart. Runtime collectors keep smartBuckets current afterwards.
 func (s *Service) WarmSmartUsage(ctx context.Context) error {
 	if s == nil || s.store == nil {
 		return nil
 	}
 	now := time.Now()
-	from := now.Add(-30 * time.Minute).UnixMilli()
+	from := now.Add(-180 * time.Minute).UnixMilli()
 	minutes, err := s.store.ListSupplyUsageMinutes(ctx, from)
 	if err != nil {
 		return err
@@ -341,6 +366,12 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 
 	capacityItems := make([]smartCapacityItem, 0, len(snapshot.results))
 	inspectedFiles := make(map[string]struct{}, len(snapshot.results))
+	importedAtByFile := make(map[string]int64, len(snapshot.activeImportItems))
+	for _, item := range snapshot.activeImportItems {
+		if fileName := strings.TrimSpace(item.FileName); fileName != "" && item.ImportedAtMS > 0 {
+			importedAtByFile[fileName] = item.ImportedAtMS
+		}
+	}
 	eligible := 0
 	withQuotaEvidence := 0
 	usabilityRequired := 0
@@ -411,6 +442,13 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			resource.WeakAccounts++
 			continue
 		}
+		if smartSupplyManagedFileName(result.FileName) {
+			ageSeconds := float64(-1)
+			if importedAtMS := importedAtByFile[strings.TrimSpace(result.FileName)]; importedAtMS > 0 {
+				ageSeconds = math.Max(0, now.Sub(time.UnixMilli(importedAtMS)).Seconds())
+			}
+			capacity = smartRiskAdjustedAccountCapacityRCU(cfg, capacity, resource.UnitCapacityRCU, remainingMinutes, ageSeconds)
+		}
 		if capacity <= 0 {
 			resource.WeakAccounts++
 			continue
@@ -445,6 +483,11 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		}
 		remainingMinutes := clampFloat(time.UnixMilli(item.LeaseExpiresAtMS).Sub(now).Minutes(), 0, float64(smartUsefulAccountLifetimeMinutes()))
 		capacity := smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * smartNewAccountConfidence(cfg)
+		ageSeconds := float64(-1)
+		if item.ImportedAtMS > 0 {
+			ageSeconds = math.Max(0, now.Sub(time.UnixMilli(item.ImportedAtMS)).Seconds())
+		}
+		capacity = smartRiskAdjustedAccountCapacityRCU(cfg, capacity, resource.UnitCapacityRCU, remainingMinutes, ageSeconds)
 		if capacity <= 0 {
 			continue
 		}
@@ -484,6 +527,8 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	}
 	resource.TargetCapacityRCU = round2(consumeRCUPerMinute * float64(resource.EffectiveHealthyMinutes))
 	resource.RecommendedCapacityRCU = resource.TargetCapacityRCU
+	consumeRCUPerMinute = s.applySmartDemandMemory(cfg, &resource, now, consumeRCUPerMinute)
+	applySmartEmergencyAvailability(cfg, &resource, now)
 
 	// Keep the verified portion visible even while one or more credentials did
 	// not return quota evidence. Returning early here used to turn the entire
@@ -491,7 +536,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	// figure is a lower bound: a bounded purchase may use its capacity deficit
 	// while it remains recent, without counting unverified credentials as usable.
 	if quotaEvidenceIncomplete || usabilityEvidenceIncomplete {
-		if usageStats.successful30 > 0 && consumeRCUPerMinute > 0 {
+		if usageStats.successful30 > 0 && resource.ConsumeRCUPerMinute > 0 {
 			recalculateSmartResourceCapacityPlan(cfg, &resource)
 		}
 		resource.SnapshotFresh = false
@@ -513,7 +558,9 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		}
 		return resource
 	}
-	if usageStats.successful30 <= 0 || (consumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling) {
+	if !smartResourceEmergency(resource) &&
+		((usageStats.successful30 <= 0 && resource.VirtualDemandRCUPerMinute <= 0) ||
+			(resource.ConsumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling)) {
 		resource.Confidence = smartConfidenceLow
 		resource.HealthLevel = smartHealthUnknown
 		resource.SuggestedAction = smartActionSnapshotStale
@@ -564,6 +611,10 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		if !ok {
 			rawCapacity = smartEstimatedAccountCapacityRCU(unit, remainingMinutes)
 		}
+		if smartSupplyManagedFileName(file.Name) {
+			ageSeconds := math.Max(0, float64(smartAccountLifetimeMinutes())*60-remainingMinutes*60)
+			rawCapacity = smartRiskAdjustedAccountCapacityRCU(cfg, rawCapacity, unit, remainingMinutes, ageSeconds)
+		}
 		weightedCapacity += rawCapacity
 		if rawCapacity > 0 {
 			capacityItems = append(capacityItems, smartCapacityItem{
@@ -584,8 +635,12 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 	}
 	resource.TargetCapacityRCU = round2(consumeRCUPerMinute * float64(resource.EffectiveHealthyMinutes))
 	resource.RecommendedCapacityRCU = resource.TargetCapacityRCU
+	consumeRCUPerMinute = s.applySmartDemandMemory(cfg, &resource, now, consumeRCUPerMinute)
+	applySmartEmergencyAvailability(cfg, &resource, now)
 
-	if usageStats.successful30 <= 0 || (consumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling) {
+	if !smartResourceEmergency(resource) &&
+		((usageStats.successful30 <= 0 && resource.VirtualDemandRCUPerMinute <= 0) ||
+			(resource.ConsumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling)) {
 		resource.Confidence = smartConfidenceLow
 		resource.HealthLevel = smartHealthUnknown
 		resource.SuggestedAction = smartActionSnapshotStale
@@ -874,6 +929,113 @@ func applySmartUsage(resource *SmartResource, usage smartUsageAggregate, unit fl
 	resource.ConsumeRCUPerMinute = round2(demand.consumeRCU)
 	resource.UsageSampleMinutes = usage.sampleMinutes
 	return demand.consumeRCU
+}
+
+func (s *Service) applySmartDemandMemory(cfg store.ManagerSupplyConfig, resource *SmartResource, now time.Time, currentRCU float64) float64 {
+	if resource == nil {
+		return currentRCU
+	}
+	if !smartSupplyStrategyConfigured(cfg) {
+		return currentRCU
+	}
+	ttl := time.Duration(smartVirtualDemandTTLMinutes(cfg)) * time.Minute
+	memoryRCU, lastSeenMS, ageSeconds := s.smartDemandMemory(now, ttl, resource.UnitCapacityRCU)
+	resource.DemandMemoryRCUPerMinute = round2(memoryRCU)
+	resource.DemandMemoryLastSeenMS = lastSeenMS
+	resource.DemandMemoryAgeSeconds = ageSeconds
+	resource.VirtualDemandTTLMinutes = smartVirtualDemandTTLMinutes(cfg)
+	if currentRCU > 0 || memoryRCU <= 0 || !smartEmergencyBypassUsageRate(cfg) {
+		return currentRCU
+	}
+	resource.VirtualDemandRCUPerMinute = round2(memoryRCU)
+	resource.ConsumeRCUPerMinute = round2(memoryRCU)
+	resource.DemandPlanningRCUPerMinute = round2(memoryRCU)
+	resource.DemandTrend = smartDemandTrendVirtual
+	resource.TargetCapacityRCU = round2(memoryRCU * float64(resource.EffectiveHealthyMinutes))
+	resource.RecommendedCapacityRCU = resource.TargetCapacityRCU
+	if resource.CurrentCapacityRCU > 0 {
+		resource.EstimatedSustainMinutes = round1(resource.CurrentCapacityRCU / memoryRCU)
+	}
+	resource.CapacityGapRCU = round2(math.Max(0, resource.TargetCapacityRCU-resource.CurrentCapacityRCU-resource.PrelockedCapacityRCU))
+	resource.DecisionReason = "virtual_demand_memory"
+	return memoryRCU
+}
+
+func (s *Service) smartDemandMemory(now time.Time, ttl time.Duration, unit float64) (float64, int64, int) {
+	if s == nil || ttl <= 0 {
+		return 0, 0, 0
+	}
+	from := now.Add(-ttl).UnixMilli() / 60000 * 60000
+	s.smartMu.RLock()
+	defer s.smartMu.RUnlock()
+	if len(s.smartBuckets) == 0 {
+		return 0, 0, 0
+	}
+	var last int64
+	for minute, bucket := range s.smartBuckets {
+		if bucket != nil && minute >= from && bucket.success > 0 && minute > last {
+			last = minute
+		}
+	}
+	if last <= 0 {
+		return 0, 0, 0
+	}
+	// Preserve the rate from the final non-zero ten-minute window. Idle time
+	// after that window is represented by ageSeconds and must not dilute the
+	// remembered rate before the selected strategy TTL expires.
+	windowStart := last - int64((9*time.Minute)/time.Millisecond)
+	var success, tokens int64
+	var first int64
+	peak := 0.0
+	for minute, bucket := range s.smartBuckets {
+		if bucket == nil || minute < windowStart || minute > last {
+			continue
+		}
+		if first == 0 || minute < first {
+			first = minute
+		}
+		success += bucket.success
+		tokens += bucket.totalTokens
+		if float64(bucket.success) > peak {
+			peak = float64(bucket.success)
+		}
+	}
+	if success <= 0 || first <= 0 || last <= 0 {
+		return 0, 0, 0
+	}
+	denominator := math.Max(1, float64((last-first)/int64(time.Minute/time.Millisecond)+1))
+	rpm := float64(success) / denominator
+	tpm := float64(tokens) / denominator
+	rcu := smartConsumeRCUPerMinute(rpm, peak, tpm, unit)
+	return rcu, last, max(0, int(now.Sub(time.UnixMilli(last)).Seconds()))
+}
+
+func applySmartEmergencyAvailability(cfg store.ManagerSupplyConfig, resource *SmartResource, now time.Time) {
+	if resource == nil || !smartSupplyStrategyConfigured(cfg) {
+		return
+	}
+	critical := smartCriticalAvailableAccounts(cfg)
+	if resource.AvailableAccounts > critical {
+		return
+	}
+	reason := "critical_available_accounts"
+	if resource.AvailableAccounts <= 0 {
+		reason = "emergency_pool_vacuum"
+		resource.PoolVacuumActive = true
+		if resource.PoolVacuumStartedAtMS <= 0 {
+			resource.PoolVacuumStartedAtMS = now.UnixMilli()
+		}
+		resource.PoolVacuumDurationSeconds = max(0, int(now.Sub(time.UnixMilli(resource.PoolVacuumStartedAtMS)).Seconds()))
+	}
+	resource.EmergencyShortage = true
+	resource.EmergencyReason = reason
+	resource.HealthLevel = smartHealthCritical
+	resource.SuggestedAction = smartActionEmergencyReplenish
+	resource.DecisionReason = reason
+	resource.SuggestedQuantity = smartEmergencyRefillQuantity(cfg, resource.AvailableAccounts)
+	if resource.CapacityGapRCU <= 0 && resource.ConsumeRCUPerMinute > 0 {
+		resource.CapacityGapRCU = round2(math.Max(0, resource.TargetCapacityRCU-resource.CurrentCapacityRCU-resource.PrelockedCapacityRCU))
+	}
 }
 
 func (s *Service) cachedAuthFiles(ctx context.Context, cfg store.ManagerConfig, force bool) (authFileSnapshot, error) {
@@ -1239,6 +1401,14 @@ func (s *Service) currentSmartResource(cfg store.ManagerSupplyConfig) SmartResou
 	resource.WarningMinutes = smartWarningMinutes(cfg)
 	resource.CriticalMinutes = smartCriticalMinutes(cfg)
 	resource.TargetAvailableAccounts = cfg.TargetAvailableAccounts
+	resource.Strategy = managerconfigsvc.NormalizeSupplyStrategy(cfg.Strategy)
+	resource.CriticalAvailableAccounts = smartCriticalAvailableAccounts(cfg)
+	resource.HealthyAvailableAccounts = smartHealthyAvailableAccounts(cfg)
+	resource.EmergencyMinAccounts = smartEmergencyMinAccounts(cfg)
+	resource.VirtualDemandTTLMinutes = smartVirtualDemandTTLMinutes(cfg)
+	resource.AccountMaxRequestsBefore401 = smartAccountMaxRequestsBefore401(cfg)
+	resource.AccountMaxUsefulSeconds401 = smartAccountMaxUsefulSecondsBefore401(cfg)
+	resource.RiskAdjustedUnitCapacityRCU = round2(smartEstimatedNewAccountCapacityRCU(cfg))
 	configChanged := previousEffectiveMinutes != resource.EffectiveHealthyMinutes ||
 		previousWarningMinutes != resource.WarningMinutes ||
 		previousCriticalMinutes != resource.CriticalMinutes ||
@@ -1312,6 +1482,61 @@ func smartPrelockMaxQuantity(cfg store.ManagerSupplyConfig) int {
 	return maxQuantity
 }
 
+func smartCriticalAvailableAccounts(cfg store.ManagerSupplyConfig) int {
+	return clampInt(cfg.CriticalAvailableAccounts, 0, 1000)
+}
+
+func smartSupplyStrategyConfigured(cfg store.ManagerSupplyConfig) bool {
+	return strings.TrimSpace(cfg.Strategy) != "" ||
+		cfg.CriticalAvailableAccounts > 0 || cfg.HealthyAvailableAccounts > 0 ||
+		cfg.DefaultEmergencyMinAccounts > 0 || cfg.VirtualDemandTTLMinutes > 0 ||
+		cfg.AccountMaxRequestsBefore401 > 0 || cfg.AccountMaxUsefulSeconds401 > 0 ||
+		cfg.EmergencyBypassUsageRate != nil || cfg.RecoveryTriggerOn401 != nil
+}
+
+func smartHealthyAvailableAccounts(cfg store.ManagerSupplyConfig) int {
+	value := clampInt(cfg.HealthyAvailableAccounts, 0, 10000)
+	if value < smartCriticalAvailableAccounts(cfg) {
+		return smartCriticalAvailableAccounts(cfg)
+	}
+	return value
+}
+
+func smartEmergencyMinAccounts(cfg store.ManagerSupplyConfig) int {
+	return clampInt(positiveOr(cfg.DefaultEmergencyMinAccounts, 5), 1, 100)
+}
+
+func smartEmergencyRefillQuantity(cfg store.ManagerSupplyConfig, available int) int {
+	toHealthy := max(0, smartHealthyAvailableAccounts(cfg)-max(0, available))
+	return clampInt(max(smartEmergencyMinAccounts(cfg), toHealthy), 1, 100)
+}
+
+func smartVirtualDemandTTLMinutes(cfg store.ManagerSupplyConfig) int {
+	return clampInt(positiveOr(cfg.VirtualDemandTTLMinutes, 60), 1, 180)
+}
+
+func smartAccountMaxRequestsBefore401(cfg store.ManagerSupplyConfig) int {
+	if cfg.AccountMaxRequestsBefore401 <= 0 && !smartSupplyStrategyConfigured(cfg) {
+		return 0
+	}
+	return clampInt(positiveOr(cfg.AccountMaxRequestsBefore401, 30), 1, 100000)
+}
+
+func smartAccountMaxUsefulSecondsBefore401(cfg store.ManagerSupplyConfig) int {
+	if cfg.AccountMaxUsefulSeconds401 <= 0 && !smartSupplyStrategyConfigured(cfg) {
+		return 0
+	}
+	return clampInt(positiveOr(cfg.AccountMaxUsefulSeconds401, 120), 1, 3600)
+}
+
+func smartEmergencyBypassUsageRate(cfg store.ManagerSupplyConfig) bool {
+	return cfg.EmergencyBypassUsageRate == nil || *cfg.EmergencyBypassUsageRate
+}
+
+func smartRecoveryTriggerOn401(cfg store.ManagerSupplyConfig) bool {
+	return cfg.RecoveryTriggerOn401 == nil || *cfg.RecoveryTriggerOn401
+}
+
 // smartResourceAtOrBelowWarning distinguishes a true warning-water event from
 // the ordinary "below healthy target" prelock state. Only the former may use
 // the larger ReplenishBatchSize cap and the shorter retry cooldown.
@@ -1332,6 +1557,10 @@ func smartEmergencyShortage(resource SmartResource) bool {
 	}
 	threshold := max(resource.CriticalMinutes, max(1, resource.EffectiveHealthyMinutes/2))
 	return resource.EstimatedSustainMinutes <= float64(threshold)
+}
+
+func smartResourceEmergency(resource SmartResource) bool {
+	return resource.EmergencyShortage || smartEmergencyShortage(resource) || resource.SuggestedAction == smartActionEmergencyReplenish
 }
 
 // smartPartialInspectionCapacityDeficitAllowed permits a bounded purchase
@@ -1380,7 +1609,7 @@ func smartReplenishBatchLimit(cfg store.ManagerSupplyConfig) int {
 // active safety cap so a configured 15-account recovery batch is not silently
 // reduced by a smaller routine-prelock setting such as 7.
 func smartAutomaticOrderQuantityLimit(cfg store.ManagerSupplyConfig, resource SmartResource) int {
-	if smartEmergencyShortage(resource) || smartResourceAtOrBelowWarning(resource) {
+	if smartResourceEmergency(resource) || smartResourceAtOrBelowWarning(resource) {
 		return smartReplenishBatchLimit(cfg)
 	}
 	limit := smartReplenishBatchLimit(cfg)
@@ -1424,7 +1653,7 @@ func smartCreateCooldownSeconds(cfg store.ManagerSupplyConfig) int {
 // store, daily limits and balance limits still apply.
 func smartCreateCooldownForResource(cfg store.ManagerSupplyConfig, resource SmartResource) int {
 	cooldown := smartCreateCooldownSeconds(cfg)
-	if smartEmergencyShortage(resource) {
+	if smartResourceEmergency(resource) {
 		return 0
 	}
 	if !smartResourceAtOrBelowWarning(resource) {
@@ -1480,11 +1709,30 @@ func smartEstimatedAccountCapacityRCU(unitPerMinute float64, remainingMinutes fl
 func smartEstimatedNewAccountCapacityRCU(cfg store.ManagerSupplyConfig) float64 {
 	unit := smartProductUnitCapacity(cfg.Product)
 	capacity := smartEstimatedAccountCapacityRCU(unit, float64(smartUsefulAccountLifetimeMinutes()))
+	capacity = smartRiskAdjustedAccountCapacityRCU(cfg, capacity, unit, float64(smartUsefulAccountLifetimeMinutes()), 0)
 	confidence := smartNewAccountConfidence(cfg)
 	if confidence <= 0 {
 		confidence = 1
 	}
 	return capacity * confidence
+}
+
+func smartRiskAdjustedAccountCapacityRCU(cfg store.ManagerSupplyConfig, capacity float64, unit float64, remainingMinutes float64, ageSeconds float64) float64 {
+	if capacity <= 0 {
+		return 0
+	}
+	if maxSeconds := smartAccountMaxUsefulSecondsBefore401(cfg); maxSeconds > 0 {
+		riskMinutes := float64(maxSeconds) / 60
+		if ageSeconds >= 0 {
+			riskMinutes = math.Max(0, riskMinutes-ageSeconds/60)
+		}
+		riskMinutes = math.Min(remainingMinutes, riskMinutes)
+		capacity = math.Min(capacity, smartEstimatedAccountCapacityRCU(unit, riskMinutes))
+	}
+	if maxRequests := smartAccountMaxRequestsBefore401(cfg); maxRequests > 0 {
+		capacity = math.Min(capacity, float64(maxRequests))
+	}
+	return math.Max(0, capacity)
 }
 
 func smartConsumeRCUPerMinute(rpm30 float64, rpm5Peak float64, tpm30 float64, unit float64) float64 {

@@ -230,6 +230,14 @@ func (s *Store) ListAccountActionCandidates(ctx context.Context, status string, 
 	return s.AccountActions.List(ctx, status, limit)
 }
 
+func (s *Store) ListAccountActionCandidatesByAuthFiles(ctx context.Context, authFiles []string, limit int) ([]AccountActionCandidate, error) {
+	return s.AccountActions.ListByAuthFiles(ctx, authFiles, limit)
+}
+
+func (s *Store) ListAccountActionCandidatesBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]AccountActionCandidate, error) {
+	return s.AccountActions.ListBetween(ctx, fromMS, toMS, limit)
+}
+
 func (s *Store) CountAccountActionCandidates(ctx context.Context, status string) (int64, error) {
 	return s.AccountActions.Count(ctx, status)
 }

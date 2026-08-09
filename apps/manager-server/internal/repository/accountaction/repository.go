@@ -14,6 +14,8 @@ import (
 type Repository interface {
 	Upsert(ctx context.Context, input model.AccountActionCandidateUpsert) (model.AccountActionCandidate, error)
 	List(ctx context.Context, status string, limit int) ([]model.AccountActionCandidate, error)
+	ListByAuthFiles(ctx context.Context, authFiles []string, limit int) ([]model.AccountActionCandidate, error)
+	ListBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.AccountActionCandidate, error)
 	Count(ctx context.Context, status string) (int64, error)
 	Get(ctx context.Context, id int64) (model.AccountActionCandidate, bool, error)
 	UpdateStatus(ctx context.Context, id int64, status string) (model.AccountActionCandidate, error)
@@ -137,6 +139,91 @@ func (r *repository) List(ctx context.Context, status string, limit int) ([]mode
 	query += ` order by case status when 'pending' then 0 else 1 end, last_seen_at_ms desc, id desc limit ?`
 	args = append(args, limit)
 	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]model.AccountActionCandidate, 0)
+	for rows.Next() {
+		item, err := scanCandidate(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *repository) ListByAuthFiles(ctx context.Context, authFiles []string, limit int) ([]model.AccountActionCandidate, error) {
+	if len(authFiles) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 5000 {
+		limit = 1000
+	}
+	seen := map[string]struct{}{}
+	names := make([]string, 0, len(authFiles))
+	for _, value := range authFiles {
+		name := strings.TrimSpace(value)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return nil, nil
+	}
+	result := make([]model.AccountActionCandidate, 0)
+	const chunkSize = 200
+	for start := 0; start < len(names) && len(result) < limit; start += chunkSize {
+		end := start + chunkSize
+		if end > len(names) {
+			end = len(names)
+		}
+		placeholders := strings.TrimRight(strings.Repeat("?,", end-start), ",")
+		args := make([]any, 0, end-start+1)
+		for _, name := range names[start:end] {
+			args = append(args, name)
+		}
+		args = append(args, limit-len(result))
+		rows, err := r.db.QueryContext(ctx, selectCandidates+` where auth_file_name in (`+placeholders+`)
+			order by last_seen_at_ms desc, id desc limit ?`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			item, err := scanCandidate(rows)
+			if err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			result = append(result, item)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+func (r *repository) ListBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.AccountActionCandidate, error) {
+	if limit <= 0 || limit > 10000 {
+		limit = 5000
+	}
+	rows, err := r.db.QueryContext(ctx, selectCandidates+` where
+		(first_seen_at_ms >= ? and first_seen_at_ms < ?) or
+		(last_seen_at_ms >= ? and last_seen_at_ms < ?) or
+		(coalesce(auto_disabled_at_ms, 0) >= ? and coalesce(auto_disabled_at_ms, 0) < ?)
+		order by last_seen_at_ms desc, id desc limit ?`,
+		fromMS, toMS, fromMS, toMS, fromMS, toMS, limit)
 	if err != nil {
 		return nil, err
 	}

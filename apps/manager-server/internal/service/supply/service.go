@@ -18,11 +18,14 @@ import (
 	"sync"
 	"time"
 
+	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/pricing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/supplyclient"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
 var (
@@ -162,6 +165,8 @@ type SupplyAccountSummary struct {
 	AverageRevenuePerCall float64 `json:"averageRevenuePerCall"`
 	LastUsedAtMS          int64   `json:"lastUsedAtMs,omitempty"`
 	CPAStatusError        string  `json:"cpaStatusError,omitempty"`
+	Auth401Accounts       int     `json:"auth401Accounts"`
+	AutoQuarantined       int     `json:"autoQuarantined"`
 }
 
 type SupplyAccountItem struct {
@@ -193,6 +198,12 @@ type SupplyAccountItem struct {
 	ImportedAtMS         int64   `json:"importedAtMs,omitempty"`
 	LeaseExpiresAtMS     int64   `json:"leaseExpiresAtMs,omitempty"`
 	RemainingSeconds     int64   `json:"remainingSeconds,omitempty"`
+	Auth401AtMS          int64   `json:"auth401AtMs,omitempty"`
+	Auth401BeforeCalls   int64   `json:"auth401BeforeCalls,omitempty"`
+	Auth401Reason        string  `json:"auth401Reason,omitempty"`
+	AutoDisabledAtMS     int64   `json:"autoDisabledAtMs,omitempty"`
+	RecoveryID           string  `json:"recoveryId,omitempty"`
+	RecoveryStatus       string  `json:"recoveryStatus,omitempty"`
 	AttemptCount         int     `json:"attemptCount"`
 	LastError            string  `json:"lastError,omitempty"`
 	CreatedAtMS          int64   `json:"createdAtMs"`
@@ -206,35 +217,44 @@ type SupplyAccountList struct {
 }
 
 type ReportExecutive struct {
-	Orders                int     `json:"orders"`
-	ManualOrders          int     `json:"manualOrders"`
-	AutomaticOrders       int     `json:"automaticOrders"`
-	RecoveryOrders        int     `json:"recoveryOrders"`
-	RequestedAccounts     int     `json:"requestedAccounts"`
-	ImportedAccounts      int     `json:"importedAccounts"`
-	ChargedFen            int64   `json:"chargedFen"`
-	ReleasedFen           int64   `json:"releasedFen"`
-	NetFen                int64   `json:"netFen"`
-	SupplySpendFen        int64   `json:"supplySpendFen"`
-	SupplyNetSpendFen     int64   `json:"supplyNetSpendFen"`
-	AverageUnitFen        float64 `json:"averageUnitFen"`
-	UsageCalls            int64   `json:"usageCalls"`
-	UsageTokens           int64   `json:"usageTokens"`
-	UsageRevenue          float64 `json:"usageRevenue"`
-	UsageRevenueCurrency  string  `json:"usageRevenueCurrency"`
-	RevenueMultiplier     float64 `json:"revenueMultiplier"`
-	AverageRevenuePerCall float64 `json:"averageRevenuePerCall"`
-	Recoveries            int     `json:"recoveries"`
-	ClaimableRecoveries   int     `json:"claimableRecoveries"`
-	ClaimedRecoveries     int     `json:"claimedRecoveries"`
-	ImportedRecoveries    int     `json:"importedRecoveries"`
-	RefundedRecoveries    int     `json:"refundedRecoveries"`
-	FailedRecoveries      int     `json:"failedRecoveries"`
-	RefundedFen           int64   `json:"refundedFen"`
-	RecoveryClaimRate     float64 `json:"recoveryClaimRate"`
-	RecoveryImportRate    float64 `json:"recoveryImportRate"`
-	RecoveryRefundRate    float64 `json:"recoveryRefundRate"`
-	ImportSuccessRate     float64 `json:"importSuccessRate"`
+	Orders                       int     `json:"orders"`
+	ManualOrders                 int     `json:"manualOrders"`
+	AutomaticOrders              int     `json:"automaticOrders"`
+	RecoveryOrders               int     `json:"recoveryOrders"`
+	RequestedAccounts            int     `json:"requestedAccounts"`
+	ImportedAccounts             int     `json:"importedAccounts"`
+	ChargedFen                   int64   `json:"chargedFen"`
+	ReleasedFen                  int64   `json:"releasedFen"`
+	NetFen                       int64   `json:"netFen"`
+	SupplySpendFen               int64   `json:"supplySpendFen"`
+	SupplyNetSpendFen            int64   `json:"supplyNetSpendFen"`
+	AverageUnitFen               float64 `json:"averageUnitFen"`
+	UsageCalls                   int64   `json:"usageCalls"`
+	UsageTokens                  int64   `json:"usageTokens"`
+	UsageRevenue                 float64 `json:"usageRevenue"`
+	UsageRevenueCurrency         string  `json:"usageRevenueCurrency"`
+	RevenueMultiplier            float64 `json:"revenueMultiplier"`
+	AverageRevenuePerCall        float64 `json:"averageRevenuePerCall"`
+	Recoveries                   int     `json:"recoveries"`
+	ClaimableRecoveries          int     `json:"claimableRecoveries"`
+	ClaimedRecoveries            int     `json:"claimedRecoveries"`
+	ImportedRecoveries           int     `json:"importedRecoveries"`
+	RefundedRecoveries           int     `json:"refundedRecoveries"`
+	FailedRecoveries             int     `json:"failedRecoveries"`
+	RefundedFen                  int64   `json:"refundedFen"`
+	RecoveryClaimRate            float64 `json:"recoveryClaimRate"`
+	RecoveryImportRate           float64 `json:"recoveryImportRate"`
+	RecoveryRefundRate           float64 `json:"recoveryRefundRate"`
+	ImportSuccessRate            float64 `json:"importSuccessRate"`
+	Auth401Accounts              int     `json:"auth401Accounts"`
+	Auth401Events                int     `json:"auth401Events"`
+	Auth401Rate                  float64 `json:"auth401Rate"`
+	AutoQuarantined              int     `json:"autoQuarantined"`
+	EmergencyReplenishments      int     `json:"emergencyReplenishments"`
+	VirtualDemandReplenishments  int     `json:"virtualDemandReplenishments"`
+	VacuumReplenishments         int     `json:"vacuumReplenishments"`
+	VacuumTotalSeconds           int64   `json:"vacuumTotalSeconds"`
+	AverageVacuumRecoverySeconds float64 `json:"averageVacuumRecoverySeconds"`
 }
 
 type ReportDimensionStat struct {
@@ -334,6 +354,8 @@ type ReportReconciliationSummary struct {
 type ReportOrderLedgerRow struct {
 	OrderID           string `json:"orderId"`
 	Source            string `json:"source"`
+	Strategy          string `json:"strategy,omitempty"`
+	TriggerReason     string `json:"triggerReason,omitempty"`
 	Product           string `json:"product"`
 	Status            string `json:"status"`
 	RequestedQuantity int    `json:"requestedQuantity"`
@@ -367,6 +389,8 @@ type ReportAccountLedgerRow struct {
 	UsageTokens          int64   `json:"usageTokens"`
 	UsageRevenue         float64 `json:"usageRevenue"`
 	LastUsedAtMS         int64   `json:"lastUsedAtMs,omitempty"`
+	Auth401AtMS          int64   `json:"auth401AtMs,omitempty"`
+	AutoDisabledAtMS     int64   `json:"autoDisabledAtMs,omitempty"`
 }
 
 type ReportRecoveryLedgerRow struct {
@@ -400,6 +424,8 @@ type Report struct {
 	Reconciliation   ReportReconciliation   `json:"reconciliation"`
 	Timeline         []ReportTimelinePoint  `json:"timeline"`
 	Products         []ReportDimensionStat  `json:"products"`
+	Strategies       []ReportDimensionStat  `json:"strategies"`
+	TriggerReasons   []ReportDimensionStat  `json:"triggerReasons"`
 	OrderStatuses    []ReportDimensionStat  `json:"orderStatuses"`
 	RecoveryStatuses []ReportDimensionStat  `json:"recoveryStatuses"`
 	DeliveryStatuses []ReportDimensionStat  `json:"deliveryStatuses"`
@@ -434,6 +460,8 @@ type Service struct {
 	automation         AutomationExecution
 	recoveryMu         sync.Mutex
 	recoveryState      RecoverySummary
+	poolVacuumMu       sync.Mutex
+	poolVacuumStarted  int64
 
 	inspectionSnapshotRefreshMu sync.Mutex
 	inspectionSnapshotRefresh   inspectionSnapshotRefreshState
@@ -803,11 +831,20 @@ func (s *Service) ListAccounts(ctx context.Context, req SupplyAccountsRequest) (
 	if err != nil {
 		return SupplyAccountList{}, err
 	}
-	usageByFile, err := s.supplyAccountUsageByFile(ctx, ReportRequest{FromMS: req.FromMS, ToMS: req.ToMS}, supplyUsageAuthFiles(items), prices, revenueMultiplier)
+	authFiles := supplyUsageAuthFiles(items)
+	usageByFile, err := s.supplyAccountUsageByFile(ctx, ReportRequest{FromMS: req.FromMS, ToMS: req.ToMS}, authFiles, prices, revenueMultiplier)
+	if err != nil {
+		return SupplyAccountList{}, err
+	}
+	issuesByFile, err := s.supplyAccountIssuesByFile(ctx, authFiles)
 	if err != nil {
 		return SupplyAccountList{}, err
 	}
 	orders, err := s.supplyOrdersForItems(ctx, nil, items)
+	if err != nil {
+		return SupplyAccountList{}, err
+	}
+	recoveriesByFile, err := s.supplyRecoveriesByOriginalFile(ctx)
 	if err != nil {
 		return SupplyAccountList{}, err
 	}
@@ -847,7 +884,7 @@ func (s *Service) ListAccounts(ctx context.Context, req SupplyAccountsRequest) (
 	for _, item := range items {
 		fileName := strings.TrimSpace(item.FileName)
 		file, found := cpaFiles[fileName]
-		account := supplyAccountItemFromStore(item, orders[item.OrderID], usageByFile[fileName], file, cpaLookupKnown, found, now)
+		account := supplyAccountItemFromStore(item, orders[item.OrderID], usageByFile[fileName], file, cpaLookupKnown, found, now, issuesByFile[fileName], recoveriesByFile[fileName])
 		if !supplyAccountStatusMatches(statusFilter, account) {
 			continue
 		}
@@ -880,6 +917,10 @@ func (s *Service) Report(ctx context.Context, req ReportRequest) (Report, error)
 	if err != nil {
 		return Report{}, err
 	}
+	actionCandidates, err := s.store.ListAccountActionCandidatesBetween(ctx, req.FromMS, req.ToMS, req.Limit)
+	if err != nil {
+		return Report{}, err
+	}
 	usageItems, err := s.store.ListImportedSupplyItemsOverlapping(ctx, req.FromMS, req.ToMS, req.Limit*2)
 	if err != nil {
 		return Report{}, err
@@ -902,12 +943,13 @@ func (s *Service) Report(ctx context.Context, req ReportRequest) (Report, error)
 	if err != nil {
 		return Report{}, err
 	}
-	report := buildSupplyReport(req, orders, recoveries, items, time.Now())
+	report := buildSupplyReport(req, orders, recoveries, items, actionCandidates, time.Now())
 	report.Executive.RevenueMultiplier = revenueMultiplier
 	applyUsageRevenueToReport(&report, modelStats, usageTimeline, prices, revenueMultiplier)
-	report.Reconciliation = buildReportReconciliation(orders, recoveries, reconciliationItems, orderLookup, accountUsage, time.Now())
+	report.Executive.Auth401Rate = math.Min(1, reportRatio(float64(report.Executive.Auth401Events), float64(report.Executive.UsageCalls)))
+	report.Reconciliation = buildReportReconciliation(orders, recoveries, reconciliationItems, orderLookup, accountUsage, supplyAccountIssuesByFileFromCandidates(actionCandidates), time.Now())
 	report.Range.Truncated = len(orders) >= req.Limit || len(recoveries) >= req.Limit ||
-		len(items) >= req.Limit || len(usageItems) >= req.Limit*2
+		len(items) >= req.Limit || len(actionCandidates) >= req.Limit || len(usageItems) >= req.Limit*2
 	return report, nil
 }
 
@@ -972,7 +1014,7 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 		return s.withRecoveryInterval(time.Minute, cfg.Supply)
 	}
 	resource := s.currentSmartResource(cfg.Supply)
-	if smartEmergencyShortage(resource) {
+	if smartResourceEmergency(resource) {
 		return s.withRecoveryInterval(time.Second, cfg.Supply)
 	}
 	seconds := smartAutomaticCheckIntervalSeconds(cfg.Supply, resource)
@@ -1045,6 +1087,17 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		if err != nil {
 			return err
 		}
+		if poolAvailable, emergencyQuantity, emergencyReason, err := s.smartEmergencyAvailability(ctx, cfg, &resource); err != nil {
+			return err
+		} else {
+			available = poolAvailable
+			if emergencyQuantity > 0 {
+				resource.SuggestedQuantity = emergencyQuantity
+				resource.DecisionReason = emergencyReason
+				resource.EmergencyReason = emergencyReason
+			}
+			s.setSmartResource(resource)
+		}
 	} else {
 		available, err = s.countAvailableAccounts(ctx, cfg)
 		if err != nil {
@@ -1054,7 +1107,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	if manualQuantity == 0 {
 		if recent, recentFound, err := s.store.GetLatestCompletedAutomaticSupplyOrder(ctx); err != nil {
 			return err
-		} else if recentFound && !smartEmergencyShortage(resource) && time.Since(time.UnixMilli(recent.CompletedAtMS)) < automaticSettleWindow(supplyCfg) {
+		} else if recentFound && !smartResourceEmergency(resource) && time.Since(time.UnixMilli(recent.CompletedAtMS)) < automaticSettleWindow(supplyCfg) {
 			s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
 			return nil
 		}
@@ -1062,23 +1115,22 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	quantity := manualQuantity
 	if quantity == 0 {
 		if useSmart {
-			if !resource.SnapshotFresh && !smartPartialInspectionCapacityDeficitAllowed(resource) {
+			if smartResourceEmergency(resource) {
+				quantity = s.smartSuggestedCreateQuantity(supplyCfg, resource)
+			} else if !resource.SnapshotFresh && !smartPartialInspectionCapacityDeficitAllowed(resource) {
 				return nil
-			}
-			if resource.DecisionReason == "usage_rate_not_ready" || resource.ConsumeRCUPerMinute <= 0 {
+			} else if resource.DecisionReason == "usage_rate_not_ready" || resource.ConsumeRCUPerMinute <= 0 {
 				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
-			}
-			if resource.CapacityGapRCU <= 0 {
+			} else if resource.CapacityGapRCU <= 0 {
 				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
-			}
-			if resource.SuggestedAction == smartActionHealthy || resource.HealthLevel == smartHealthHealthy {
+			} else if resource.SuggestedAction == smartActionHealthy || resource.HealthLevel == smartHealthHealthy {
 				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
-			}
-			if !smartEmergencyShortage(resource) && s.automaticCreateCooldownActive(supplyCfg, resource) {
+			} else if !smartResourceEmergency(resource) && s.automaticCreateCooldownActive(supplyCfg, resource) {
 				s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
 				return nil
+			} else {
+				quantity = s.smartSuggestedCreateQuantity(supplyCfg, resource)
 			}
-			quantity = s.smartSuggestedCreateQuantity(supplyCfg, resource)
 		} else {
 			deficit := supplyCfg.TargetAvailableAccounts - available
 			if deficit <= 0 {
@@ -1176,6 +1228,8 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		Product:           supplyCfg.Product,
 		RequestedQuantity: quantity,
 		Automatic:         manualQuantity == 0,
+		Strategy:          supplyOrderStrategy(supplyCfg, manualQuantity == 0),
+		TriggerReason:     supplyOrderTriggerReason(resource, manualQuantity == 0),
 		Status:            "creating",
 	}
 	if _, err := s.store.CreateSupplyOrder(ctx, attempt); err != nil {
@@ -1209,6 +1263,8 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		Product:              supplyCfg.Product,
 		RequestedQuantity:    quantity,
 		Automatic:            manualQuantity == 0,
+		Strategy:             attempt.Strategy,
+		TriggerReason:        attempt.TriggerReason,
 		Status:               localOrderStatus(remote.Status),
 		RemoteStatus:         remote.Status,
 		ReadyQuantity:        remote.ReadyQuantity,
@@ -1389,7 +1445,7 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 		resource.LockedOrderID = order.OrderID
 		resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
 		if resource.HealthLevel != smartHealthHealthy && resource.CapacityGapRCU > 0 {
-			if smartEmergencyShortage(resource) {
+			if smartResourceEmergency(resource) {
 				resource.EmergencyShortage = true
 				resource.SuggestedAction = smartActionEmergencyReplenish
 				resource.DecisionReason = "emergency_capacity_shortage"
@@ -1716,6 +1772,18 @@ type supplyAccountUsage struct {
 	LastUsedAtMS int64
 }
 
+type supplyAccountIssue struct {
+	Auth401AtMS      int64
+	Auth401Reason    string
+	AutoDisabledAtMS int64
+	HitCount         int
+}
+
+type supplyAccountRecoveryStatus struct {
+	RecoveryID string
+	Status     string
+}
+
 func (s *Service) supplyAccountUsageByFile(ctx context.Context, req ReportRequest, authFiles []string, prices map[string]store.ModelPrice, revenueMultiplier float64) (map[string]supplyAccountUsage, error) {
 	usageByFile := make(map[string]supplyAccountUsage)
 	if len(authFiles) == 0 {
@@ -1761,6 +1829,88 @@ func (s *Service) supplyAccountUsageByFile(ctx context.Context, req ReportReques
 	return usageByFile, nil
 }
 
+func (s *Service) supplyAccountIssuesByFile(ctx context.Context, authFiles []string) (map[string]supplyAccountIssue, error) {
+	result := make(map[string]supplyAccountIssue)
+	if s == nil || s.store == nil || len(authFiles) == 0 {
+		return result, nil
+	}
+	candidates, err := s.store.ListAccountActionCandidatesByAuthFiles(ctx, authFiles, len(authFiles)*5)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range candidates {
+		if !supplyAccountActionIs401(candidate) {
+			continue
+		}
+		fileName := strings.TrimSpace(candidate.AuthFileName)
+		if fileName == "" {
+			continue
+		}
+		current := result[fileName]
+		if candidate.LastSeenAtMS >= current.Auth401AtMS {
+			current.Auth401AtMS = candidate.LastSeenAtMS
+			current.Auth401Reason = firstNonEmptyString(candidate.Reason, candidate.ReasonCode)
+			current.AutoDisabledAtMS = candidate.AutoDisabledAtMS
+			current.HitCount = candidate.HitCount
+			result[fileName] = current
+		}
+	}
+	return result, nil
+}
+
+func supplyAccountIssuesByFileFromCandidates(candidates []model.AccountActionCandidate) map[string]supplyAccountIssue {
+	result := make(map[string]supplyAccountIssue)
+	for _, candidate := range candidates {
+		if !supplyAccountActionIs401(candidate) {
+			continue
+		}
+		fileName := strings.TrimSpace(candidate.AuthFileName)
+		if fileName == "" {
+			continue
+		}
+		current := result[fileName]
+		if candidate.LastSeenAtMS >= current.Auth401AtMS {
+			current.Auth401AtMS = candidate.LastSeenAtMS
+			current.Auth401Reason = firstNonEmptyString(candidate.Reason, candidate.ReasonCode)
+			current.AutoDisabledAtMS = candidate.AutoDisabledAtMS
+			current.HitCount = candidate.HitCount
+			result[fileName] = current
+		}
+	}
+	return result
+}
+
+func (s *Service) supplyRecoveriesByOriginalFile(ctx context.Context) (map[string]supplyAccountRecoveryStatus, error) {
+	result := make(map[string]supplyAccountRecoveryStatus)
+	if s == nil || s.store == nil {
+		return result, nil
+	}
+	recoveries, err := s.store.ListSupplyRecoveries(ctx, 1000, "")
+	if err != nil {
+		return nil, err
+	}
+	updatedByFile := map[string]int64{}
+	for _, recovery := range recoveries {
+		fileName := strings.TrimSpace(recovery.OriginalFileName)
+		if fileName == "" {
+			continue
+		}
+		if currentUpdated, ok := updatedByFile[fileName]; !ok || recovery.UpdatedAtMS >= currentUpdated {
+			result[fileName] = supplyAccountRecoveryStatus{RecoveryID: recovery.RecoveryID, Status: recovery.Status}
+			updatedByFile[fileName] = recovery.UpdatedAtMS
+		}
+	}
+	return result, nil
+}
+
+func supplyAccountActionIs401(candidate model.AccountActionCandidate) bool {
+	text := strings.ToLower(strings.Join([]string{candidate.ReasonCode, candidate.Reason, candidate.EvidenceJSON}, " "))
+	return strings.Contains(text, "401") ||
+		strings.Contains(text, "invalid_401") ||
+		strings.Contains(text, "invalid_credentials") ||
+		strings.Contains(text, "token_revoked")
+}
+
 func (s *Service) supplyOrdersForItems(ctx context.Context, existing []store.SupplyOrder, items []store.SupplyImportItem) (map[string]store.SupplyOrder, error) {
 	orders := make(map[string]store.SupplyOrder, len(existing))
 	for _, order := range existing {
@@ -1797,7 +1947,7 @@ func (s *Service) supplyOrdersForItems(ctx context.Context, existing []store.Sup
 	return orders, nil
 }
 
-func supplyAccountItemFromStore(item store.SupplyImportItem, order store.SupplyOrder, usage supplyAccountUsage, file cpaauthfiles.File, cpaLookupKnown bool, cpaFound bool, now time.Time) SupplyAccountItem {
+func supplyAccountItemFromStore(item store.SupplyImportItem, order store.SupplyOrder, usage supplyAccountUsage, file cpaauthfiles.File, cpaLookupKnown bool, cpaFound bool, now time.Time, issue supplyAccountIssue, recovery supplyAccountRecoveryStatus) SupplyAccountItem {
 	source := "unknown"
 	product := ""
 	orderStatus := ""
@@ -1813,6 +1963,10 @@ func supplyAccountItemFromStore(item store.SupplyImportItem, order store.SupplyO
 		remainingSeconds = max(0, (item.LeaseExpiresAtMS-now.UnixMilli())/1000)
 	}
 	accountStatus := supplyAccountStatus(item, file, cpaLookupKnown, cpaFound, now)
+	accountStatusReason := supplyAccountStatusReason(accountStatus, item, file, cpaLookupKnown, cpaFound, now)
+	if issue.Auth401AtMS > 0 {
+		accountStatusReason = firstNonEmptyString(issue.Auth401Reason, accountStatusReason, "账号触发 401，已进入隔离/修复流程")
+	}
 	return SupplyAccountItem{
 		ID:                   item.ID,
 		FileName:             item.FileName,
@@ -1822,7 +1976,7 @@ func supplyAccountItemFromStore(item store.SupplyImportItem, order store.SupplyO
 		OrderStatus:          orderStatus,
 		Status:               reportKey(item.Status),
 		AccountStatus:        accountStatus,
-		AccountStatusReason:  supplyAccountStatusReason(accountStatus, item, file, cpaLookupKnown, cpaFound, now),
+		AccountStatusReason:  accountStatusReason,
 		CPAProvider:          file.Provider,
 		CPAAccount:           firstNonEmptyString(file.AccountSnapshot, textField(file.Raw, "account", "email", "username", "auth_label")),
 		CPAAccountID:         file.AccountID,
@@ -1842,6 +1996,12 @@ func supplyAccountItemFromStore(item store.SupplyImportItem, order store.SupplyO
 		ImportedAtMS:         item.ImportedAtMS,
 		LeaseExpiresAtMS:     item.LeaseExpiresAtMS,
 		RemainingSeconds:     remainingSeconds,
+		Auth401AtMS:          issue.Auth401AtMS,
+		Auth401BeforeCalls:   usage.SuccessCalls,
+		Auth401Reason:        issue.Auth401Reason,
+		AutoDisabledAtMS:     issue.AutoDisabledAtMS,
+		RecoveryID:           recovery.RecoveryID,
+		RecoveryStatus:       recovery.Status,
 		AttemptCount:         item.AttemptCount,
 		LastError:            item.LastError,
 		CreatedAtMS:          item.CreatedAtMS,
@@ -2053,6 +2213,12 @@ func supplyAccountSummaryAdd(summary *SupplyAccountSummary, account SupplyAccoun
 	if account.LastUsedAtMS > summary.LastUsedAtMS {
 		summary.LastUsedAtMS = account.LastUsedAtMS
 	}
+	if account.Auth401AtMS > 0 {
+		summary.Auth401Accounts++
+	}
+	if account.AutoDisabledAtMS > 0 {
+		summary.AutoQuarantined++
+	}
 }
 
 func (s *Service) supplyUsageStats(ctx context.Context, req ReportRequest, authFiles []string) ([]store.ModelStat, []store.TimelinePoint, error) {
@@ -2138,7 +2304,7 @@ func addReportModelStat(target *store.ModelStat, stat store.ModelStat) {
 	target.TotalTokens += stat.TotalTokens
 }
 
-func buildSupplyReport(req ReportRequest, orders []store.SupplyOrder, recoveries []store.SupplyRecovery, items []store.SupplyImportItem, now time.Time) Report {
+func buildSupplyReport(req ReportRequest, orders []store.SupplyOrder, recoveries []store.SupplyRecovery, items []store.SupplyImportItem, actionCandidates []model.AccountActionCandidate, now time.Time) Report {
 	report := Report{
 		Range: ReportRange{
 			FromMS:        req.FromMS,
@@ -2162,6 +2328,8 @@ func buildSupplyReport(req ReportRequest, orders []store.SupplyOrder, recoveries
 		}
 	}
 	productStats := make(map[string]*ReportDimensionStat)
+	strategyStats := make(map[string]*ReportDimensionStat)
+	triggerReasonStats := make(map[string]*ReportDimensionStat)
 	orderStatusStats := make(map[string]*ReportDimensionStat)
 	recoveryStatusStats := make(map[string]*ReportDimensionStat)
 	deliveryStatusStats := make(map[string]*ReportDimensionStat)
@@ -2169,8 +2337,12 @@ func buildSupplyReport(req ReportRequest, orders []store.SupplyOrder, recoveries
 
 	var orderFulfillmentTotal int64
 	var orderFulfillmentSamples int
+	var vacuumRecoveryTotal int64
+	var vacuumRecoverySamples int
 	for _, order := range orders {
 		source := reportOrderSource(order)
+		strategy := reportKey(firstNonEmptyString(order.Strategy, source))
+		triggerReason := reportKey(order.TriggerReason)
 		product := reportKey(order.Product)
 		status := reportKey(order.Status)
 		quantity := order.RequestedQuantity
@@ -2190,6 +2362,29 @@ func buildSupplyReport(req ReportRequest, orders []store.SupplyOrder, recoveries
 		default:
 			report.Executive.AutomaticOrders++
 		}
+		if order.Automatic {
+			if supplyTriggerReasonEmergency(triggerReason) {
+				report.Executive.EmergencyReplenishments++
+			}
+			if triggerReason == "virtual_demand_memory" {
+				report.Executive.VirtualDemandReplenishments++
+			}
+			if triggerReason == "emergency_pool_vacuum" {
+				report.Executive.VacuumReplenishments++
+				vacuumEndMS := order.CompletedAtMS
+				if vacuumEndMS <= 0 {
+					vacuumEndMS = min(now.UnixMilli(), req.ToMS)
+				}
+				if order.CreatedAtMS > 0 && vacuumEndMS >= order.CreatedAtMS {
+					durationSeconds := (vacuumEndMS - order.CreatedAtMS) / 1000
+					report.Executive.VacuumTotalSeconds += durationSeconds
+					if order.CompletedAtMS > 0 {
+						vacuumRecoveryTotal += durationSeconds
+						vacuumRecoverySamples++
+					}
+				}
+			}
+		}
 		if reportOpenOrderStatus(order.Status) {
 			report.Risk.OpenOrders++
 		}
@@ -2199,6 +2394,8 @@ func buildSupplyReport(req ReportRequest, orders []store.SupplyOrder, recoveries
 		}
 		for _, stat := range []*ReportDimensionStat{
 			reportDimension(productStats, product),
+			reportDimension(strategyStats, strategy),
+			reportDimension(triggerReasonStats, triggerReason),
 			reportDimension(orderStatusStats, status),
 			reportDimension(sourceStats, source),
 		} {
@@ -2214,6 +2411,22 @@ func buildSupplyReport(req ReportRequest, orders []store.SupplyOrder, recoveries
 		point.Requested += quantity
 		point.ChargedFen += order.ChargedFen
 	}
+
+	auth401Files := map[string]struct{}{}
+	for _, candidate := range actionCandidates {
+		if !supplyAccountActionIs401(candidate) {
+			continue
+		}
+		report.Executive.Auth401Events += max(1, candidate.HitCount)
+		fileName := strings.TrimSpace(candidate.AuthFileName)
+		if fileName != "" {
+			auth401Files[fileName] = struct{}{}
+		}
+		if candidate.AutoDisabledAtMS > 0 {
+			report.Executive.AutoQuarantined++
+		}
+	}
+	report.Executive.Auth401Accounts = len(auth401Files)
 
 	var recoveryClaimTotal int64
 	var recoveryClaimSamples int
@@ -2333,12 +2546,15 @@ func buildSupplyReport(req ReportRequest, orders []store.SupplyOrder, recoveries
 	report.ImportHealth.SuccessRate = report.Executive.ImportSuccessRate
 	report.ImportHealth.AverageAttempts = reportRatioFloat(float64(attempts), float64(report.ImportHealth.Items))
 	report.Timing.AverageOrderFulfillmentSeconds = reportRatioFloat(float64(orderFulfillmentTotal), float64(orderFulfillmentSamples))
+	report.Executive.AverageVacuumRecoverySeconds = reportRatioFloat(float64(vacuumRecoveryTotal), float64(vacuumRecoverySamples))
 	report.Timing.AverageRecoveryClaimSeconds = reportRatioFloat(float64(recoveryClaimTotal), float64(recoveryClaimSamples))
 	report.Timing.AverageRecoveryImportSeconds = reportRatioFloat(float64(recoveryImportTotal), float64(recoveryImportSamples))
 	report.Timing.AverageImportRegistrationSeconds = reportRatioFloat(float64(importRegistrationTotal), float64(importRegistrationSamples))
 
 	report.Timeline = reportTimelinePoints(timeline)
 	report.Products = reportDimensionStats(productStats)
+	report.Strategies = reportDimensionStats(strategyStats)
+	report.TriggerReasons = reportDimensionStats(triggerReasonStats)
 	report.OrderStatuses = reportDimensionStats(orderStatusStats)
 	report.RecoveryStatuses = reportDimensionStats(recoveryStatusStats)
 	report.DeliveryStatuses = reportDimensionStats(deliveryStatusStats)
@@ -2410,7 +2626,7 @@ func applyUsageRevenueToReport(report *Report, stats []store.ModelStat, timeline
 	sort.Slice(report.Timeline, func(i, j int) bool { return report.Timeline[i].BucketMS < report.Timeline[j].BucketMS })
 }
 
-func buildReportReconciliation(orders []store.SupplyOrder, recoveries []store.SupplyRecovery, items []store.SupplyImportItem, orderLookup map[string]store.SupplyOrder, usageByFile map[string]supplyAccountUsage, now time.Time) ReportReconciliation {
+func buildReportReconciliation(orders []store.SupplyOrder, recoveries []store.SupplyRecovery, items []store.SupplyImportItem, orderLookup map[string]store.SupplyOrder, usageByFile map[string]supplyAccountUsage, issuesByFile map[string]supplyAccountIssue, now time.Time) ReportReconciliation {
 	reconciliation := ReportReconciliation{
 		Summary: ReportReconciliationSummary{
 			UsageRevenueCurrency: "USD",
@@ -2424,6 +2640,8 @@ func buildReportReconciliation(orders []store.SupplyOrder, recoveries []store.Su
 		row := ReportOrderLedgerRow{
 			OrderID:           order.OrderID,
 			Source:            reportOrderSource(order),
+			Strategy:          order.Strategy,
+			TriggerReason:     order.TriggerReason,
 			Product:           order.Product,
 			Status:            reportKey(order.Status),
 			RequestedQuantity: order.RequestedQuantity,
@@ -2453,6 +2671,7 @@ func buildReportReconciliation(orders []store.SupplyOrder, recoveries []store.Su
 			source = "recovery"
 		}
 		usage := usageByFile[strings.TrimSpace(item.FileName)]
+		issue := issuesByFile[strings.TrimSpace(item.FileName)]
 		row := ReportAccountLedgerRow{
 			FileName:             item.FileName,
 			OrderID:              item.OrderID,
@@ -2471,6 +2690,8 @@ func buildReportReconciliation(orders []store.SupplyOrder, recoveries []store.Su
 			UsageTokens:          usage.Tokens,
 			UsageRevenue:         reportRatioFloat(usage.Revenue, 1),
 			LastUsedAtMS:         usage.LastUsedAtMS,
+			Auth401AtMS:          issue.Auth401AtMS,
+			AutoDisabledAtMS:     issue.AutoDisabledAtMS,
 		}
 		reconciliation.Accounts = append(reconciliation.Accounts, row)
 		index := len(reconciliation.Accounts) - 1
@@ -2795,6 +3016,13 @@ func reportRecoveryClaimedStatus(status string) bool {
 	}
 }
 
+func supplyTriggerReasonEmergency(reason string) bool {
+	reason = reportKey(reason)
+	return strings.Contains(reason, "emergency") ||
+		strings.Contains(reason, "critical") ||
+		reason == "virtual_demand_memory"
+}
+
 func reportAddClaimableAge(risk *ReportRisk, recovery store.SupplyRecovery, now time.Time) {
 	start := reportFirstPositiveMS(recovery.CreatedAtMS, recovery.LastSeenAtMS, recovery.UpdatedAtMS)
 	if start <= 0 {
@@ -2983,6 +3211,8 @@ func (s *Service) claimRecovery(ctx context.Context, cfg store.ManagerConfig, re
 			Product:           product,
 			RequestedQuantity: len(normalized),
 			Automatic:         true,
+			Strategy:          "recovery",
+			TriggerReason:     "recovery_claimed",
 			Status:            "recovery_importing",
 			RemoteStatus:      "recovery_claimed",
 			ItemCount:         len(normalized),
@@ -3119,6 +3349,230 @@ func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerC
 	return count, err
 }
 
+func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.ManagerConfig, resource *SmartResource) (int, int, string, error) {
+	if resource == nil || !smartSupplyStrategyConfigured(cfg.Supply) || !smartEmergencyBypassUsageRate(cfg.Supply) {
+		return 0, 0, "", nil
+	}
+	available, err := s.countAvailableAccounts(ctx, cfg)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	resource.AvailableAccounts = available
+	if resource.HealthyAccounts > available {
+		resource.HealthyAccounts = available
+	}
+	if available > smartCriticalAvailableAccounts(cfg.Supply) {
+		s.clearPoolVacuum()
+		if resource.EmergencyReason == "critical_available_accounts" || resource.EmergencyReason == "emergency_pool_vacuum" {
+			resource.EmergencyReason = ""
+			resource.PoolVacuumActive = false
+			resource.PoolVacuumStartedAtMS = 0
+			resource.PoolVacuumDurationSeconds = 0
+			if resource.DecisionReason == "critical_available_accounts" || resource.DecisionReason == "emergency_pool_vacuum" {
+				resource.EmergencyShortage = false
+				resource.SuggestedQuantity = 0
+				resource.HealthLevel = smartHealthUnknown
+				resource.SuggestedAction = smartActionSnapshotStale
+				resource.DecisionReason = "usage_rate_not_ready"
+			}
+		}
+		return available, 0, "", nil
+	}
+	applySmartEmergencyAvailability(cfg.Supply, resource, time.Now())
+	if available <= 0 {
+		startedAtMS := s.beginPoolVacuum()
+		resource.PoolVacuumActive = true
+		resource.PoolVacuumStartedAtMS = startedAtMS
+		resource.PoolVacuumDurationSeconds = max(0, int(time.Since(time.UnixMilli(startedAtMS)).Seconds()))
+	} else {
+		s.clearPoolVacuum()
+		resource.PoolVacuumActive = false
+		resource.PoolVacuumStartedAtMS = 0
+		resource.PoolVacuumDurationSeconds = 0
+	}
+	quantity := smartEmergencyRefillQuantity(cfg.Supply, available)
+	reason := resource.DecisionReason
+	if reason == "" {
+		reason = "critical_available_accounts"
+	}
+	return available, quantity, reason, nil
+}
+
+func (s *Service) beginPoolVacuum() int64 {
+	if s == nil {
+		return time.Now().UnixMilli()
+	}
+	s.poolVacuumMu.Lock()
+	defer s.poolVacuumMu.Unlock()
+	if s.poolVacuumStarted <= 0 {
+		s.poolVacuumStarted = time.Now().UnixMilli()
+	}
+	return s.poolVacuumStarted
+}
+
+func (s *Service) clearPoolVacuum() {
+	if s == nil {
+		return
+	}
+	s.poolVacuumMu.Lock()
+	s.poolVacuumStarted = 0
+	s.poolVacuumMu.Unlock()
+}
+
+type supplyAuth401Candidate struct {
+	FileName       string
+	AuthIndex      string
+	Account        string
+	AccountID      string
+	AuthLabel      string
+	Provider       string
+	EventHash      string
+	SeenAtMS       int64
+	EvidenceJSON   string
+	FailureSummary string
+}
+
+func (s *Service) handleSupplyAuth401Events(ctx context.Context, runtimeCfg collectorpkg.RuntimeConfig, events []usage.Event) {
+	if s == nil || len(events) == 0 {
+		return
+	}
+	seen := map[string]struct{}{}
+	candidates := make([]supplyAuth401Candidate, 0)
+	nowMS := time.Now().UnixMilli()
+	for _, event := range events {
+		candidate, ok := supplyAuth401CandidateFromEvent(event, nowMS)
+		if !ok {
+			continue
+		}
+		key := candidate.FileName + "\x00" + candidate.AuthIndex
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, candidate)
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	go s.processSupplyAuth401Candidates(context.WithoutCancel(ctx), runtimeCfg, candidates)
+}
+
+func supplyAuth401CandidateFromEvent(event usage.Event, nowMS int64) (supplyAuth401Candidate, bool) {
+	if !event.Failed || event.FailStatusCode != http.StatusUnauthorized {
+		return supplyAuth401Candidate{}, false
+	}
+	fileName := strings.TrimSpace(event.AuthFileSnapshot)
+	if fileName == "" || !smartSupplyManagedFileName(fileName) {
+		return supplyAuth401Candidate{}, false
+	}
+	seenAtMS := event.TimestampMS
+	if seenAtMS <= 0 {
+		seenAtMS = nowMS
+	}
+	provider := strings.TrimSpace(firstNonEmptyString(event.AuthProviderSnapshot, event.Provider))
+	return supplyAuth401Candidate{
+		FileName:       fileName,
+		AuthIndex:      strings.TrimSpace(event.AuthIndex),
+		Account:        firstNonEmptyString(event.AccountSnapshot, event.AuthLabelSnapshot, event.Source, fileName),
+		AccountID:      strings.TrimSpace(event.AuthProjectIDSnapshot),
+		AuthLabel:      event.AuthLabelSnapshot,
+		Provider:       provider,
+		EventHash:      event.EventHash,
+		SeenAtMS:       seenAtMS,
+		EvidenceJSON:   supplyAuth401EvidenceJSON(event),
+		FailureSummary: event.FailSummary,
+	}, true
+}
+
+func (s *Service) processSupplyAuth401Candidates(ctx context.Context, runtimeCfg collectorpkg.RuntimeConfig, candidates []supplyAuth401Candidate) {
+	if s == nil || len(candidates) == 0 || s.store == nil || s.managerConfig == nil {
+		return
+	}
+	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		return
+	}
+	baseURL := strings.TrimSpace(firstNonEmptyString(runtimeCfg.CPAUpstreamURL, cfg.CPAConnection.CPABaseURL))
+	managementKey := strings.TrimSpace(firstNonEmptyString(runtimeCfg.ManagementKey, cfg.CPAConnection.ManagementKey))
+	patchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for _, candidate := range candidates {
+		item, err := s.store.UpsertAccountActionCandidate(patchCtx, model.AccountActionCandidateUpsert{
+			ActionType:          model.AccountActionTypeReauth,
+			Provider:            candidate.Provider,
+			AuthFileName:        candidate.FileName,
+			AuthIndex:           candidate.AuthIndex,
+			AccountSnapshot:     candidate.Account,
+			AccountIDSnapshot:   candidate.AccountID,
+			AuthLabel:           candidate.AuthLabel,
+			ReasonCode:          "invalid_401",
+			Reason:              firstNonEmptyString(candidate.FailureSummary, "OAuth token returned 401 and was quarantined"),
+			AutoDisableEligible: true,
+			EvidenceJSON:        candidate.EvidenceJSON,
+			SeenAtMS:            candidate.SeenAtMS,
+		})
+		if err == nil && baseURL != "" && managementKey != "" {
+			if patchErr := s.authFiles.PatchDisabled(patchCtx, baseURL, managementKey, candidate.FileName, true, candidate.AuthIndex); patchErr == nil {
+				_ = s.store.MarkAccountActionCandidateAutoDisabled(patchCtx, item.ID, time.Now().UnixMilli())
+			} else {
+				_ = s.store.RecordAccountActionCandidateFailure(patchCtx, item.ID, patchErr.Error())
+			}
+		}
+	}
+	s.invalidateAuthAndCapacityCaches()
+	if smartRecoveryTriggerOn401(cfg.Supply) {
+		autoClaim := true
+		_, _ = s.SyncRecoveries(ctx, RecoverySyncRequest{
+			Force:     true,
+			AutoClaim: &autoClaim,
+			Limit:     max(1, recoveryClaimBatchSize(cfg.Supply)),
+		})
+	}
+	if managerconfigsvc.SupplyEnabled(cfg.Supply) {
+		_ = s.RunAutomatic(ctx)
+	}
+}
+
+func supplyAuth401EvidenceJSON(event usage.Event) string {
+	evidence := map[string]any{
+		"eventHash":         event.EventHash,
+		"requestId":         event.RequestID,
+		"timestamp":         event.Timestamp,
+		"timestampMs":       event.TimestampMS,
+		"statusCode":        event.FailStatusCode,
+		"failSummary":       event.FailSummary,
+		"headerErrorKind":   event.HeaderErrorKind,
+		"headerErrorCode":   event.HeaderErrorCode,
+		"headerTraceId":     event.HeaderTraceID,
+		"authIndex":         event.AuthIndex,
+		"authFileName":      event.AuthFileSnapshot,
+		"accountSnapshot":   event.AccountSnapshot,
+		"accountIdSnapshot": event.AuthProjectIDSnapshot,
+		"authLabel":         event.AuthLabelSnapshot,
+		"provider":          firstNonEmptyString(event.AuthProviderSnapshot, event.Provider),
+		"model":             event.Model,
+		"endpoint":          event.Endpoint,
+		"actionType":        model.AccountActionTypeReauth,
+		"reasonCode":        "invalid_401",
+		"quarantineSource":  "supply_pool",
+	}
+	data, err := json.Marshal(evidence)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func (s *Service) invalidateAuthAndCapacityCaches() {
+	if s == nil {
+		return
+	}
+	s.authCacheMu.Lock()
+	s.authCache = authFileSnapshot{}
+	s.authCacheMu.Unlock()
+	s.invalidateInspectionQuotaSnapshot()
+}
+
 type smartSupplyPressure struct {
 	level              string
 	reason             string
@@ -3236,15 +3690,19 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 	if quantity <= 0 {
 		return quantity, ""
 	}
-	if smartEmergencyShortage(resource) {
+	if smartResourceEmergency(resource) {
 		limit := smartAutomaticOrderQuantityLimit(cfg, resource)
 		minimum := min(smartPrelockMinQuantity(cfg), limit)
-		return clampInt(quantity, minimum, limit), "emergency_capacity_shortage"
+		reason := resource.DecisionReason
+		if reason == "" {
+			reason = "emergency_capacity_shortage"
+		}
+		return clampInt(quantity, minimum, limit), reason
 	}
-	if resource.DemandTrend == smartDemandTrendFalling && !smartEmergencyShortage(resource) {
+	if resource.DemandTrend == smartDemandTrendFalling && !smartResourceEmergency(resource) {
 		return 0, "demand_falling_observe"
 	}
-	if resource.DemandTrend == smartDemandTrendRising && !smartEmergencyShortage(resource) {
+	if resource.DemandTrend == smartDemandTrendRising && !smartResourceEmergency(resource) {
 		return min(quantity, smartRisingObservationQuantity(cfg, resource)), "demand_rising_observe"
 	}
 	maxQuantity := smartAutomaticOrderQuantityLimit(cfg, resource)
@@ -3329,7 +3787,7 @@ func sameSupplyProduct(a string, b string) bool {
 }
 
 func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, resource SmartResource) int {
-	if resource.DemandTrend == smartDemandTrendFalling && !smartEmergencyShortage(resource) {
+	if resource.DemandTrend == smartDemandTrendFalling && !smartResourceEmergency(resource) {
 		return 0
 	}
 	quantity := resource.SuggestedQuantity
@@ -3351,7 +3809,7 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	if cfg.DailyMaxReplenishQuantity > 0 {
 		quantity = min(quantity, cfg.DailyMaxReplenishQuantity)
 	}
-	if resource.DemandTrend == smartDemandTrendRising && !smartEmergencyShortage(resource) {
+	if resource.DemandTrend == smartDemandTrendRising && !smartResourceEmergency(resource) {
 		quantity = min(quantity, smartRisingObservationQuantity(cfg, resource))
 	}
 	return clampInt(quantity, 1, 100)
@@ -3363,6 +3821,26 @@ func estimatedSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, quantity int
 	}
 	unit := smartEstimatedNewAccountCapacityRCU(cfg)
 	return round2(float64(quantity) * unit)
+}
+
+func supplyOrderStrategy(cfg store.ManagerSupplyConfig, automatic bool) string {
+	if !automatic {
+		return "manual"
+	}
+	return managerconfigsvc.NormalizeSupplyStrategy(cfg.Strategy)
+}
+
+func supplyOrderTriggerReason(resource SmartResource, automatic bool) string {
+	if !automatic {
+		return "manual"
+	}
+	if resource.EmergencyReason != "" {
+		return resource.EmergencyReason
+	}
+	if resource.VirtualDemandRCUPerMinute > 0 || resource.DemandTrend == smartDemandTrendVirtual {
+		return "virtual_demand_memory"
+	}
+	return firstNonEmptyString(resource.DecisionReason, "automatic")
 }
 
 func (s *Service) remainingAutomaticDailyQuantity(ctx context.Context, cfg store.ManagerSupplyConfig) (int, error) {
@@ -3431,7 +3909,7 @@ func smartAutomaticCheckIntervalSeconds(cfg store.ManagerSupplyConfig, resource 
 	if seconds <= 0 {
 		seconds = 60
 	}
-	if smartEmergencyShortage(resource) {
+	if smartResourceEmergency(resource) {
 		return 1
 	}
 	if smartResourceAtOrBelowWarning(resource) {
@@ -3471,7 +3949,7 @@ func (s *Service) smartCriticalTakeConfirmed(cfg store.ManagerSupplyConfig, orde
 
 func (s *Service) smartTakeAllowed(cfg store.ManagerSupplyConfig, orderID string) bool {
 	resource := s.currentSmartResource(cfg)
-	if smartEmergencyShortage(resource) {
+	if smartResourceEmergency(resource) {
 		return true
 	}
 	if resource.SuggestedAction == smartActionTakeLocked {
@@ -3842,7 +4320,7 @@ func (s *Service) emergencyOrderProcessingAllowed(cfg store.ManagerSupplyConfig,
 		order.Status == "creating" || order.Status == "create_uncertain" || order.SupplierRetryUntilMS > time.Now().UnixMilli() {
 		return false
 	}
-	return smartEmergencyShortage(resource)
+	return smartResourceEmergency(resource)
 }
 
 func (s *Service) cancelOrder(ctx context.Context, order *store.SupplyOrder, err error) error {
