@@ -15,6 +15,7 @@ type Repository interface {
 	Create(ctx context.Context, order model.SupplyOrder) (model.SupplyOrder, error)
 	Get(ctx context.Context, orderID string) (model.SupplyOrder, bool, error)
 	GetOpen(ctx context.Context) (model.SupplyOrder, bool, error)
+	GetLatestAutomatic(ctx context.Context) (model.SupplyOrder, bool, error)
 	GetLatestCompletedAutomatic(ctx context.Context) (model.SupplyOrder, bool, error)
 	ActivateNextLegacyRepair(ctx context.Context) (model.SupplyOrder, bool, error)
 	ActivateNextUnsupportedRelease(ctx context.Context) (model.SupplyOrder, bool, error)
@@ -113,6 +114,16 @@ func (r *repository) Get(ctx context.Context, orderID string) (model.SupplyOrder
 
 func (r *repository) GetOpen(ctx context.Context) (model.SupplyOrder, bool, error) {
 	row := r.db.QueryRowContext(ctx, orderSelect+` where status in (`+openOrderStatusClause+`) order by created_at_ms asc limit 1`)
+	order, err := scanOrder(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.SupplyOrder{}, false, nil
+	}
+	return order, err == nil, err
+}
+
+func (r *repository) GetLatestAutomatic(ctx context.Context) (model.SupplyOrder, bool, error) {
+	row := r.db.QueryRowContext(ctx, orderSelect+` where automatic = 1
+		order by created_at_ms desc, id desc limit 1`)
 	order, err := scanOrder(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.SupplyOrder{}, false, nil

@@ -125,6 +125,9 @@ export interface SupplySmartResource {
   weakAccounts: number;
   pendingInspectionAccounts?: number;
   pendingInspectionCapacityRcu?: number;
+  estimatedRequiredAccounts?: number;
+  projectedAvailableAccounts?: number;
+  accountQuantityDeficit?: number;
   leaseEstimatedAccounts?: number;
   leaseEstimatedCapacityRcu?: number;
   configuredHealthyMinutesTarget?: number;

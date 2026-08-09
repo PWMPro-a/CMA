@@ -83,6 +83,9 @@ type SmartResource struct {
 	// them. They are deliberately separate from HealthyAccounts.
 	PendingInspectionAccounts    int     `json:"pendingInspectionAccounts,omitempty"`
 	PendingInspectionCapacityRCU float64 `json:"pendingInspectionCapacityRcu,omitempty"`
+	EstimatedRequiredAccounts    int     `json:"estimatedRequiredAccounts,omitempty"`
+	ProjectedAvailableAccounts   int     `json:"projectedAvailableAccounts,omitempty"`
+	AccountQuantityDeficit       int     `json:"accountQuantityDeficit,omitempty"`
 	// A supplier-managed credential can have a verified usable probe but expose
 	// only its monthly quota window. The quota selector always prefers a shorter
 	// window; monthly data is used only as the fallback when no short window is
@@ -667,6 +670,7 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 	if resource == nil {
 		return
 	}
+	defer applySmartAccountQuantityEstimate(cfg, resource)
 	if resource.ConsumeRCUPerMinute <= 0 {
 		if resource.DemandTrend != smartDemandTrendFalling {
 			return
@@ -711,8 +715,8 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 	resource.EmergencyShortage = emergency
 	if emergency {
 		// A critically short runway must not be hidden by a transient demand
-		// drop. Local cooldowns and observation batching are bypassed by the
-		// worker, while supplier and budget guards remain in effect.
+		// drop. Observation batching may be shortened, but the persisted create
+		// cooldown and in-flight supply guards remain mandatory.
 		resource.HealthLevel = smartHealthCritical
 		resource.SuggestedAction = smartActionEmergencyReplenish
 		resource.DecisionReason = "emergency_capacity_shortage"
@@ -749,6 +753,27 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 		resource.SuggestedQuantity = min(resource.SuggestedQuantity, smartRisingObservationQuantity(cfg, *resource))
 		resource.DecisionReason = "demand_rising_observe"
 	}
+}
+
+func applySmartAccountQuantityEstimate(cfg store.ManagerSupplyConfig, resource *SmartResource) {
+	if resource == nil {
+		return
+	}
+	projected := max(0, resource.AvailableAccounts)
+	required := smartHealthyAvailableAccounts(cfg)
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	if unit <= 0 {
+		unit = resource.RiskAdjustedUnitCapacityRCU
+	}
+	if unit <= 0 && resource.UnitCapacityRCU > 0 {
+		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
+	}
+	if resource.TargetCapacityRCU > 0 && unit > 0 {
+		required = max(required, int(math.Ceil(resource.TargetCapacityRCU/unit)))
+	}
+	resource.EstimatedRequiredAccounts = max(0, required)
+	resource.ProjectedAvailableAccounts = projected
+	resource.AccountQuantityDeficit = max(0, resource.EstimatedRequiredAccounts-projected)
 }
 
 type smartUsageAggregate struct {
@@ -1139,7 +1164,11 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context) (inspec
 				filtered = append(filtered, result)
 			}
 		}
-		if len(filtered) == 0 {
+		// A read-only Codex supply snapshot can legitimately contain no
+		// results when the pool is empty. Preserve that completed run as a
+		// trusted zero-capacity baseline so first-enable automation does not
+		// wait forever for a result row that cannot exist.
+		if len(filtered) == 0 && !smartInspectionRunIsTrustedEmptySupplySnapshot(run) {
 			continue
 		}
 		leaseItems, err := s.store.ListActiveImportedSupplyItems(ctx, time.Now().UnixMilli())
@@ -1199,7 +1228,20 @@ func smartInspectionSnapshotFresh(snapshot inspectionQuotaSnapshot, now time.Tim
 }
 
 func smartInspectionSnapshotComplete(snapshot inspectionQuotaSnapshot) bool {
-	return snapshot.run.ProbeSetCount > 0 && snapshot.run.SampledCount >= snapshot.run.ProbeSetCount
+	if snapshot.run.ProbeSetCount > 0 {
+		return snapshot.run.SampledCount >= snapshot.run.ProbeSetCount
+	}
+	return smartInspectionRunIsTrustedEmptySupplySnapshot(snapshot.run)
+}
+
+func smartInspectionRunIsTrustedEmptySupplySnapshot(run store.CodexInspectionRun) bool {
+	if run.Status != model.CodexInspectionStatusCompleted ||
+		run.TriggerType != model.CodexInspectionTriggerSupplySnapshot ||
+		run.ProbeSetCount != 0 || run.SampledCount != 0 {
+		return false
+	}
+	targets := run.Settings.TargetProviders()
+	return len(targets) == 1 && targets[0] == model.CodexInspectionTargetCodex
 }
 
 func isSmartCapacityInspectionResult(result store.CodexInspectionResult) bool {
@@ -1648,13 +1690,13 @@ func smartCreateCooldownSeconds(cfg store.ManagerSupplyConfig) int {
 	return clampInt(positiveOr(cfg.CreateCooldownSeconds, 120), 0, 3600)
 }
 
-// smartCreateCooldownForResource shortens recovery retries without removing
-// the configured cooldown entirely. One open order remains enforced by the
-// store, daily limits and balance limits still apply.
+// smartCreateCooldownForResource shortens recovery retries without ever
+// removing the safety delay. The delay is also checked against the latest
+// persisted automatic order, so a process restart cannot reset it.
 func smartCreateCooldownForResource(cfg store.ManagerSupplyConfig, resource SmartResource) int {
 	cooldown := smartCreateCooldownSeconds(cfg)
 	if smartResourceEmergency(resource) {
-		return 0
+		return clampInt(min(cooldown, 60), 30, 60)
 	}
 	if !smartResourceAtOrBelowWarning(resource) {
 		return cooldown

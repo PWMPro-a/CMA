@@ -437,6 +437,66 @@ func TestSmartResourceIncludesRecentImportedCapacityUntilNextInspection(t *testi
 	}
 }
 
+func TestLoadLatestInspectionQuotaSnapshotAcceptsTrustedEmptySupplySnapshot(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "empty-supply-snapshot.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	now := time.Now()
+	settings := model.DefaultCodexInspectionConfig()
+	settings.TargetTypes = []string{model.CodexInspectionTargetCodex}
+	settings.TargetType = model.CodexInspectionTargetCodex
+	settings.AutoActionMode = model.CodexInspectionAutoActionNone
+	settings.AutoRecoverEnabled = false
+	run, err := st.CreateCodexInspectionRun(context.Background(), store.CodexInspectionRun{
+		TriggerType:   model.CodexInspectionTriggerSupplySnapshot,
+		TriggerKey:    "supply-empty-pool",
+		Status:        model.CodexInspectionStatusCompleted,
+		StartedAtMS:   now.Add(-time.Second).UnixMilli(),
+		FinishedAtMS:  now.UnixMilli(),
+		ProbeSetCount: 0,
+		SampledCount:  0,
+		Settings:      settings,
+	})
+	if err != nil {
+		t.Fatalf("create empty supply snapshot: %v", err)
+	}
+
+	service := New(st, nil)
+	snapshot, err := service.loadLatestInspectionQuotaSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("load empty supply snapshot: %v", err)
+	}
+	if snapshot.run.ID != run.ID || len(snapshot.results) != 0 || !smartInspectionSnapshotComplete(snapshot) {
+		t.Fatalf("empty supply snapshot was not accepted as complete: %#v", snapshot)
+	}
+	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product: "oauth_7d",
+	}, snapshot, now)
+	if !resource.SnapshotFresh || resource.AvailableAccounts != 0 || resource.CurrentCapacityRCU != 0 ||
+		resource.DecisionReason == "inspection_snapshot_incomplete" {
+		t.Fatalf("empty supply snapshot must produce a trusted zero-capacity baseline: %#v", resource)
+	}
+}
+
+func TestEmptyNonSupplyInspectionDoesNotBecomeCapacityBaseline(t *testing.T) {
+	settings := model.DefaultCodexInspectionConfig()
+	snapshot := inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{
+			TriggerType:   model.CodexInspectionTriggerScheduled,
+			Status:        model.CodexInspectionStatusCompleted,
+			ProbeSetCount: 0,
+			SampledCount:  0,
+			Settings:      settings,
+		},
+		generatedAt: time.Now(),
+	}
+	if smartInspectionSnapshotComplete(snapshot) {
+		t.Fatal("an unrelated empty inspection must not be trusted as a supply capacity baseline")
+	}
+}
+
 func TestSmartLowWaterUsesRecoveryBatchCapAndShortCooldown(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		ReplenishBatchSize:        15,
@@ -490,7 +550,42 @@ func TestSmartLowWaterUsesRecoveryBatchCapAndShortCooldown(t *testing.T) {
 	}
 }
 
-func TestSmartEmergencyShortageRemovesLocalCreateCooldownAndCheckDelay(t *testing.T) {
+func TestSmartQuantityEstimateCapsAutomaticOrderByAccountDeficit(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Product:                     "oauth_7d",
+		Strategy:                    managerconfigsvc.SupplyStrategyBalanced,
+		HealthyAvailableAccounts:    5,
+		ReplenishBatchSize:          10,
+		PrelockMinQuantity:          6,
+		PrelockMaxQuantity:          10,
+		NewAccountConfidence:        0.7,
+		AccountMaxRequestsBefore401: 40,
+		AccountMaxUsefulSeconds401:  150,
+	}
+	resource := SmartResource{
+		AvailableAccounts:   3,
+		TargetCapacityRCU:   280,
+		CapacityGapRCU:      280,
+		UnitCapacityRCU:     80,
+		SuggestedQuantity:   10,
+		ConsumeRCUPerMinute: 10,
+	}
+	applySmartAccountQuantityEstimate(cfg, &resource)
+	if resource.EstimatedRequiredAccounts < 5 || resource.ProjectedAvailableAccounts != 3 ||
+		resource.AccountQuantityDeficit != resource.EstimatedRequiredAccounts-3 {
+		t.Fatalf("account estimate = %#v", resource)
+	}
+	quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource)
+	if quantity > resource.AccountQuantityDeficit {
+		t.Fatalf("prelock minimum raised quantity=%d above account deficit=%d", quantity, resource.AccountQuantityDeficit)
+	}
+	resource.AvailableAccounts = resource.EstimatedRequiredAccounts
+	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 0 {
+		t.Fatalf("satisfied account estimate quantity=%d, want 0", quantity)
+	}
+}
+
+func TestSmartEmergencyShortageKeepsHardCreateCooldown(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		ReplenishBatchSize:    15,
 		PrelockMinQuantity:    1,
@@ -508,11 +603,11 @@ func TestSmartEmergencyShortageRemovesLocalCreateCooldownAndCheckDelay(t *testin
 	if !smartEmergencyShortage(emergency) {
 		t.Fatalf("20 minute runway for a 40 minute target must be emergency: %#v", emergency)
 	}
-	if got := smartCreateCooldownForResource(cfg, emergency); got != 0 {
-		t.Fatalf("emergency create cooldown=%d, want 0", got)
+	if got := smartCreateCooldownForResource(cfg, emergency); got != 60 {
+		t.Fatalf("emergency create cooldown=%d, want 60", got)
 	}
-	if got := smartAutomaticCheckIntervalSeconds(cfg, emergency); got != 1 {
-		t.Fatalf("emergency check interval=%d, want 1", got)
+	if got := smartAutomaticCheckIntervalSeconds(cfg, emergency); got != 60 {
+		t.Fatalf("emergency check interval=%d, want 60", got)
 	}
 
 	buffered := emergency

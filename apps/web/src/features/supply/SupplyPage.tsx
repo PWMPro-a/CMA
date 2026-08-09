@@ -1234,8 +1234,10 @@ export function SupplyPage() {
           <span>{t('supply.pool_pending_inspection')}</span>
           <strong>{formatInteger(smart?.pendingInspectionAccounts ?? 0)}</strong>
           <small>
-            {t('supply.pool_risk_capacity_hint', {
-              value: formatRcu(smart?.riskAdjustedUnitCapacityRcu),
+            {t('supply.pool_account_estimate_hint', {
+              current: formatInteger(smart?.projectedAvailableAccounts ?? smart?.availableAccounts),
+              required: formatInteger(smart?.estimatedRequiredAccounts),
+              deficit: formatInteger(smart?.accountQuantityDeficit),
             })}
           </small>
         </div>

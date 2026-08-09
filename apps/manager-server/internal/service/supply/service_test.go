@@ -106,6 +106,58 @@ func TestEmergencyOrderProcessingHonorsSupplierRetryDeadline(t *testing.T) {
 	}
 }
 
+func TestAutomaticCreateCooldownUsesPersistedLatestOrder(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-cooldown.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	now := time.Now()
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID:           "automatic-recent",
+		Product:           "oauth_7d",
+		RequestedQuantity: 6,
+		Automatic:         true,
+		Status:            "completed",
+		CreatedAtMS:       now.Add(-5 * time.Second).UnixMilli(),
+		CompletedAtMS:     now.Add(-4 * time.Second).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("create automatic order: %v", err)
+	}
+	service := New(st, nil)
+	active, err := service.automaticCreateCooldownActive(context.Background(), store.ManagerSupplyConfig{
+		CreateCooldownSeconds: 120,
+	}, SmartResource{EmergencyShortage: true})
+	if err != nil {
+		t.Fatalf("check persisted cooldown: %v", err)
+	}
+	if !active {
+		t.Fatal("a recent persisted automatic order must keep emergency replenishment in cooldown")
+	}
+}
+
+func TestAutomaticSupplyGuardRequiresFreshBaselineAndSettledImports(t *testing.T) {
+	service := New(nil, nil)
+	nowMS := time.Now().UnixMilli()
+	service.automaticEnabled = true
+	service.automaticBaselineAtMS = nowMS
+	service.automaticAccountAtMS = nowMS
+	service.inspectionSnapshotRefresh.refresh = func(context.Context) error { return nil }
+
+	resource := SmartResource{SnapshotFresh: true, CapacitySnapshotAtMS: nowMS - 1}
+	if reason := service.automaticSupplyGuardReason(resource); reason != "initial_capacity_snapshot_pending" {
+		t.Fatalf("old capacity baseline reason = %q", reason)
+	}
+	resource.CapacitySnapshotAtMS = nowMS
+	if reason := service.automaticSupplyGuardReason(resource); reason != "" {
+		t.Fatalf("fresh baseline reason = %q", reason)
+	}
+	resource.PendingInspectionAccounts = 6
+	if reason := service.automaticSupplyGuardReason(resource); reason != "pending_account_inspection" {
+		t.Fatalf("pending import guard reason = %q", reason)
+	}
+}
+
 func TestAutomaticReplenishmentCreatesTakesAndImportsOrder(t *testing.T) {
 	var createCalls atomic.Int32
 	var takeCalls atomic.Int32

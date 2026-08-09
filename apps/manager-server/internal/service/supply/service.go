@@ -469,6 +469,10 @@ type Service struct {
 	criticalConfirmMu       sync.Mutex
 	criticalConfirmRounds   map[string]int
 	lastAutomaticCreateAtMS int64
+	automaticGuardMu        sync.Mutex
+	automaticEnabled        bool
+	automaticBaselineAtMS   int64
+	automaticAccountAtMS    int64
 }
 
 const (
@@ -641,8 +645,22 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 }
 
 func (s *Service) UpdateConfig(ctx context.Context, config store.ManagerSupplyConfig) (Status, error) {
-	if _, err := s.managerConfig.UpdateSupply(ctx, config); err != nil {
+	current, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
 		return Status{}, err
+	}
+	updated, err := s.managerConfig.UpdateSupply(ctx, config)
+	if err != nil {
+		return Status{}, err
+	}
+	wasEnabled := managerconfigsvc.SupplyEnabled(current.Supply)
+	isEnabled := managerconfigsvc.SupplyEnabled(updated)
+	if isEnabled && !wasEnabled {
+		s.armAutomaticBaseline()
+		s.invalidateInspectionQuotaSnapshot()
+		s.requestStaleInspectionSnapshotRefresh()
+	} else if !isEnabled {
+		s.observeAutomaticEnabled(false)
 	}
 	return s.GetStatus(ctx, 50)
 }
@@ -1015,7 +1033,8 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 	}
 	resource := s.currentSmartResource(cfg.Supply)
 	if smartResourceEmergency(resource) {
-		return s.withRecoveryInterval(time.Second, cfg.Supply)
+		seconds := smartCreateCooldownForResource(cfg.Supply, resource)
+		return s.withRecoveryInterval(time.Duration(max(1, seconds))*time.Second, cfg.Supply)
 	}
 	seconds := smartAutomaticCheckIntervalSeconds(cfg.Supply, resource)
 	return s.withRecoveryInterval(time.Duration(seconds)*time.Second, cfg.Supply)
@@ -1032,6 +1051,11 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		return err
 	}
 	supplyCfg := cfg.Supply
+	_, baselineStarted := s.observeAutomaticEnabled(managerconfigsvc.SupplyEnabled(supplyCfg))
+	if baselineStarted && smartSupplyEnabled(supplyCfg) {
+		s.invalidateInspectionQuotaSnapshot()
+		s.requestStaleInspectionSnapshotRefresh()
+	}
 	if restored, restoredFound, err := s.store.ActivateNextUnsupportedSupplyRelease(ctx); err != nil {
 		return err
 	} else if restoredFound {
@@ -1087,15 +1111,19 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		if err != nil {
 			return err
 		}
-		if poolAvailable, emergencyQuantity, emergencyReason, err := s.smartEmergencyAvailability(ctx, cfg, &resource); err != nil {
+		if poolAvailable, emergencyQuantity, emergencyReason, accountLoaded, err := s.smartEmergencyAvailability(ctx, cfg, &resource); err != nil {
 			return err
 		} else {
 			available = poolAvailable
+			if accountLoaded {
+				s.markAutomaticAccountSnapshot()
+			}
 			if emergencyQuantity > 0 {
 				resource.SuggestedQuantity = emergencyQuantity
 				resource.DecisionReason = emergencyReason
 				resource.EmergencyReason = emergencyReason
 			}
+			applySmartAccountQuantityEstimate(supplyCfg, &resource)
 			s.setSmartResource(resource)
 		}
 	} else {
@@ -1105,11 +1133,45 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		}
 	}
 	if manualQuantity == 0 {
+		if useSmart {
+			if reason := s.automaticSupplyGuardReason(resource); reason != "" {
+				resource.EmergencyShortage = false
+				resource.EmergencyReason = ""
+				resource.SuggestedAction = smartActionSnapshotStale
+				resource.SuggestedQuantity = 0
+				resource.DecisionReason = reason
+				s.setSmartResource(resource)
+				s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
+				return nil
+			}
+		}
 		if recent, recentFound, err := s.store.GetLatestCompletedAutomaticSupplyOrder(ctx); err != nil {
 			return err
-		} else if recentFound && !smartResourceEmergency(resource) && time.Since(time.UnixMilli(recent.CompletedAtMS)) < automaticSettleWindow(supplyCfg) {
+		} else if recentFound && time.Since(time.UnixMilli(recent.CompletedAtMS)) < automaticSettleWindow(supplyCfg) {
+			if useSmart {
+				resource.EmergencyShortage = false
+				resource.SuggestedAction = smartActionObserveDemand
+				resource.SuggestedQuantity = 0
+				resource.DecisionReason = "automatic_settlement_pending"
+				s.setSmartResource(resource)
+			}
 			s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
 			return nil
+		}
+		if useSmart {
+			cooldownActive, err := s.automaticCreateCooldownActive(ctx, supplyCfg, resource)
+			if err != nil {
+				return err
+			}
+			if cooldownActive {
+				resource.EmergencyShortage = false
+				resource.SuggestedAction = smartActionObserveDemand
+				resource.SuggestedQuantity = 0
+				resource.DecisionReason = "automatic_create_cooldown"
+				s.setSmartResource(resource)
+				s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
+				return nil
+			}
 		}
 	}
 	quantity := manualQuantity
@@ -1125,9 +1187,6 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
 			} else if resource.SuggestedAction == smartActionHealthy || resource.HealthLevel == smartHealthHealthy {
 				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
-			} else if !smartResourceEmergency(resource) && s.automaticCreateCooldownActive(supplyCfg, resource) {
-				s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
-				return nil
 			} else {
 				quantity = s.smartSuggestedCreateQuantity(supplyCfg, resource)
 			}
@@ -1554,6 +1613,10 @@ func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, orde
 	}
 	if err := s.store.UpdateSupplyOrder(ctx, *order); err != nil {
 		return err
+	}
+	if order.Status == "completed" && order.Automatic {
+		s.invalidateInspectionQuotaSnapshot()
+		s.requestStaleInspectionSnapshotRefresh()
 	}
 	return firstErr
 }
@@ -3349,17 +3412,20 @@ func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerC
 	return count, err
 }
 
-func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.ManagerConfig, resource *SmartResource) (int, int, string, error) {
-	if resource == nil || !smartSupplyStrategyConfigured(cfg.Supply) || !smartEmergencyBypassUsageRate(cfg.Supply) {
-		return 0, 0, "", nil
+func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.ManagerConfig, resource *SmartResource) (int, int, string, bool, error) {
+	if resource == nil {
+		return 0, 0, "", false, nil
 	}
 	available, err := s.countAvailableAccounts(ctx, cfg)
 	if err != nil {
-		return 0, 0, "", err
+		return 0, 0, "", false, err
 	}
 	resource.AvailableAccounts = available
 	if resource.HealthyAccounts > available {
 		resource.HealthyAccounts = available
+	}
+	if !smartSupplyStrategyConfigured(cfg.Supply) || !smartEmergencyBypassUsageRate(cfg.Supply) {
+		return available, 0, "", true, nil
 	}
 	if available > smartCriticalAvailableAccounts(cfg.Supply) {
 		s.clearPoolVacuum()
@@ -3376,7 +3442,7 @@ func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.Mana
 				resource.DecisionReason = "usage_rate_not_ready"
 			}
 		}
-		return available, 0, "", nil
+		return available, 0, "", true, nil
 	}
 	applySmartEmergencyAvailability(cfg.Supply, resource, time.Now())
 	if available <= 0 {
@@ -3395,7 +3461,7 @@ func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.Mana
 	if reason == "" {
 		reason = "critical_available_accounts"
 	}
-	return available, quantity, reason, nil
+	return available, quantity, reason, true, nil
 }
 
 func (s *Service) beginPoolVacuum() int64 {
@@ -3801,10 +3867,23 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	if quantity <= 0 {
 		return 0
 	}
+	accountQuantityLimit := 0
+	applySmartAccountQuantityEstimate(cfg, &resource)
+	if resource.EstimatedRequiredAccounts > 0 {
+		if resource.AccountQuantityDeficit <= 0 {
+			return 0
+		}
+		accountQuantityLimit = resource.AccountQuantityDeficit
+		quantity = min(quantity, accountQuantityLimit)
+	}
 	limit := smartAutomaticOrderQuantityLimit(cfg, resource)
 	quantity = min(quantity, limit)
 	if smartPrelockEnabled(cfg) {
-		quantity = max(quantity, min(smartPrelockMinQuantity(cfg), limit))
+		minimumQuantity := min(smartPrelockMinQuantity(cfg), limit)
+		if accountQuantityLimit > 0 {
+			minimumQuantity = min(minimumQuantity, accountQuantityLimit)
+		}
+		quantity = max(quantity, minimumQuantity)
 	}
 	if cfg.DailyMaxReplenishQuantity > 0 {
 		quantity = min(quantity, cfg.DailyMaxReplenishQuantity)
@@ -3889,15 +3968,22 @@ func (s *Service) waitLockedOrder(ctx context.Context, cfg store.ManagerSupplyCo
 	return s.store.UpdateSupplyOrder(ctx, *order)
 }
 
-func (s *Service) automaticCreateCooldownActive(cfg store.ManagerSupplyConfig, resource SmartResource) bool {
+func (s *Service) automaticCreateCooldownActive(ctx context.Context, cfg store.ManagerSupplyConfig, resource SmartResource) (bool, error) {
 	seconds := smartCreateCooldownForResource(cfg, resource)
 	s.stateMu.RLock()
 	last := s.lastAutomaticCreateAtMS
 	s.stateMu.RUnlock()
-	if seconds <= 0 || last <= 0 {
-		return false
+	latest, found, err := s.store.GetLatestAutomaticSupplyOrder(ctx)
+	if err != nil {
+		return false, err
 	}
-	return time.Since(time.UnixMilli(last)) < time.Duration(seconds)*time.Second
+	if found {
+		last = maxInt64(last, latest.CreatedAtMS)
+	}
+	if seconds <= 0 || last <= 0 {
+		return false, nil
+	}
+	return time.Since(time.UnixMilli(last)) < time.Duration(seconds)*time.Second, nil
 }
 
 // smartAutomaticCheckIntervalSeconds keeps the worker responsive while the
@@ -3910,7 +3996,7 @@ func smartAutomaticCheckIntervalSeconds(cfg store.ManagerSupplyConfig, resource 
 		seconds = 60
 	}
 	if smartResourceEmergency(resource) {
-		return 1
+		return max(1, smartCreateCooldownForResource(cfg, resource))
 	}
 	if smartResourceAtOrBelowWarning(resource) {
 		seconds = min(seconds, smartCreateCooldownForResource(cfg, resource))
@@ -3922,6 +4008,97 @@ func (s *Service) markAutomaticCreate() {
 	s.stateMu.Lock()
 	s.lastAutomaticCreateAtMS = time.Now().UnixMilli()
 	s.stateMu.Unlock()
+}
+
+func (s *Service) armAutomaticBaseline() int64 {
+	if s == nil {
+		return 0
+	}
+	s.automaticGuardMu.Lock()
+	defer s.automaticGuardMu.Unlock()
+	s.automaticEnabled = true
+	s.automaticBaselineAtMS = time.Now().UnixMilli()
+	s.automaticAccountAtMS = 0
+	return s.automaticBaselineAtMS
+}
+
+func (s *Service) observeAutomaticEnabled(enabled bool) (int64, bool) {
+	if s == nil {
+		return 0, false
+	}
+	s.automaticGuardMu.Lock()
+	defer s.automaticGuardMu.Unlock()
+	if !enabled {
+		s.automaticEnabled = false
+		s.automaticBaselineAtMS = 0
+		s.automaticAccountAtMS = 0
+		return 0, false
+	}
+	if !s.automaticEnabled || s.automaticBaselineAtMS <= 0 {
+		s.automaticEnabled = true
+		s.automaticBaselineAtMS = time.Now().UnixMilli()
+		s.automaticAccountAtMS = 0
+		return s.automaticBaselineAtMS, true
+	}
+	return s.automaticBaselineAtMS, false
+}
+
+func (s *Service) markAutomaticAccountSnapshot() {
+	if s == nil {
+		return
+	}
+	s.automaticGuardMu.Lock()
+	if s.automaticEnabled && s.automaticBaselineAtMS > 0 {
+		s.automaticAccountAtMS = time.Now().UnixMilli()
+	}
+	s.automaticGuardMu.Unlock()
+}
+
+func (s *Service) automaticBaselineBlockReason(resource SmartResource) string {
+	if s == nil {
+		return ""
+	}
+	s.automaticGuardMu.Lock()
+	baselineAtMS := s.automaticBaselineAtMS
+	accountAtMS := s.automaticAccountAtMS
+	enabled := s.automaticEnabled
+	s.automaticGuardMu.Unlock()
+	if !enabled || baselineAtMS <= 0 {
+		return ""
+	}
+	if accountAtMS < baselineAtMS {
+		return "initial_account_snapshot_pending"
+	}
+	if !resource.SnapshotFresh {
+		s.requestStaleInspectionSnapshotRefresh()
+		return "initial_capacity_snapshot_pending"
+	}
+	if s.hasInspectionSnapshotRefresher() && (resource.CapacitySnapshotAtMS < baselineAtMS || resource.SnapshotRefreshInProgress) {
+		s.requestStaleInspectionSnapshotRefresh()
+		return "initial_capacity_snapshot_pending"
+	}
+	return ""
+}
+
+func (s *Service) automaticSupplyGuardReason(resource SmartResource) string {
+	if reason := s.automaticBaselineBlockReason(resource); reason != "" {
+		return reason
+	}
+	if resource.PendingInspectionAccounts > 0 {
+		s.requestStaleInspectionSnapshotRefresh()
+		return "pending_account_inspection"
+	}
+	return ""
+}
+
+func (s *Service) hasInspectionSnapshotRefresher() bool {
+	if s == nil {
+		return false
+	}
+	s.inspectionSnapshotRefreshMu.Lock()
+	configured := s.inspectionSnapshotRefresh.refresh != nil
+	s.inspectionSnapshotRefreshMu.Unlock()
+	return configured
 }
 
 func (s *Service) incrementCriticalConfirm(orderID string) int {

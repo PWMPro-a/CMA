@@ -338,6 +338,10 @@ func (s *Store) GetOpenSupplyOrder(ctx context.Context) (SupplyOrder, bool, erro
 	return s.SupplyOrders.GetOpen(ctx)
 }
 
+func (s *Store) GetLatestAutomaticSupplyOrder(ctx context.Context) (SupplyOrder, bool, error) {
+	return s.SupplyOrders.GetLatestAutomatic(ctx)
+}
+
 func (s *Store) GetLatestCompletedAutomaticSupplyOrder(ctx context.Context) (SupplyOrder, bool, error) {
 	return s.SupplyOrders.GetLatestCompletedAutomatic(ctx)
 }
