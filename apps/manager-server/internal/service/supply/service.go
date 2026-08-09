@@ -125,12 +125,78 @@ type ReportRequest struct {
 	Limit  int   `json:"limit,omitempty"`
 }
 
+type SupplyAccountsRequest struct {
+	FromMS int64  `json:"fromMs,omitempty"`
+	ToMS   int64  `json:"toMs,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+	Status string `json:"status,omitempty"`
+}
+
 type ReportRange struct {
 	FromMS        int64 `json:"fromMs"`
 	ToMS          int64 `json:"toMs"`
 	GeneratedAtMS int64 `json:"generatedAtMs"`
 	Days          int   `json:"days"`
 	Truncated     bool  `json:"truncated"`
+}
+
+type SupplyAccountSummary struct {
+	Total                 int     `json:"total"`
+	Imported              int     `json:"imported"`
+	Pending               int     `json:"pending"`
+	Failed                int     `json:"failed"`
+	Active                int     `json:"active"`
+	Disabled              int     `json:"disabled"`
+	Expired               int     `json:"expired"`
+	Missing               int     `json:"missing"`
+	Unknown               int     `json:"unknown"`
+	ExpiringSoon          int     `json:"expiringSoon"`
+	UsageCalls            int64   `json:"usageCalls"`
+	UsageSuccessCalls     int64   `json:"usageSuccessCalls"`
+	UsageFailureCalls     int64   `json:"usageFailureCalls"`
+	UsageTokens           int64   `json:"usageTokens"`
+	UsageRevenue          float64 `json:"usageRevenue"`
+	UsageRevenueCurrency  string  `json:"usageRevenueCurrency"`
+	AverageRevenuePerCall float64 `json:"averageRevenuePerCall"`
+	LastUsedAtMS          int64   `json:"lastUsedAtMs,omitempty"`
+	CPAStatusError        string  `json:"cpaStatusError,omitempty"`
+}
+
+type SupplyAccountItem struct {
+	ID                   int64   `json:"id"`
+	FileName             string  `json:"fileName"`
+	OrderID              string  `json:"orderId"`
+	Source               string  `json:"source"`
+	Product              string  `json:"product,omitempty"`
+	OrderStatus          string  `json:"orderStatus,omitempty"`
+	Status               string  `json:"status"`
+	AccountStatus        string  `json:"accountStatus"`
+	CPAProvider          string  `json:"cpaProvider,omitempty"`
+	CPAAccount           string  `json:"cpaAccount,omitempty"`
+	CPAAccountID         string  `json:"cpaAccountId,omitempty"`
+	CPAAuthIndex         string  `json:"cpaAuthIndex,omitempty"`
+	CPAStatus            string  `json:"cpaStatus,omitempty"`
+	CPADisabled          bool    `json:"cpaDisabled,omitempty"`
+	UsageCalls           int64   `json:"usageCalls"`
+	UsageSuccessCalls    int64   `json:"usageSuccessCalls"`
+	UsageFailureCalls    int64   `json:"usageFailureCalls"`
+	UsageTokens          int64   `json:"usageTokens"`
+	UsageRevenue         float64 `json:"usageRevenue"`
+	UsageRevenueCurrency string  `json:"usageRevenueCurrency"`
+	LastUsedAtMS         int64   `json:"lastUsedAtMs,omitempty"`
+	ImportedAtMS         int64   `json:"importedAtMs,omitempty"`
+	LeaseExpiresAtMS     int64   `json:"leaseExpiresAtMs,omitempty"`
+	RemainingSeconds     int64   `json:"remainingSeconds,omitempty"`
+	AttemptCount         int     `json:"attemptCount"`
+	LastError            string  `json:"lastError,omitempty"`
+	CreatedAtMS          int64   `json:"createdAtMs"`
+	UpdatedAtMS          int64   `json:"updatedAtMs"`
+}
+
+type SupplyAccountList struct {
+	Range   ReportRange          `json:"range"`
+	Summary SupplyAccountSummary `json:"summary"`
+	Items   []SupplyAccountItem  `json:"items"`
 }
 
 type ReportExecutive struct {
@@ -240,12 +306,88 @@ type ReportRisk struct {
 	ClaimableAgeBuckets      []ReportRiskBucket `json:"claimableAgeBuckets"`
 }
 
+type ReportReconciliationSummary struct {
+	OrderRows                   int     `json:"orderRows"`
+	AccountRows                 int     `json:"accountRows"`
+	RecoveryRows                int     `json:"recoveryRows"`
+	OrderChargedFen             int64   `json:"orderChargedFen"`
+	OrderReleasedFen            int64   `json:"orderReleasedFen"`
+	OrderNetFen                 int64   `json:"orderNetFen"`
+	AccountAllocatedChargedFen  int64   `json:"accountAllocatedChargedFen"`
+	AccountAllocatedReleasedFen int64   `json:"accountAllocatedReleasedFen"`
+	AccountAllocatedNetFen      int64   `json:"accountAllocatedNetFen"`
+	AccountUsageCalls           int64   `json:"accountUsageCalls"`
+	AccountUsageTokens          int64   `json:"accountUsageTokens"`
+	AccountUsageRevenue         float64 `json:"accountUsageRevenue"`
+	RefundedFen                 int64   `json:"refundedFen"`
+	UsageRevenueCurrency        string  `json:"usageRevenueCurrency"`
+	AllocationMethod            string  `json:"allocationMethod"`
+}
+
+type ReportOrderLedgerRow struct {
+	OrderID           string `json:"orderId"`
+	Source            string `json:"source"`
+	Product           string `json:"product"`
+	Status            string `json:"status"`
+	RequestedQuantity int    `json:"requestedQuantity"`
+	ItemCount         int    `json:"itemCount"`
+	ImportedCount     int    `json:"importedCount"`
+	ChargedFen        int64  `json:"chargedFen"`
+	ReleasedFen       int64  `json:"releasedFen"`
+	NetFen            int64  `json:"netFen"`
+	CreatedAtMS       int64  `json:"createdAtMs"`
+	CompletedAtMS     int64  `json:"completedAtMs,omitempty"`
+}
+
+type ReportAccountLedgerRow struct {
+	FileName             string  `json:"fileName"`
+	OrderID              string  `json:"orderId"`
+	Source               string  `json:"source"`
+	Product              string  `json:"product,omitempty"`
+	Status               string  `json:"status"`
+	AccountStatus        string  `json:"accountStatus"`
+	ImportedAtMS         int64   `json:"importedAtMs,omitempty"`
+	LeaseExpiresAtMS     int64   `json:"leaseExpiresAtMs,omitempty"`
+	AllocatedChargedFen  int64   `json:"allocatedChargedFen"`
+	AllocatedReleasedFen int64   `json:"allocatedReleasedFen"`
+	AllocatedNetFen      int64   `json:"allocatedNetFen"`
+	UsageCalls           int64   `json:"usageCalls"`
+	UsageSuccessCalls    int64   `json:"usageSuccessCalls"`
+	UsageFailureCalls    int64   `json:"usageFailureCalls"`
+	UsageTokens          int64   `json:"usageTokens"`
+	UsageRevenue         float64 `json:"usageRevenue"`
+	LastUsedAtMS         int64   `json:"lastUsedAtMs,omitempty"`
+}
+
+type ReportRecoveryLedgerRow struct {
+	RecoveryID       string `json:"recoveryId"`
+	Product          string `json:"product,omitempty"`
+	DeliveryStatus   string `json:"deliveryStatus"`
+	Status           string `json:"status"`
+	OriginalFileName string `json:"originalFileName,omitempty"`
+	ClaimOrderID     string `json:"claimOrderId,omitempty"`
+	ItemCount        int    `json:"itemCount"`
+	ImportedCount    int    `json:"importedCount"`
+	RefundedFen      int64  `json:"refundedFen"`
+	LastSeenAtMS     int64  `json:"lastSeenAtMs,omitempty"`
+	ClaimedAtMS      int64  `json:"claimedAtMs,omitempty"`
+	UpdatedAtMS      int64  `json:"updatedAtMs"`
+}
+
+type ReportReconciliation struct {
+	Summary    ReportReconciliationSummary `json:"summary"`
+	Orders     []ReportOrderLedgerRow      `json:"orders"`
+	Accounts   []ReportAccountLedgerRow    `json:"accounts"`
+	Recoveries []ReportRecoveryLedgerRow   `json:"recoveries"`
+}
+
 type Report struct {
 	Range            ReportRange            `json:"range"`
 	Executive        ReportExecutive        `json:"executive"`
 	ImportHealth     ReportImportHealth     `json:"importHealth"`
 	Timing           ReportTiming           `json:"timing"`
 	Risk             ReportRisk             `json:"risk"`
+	Reconciliation   ReportReconciliation   `json:"reconciliation"`
 	Timeline         []ReportTimelinePoint  `json:"timeline"`
 	Products         []ReportDimensionStat  `json:"products"`
 	OrderStatuses    []ReportDimensionStat  `json:"orderStatuses"`
@@ -626,6 +768,80 @@ func (s *Service) ListRecoveries(ctx context.Context, limit int, status string) 
 	return s.store.ListSupplyRecoveries(ctx, limit, status)
 }
 
+func (s *Service) ListAccounts(ctx context.Context, req SupplyAccountsRequest) (SupplyAccountList, error) {
+	if s == nil || s.store == nil {
+		return SupplyAccountList{}, ErrNotConfigured
+	}
+	req = normalizeSupplyAccountsRequest(req)
+	statusFilter := strings.ToLower(strings.TrimSpace(req.Status))
+	items, err := s.store.ListSupplyImportItems(ctx, supplyAccountListLimit(req, statusFilter), supplyImportStatusFilter(statusFilter))
+	if err != nil {
+		return SupplyAccountList{}, err
+	}
+	prices, err := s.store.LoadModelPrices(ctx)
+	if err != nil {
+		return SupplyAccountList{}, err
+	}
+	usageByFile, err := s.supplyAccountUsageByFile(ctx, ReportRequest{FromMS: req.FromMS, ToMS: req.ToMS}, supplyUsageAuthFiles(items), prices)
+	if err != nil {
+		return SupplyAccountList{}, err
+	}
+	orders, err := s.supplyOrdersForItems(ctx, nil, items)
+	if err != nil {
+		return SupplyAccountList{}, err
+	}
+
+	var cpaStatusErr string
+	cpaFiles := map[string]cpaauthfiles.File{}
+	cpaLookupKnown := false
+	if s.managerConfig != nil {
+		cfg, _, _, cfgErr := s.managerConfig.ResolveManagerConfigWithSource(ctx)
+		if cfgErr == nil && cpaManagementConfigured(cfg) {
+			snapshot, snapshotErr := s.cachedAuthFiles(ctx, cfg, false)
+			if snapshotErr != nil {
+				cpaStatusErr = safeError(snapshotErr)
+			}
+			cpaLookupKnown = snapshotErr == nil || len(snapshot.files) > 0
+			cpaFiles = supplyCPAFileMap(snapshot.files)
+		} else if cfgErr != nil {
+			cpaStatusErr = safeError(cfgErr)
+		}
+	}
+
+	now := time.Now()
+	result := SupplyAccountList{
+		Range: ReportRange{
+			FromMS:        req.FromMS,
+			ToMS:          req.ToMS,
+			GeneratedAtMS: now.UnixMilli(),
+			Days:          max(1, int(math.Ceil(float64(req.ToMS-req.FromMS)/float64(24*time.Hour/time.Millisecond)))),
+			Truncated:     len(items) >= supplyAccountListLimit(req, statusFilter),
+		},
+		Summary: SupplyAccountSummary{
+			UsageRevenueCurrency: "USD",
+			CPAStatusError:       cpaStatusErr,
+		},
+		Items: make([]SupplyAccountItem, 0, min(len(items), req.Limit)),
+	}
+	for _, item := range items {
+		fileName := strings.TrimSpace(item.FileName)
+		file, found := cpaFiles[fileName]
+		account := supplyAccountItemFromStore(item, orders[item.OrderID], usageByFile[fileName], file, cpaLookupKnown, found, now)
+		if !supplyAccountStatusMatches(statusFilter, account) {
+			continue
+		}
+		result.Items = append(result.Items, account)
+		supplyAccountSummaryAdd(&result.Summary, account, now)
+		if len(result.Items) >= req.Limit {
+			result.Range.Truncated = result.Range.Truncated || len(items) > len(result.Items)
+			break
+		}
+	}
+	result.Summary.UsageRevenue = reportRatioFloat(result.Summary.UsageRevenue, 1)
+	result.Summary.AverageRevenuePerCall = reportRatioFloat(result.Summary.UsageRevenue, float64(result.Summary.UsageCalls))
+	return result, nil
+}
+
 func (s *Service) Report(ctx context.Context, req ReportRequest) (Report, error) {
 	if s == nil || s.store == nil {
 		return Report{}, ErrNotConfigured
@@ -655,8 +871,18 @@ func (s *Service) Report(ctx context.Context, req ReportRequest) (Report, error)
 	if err != nil {
 		return Report{}, err
 	}
+	reconciliationItems := mergeSupplyImportItems(items, usageItems)
+	accountUsage, err := s.supplyAccountUsageByFile(ctx, req, supplyUsageAuthFiles(reconciliationItems), prices)
+	if err != nil {
+		return Report{}, err
+	}
+	orderLookup, err := s.supplyOrdersForItems(ctx, orders, reconciliationItems)
+	if err != nil {
+		return Report{}, err
+	}
 	report := buildSupplyReport(req, orders, recoveries, items, time.Now())
 	applyUsageRevenueToReport(&report, modelStats, usageTimeline, prices)
+	report.Reconciliation = buildReportReconciliation(orders, recoveries, reconciliationItems, orderLookup, accountUsage, time.Now())
 	report.Range.Truncated = len(orders) >= req.Limit || len(recoveries) >= req.Limit ||
 		len(items) >= req.Limit || len(usageItems) >= req.Limit*2
 	return report, nil
@@ -1337,13 +1563,40 @@ func cpaManagementConfigured(cfg store.ManagerConfig) bool {
 		strings.TrimSpace(cfg.CPAConnection.ManagementKey) != ""
 }
 
+func normalizeSupplyAccountsRequest(req SupplyAccountsRequest) SupplyAccountsRequest {
+	now := time.Now()
+	if req.ToMS <= 0 {
+		req.ToMS = now.UnixMilli()
+	}
+	if req.FromMS <= 0 {
+		to := time.UnixMilli(req.ToMS).In(time.Local)
+		req.FromMS = time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.Local).UnixMilli()
+	}
+	if req.ToMS <= req.FromMS {
+		req.ToMS = time.UnixMilli(req.FromMS).Add(24 * time.Hour).UnixMilli()
+	}
+	maxRange := time.UnixMilli(req.ToMS).AddDate(-1, 0, 0).UnixMilli()
+	if req.FromMS < maxRange {
+		req.FromMS = maxRange
+	}
+	if req.Limit <= 0 {
+		req.Limit = 200
+	}
+	if req.Limit > 1000 {
+		req.Limit = 1000
+	}
+	req.Status = strings.ToLower(strings.TrimSpace(req.Status))
+	return req
+}
+
 func normalizeReportRequest(req ReportRequest) ReportRequest {
 	now := time.Now()
 	if req.ToMS <= 0 {
 		req.ToMS = now.UnixMilli()
 	}
 	if req.FromMS <= 0 {
-		req.FromMS = time.UnixMilli(req.ToMS).AddDate(0, 0, -30).UnixMilli()
+		to := time.UnixMilli(req.ToMS).In(time.Local)
+		req.FromMS = time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.Local).UnixMilli()
 	}
 	if req.ToMS <= req.FromMS {
 		req.ToMS = time.UnixMilli(req.FromMS).Add(24 * time.Hour).UnixMilli()
@@ -1356,6 +1609,262 @@ func normalizeReportRequest(req ReportRequest) ReportRequest {
 		req.Limit = 5000
 	}
 	return req
+}
+
+func supplyAccountListLimit(req SupplyAccountsRequest, statusFilter string) int {
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	if supplyImportStatusFilter(statusFilter) == "" && statusFilter != "" && statusFilter != "all" {
+		limit = min(1000, limit*4)
+	}
+	return limit
+}
+
+func supplyImportStatusFilter(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "imported", "pending", "failed":
+		return strings.ToLower(strings.TrimSpace(status))
+	default:
+		return ""
+	}
+}
+
+func supplyAccountStatusMatches(status string, account SupplyAccountItem) bool {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "" || status == "all" {
+		return true
+	}
+	if supplyImportStatusFilter(status) != "" {
+		return strings.EqualFold(account.Status, status)
+	}
+	return strings.EqualFold(account.AccountStatus, status)
+}
+
+func supplyCPAFileMap(files []cpaauthfiles.File) map[string]cpaauthfiles.File {
+	mapped := make(map[string]cpaauthfiles.File, len(files))
+	for _, file := range files {
+		name := strings.TrimSpace(file.Name)
+		if name == "" {
+			continue
+		}
+		if _, exists := mapped[name]; exists {
+			continue
+		}
+		mapped[name] = file
+	}
+	return mapped
+}
+
+type supplyAccountUsage struct {
+	Calls        int64
+	SuccessCalls int64
+	FailureCalls int64
+	Tokens       int64
+	Revenue      float64
+	LastUsedAtMS int64
+}
+
+func (s *Service) supplyAccountUsageByFile(ctx context.Context, req ReportRequest, authFiles []string, prices map[string]store.ModelPrice) (map[string]supplyAccountUsage, error) {
+	usageByFile := make(map[string]supplyAccountUsage)
+	if len(authFiles) == 0 {
+		return usageByFile, nil
+	}
+	req = normalizeReportRequest(req)
+	const chunkSize = 200
+	for start := 0; start < len(authFiles); start += chunkSize {
+		end := start + chunkSize
+		if end > len(authFiles) {
+			end = len(authFiles)
+		}
+		stats, err := s.store.CredentialModelStatsWithFilter(ctx, store.AnalyticsFilter{
+			FromMS:        req.FromMS,
+			ToMS:          req.ToMS,
+			AuthFiles:     authFiles[start:end],
+			IncludeFailed: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, stat := range stats {
+			fileName := strings.TrimSpace(stat.AuthFileSnapshot)
+			if fileName == "" {
+				continue
+			}
+			current := usageByFile[fileName]
+			current.Calls += stat.Calls
+			current.SuccessCalls += stat.SuccessCalls
+			current.FailureCalls += stat.FailureCalls
+			current.Tokens += stat.TotalTokens
+			current.Revenue += reportCostForCredentialStat(stat, prices)
+			if stat.LastSeenMS > current.LastUsedAtMS {
+				current.LastUsedAtMS = stat.LastSeenMS
+			}
+			usageByFile[fileName] = current
+		}
+	}
+	for fileName, usage := range usageByFile {
+		usage.Revenue = reportRatioFloat(usage.Revenue, 1)
+		usageByFile[fileName] = usage
+	}
+	return usageByFile, nil
+}
+
+func (s *Service) supplyOrdersForItems(ctx context.Context, existing []store.SupplyOrder, items []store.SupplyImportItem) (map[string]store.SupplyOrder, error) {
+	orders := make(map[string]store.SupplyOrder, len(existing))
+	for _, order := range existing {
+		if strings.TrimSpace(order.OrderID) == "" {
+			continue
+		}
+		orders[order.OrderID] = order
+	}
+	if s == nil || s.store == nil {
+		return orders, nil
+	}
+	seenMissing := make(map[string]struct{})
+	for _, item := range items {
+		orderID := strings.TrimSpace(item.OrderID)
+		if orderID == "" {
+			continue
+		}
+		if _, ok := orders[orderID]; ok {
+			continue
+		}
+		if _, skipped := seenMissing[orderID]; skipped {
+			continue
+		}
+		order, found, err := s.store.GetSupplyOrder(ctx, orderID)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			orders[orderID] = order
+		} else {
+			seenMissing[orderID] = struct{}{}
+		}
+	}
+	return orders, nil
+}
+
+func supplyAccountItemFromStore(item store.SupplyImportItem, order store.SupplyOrder, usage supplyAccountUsage, file cpaauthfiles.File, cpaLookupKnown bool, cpaFound bool, now time.Time) SupplyAccountItem {
+	source := "unknown"
+	product := ""
+	orderStatus := ""
+	if strings.TrimSpace(order.OrderID) != "" {
+		source = reportOrderSource(order)
+		product = order.Product
+		orderStatus = order.Status
+	} else if strings.HasPrefix(item.OrderID, "recovery-") {
+		source = "recovery"
+	}
+	remainingSeconds := int64(0)
+	if item.LeaseExpiresAtMS > 0 {
+		remainingSeconds = max(0, (item.LeaseExpiresAtMS-now.UnixMilli())/1000)
+	}
+	return SupplyAccountItem{
+		ID:                   item.ID,
+		FileName:             item.FileName,
+		OrderID:              item.OrderID,
+		Source:               source,
+		Product:              product,
+		OrderStatus:          orderStatus,
+		Status:               reportKey(item.Status),
+		AccountStatus:        supplyAccountStatus(item, file, cpaLookupKnown, cpaFound, now),
+		CPAProvider:          file.Provider,
+		CPAAccount:           firstNonEmptyString(file.AccountSnapshot, textField(file.Raw, "account", "email", "username", "auth_label")),
+		CPAAccountID:         file.AccountID,
+		CPAAuthIndex:         file.AuthIndex,
+		CPAStatus:            textField(file.Raw, "status", "state"),
+		CPADisabled:          file.Disabled,
+		UsageCalls:           usage.Calls,
+		UsageSuccessCalls:    usage.SuccessCalls,
+		UsageFailureCalls:    usage.FailureCalls,
+		UsageTokens:          usage.Tokens,
+		UsageRevenue:         reportRatioFloat(usage.Revenue, 1),
+		UsageRevenueCurrency: "USD",
+		LastUsedAtMS:         usage.LastUsedAtMS,
+		ImportedAtMS:         item.ImportedAtMS,
+		LeaseExpiresAtMS:     item.LeaseExpiresAtMS,
+		RemainingSeconds:     remainingSeconds,
+		AttemptCount:         item.AttemptCount,
+		LastError:            item.LastError,
+		CreatedAtMS:          item.CreatedAtMS,
+		UpdatedAtMS:          item.UpdatedAtMS,
+	}
+}
+
+func supplyAccountStatus(item store.SupplyImportItem, file cpaauthfiles.File, cpaLookupKnown bool, cpaFound bool, now time.Time) string {
+	status := reportKey(item.Status)
+	if status != "imported" {
+		return status
+	}
+	if item.LeaseExpiresAtMS > 0 && item.LeaseExpiresAtMS <= now.UnixMilli() {
+		return "expired"
+	}
+	if !cpaLookupKnown {
+		return "unknown"
+	}
+	if !cpaFound {
+		return "missing"
+	}
+	if !isAvailableCodexFile(file) {
+		return "disabled"
+	}
+	return "active"
+}
+
+func supplyAccountStatusFromItem(item store.SupplyImportItem, now time.Time) string {
+	status := reportKey(item.Status)
+	if status != "imported" {
+		return status
+	}
+	if item.LeaseExpiresAtMS > 0 && item.LeaseExpiresAtMS <= now.UnixMilli() {
+		return "expired"
+	}
+	return "imported"
+}
+
+func supplyAccountSummaryAdd(summary *SupplyAccountSummary, account SupplyAccountItem, now time.Time) {
+	if summary == nil {
+		return
+	}
+	summary.Total++
+	switch reportKey(account.Status) {
+	case "imported":
+		summary.Imported++
+	case "pending":
+		summary.Pending++
+	case "failed":
+		summary.Failed++
+	}
+	switch reportKey(account.AccountStatus) {
+	case "active":
+		summary.Active++
+	case "disabled":
+		summary.Disabled++
+	case "expired":
+		summary.Expired++
+	case "missing":
+		summary.Missing++
+	case "unknown":
+		summary.Unknown++
+	}
+	if account.AccountStatus == "active" && account.LeaseExpiresAtMS > 0 &&
+		account.LeaseExpiresAtMS <= now.Add(15*time.Minute).UnixMilli() {
+		summary.ExpiringSoon++
+	}
+	summary.UsageCalls += account.UsageCalls
+	summary.UsageSuccessCalls += account.UsageSuccessCalls
+	summary.UsageFailureCalls += account.UsageFailureCalls
+	summary.UsageTokens += account.UsageTokens
+	summary.UsageRevenue += account.UsageRevenue
+	if account.LastUsedAtMS > summary.LastUsedAtMS {
+		summary.LastUsedAtMS = account.LastUsedAtMS
+	}
 }
 
 func (s *Service) supplyUsageStats(ctx context.Context, req ReportRequest, authFiles []string) ([]store.ModelStat, []store.TimelinePoint, error) {
@@ -1713,7 +2222,213 @@ func applyUsageRevenueToReport(report *Report, stats []store.ModelStat, timeline
 	sort.Slice(report.Timeline, func(i, j int) bool { return report.Timeline[i].BucketMS < report.Timeline[j].BucketMS })
 }
 
+func buildReportReconciliation(orders []store.SupplyOrder, recoveries []store.SupplyRecovery, items []store.SupplyImportItem, orderLookup map[string]store.SupplyOrder, usageByFile map[string]supplyAccountUsage, now time.Time) ReportReconciliation {
+	reconciliation := ReportReconciliation{
+		Summary: ReportReconciliationSummary{
+			UsageRevenueCurrency: "USD",
+			AllocationMethod:     "order_even_split_by_visible_accounts",
+		},
+		Orders:     make([]ReportOrderLedgerRow, 0, len(orders)),
+		Accounts:   make([]ReportAccountLedgerRow, 0, len(items)),
+		Recoveries: make([]ReportRecoveryLedgerRow, 0, len(recoveries)),
+	}
+	for _, order := range orders {
+		row := ReportOrderLedgerRow{
+			OrderID:           order.OrderID,
+			Source:            reportOrderSource(order),
+			Product:           order.Product,
+			Status:            reportKey(order.Status),
+			RequestedQuantity: order.RequestedQuantity,
+			ItemCount:         order.ItemCount,
+			ImportedCount:     order.ImportedCount,
+			ChargedFen:        order.ChargedFen,
+			ReleasedFen:       order.ReleasedFen,
+			NetFen:            order.ChargedFen - order.ReleasedFen,
+			CreatedAtMS:       order.CreatedAtMS,
+			CompletedAtMS:     order.CompletedAtMS,
+		}
+		reconciliation.Orders = append(reconciliation.Orders, row)
+		reconciliation.Summary.OrderChargedFen += row.ChargedFen
+		reconciliation.Summary.OrderReleasedFen += row.ReleasedFen
+		reconciliation.Summary.OrderNetFen += row.NetFen
+	}
+
+	accountIndexesByOrder := make(map[string][]int)
+	for _, item := range items {
+		order := orderLookup[item.OrderID]
+		source := "unknown"
+		product := ""
+		if strings.TrimSpace(order.OrderID) != "" {
+			source = reportOrderSource(order)
+			product = order.Product
+		} else if strings.HasPrefix(item.OrderID, "recovery-") {
+			source = "recovery"
+		}
+		usage := usageByFile[strings.TrimSpace(item.FileName)]
+		row := ReportAccountLedgerRow{
+			FileName:          item.FileName,
+			OrderID:           item.OrderID,
+			Source:            source,
+			Product:           product,
+			Status:            reportKey(item.Status),
+			AccountStatus:     supplyAccountStatusFromItem(item, now),
+			ImportedAtMS:      item.ImportedAtMS,
+			LeaseExpiresAtMS:  item.LeaseExpiresAtMS,
+			UsageCalls:        usage.Calls,
+			UsageSuccessCalls: usage.SuccessCalls,
+			UsageFailureCalls: usage.FailureCalls,
+			UsageTokens:       usage.Tokens,
+			UsageRevenue:      reportRatioFloat(usage.Revenue, 1),
+			LastUsedAtMS:      usage.LastUsedAtMS,
+		}
+		reconciliation.Accounts = append(reconciliation.Accounts, row)
+		index := len(reconciliation.Accounts) - 1
+		if strings.TrimSpace(item.OrderID) != "" {
+			accountIndexesByOrder[item.OrderID] = append(accountIndexesByOrder[item.OrderID], index)
+		}
+		reconciliation.Summary.AccountUsageCalls += row.UsageCalls
+		reconciliation.Summary.AccountUsageTokens += row.UsageTokens
+		reconciliation.Summary.AccountUsageRevenue += row.UsageRevenue
+	}
+	for orderID, indexes := range accountIndexesByOrder {
+		order, ok := orderLookup[orderID]
+		if !ok || len(indexes) == 0 {
+			continue
+		}
+		chargedParts := splitFenEvenly(order.ChargedFen, len(indexes))
+		releasedParts := splitFenEvenly(order.ReleasedFen, len(indexes))
+		for i, index := range indexes {
+			reconciliation.Accounts[index].AllocatedChargedFen = chargedParts[i]
+			reconciliation.Accounts[index].AllocatedReleasedFen = releasedParts[i]
+			reconciliation.Accounts[index].AllocatedNetFen = chargedParts[i] - releasedParts[i]
+			reconciliation.Summary.AccountAllocatedChargedFen += chargedParts[i]
+			reconciliation.Summary.AccountAllocatedReleasedFen += releasedParts[i]
+			reconciliation.Summary.AccountAllocatedNetFen += chargedParts[i] - releasedParts[i]
+		}
+	}
+	reconciliation.Summary.AccountUsageRevenue = reportRatioFloat(reconciliation.Summary.AccountUsageRevenue, 1)
+
+	for _, recovery := range recoveries {
+		row := ReportRecoveryLedgerRow{
+			RecoveryID:       recovery.RecoveryID,
+			Product:          recovery.Product,
+			DeliveryStatus:   reportKey(recovery.DeliveryStatus),
+			Status:           reportKey(recovery.Status),
+			OriginalFileName: recovery.OriginalFileName,
+			ClaimOrderID:     recovery.ClaimOrderID,
+			ItemCount:        recovery.ItemCount,
+			ImportedCount:    recovery.ImportedCount,
+			RefundedFen:      recovery.RefundedFen,
+			LastSeenAtMS:     recovery.LastSeenAtMS,
+			ClaimedAtMS:      recovery.ClaimedAtMS,
+			UpdatedAtMS:      recovery.UpdatedAtMS,
+		}
+		reconciliation.Recoveries = append(reconciliation.Recoveries, row)
+		reconciliation.Summary.RefundedFen += row.RefundedFen
+	}
+	reconciliation.Summary.OrderRows = len(reconciliation.Orders)
+	reconciliation.Summary.AccountRows = len(reconciliation.Accounts)
+	reconciliation.Summary.RecoveryRows = len(reconciliation.Recoveries)
+	return reconciliation
+}
+
+func splitFenEvenly(total int64, parts int) []int64 {
+	if parts <= 0 {
+		return nil
+	}
+	values := make([]int64, parts)
+	base := total / int64(parts)
+	remainder := total % int64(parts)
+	for i := range values {
+		values[i] = base
+		if remainder > 0 {
+			values[i]++
+			remainder--
+		} else if remainder < 0 {
+			values[i]--
+			remainder++
+		}
+	}
+	return values
+}
+
+func mergeSupplyImportItems(groups ...[]store.SupplyImportItem) []store.SupplyImportItem {
+	merged := make([]store.SupplyImportItem, 0)
+	seen := make(map[string]int)
+	for _, group := range groups {
+		for _, item := range group {
+			key := supplyImportItemMergeKey(item)
+			if key == "" {
+				continue
+			}
+			if index, ok := seen[key]; ok {
+				merged[index] = richerSupplyImportItem(merged[index], item)
+				continue
+			}
+			seen[key] = len(merged)
+			merged = append(merged, item)
+		}
+	}
+	return merged
+}
+
+func supplyImportItemMergeKey(item store.SupplyImportItem) string {
+	if strings.TrimSpace(item.FileName) != "" {
+		return "file:" + strings.TrimSpace(item.FileName)
+	}
+	if strings.TrimSpace(item.OrderID) != "" && strings.TrimSpace(item.ItemKey) != "" {
+		return "order:" + strings.TrimSpace(item.OrderID) + ":" + strings.TrimSpace(item.ItemKey)
+	}
+	if item.ID > 0 {
+		return "id:" + strconv.FormatInt(item.ID, 10)
+	}
+	return ""
+}
+
+func richerSupplyImportItem(current store.SupplyImportItem, candidate store.SupplyImportItem) store.SupplyImportItem {
+	if strings.TrimSpace(current.OrderID) == "" && strings.TrimSpace(candidate.OrderID) != "" {
+		current.OrderID = candidate.OrderID
+	}
+	if strings.TrimSpace(current.ItemKey) == "" && strings.TrimSpace(candidate.ItemKey) != "" {
+		current.ItemKey = candidate.ItemKey
+	}
+	if strings.TrimSpace(current.FileName) == "" && strings.TrimSpace(candidate.FileName) != "" {
+		current.FileName = candidate.FileName
+	}
+	if strings.TrimSpace(current.Status) == "" && strings.TrimSpace(candidate.Status) != "" {
+		current.Status = candidate.Status
+	}
+	if current.ImportedAtMS <= 0 && candidate.ImportedAtMS > 0 {
+		current.ImportedAtMS = candidate.ImportedAtMS
+	}
+	if current.LeaseExpiresAtMS <= 0 && candidate.LeaseExpiresAtMS > 0 {
+		current.LeaseExpiresAtMS = candidate.LeaseExpiresAtMS
+	}
+	if current.CreatedAtMS <= 0 && candidate.CreatedAtMS > 0 {
+		current.CreatedAtMS = candidate.CreatedAtMS
+	}
+	if candidate.UpdatedAtMS > current.UpdatedAtMS {
+		current.UpdatedAtMS = candidate.UpdatedAtMS
+	}
+	return current
+}
+
 func reportCostForStat(stat store.ModelStat, prices map[string]store.ModelPrice) float64 {
+	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
+		InputTokens:             stat.InputTokens,
+		OutputTokens:            stat.OutputTokens,
+		CachedTokens:            stat.CachedTokens,
+		CacheReadTokens:         stat.CacheReadTokens,
+		CacheCreationTokens:     stat.CacheCreationTokens,
+		LongInputTokens:         stat.LongInputTokens,
+		LongOutputTokens:        stat.LongOutputTokens,
+		LongCachedTokens:        stat.LongCachedTokens,
+		LongCacheReadTokens:     stat.LongCacheReadTokens,
+		LongCacheCreationTokens: stat.LongCacheCreationTokens,
+	}, prices)
+}
+
+func reportCostForCredentialStat(stat store.CredentialModelStat, prices map[string]store.ModelPrice) float64 {
 	return pricing.CostForModelCandidatesWithServiceTier([]string{stat.BillingModel, stat.Model}, stat.ServiceTier, pricing.ModelTokens{
 		InputTokens:             stat.InputTokens,
 		OutputTokens:            stat.OutputTokens,

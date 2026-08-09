@@ -97,6 +97,31 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 		result, err := h.App.SupplyService.ListRecoveries(r.Context(), limit, r.URL.Query().Get("status"))
 		h.writeResult(w, result, err)
+	case "/v0/management/supply/accounts":
+		if r.Method != http.MethodGet {
+			response.MethodNotAllowed(w)
+			return
+		}
+		req := supplysvc.SupplyAccountsRequest{
+			Status: r.URL.Query().Get("status"),
+		}
+		if raw := strings.TrimSpace(r.URL.Query().Get("fromMs")); raw != "" {
+			if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil {
+				req.FromMS = parsed
+			}
+		}
+		if raw := strings.TrimSpace(r.URL.Query().Get("toMs")); raw != "" {
+			if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil {
+				req.ToMS = parsed
+			}
+		}
+		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+				req.Limit = parsed
+			}
+		}
+		result, err := h.App.SupplyService.ListAccounts(r.Context(), req)
+		h.writeResult(w, result, err)
 	case "/v0/management/supply/reports":
 		if r.Method != http.MethodGet {
 			response.MethodNotAllowed(w)

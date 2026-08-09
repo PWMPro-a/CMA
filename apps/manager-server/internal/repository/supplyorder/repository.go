@@ -24,6 +24,7 @@ type Repository interface {
 	List(ctx context.Context, limit int) ([]model.SupplyOrder, error)
 	ListBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyOrder, error)
 	InsertItems(ctx context.Context, orderID string, items []model.SupplyImportItem) (int, error)
+	ListItems(ctx context.Context, limit int, status string) ([]model.SupplyImportItem, error)
 	ListItemsBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyImportItem, error)
 	ListImportedItemsOverlapping(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyImportItem, error)
 	ListPendingItems(ctx context.Context, orderID string, nowMS int64, limit int) ([]model.SupplyImportItem, error)
@@ -387,6 +388,37 @@ func (r *repository) InsertItems(ctx context.Context, orderID string, items []mo
 	return inserted, nil
 }
 
+func (r *repository) ListItems(ctx context.Context, limit int, status string) ([]model.SupplyImportItem, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	status = strings.ToLower(strings.TrimSpace(status))
+	query := `select id, order_id, item_key, file_name, status,
+		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms, created_at_ms, updated_at_ms
+		from supply_import_items`
+	args := make([]any, 0, 2)
+	if status != "" && status != "all" {
+		query += ` where status = ?`
+		args = append(args, status)
+	}
+	query += ` order by coalesce(imported_at_ms, updated_at_ms, created_at_ms) desc, id desc limit ?`
+	args = append(args, limit)
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]model.SupplyImportItem, 0)
+	for rows.Next() {
+		item, err := r.scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (r *repository) ListItemsBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyImportItem, error) {
 	if limit <= 0 || limit > 10000 {
 		limit = 5000
@@ -418,7 +450,8 @@ func (r *repository) ListImportedItemsOverlapping(ctx context.Context, fromMS in
 	if limit <= 0 || limit > 20000 {
 		limit = 10000
 	}
-	rows, err := r.db.QueryContext(ctx, `select file_name, imported_at_ms, lease_expires_at_ms
+	rows, err := r.db.QueryContext(ctx, `select id, order_id, item_key, file_name, status,
+		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms, created_at_ms, updated_at_ms
 		from supply_import_items
 		where status = 'imported'
 			and coalesce(file_name, '') <> ''
@@ -431,8 +464,8 @@ func (r *repository) ListImportedItemsOverlapping(ctx context.Context, fromMS in
 	defer rows.Close()
 	items := make([]model.SupplyImportItem, 0)
 	for rows.Next() {
-		var item model.SupplyImportItem
-		if err := rows.Scan(&item.FileName, &item.ImportedAtMS, &item.LeaseExpiresAtMS); err != nil {
+		item, err := r.scanItem(rows)
+		if err != nil {
 			return nil, err
 		}
 		items = append(items, item)

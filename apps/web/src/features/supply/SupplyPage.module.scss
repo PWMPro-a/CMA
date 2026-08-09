@@ -100,6 +100,10 @@
   flex-wrap: wrap;
 }
 
+.reportRangeTabs {
+  min-width: min(440px, 100%);
+}
+
 .serviceBadge,
 .statusPill {
   display: inline-flex;
@@ -576,6 +580,12 @@
   align-items: start;
 }
 
+.accountsGrid {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
 .reportsGrid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: start;
@@ -630,6 +640,41 @@
 
 .quoteBox strong {
   font-size: 24px;
+}
+
+.accountPrimary {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.accountPrimary strong,
+.accountMeta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.accountPrimary strong {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.accountPrimary small,
+.accountMeta small {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.accountMeta {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.accountStatusSelect {
+  min-width: 152px;
 }
 
 .orderSummary {

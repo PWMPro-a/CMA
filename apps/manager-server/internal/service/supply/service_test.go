@@ -452,6 +452,24 @@ func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 	}
 }
 
+func TestNormalizeReportRequestDefaultsToToday(t *testing.T) {
+	before := time.Now()
+	req := normalizeReportRequest(ReportRequest{})
+	after := time.Now()
+	from := time.UnixMilli(req.FromMS).In(time.Local)
+	to := time.UnixMilli(req.ToMS).In(time.Local)
+	if req.FromMS <= 0 || req.ToMS <= 0 || req.ToMS <= req.FromMS {
+		t.Fatalf("normalized range is invalid: %#v", req)
+	}
+	if to.Before(before.Add(-2*time.Second)) || to.After(after.Add(2*time.Second)) {
+		t.Fatalf("toMs=%s is not near now [%s, %s]", to, before, after)
+	}
+	if from.Year() != to.Year() || from.YearDay() != to.YearDay() ||
+		from.Hour() != 0 || from.Minute() != 0 || from.Second() != 0 {
+		t.Fatalf("fromMs=%s should be start of the same local day as toMs=%s", from, to)
+	}
+}
+
 func TestRecoverySyncImportsLocalPendingWhenSupplierRecoveriesFail(t *testing.T) {
 	var uploadCalls atomic.Int32
 	uploadedNames := sync.Map{}

@@ -224,6 +224,65 @@ export interface SupplyReportRange {
   truncated: boolean;
 }
 
+export interface SupplyAccountSummary {
+  total: number;
+  imported: number;
+  pending: number;
+  failed: number;
+  active: number;
+  disabled: number;
+  expired: number;
+  missing: number;
+  unknown: number;
+  expiringSoon: number;
+  usageCalls: number;
+  usageSuccessCalls: number;
+  usageFailureCalls: number;
+  usageTokens: number;
+  usageRevenue: number;
+  usageRevenueCurrency: string;
+  averageRevenuePerCall: number;
+  lastUsedAtMs?: number;
+  cpaStatusError?: string;
+}
+
+export interface SupplyAccountItem {
+  id: number;
+  fileName: string;
+  orderId: string;
+  source: string;
+  product?: string;
+  orderStatus?: string;
+  status: string;
+  accountStatus: string;
+  cpaProvider?: string;
+  cpaAccount?: string;
+  cpaAccountId?: string;
+  cpaAuthIndex?: string;
+  cpaStatus?: string;
+  cpaDisabled?: boolean;
+  usageCalls: number;
+  usageSuccessCalls: number;
+  usageFailureCalls: number;
+  usageTokens: number;
+  usageRevenue: number;
+  usageRevenueCurrency: string;
+  lastUsedAtMs?: number;
+  importedAtMs?: number;
+  leaseExpiresAtMs?: number;
+  remainingSeconds?: number;
+  attemptCount: number;
+  lastError?: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface SupplyAccountList {
+  range: SupplyReportRange;
+  summary: SupplyAccountSummary;
+  items: SupplyAccountItem[];
+}
+
 export interface SupplyReportExecutive {
   orders: number;
   manualOrders: number;
@@ -321,6 +380,81 @@ export interface SupplyReportRisk {
   claimableAgeBuckets: SupplyReportRiskBucket[];
 }
 
+export interface SupplyReportReconciliationSummary {
+  orderRows: number;
+  accountRows: number;
+  recoveryRows: number;
+  orderChargedFen: number;
+  orderReleasedFen: number;
+  orderNetFen: number;
+  accountAllocatedChargedFen: number;
+  accountAllocatedReleasedFen: number;
+  accountAllocatedNetFen: number;
+  accountUsageCalls: number;
+  accountUsageTokens: number;
+  accountUsageRevenue: number;
+  refundedFen: number;
+  usageRevenueCurrency: string;
+  allocationMethod: string;
+}
+
+export interface SupplyReportOrderLedgerRow {
+  orderId: string;
+  source: string;
+  product: string;
+  status: string;
+  requestedQuantity: number;
+  itemCount: number;
+  importedCount: number;
+  chargedFen: number;
+  releasedFen: number;
+  netFen: number;
+  createdAtMs: number;
+  completedAtMs?: number;
+}
+
+export interface SupplyReportAccountLedgerRow {
+  fileName: string;
+  orderId: string;
+  source: string;
+  product?: string;
+  status: string;
+  accountStatus: string;
+  importedAtMs?: number;
+  leaseExpiresAtMs?: number;
+  allocatedChargedFen: number;
+  allocatedReleasedFen: number;
+  allocatedNetFen: number;
+  usageCalls: number;
+  usageSuccessCalls: number;
+  usageFailureCalls: number;
+  usageTokens: number;
+  usageRevenue: number;
+  lastUsedAtMs?: number;
+}
+
+export interface SupplyReportRecoveryLedgerRow {
+  recoveryId: string;
+  product?: string;
+  deliveryStatus: string;
+  status: string;
+  originalFileName?: string;
+  claimOrderId?: string;
+  itemCount: number;
+  importedCount: number;
+  refundedFen: number;
+  lastSeenAtMs?: number;
+  claimedAtMs?: number;
+  updatedAtMs: number;
+}
+
+export interface SupplyReportReconciliation {
+  summary: SupplyReportReconciliationSummary;
+  orders: SupplyReportOrderLedgerRow[];
+  accounts: SupplyReportAccountLedgerRow[];
+  recoveries: SupplyReportRecoveryLedgerRow[];
+}
+
 export interface SupplyReportUsageModelStat {
   model: string;
   billingModel: string;
@@ -337,6 +471,7 @@ export interface SupplyReport {
   importHealth: SupplyReportImportHealth;
   timing: SupplyReportTiming;
   risk: SupplyReportRisk;
+  reconciliation: SupplyReportReconciliation;
   timeline: SupplyReportTimelinePoint[];
   products: SupplyReportDimensionStat[];
   orderStatuses: SupplyReportDimensionStat[];
@@ -368,6 +503,10 @@ export const supplyApi = {
   getReport: (
     params: { fromMs?: number; toMs?: number; limit?: number } = {}
   ): Promise<SupplyReport> => apiClient.get('/supply/reports', { params }),
+
+  listAccounts: (
+    params: { fromMs?: number; toMs?: number; limit?: number; status?: string } = {}
+  ): Promise<SupplyAccountList> => apiClient.get('/supply/accounts', { params }),
 
   listRecoveries: (params: { limit?: number; status?: string } = {}): Promise<SupplyRecovery[]> =>
     apiClient.get('/supply/recoveries', { params }),

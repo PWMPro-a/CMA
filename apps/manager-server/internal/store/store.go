@@ -366,6 +366,10 @@ func (s *Store) InsertSupplyImportItems(ctx context.Context, orderID string, ite
 	return s.SupplyOrders.InsertItems(ctx, orderID, items)
 }
 
+func (s *Store) ListSupplyImportItems(ctx context.Context, limit int, status string) ([]SupplyImportItem, error) {
+	return s.SupplyOrders.ListItems(ctx, limit, status)
+}
+
 func (s *Store) ListSupplyImportItemsBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]SupplyImportItem, error) {
 	return s.SupplyOrders.ListItemsBetween(ctx, fromMS, toMS, limit)
 }
