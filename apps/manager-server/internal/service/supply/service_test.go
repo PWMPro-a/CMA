@@ -592,6 +592,20 @@ func TestRecoverySyncIntervalHonorsRetryAfter(t *testing.T) {
 	}
 }
 
+func TestRecoveryNextSyncIntervalDrainsAutomaticBacklog(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{RecoverySyncIntervalSeconds: 30}
+	if interval := recoveryNextSyncInterval(cfg, nil, true, 9); interval != 3*time.Second {
+		t.Fatalf("backlog interval = %s, want 3s", interval)
+	}
+	if interval := recoveryNextSyncInterval(cfg, nil, false, 9); interval != 30*time.Second {
+		t.Fatalf("manual interval = %s, want 30s", interval)
+	}
+	retryErr := &supplyclient.HTTPError{StatusCode: http.StatusTooManyRequests, RetryAfterSeconds: 17}
+	if interval := recoveryNextSyncInterval(cfg, retryErr, true, 9); interval != 17*time.Second {
+		t.Fatalf("retry interval = %s, want 17s", interval)
+	}
+}
+
 func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "supply-report.sqlite"))

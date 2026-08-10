@@ -1001,10 +1001,14 @@ export function SupplyPage() {
         {
           label: t('supply.effective_capacity_1h'),
           value: formatRcu(smart?.currentCapacityRcu),
-          detail: t('supply.raw_capacity_waste_detail', {
+          detail: t('supply.reliable_capacity_detail', {
             raw: formatNumber(smart?.rawCapacityRcu ?? smart?.currentCapacityRcu),
-            waste: formatNumber(smart?.expiryWasteRiskRcu ?? 0),
-            minutes: smart?.accountLifetimeMinutes ?? 60,
+            unit: formatNumber(smart?.riskAdjustedUnitCapacityRcu),
+            requests:
+              smart?.accountMaxRequestsBefore401 ?? draft.accountMaxRequestsBefore401,
+            seconds:
+              smart?.accountMaxUsefulSecondsBefore401 ??
+              draft.accountMaxUsefulSecondsBefore401,
           }),
           icon: <IconDatabaseZap size={18} />,
           tone: 'teal',
@@ -1085,6 +1089,8 @@ export function SupplyPage() {
     ];
   }, [
     balance,
+    draft.accountMaxRequestsBefore401,
+    draft.accountMaxUsefulSecondsBefore401,
     draft.healthyMinutesTarget,
     draft.smartEnabled,
     draft.targetAvailableAccounts,
@@ -2384,14 +2390,20 @@ export function SupplyPage() {
                           </td>
                           <td>
                             {item.status === 'claimable' ? (
-                              <Button
-                                size="sm"
-                                variant="secondary"
-                                loading={action === 'claimRecovery'}
-                                onClick={() => void claimRecovery(item.recoveryId)}
-                              >
-                                {t('supply.recovery_claim_now')}
-                              </Button>
+                              recovery?.autoClaim !== false ? (
+                                <span className={`${styles.statusPill} ${styles.active}`}>
+                                  {t('supply.recovery_auto_queued')}
+                                </span>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  loading={action === 'claimRecovery'}
+                                  onClick={() => void claimRecovery(item.recoveryId)}
+                                >
+                                  {t('supply.recovery_claim_now')}
+                                </Button>
+                              )
                             ) : (
                               '-'
                             )}

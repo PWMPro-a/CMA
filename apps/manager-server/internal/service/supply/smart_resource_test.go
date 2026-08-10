@@ -430,6 +430,19 @@ func TestSmartResourceIncludesRecentImportedCapacityUntilNextInspection(t *testi
 		withRecentImport.EstimatedSustainMinutes <= withoutRecentImport.EstimatedSustainMinutes {
 		t.Fatalf("recent imported capacity must affect the capacity plan: before=%#v after=%#v", withoutRecentImport, withRecentImport)
 	}
+	base.activeImportItems = append(base.activeImportItems, store.SupplyImportItem{
+		OrderID:          "replacement-order",
+		FileName:         "newly-imported.json",
+		Status:           "imported",
+		ImportedAtMS:     now.Add(-30 * time.Second).UnixMilli(),
+		LeaseExpiresAtMS: now.Add(55 * time.Minute).UnixMilli(),
+	})
+	withoutImportDuplicate := service.buildSmartResourceFromInspectionSnapshot(cfg, base, now)
+	if withoutImportDuplicate.PendingInspectionAccounts != 1 ||
+		withoutImportDuplicate.CurrentCapacityRCU != withRecentImport.CurrentCapacityRCU {
+		t.Fatalf("duplicate import rows for one CPA file must count once: %#v", withoutImportDuplicate)
+	}
+	base.activeImportItems = base.activeImportItems[:1]
 	base.activeImportItems[0].FileName = "inspected.json"
 	withoutDuplicate := service.buildSmartResourceFromInspectionSnapshot(cfg, base, now)
 	if withoutDuplicate.PendingInspectionAccounts != 0 {
@@ -1683,7 +1696,7 @@ func TestSupplyOrderTriggerReasonPreservesWaterlineAndVirtualDemandReasons(t *te
 	}
 }
 
-func Test401ChurnThresholdsDoNotChangeQuotaCapacityUnits(t *testing.T) {
+func Test401ChurnThresholdsBoundRiskAdjustedCapacity(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		Product:                     "oauth_30d",
 		Strategy:                    managerconfigsvc.SupplyStrategyStrongSupply,
@@ -1692,7 +1705,20 @@ func Test401ChurnThresholdsDoNotChangeQuotaCapacityUnits(t *testing.T) {
 		NewAccountConfidence:        0.7,
 	}
 	if got := smartEstimatedNewAccountCapacityRCU(cfg); got != 3_080 {
-		t.Fatalf("new-account conservative quota capacity = %f", got)
+		t.Fatalf("new-account raw quota capacity = %f", got)
+	}
+	resource := SmartResource{ConsumeRCUPerMinute: 400, RequestDemandRCUPerMinute: 100}
+	if got := smart401RiskCapacityRCU(cfg, resource, false); got != 120 {
+		t.Fatalf("verified-account 401 risk capacity = %f, want 120", got)
+	}
+	if got := smart401RiskCapacityRCU(cfg, resource, true); got != 84 {
+		t.Fatalf("new-account 401 risk capacity = %f, want 84", got)
+	}
+	if got := smartEffectiveHealthyMinutesTarget(cfg); got != 2 {
+		t.Fatalf("401-aware healthy runway = %d, want 2", got)
+	}
+	if got := smartReliableAccountCapacityRCU(0, 120); got != 0 {
+		t.Fatalf("exhausted quota must not be restored by risk capacity, got %f", got)
 	}
 }
 
@@ -1727,8 +1753,53 @@ func Test401AgeDoesNotEraseVerifiedAccountQuotaCapacity(t *testing.T) {
 	if resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 || resource.WeakAccounts != 0 {
 		t.Fatalf("risk lifetime must affect capacity, not account health counts: %#v", resource)
 	}
-	if resource.RawCapacityRCU != 2_200 || resource.CurrentCapacityRCU != 2_200 {
-		t.Fatalf("a fresh successful inspection must retain verified quota capacity: %#v", resource)
+	if resource.RawCapacityRCU != 2_200 || resource.CurrentCapacityRCU != 50 {
+		t.Fatalf("verified quota must remain visible while reliable capacity is 401-bounded: %#v", resource)
+	}
+}
+
+func TestStrongSupplyTreatsTwentyOne401RiskBoundedAccountsAsHealthy(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Product:                     "oauth_7d",
+		Strategy:                    managerconfigsvc.SupplyStrategyStrongSupply,
+		HealthyMinutesTarget:        60,
+		WarningMinutes:              30,
+		CriticalMinutes:             20,
+		HealthyAvailableAccounts:    10,
+		CriticalAvailableAccounts:   2,
+		AccountMaxRequestsBefore401: 30,
+		AccountMaxUsefulSeconds401:  120,
+		NewAccountConfidence:        0.7,
+	}
+	resource := defaultSmartResource(cfg)
+	resource.AvailableAccounts = 21
+	resource.SchedulableAccounts = 21
+	resource.HealthyAccounts = 21
+	resource.RequestDemandRCUPerMinute = 149
+	resource.ConsumeRCUPerMinute = 391.62
+	verifiedUnit := smart401RiskCapacityRCU(cfg, resource, false)
+	resource.RiskAdjustedUnitCapacityRCU = smart401RiskCapacityRCU(cfg, resource, true)
+	resource.CurrentCapacityRCU = float64(resource.AvailableAccounts) * verifiedUnit
+	resource.DemandTrend = smartDemandTrendStable
+
+	recalculateSmartResourceCapacityPlan(cfg, &resource)
+
+	if resource.EffectiveHealthyMinutes != 2 || resource.HealthLevel != smartHealthHealthy ||
+		resource.SuggestedQuantity != 0 || resource.AccountQuantityDeficit != 0 ||
+		resource.EstimatedRequiredAccounts != 10 {
+		t.Fatalf("21-account reliable capacity plan = %#v", resource)
+	}
+
+	resource.AvailableAccounts = 5
+	resource.SchedulableAccounts = 5
+	resource.HealthyAccounts = 5
+	resource.CurrentCapacityRCU = 5 * verifiedUnit
+	recalculateSmartResourceCapacityPlan(cfg, &resource)
+	if resource.HealthLevel != smartHealthCritical || resource.AccountQuantityDeficit != 5 {
+		t.Fatalf("five-account reliable capacity plan = %#v", resource)
+	}
+	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 5 {
+		t.Fatalf("five-account reliable deficit should request five accounts, got %d", quantity)
 	}
 }
 
@@ -1861,7 +1932,7 @@ func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *t
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if createQuantity.Load() != 3 {
+	if createQuantity.Load() != 2 {
 		t.Fatalf("quota-capacity sizing should avoid inflating the emergency batch, quantity=%d", createQuantity.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
@@ -1950,7 +2021,7 @@ func TestSmartAutomaticKeepsFullBatchWhenSupplyIsScarce(t *testing.T) {
 	}
 }
 
-func TestSmartReadySmallOrderTakesWhenSupplyIsPlentyBeforeCritical(t *testing.T) {
+func TestSmartReadySmallOrderReleasesWhen401AwareCapacityIsHealthy(t *testing.T) {
 	var takeCalls atomic.Int32
 	var uploadCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2037,14 +2108,14 @@ func TestSmartReadySmallOrderTakesWhenSupplyIsPlentyBeforeCritical(t *testing.T)
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if takeCalls.Load() != 1 || uploadCalls.Load() != 1 {
-		t.Fatalf("small plenty order should be taken once, take=%d upload=%d", takeCalls.Load(), uploadCalls.Load())
+	if takeCalls.Load() != 0 || uploadCalls.Load() != 0 {
+		t.Fatalf("healthy 401-aware capacity should avoid an unnecessary take, take=%d upload=%d", takeCalls.Load(), uploadCalls.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("get status: %v", err)
 	}
-	if len(status.Orders) == 0 || status.Orders[0].Status != "completed" {
+	if len(status.Orders) == 0 || status.Orders[0].Status != "released" {
 		t.Fatalf("orders = %#v", status.Orders)
 	}
 }

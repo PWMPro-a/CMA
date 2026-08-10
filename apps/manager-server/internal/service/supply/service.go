@@ -837,6 +837,7 @@ func (s *Service) SyncRecoveries(ctx context.Context, req RecoverySyncRequest) (
 	}
 	result, err := s.syncRecoveriesOnce(ctx, cfg, autoClaim, limit, recoveryID)
 	summary := s.currentRecoverySummary(ctx, cfg.Supply)
+	remainingClaimable := summary.Claimable
 	summary.Seen = result.Seen
 	summary.Claimable = result.Claimable
 	summary.Claimed = result.Claimed
@@ -845,7 +846,7 @@ func (s *Service) SyncRecoveries(ctx context.Context, req RecoverySyncRequest) (
 	summary.Failed = result.Failed
 	now := time.Now()
 	summary.LastSyncAtMS = now.UnixMilli()
-	summary.NextSyncAtMS = now.Add(recoverySyncInterval(cfg.Supply, err)).UnixMilli()
+	summary.NextSyncAtMS = now.Add(recoveryNextSyncInterval(cfg.Supply, err, autoClaim && recoveryID == "", remainingClaimable)).UnixMilli()
 	if err != nil {
 		summary.LastResult = "failed"
 		summary.LastError = safeError(err)
@@ -1365,7 +1366,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			return nil
 		}
 		resource.SuggestedQuantity = quantity
-		resource.PrelockedCapacityRCU = estimatedSupplyOrderCapacityRCU(supplyCfg, quantity)
+		resource.PrelockedCapacityRCU = estimatedSupplyOrderCapacityRCU(supplyCfg, resource, quantity)
 		s.setSmartResource(resource)
 	}
 
@@ -4226,9 +4227,9 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	}
 	quantity := resource.SuggestedQuantity
 	if quantity <= 0 && resource.CapacityGapRCU > 0 && resource.UnitCapacityRCU > 0 {
-		unit := smartEstimatedNewAccountCapacityRCU(cfg)
+		unit := resource.RiskAdjustedUnitCapacityRCU
 		if unit <= 0 {
-			unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
+			unit = smartEstimatedNewAccountCapacityRCU(cfg)
 		}
 		quantity = int(math.Ceil(resource.CapacityGapRCU / unit))
 	}
@@ -4262,11 +4263,14 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	return clampInt(quantity, 1, 100)
 }
 
-func estimatedSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, quantity int) float64 {
+func estimatedSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, resource SmartResource, quantity int) float64 {
 	if quantity <= 0 {
 		return 0
 	}
-	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	unit := resource.RiskAdjustedUnitCapacityRCU
+	if unit <= 0 {
+		unit = smartEstimatedNewAccountCapacityRCU(cfg)
+	}
 	return round2(float64(quantity) * unit)
 }
 
@@ -4766,6 +4770,18 @@ func recoverySyncInterval(cfg store.ManagerSupplyConfig, err error) time.Duratio
 		return time.Duration(seconds) * time.Second
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func recoveryNextSyncInterval(cfg store.ManagerSupplyConfig, err error, autoClaim bool, remainingClaimable int) time.Duration {
+	interval := recoverySyncInterval(cfg, err)
+	if err != nil || !autoClaim || remainingClaimable <= 0 {
+		return interval
+	}
+	const backlogInterval = 3 * time.Second
+	if interval > backlogInterval {
+		return backlogInterval
+	}
+	return interval
 }
 
 func supplyRecoveryFromClient(remote supplyclient.Recovery) store.SupplyRecovery {
