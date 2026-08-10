@@ -623,6 +623,9 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		cancel()
 		if snapshotErr == nil || len(snapshot.files) > 0 {
 			applyAccountPoolStats(&resource, accountPoolStatsFromFiles(snapshot.files))
+			if reconcileSmartCapacityWithAccountPool(cfg.Supply, &resource) {
+				recalculateSmartResourceCapacityPlan(cfg.Supply, &resource)
+			}
 			s.reconcileSmartAccountPoolGuard(cfg.Supply, &resource)
 			applySmartAccountQuantityEstimate(cfg.Supply, &resource)
 		}
@@ -1840,6 +1843,9 @@ func (s *Service) refreshOverview(ctx context.Context, cfg store.ManagerConfig, 
 			return err
 		}
 		applyAccountPoolStats(&resource, poolStats)
+		if reconcileSmartCapacityWithAccountPool(cfg.Supply, &resource) {
+			recalculateSmartResourceCapacityPlan(cfg.Supply, &resource)
+		}
 		applySmartAccountQuantityEstimate(cfg.Supply, &resource)
 		s.setSmartResource(resource)
 		available = poolStats.available
@@ -3724,6 +3730,46 @@ func applyAccountPoolStats(resource *SmartResource, stats accountPoolStats) {
 	resource.WeakAccounts = max(0, resource.AvailableAccounts-resource.HealthyAccounts)
 }
 
+// reconcileSmartCapacityWithAccountPool prevents a completed inspection from
+// retaining capacity for credentials that have already disappeared from the
+// live CPA schedulable pool. The live list is intentionally only a downward
+// bound: newly visible files still need an inspection or import overlay before
+// they can add capacity, while a rapid 401/disable must remove stale capacity
+// immediately instead of waiting for the next full inspection.
+func reconcileSmartCapacityWithAccountPool(cfg store.ManagerSupplyConfig, resource *SmartResource) bool {
+	if resource == nil || !smartSupplyStrategyConfigured(cfg) {
+		return false
+	}
+	verifiedUnit := smart401RiskCapacityRCU(cfg, *resource, false)
+	if verifiedUnit <= 0 {
+		return false
+	}
+	maximumLiveCapacity := round2(float64(max(0, resource.AvailableAccounts)) * verifiedUnit)
+	changed := false
+	if resource.CurrentCapacityRCU > maximumLiveCapacity {
+		resource.CurrentCapacityRCU = maximumLiveCapacity
+		changed = true
+	}
+	if resource.TimeLimitedCapacityRCU > maximumLiveCapacity {
+		resource.TimeLimitedCapacityRCU = maximumLiveCapacity
+		changed = true
+	}
+	maximumPending := max(0, resource.AvailableAccounts-resource.HealthyAccounts)
+	if resource.PendingInspectionAccounts > maximumPending {
+		resource.PendingInspectionAccounts = maximumPending
+		if maximumPending == 0 {
+			resource.PendingInspectionCapacityRCU = 0
+		} else {
+			resource.PendingInspectionCapacityRCU = math.Min(
+				resource.PendingInspectionCapacityRCU,
+				float64(maximumPending)*resource.RiskAdjustedUnitCapacityRCU,
+			)
+		}
+		changed = true
+	}
+	return changed
+}
+
 func preserveSmartResourceRuntimeState(resource *SmartResource, previous SmartResource) {
 	if resource == nil {
 		return
@@ -3792,6 +3838,9 @@ func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.Mana
 		return 0, 0, "", false, err
 	}
 	applyAccountPoolStats(resource, poolStats)
+	if reconcileSmartCapacityWithAccountPool(cfg.Supply, resource) {
+		recalculateSmartResourceCapacityPlan(cfg.Supply, resource)
+	}
 	available := poolStats.available
 	if !smartSupplyStrategyConfigured(cfg.Supply) || !smartEmergencyBypassUsageRate(cfg.Supply) {
 		return available, 0, "", true, nil
