@@ -7,6 +7,31 @@ import (
 	"time"
 )
 
+func TestSupplyRecoveryUpgradeAddsCredentialVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "supply-recovery-upgrade.sqlite")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if _, err := db.Exec(`alter table supply_recoveries drop column credential_version`); err != nil {
+		_ = db.Close()
+		t.Fatalf("remove new column for legacy fixture: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy sqlite: %v", err)
+	}
+
+	db, err = Open(path)
+	if err != nil {
+		t.Fatalf("upgrade sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	columns := migrationTableColumns(t, db, "supply_recoveries")
+	if !columns["credential_version"] {
+		t.Fatalf("supply recovery columns = %#v", columns)
+	}
+}
+
 func TestUsageDataMigrationInitialStateMatchesExistingUsageData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage-data-migration.sqlite")
 	db, err := Open(path)

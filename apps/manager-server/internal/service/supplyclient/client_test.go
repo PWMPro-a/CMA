@@ -3,8 +3,10 @@ package supplyclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -89,12 +91,66 @@ func TestClientRefreshesTokenOnceAfterUnauthorized(t *testing.T) {
 	}
 }
 
+func TestClientPreservesIdempotencyKeyWhenUnauthorizedRefreshesToken(t *testing.T) {
+	var loginCalls atomic.Int32
+	var createCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			call := loginCalls.Add(1)
+			_, _ = w.Write([]byte(`{"token":"token-` + strconv.Itoa(int(call)) + `"}`))
+		case "/api/customer/pickup/orders":
+			createCalls.Add(1)
+			if got := r.Header.Get("Idempotency-Key"); got != "stable-create-key" {
+				t.Fatalf("idempotency key = %q", got)
+			}
+			if r.Header.Get("X-Customer-Token") == "token-1" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"order":{"id":"order-stable","status":"waiting_inventory"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	order, err := client.CreateOrder(context.Background(), Credentials{BaseURL: server.URL, Username: "u", Password: "p"}, "oauth_30d", 1, "stable-create-key")
+	if err != nil || order.ID != "order-stable" || loginCalls.Load() != 2 || createCalls.Load() != 2 {
+		t.Fatalf("order=%#v err=%v login=%d create=%d", order, err, loginCalls.Load(), createCalls.Load())
+	}
+}
+
+func TestClientCachesTokenForThirtyDayContract(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/customer/login" {
+			_, _ = w.Write([]byte(`{"token":"token"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"available_fen":100}`))
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	if _, err := client.Balance(context.Background(), Credentials{BaseURL: server.URL, Username: "u", Password: "p"}); err != nil {
+		t.Fatalf("balance: %v", err)
+	}
+	if remaining := time.Until(client.token.expiresAt); remaining < 28*24*time.Hour || remaining > 30*24*time.Hour {
+		t.Fatalf("cached token lifetime = %s", remaining)
+	}
+}
+
 func TestClientCreatesPollsAndTakesOrder(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/customer/login":
 			_, _ = w.Write([]byte(`{"data":{"token":"token"}}`))
 		case "/api/customer/pickup/orders":
+			if got := r.Header.Get("Idempotency-Key"); got != "create-attempt-1" {
+				t.Fatalf("idempotency key = %q", got)
+			}
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"order":{"id":"order-1","status":"waiting_inventory","quantity":2}}`))
 		case "/api/customer/pickup/orders/order-1":
@@ -109,7 +165,7 @@ func TestClientCreatesPollsAndTakesOrder(t *testing.T) {
 
 	client := New(server.Client())
 	credentials := Credentials{BaseURL: server.URL, Username: "u", Password: "p"}
-	order, err := client.CreateOrder(context.Background(), credentials, "oauth_30d", 2)
+	order, err := client.CreateOrder(context.Background(), credentials, "oauth_30d", 2, "create-attempt-1")
 	if err != nil || order.ID != "order-1" {
 		t.Fatalf("create order=%#v err=%v", order, err)
 	}
@@ -251,7 +307,10 @@ func TestClientListsAndClaimsRecoveries(t *testing.T) {
 			if got := r.Header.Get("X-Customer-Token"); got != "token" {
 				t.Fatalf("claim token = %q", got)
 			}
-			_, _ = w.Write([]byte(`{"payload":{"accounts":[{"type":"oauth","credentials":{"access_token":"access","refresh_token":"refresh","email":"new@example.com","chatgpt_plan_type":"team"}}]}}`))
+			if got := r.Header.Get("Accept"); got != "application/json" {
+				t.Fatalf("claim accept = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"credential_version":2,"payload":{"type":"oauth","credentials":{"access_token":"access","refresh_token":"refresh","email":"new@example.com","chatgpt_plan_type":"team"}}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -273,8 +332,107 @@ func TestClientListsAndClaimsRecoveries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim recovery: %v", err)
 	}
-	if claimCalls.Load() != 1 || claimed.Recovery.ID != "recovery-1" || len(claimed.Accounts) != 1 {
+	if claimCalls.Load() != 1 || claimed.Recovery.ID != "recovery-1" || len(claimed.Accounts) != 1 || claimed.CredentialVersion != 2 {
 		t.Fatalf("claimed=%#v claimCalls=%d", claimed, claimCalls.Load())
+	}
+}
+
+func TestClientPaginatesRecoveries(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"token"}`))
+		case "/api/customer/recoveries":
+			if got := r.URL.Query().Get("limit"); got != "100" {
+				t.Fatalf("limit = %q", got)
+			}
+			switch r.URL.Query().Get("before_id") {
+			case "":
+				_, _ = w.Write([]byte(`{"recoveries":[{"id":"rec-3","delivery_status":"pending"},{"id":"rec-2","delivery_status":"claimable","claim_url":"/claim-2"}],"next_before_id":2}`))
+			case "2":
+				_, _ = w.Write([]byte(`{"recoveries":[{"id":"rec-1","delivery_status":"pending"}]}`))
+			default:
+				t.Fatalf("unexpected before_id %q", r.URL.Query().Get("before_id"))
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	recoveries, err := New(server.Client()).Recoveries(context.Background(), Credentials{BaseURL: server.URL, Username: "u", Password: "p"})
+	if err != nil {
+		t.Fatalf("recoveries: %v", err)
+	}
+	if len(recoveries) != 3 || recoveries[0].ID != "rec-3" || recoveries[2].ID != "rec-1" {
+		t.Fatalf("recoveries = %#v", recoveries)
+	}
+}
+
+func TestClientParsesReplacementFilesAndRefreshesStatusURL(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"token"}`))
+		case "/api/customer/pickup/orders/order-replacement/take":
+			_, _ = w.Write([]byte(`{"status":"completed","payload":{"accounts":[{"type":"codex","access_token":"old"}]},"replacement_files":[{"recovery_id":"rec-9","ready":true,"status_url":"/api/customer/recoveries/rec-9","credential_version":2}]}`))
+		case "/api/customer/recoveries/rec-9":
+			_, _ = w.Write([]byte(`{"recovery":{"id":"rec-9","delivery_status":"claimable","claim_url":"` + server.URL + `/api/customer/recoveries/rec-9/claim?ticket=fresh","credential_version":2}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	credentials := Credentials{BaseURL: server.URL, Username: "u", Password: "p"}
+	taken, err := client.Take(context.Background(), credentials, "order-replacement")
+	if err != nil || len(taken.ReplacementFiles) != 1 || !taken.ReplacementFiles[0].Ready {
+		t.Fatalf("take=%#v err=%v", taken, err)
+	}
+	recovery, err := client.GetRecovery(context.Background(), credentials, "rec-9", taken.ReplacementFiles[0].StatusURL)
+	if err != nil || recovery.ClaimURL == "" || recovery.CredentialVersion != 2 {
+		t.Fatalf("recovery=%#v err=%v", recovery, err)
+	}
+}
+
+func TestClientHTTPErrorIncludesRetryAfterAndCode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/customer/login" {
+			_, _ = w.Write([]byte(`{"token":"token"}`))
+			return
+		}
+		w.Header().Set("Retry-After", "17")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":"rate_limited","message":"slow down"}}`))
+	}))
+	defer server.Close()
+
+	_, err := New(server.Client()).Balance(context.Background(), Credentials{BaseURL: server.URL, Username: "u", Password: "p"})
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusTooManyRequests || httpErr.RetryAfterSeconds != 17 || httpErr.Code != "rate_limited" {
+		t.Fatalf("error = %#v", err)
+	}
+}
+
+func TestRecoveryClaimEnvelopeUsesLatestNestedVersionAndDirectPayload(t *testing.T) {
+	value := map[string]any{
+		"credential_version": json.Number("0"),
+		"payload": map[string]any{
+			"credential_version": json.Number("3"),
+			"credentials":        map[string]any{"access_token": "nested"},
+		},
+	}
+	if version := findInt64(value, "credential_version", "credentialVersion"); version != 3 {
+		t.Fatalf("credential version = %d, want 3", version)
+	}
+	direct := map[string]any{
+		"type":        "oauth",
+		"credentials": map[string]any{"access_token": "direct"},
+	}
+	if accounts := recoveryClaimAccounts(direct); len(accounts) != 1 {
+		t.Fatalf("direct claim accounts = %#v", accounts)
 	}
 }
 

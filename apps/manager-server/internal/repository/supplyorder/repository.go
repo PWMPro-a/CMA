@@ -26,6 +26,7 @@ type Repository interface {
 	ListBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyOrder, error)
 	InsertItems(ctx context.Context, orderID string, items []model.SupplyImportItem) (int, error)
 	ListItems(ctx context.Context, limit int, status string) ([]model.SupplyImportItem, error)
+	ListItemsByOrderIDs(ctx context.Context, orderIDs []string) ([]model.SupplyImportItem, error)
 	ListItemsBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyImportItem, error)
 	ListImportedItemsOverlapping(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyImportItem, error)
 	ListPendingItems(ctx context.Context, orderID string, nowMS int64, limit int) ([]model.SupplyImportItem, error)
@@ -262,7 +263,7 @@ func (r *repository) PromoteCreateAttempt(ctx context.Context, localOrderID stri
 		order_id = ?, strategy = ?, trigger_reason = ?, status = ?, remote_status = ?, ready_quantity = ?, progress = ?,
 		status_url = ?, take_url = ?, charged_fen = ?, released_fen = ?, last_error = null,
 		next_poll_at_ms = ?, supplier_retry_until_ms = ?, completed_at_ms = ?, updated_at_ms = ?
-		where order_id = ? and status = 'creating'`,
+		where order_id = ? and status in ('creating','create_uncertain')`,
 		order.OrderID, nullString(order.Strategy), nullString(order.TriggerReason), order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
 		nullString(order.StatusURL), nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen,
 		nullPositive(order.NextPollAtMS), nullPositive(order.SupplierRetryUntilMS), nullPositive(order.CompletedAtMS), order.UpdatedAtMS, localOrderID,
@@ -417,6 +418,51 @@ func (r *repository) ListItems(ctx context.Context, limit int, status string) ([
 	}
 	query += ` order by coalesce(imported_at_ms, updated_at_ms, created_at_ms) desc, id desc limit ?`
 	args = append(args, limit)
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]model.SupplyImportItem, 0)
+	for rows.Next() {
+		item, err := r.scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *repository) ListItemsByOrderIDs(ctx context.Context, orderIDs []string) ([]model.SupplyImportItem, error) {
+	unique := make([]string, 0, len(orderIDs))
+	seen := make(map[string]struct{}, len(orderIDs))
+	for _, orderID := range orderIDs {
+		orderID = strings.TrimSpace(orderID)
+		if orderID == "" {
+			continue
+		}
+		if _, exists := seen[orderID]; exists {
+			continue
+		}
+		seen[orderID] = struct{}{}
+		unique = append(unique, orderID)
+	}
+	if len(unique) == 0 {
+		return []model.SupplyImportItem{}, nil
+	}
+
+	placeholders := make([]string, len(unique))
+	args := make([]any, len(unique))
+	for index, orderID := range unique {
+		placeholders[index] = "?"
+		args[index] = orderID
+	}
+	query := `select id, order_id, item_key, file_name, status,
+		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms,
+		base_price_fen, charged_fen, created_at_ms, updated_at_ms
+		from supply_import_items where order_id in (` + strings.Join(placeholders, ",") + `)
+		order by order_id asc, id asc`
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err

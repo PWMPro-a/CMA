@@ -2235,51 +2235,170 @@ export function SupplyPage() {
                   <thead>
                     <tr>
                       <th>{t('supply.recovery_id')}</th>
-                      <th>{t('supply.product')}</th>
                       <th>{t('supply.original_account')}</th>
+                      <th>{t('supply.credential_version')}</th>
                       <th>{t('supply.delivery_status')}</th>
-                      <th>{t('common.status')}</th>
-                      <th>{t('supply.import_progress')}</th>
-                      <th>{t('supply.refunded')}</th>
-                      <th>{t('supply.updated_at')}</th>
+                      <th>{t('supply.import_result')}</th>
+                      <th>{t('supply.imported_files')}</th>
+                      <th>{t('supply.recovery_timeline')}</th>
+                      <th>{t('supply.failure_reason')}</th>
                       <th>{t('common.action')}</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {recoveries.map((item) => (
-                      <tr key={item.recoveryId}>
-                        <td className={styles.mono}>{item.recoveryId}</td>
-                        <td>{item.product || '-'}</td>
-                        <td>{item.originalFileName || item.originalEmail || '-'}</td>
-                        <td>{item.deliveryStatus || '-'}</td>
-                        <td>
-                          <span className={`${styles.statusPill} ${orderTone(item.status)}`}>
-                            {t(`supply.recovery_status_${item.status}`, {
-                              defaultValue: item.status,
-                            })}
-                          </span>
-                        </td>
-                        <td>
-                          {item.importedCount}/{item.itemCount || 0}
-                        </td>
-                        <td>{item.refundedFen ? formatMoney(item.refundedFen) : '-'}</td>
-                        <td>{formatTime(item.updatedAtMs || item.lastSeenAtMs)}</td>
-                        <td>
-                          {item.status === 'claimable' ? (
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              loading={action === 'claimRecovery'}
-                              onClick={() => void claimRecovery(item.recoveryId)}
+                    {recoveries.map((item) => {
+                      const importItems = item.importItems ?? [];
+                      const importedCount = item.importedCount ?? 0;
+                      const itemCount = item.itemCount ?? 0;
+                      const progress =
+                        itemCount > 0 ? clampPercent((importedCount / itemCount) * 100) : 0;
+                      const firstImportError = importItems.find(
+                        (importItem) => importItem.lastError
+                      )?.lastError;
+                      const failureReason = item.lastError || firstImportError;
+                      return (
+                        <tr key={item.recoveryId}>
+                          <td>
+                            <div className={styles.mono}>{item.recoveryId}</div>
+                            <small>{item.product || '-'}</small>
+                          </td>
+                          <td>
+                            <div className={styles.mono}>{item.originalFileName || '-'}</div>
+                            <small>{item.originalEmail || item.originalAuthIndex || '-'}</small>
+                          </td>
+                          <td>
+                            {item.credentialVersion ? (
+                              <span className={`${styles.statusPill} ${styles.success}`}>
+                                v{item.credentialVersion}
+                              </span>
+                            ) : (
+                              <span className={styles.muted}>-</span>
+                            )}
+                          </td>
+                          <td>
+                            <span
+                              className={`${styles.statusPill} ${accountTone(item.deliveryStatus)}`}
                             >
-                              {t('supply.recovery_claim_now')}
-                            </Button>
-                          ) : (
-                            '-'
-                          )}
-                        </td>
-                      </tr>
-                    ))}
+                              {t(`supply.recovery_delivery_${item.deliveryStatus}`, {
+                                defaultValue: item.deliveryStatus || '-',
+                              })}
+                            </span>
+                          </td>
+                          <td>
+                            <span className={`${styles.statusPill} ${orderTone(item.status)}`}>
+                              {t(`supply.recovery_status_${item.status}`, {
+                                defaultValue: item.status,
+                              })}
+                            </span>
+                            <div className={styles.recoveryImportCell}>
+                              <div className={styles.recoveryProgressLabel}>
+                                <small>{t('supply.import_progress')}</small>
+                                <small>
+                                  {itemCount > 0
+                                    ? `${importedCount}/${itemCount}`
+                                    : t('supply.import_not_started')}
+                                </small>
+                              </div>
+                              <div className={styles.progressTrack}>
+                                <span style={{ width: `${progress}%` }} />
+                              </div>
+                              <small>
+                                {item.importPendingCount
+                                  ? `${t('supply.import_pending')} ${item.importPendingCount}`
+                                  : ''}
+                                {item.importPendingCount && item.importFailedCount ? ' · ' : ''}
+                                {item.importFailedCount
+                                  ? `${t('supply.failed')} ${item.importFailedCount}`
+                                  : ''}
+                                {!item.importPendingCount &&
+                                !item.importFailedCount &&
+                                itemCount > 0
+                                  ? t('supply.import_complete')
+                                  : ''}
+                              </small>
+                            </div>
+                            {item.refundedFen ? (
+                              <small>
+                                {t('supply.refunded')}: {formatMoney(item.refundedFen)}
+                              </small>
+                            ) : null}
+                          </td>
+                          <td>
+                            <div className={styles.importFileList}>
+                              {importItems.slice(0, 4).map((importItem, index) => (
+                                <div
+                                  className={styles.importFileRow}
+                                  key={`${importItem.fileName}-${index}`}
+                                  title={importItem.lastError || importItem.fileName || ''}
+                                >
+                                  <span
+                                    className={`${styles.statusPill} ${accountTone(importItem.status)}`}
+                                  >
+                                    {t(`supply.import_status_${importItem.status}`, {
+                                      defaultValue: importItem.status || '-',
+                                    })}
+                                  </span>
+                                  <span className={styles.importFileName}>
+                                    {importItem.fileName || t('supply.unnamed_import_file')}
+                                  </span>
+                                </div>
+                              ))}
+                              {importItems.length > 4 ? (
+                                <small>+{importItems.length - 4}</small>
+                              ) : null}
+                              {!importItems.length && item.importedFileNames?.length
+                                ? item.importedFileNames.slice(0, 2).map((fileName) => (
+                                    <div key={fileName} className={styles.mono}>
+                                      {fileName}
+                                    </div>
+                                  ))
+                                : null}
+                              {!importItems.length && !item.importedFileNames?.length ? (
+                                <span className={styles.muted}>-</span>
+                              ) : null}
+                            </div>
+                          </td>
+                          <td>
+                            <div>
+                              <small>
+                                {t('supply.discovered_at')}: {formatTime(item.lastSeenAtMs)}
+                              </small>
+                            </div>
+                            <div>
+                              <small>
+                                {t('supply.claimed_at')}:{' '}
+                                {item.claimedAtMs ? formatTime(item.claimedAtMs) : '-'}
+                              </small>
+                            </div>
+                            <div>
+                              <small>
+                                {t('supply.imported_at')}:{' '}
+                                {item.lastImportedAtMs ? formatTime(item.lastImportedAtMs) : '-'}
+                              </small>
+                            </div>
+                          </td>
+                          <td>
+                            <span className={styles.recoveryReason} title={failureReason || ''}>
+                              {failureReason || t('supply.no_failure_reason')}
+                            </span>
+                          </td>
+                          <td>
+                            {item.status === 'claimable' ? (
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                loading={action === 'claimRecovery'}
+                                onClick={() => void claimRecovery(item.recoveryId)}
+                              >
+                                {t('supply.recovery_claim_now')}
+                              </Button>
+                            ) : (
+                              '-'
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                     {!recoveries.length ? (
                       <tr>
                         <td colSpan={9} className={styles.emptyCell}>

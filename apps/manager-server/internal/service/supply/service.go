@@ -863,7 +863,52 @@ func (s *Service) ListRecoveries(ctx context.Context, limit int, status string) 
 	if s == nil || s.store == nil {
 		return nil, ErrNotConfigured
 	}
-	return s.store.ListSupplyRecoveries(ctx, limit, status)
+	recoveries, err := s.store.ListSupplyRecoveries(ctx, limit, status)
+	if err != nil || len(recoveries) == 0 {
+		return recoveries, err
+	}
+	orderIDs := make([]string, 0, len(recoveries))
+	for _, recovery := range recoveries {
+		if orderID := strings.TrimSpace(recovery.ClaimOrderID); orderID != "" {
+			orderIDs = append(orderIDs, orderID)
+		}
+	}
+	items, err := s.store.ListSupplyImportItemsByOrderIDs(ctx, orderIDs)
+	if err != nil {
+		return nil, err
+	}
+	byOrder := make(map[string][]store.SupplyImportItem)
+	for _, item := range items {
+		if strings.TrimSpace(item.OrderID) == "" {
+			continue
+		}
+		byOrder[item.OrderID] = append(byOrder[item.OrderID], item)
+	}
+	for index := range recoveries {
+		for _, item := range byOrder[recoveries[index].ClaimOrderID] {
+			recoveries[index].ImportItems = append(recoveries[index].ImportItems, store.SupplyRecoveryImportItem{
+				FileName:      item.FileName,
+				Status:        strings.ToLower(strings.TrimSpace(item.Status)),
+				LastError:     item.LastError,
+				AttemptCount:  item.AttemptCount,
+				NextRetryAtMS: item.NextRetryAtMS,
+				ImportedAtMS:  item.ImportedAtMS,
+				UpdatedAtMS:   item.UpdatedAtMS,
+			})
+			switch strings.ToLower(strings.TrimSpace(item.Status)) {
+			case "imported":
+				recoveries[index].ImportedFileNames = append(recoveries[index].ImportedFileNames, item.FileName)
+				if item.ImportedAtMS > recoveries[index].LastImportedAtMS {
+					recoveries[index].LastImportedAtMS = item.ImportedAtMS
+				}
+			case "failed":
+				recoveries[index].ImportFailedCount++
+			default:
+				recoveries[index].ImportPendingCount++
+			}
+		}
+	}
+	return recoveries, nil
 }
 
 func (s *Service) ListAccounts(ctx context.Context, req SupplyAccountsRequest) (SupplyAccountList, error) {
@@ -1341,7 +1386,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	}
 
 	credentials := credentialsFromConfig(supplyCfg)
-	remote, err := s.supplyClient.CreateOrder(ctx, credentials, supplyCfg.Product, quantity)
+	remote, err := s.supplyClient.CreateOrder(ctx, credentials, supplyCfg.Product, quantity, attempt.OrderID)
 	if err != nil {
 		if isDefiniteCreateFailure(err) {
 			attempt.Status = "failed"
@@ -1359,24 +1404,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		}
 		return fmt.Errorf("%w: %v", ErrCreateUncertain, err)
 	}
-	order := store.SupplyOrder{
-		OrderID:              remote.ID,
-		Product:              supplyCfg.Product,
-		RequestedQuantity:    quantity,
-		Automatic:            manualQuantity == 0,
-		Strategy:             attempt.Strategy,
-		TriggerReason:        attempt.TriggerReason,
-		Status:               localOrderStatus(remote.Status),
-		RemoteStatus:         remote.Status,
-		ReadyQuantity:        remote.ReadyQuantity,
-		Progress:             remote.Progress,
-		StatusURL:            remote.StatusURL,
-		TakeURL:              remote.TakeURL,
-		ChargedFen:           remote.ChargedFen,
-		ReleasedFen:          remote.ReleasedFen,
-		NextPollAtMS:         nextPollAt(supplyCfg, remote.RetryAfterSeconds),
-		SupplierRetryUntilMS: supplierRetryUntilMS(remote.RetryAfterSeconds),
-	}
+	order := supplyOrderFromCreateResponse(attempt, remote, supplyCfg)
 	if err := s.store.PromoteSupplyCreateAttempt(ctx, attempt.OrderID, order); err != nil {
 		attempt.Status = "create_uncertain"
 		attempt.RemoteStatus = remote.Status
@@ -1407,7 +1435,7 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		return s.store.UpdateSupplyOrder(ctx, order)
 	}
 	if order.Status == "create_uncertain" {
-		return nil
+		return s.retryUncertainCreate(ctx, cfg, order)
 	}
 	credentials := credentialsFromConfig(cfg.Supply)
 	total, imported, err := s.store.SupplyImportCounts(ctx, order.OrderID)
@@ -1472,9 +1500,13 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		return s.updateOrderError(ctx, &order, err, cfg.Supply)
 	}
 	applyRemoteOrder(&order, taken.Order, cfg.Supply)
+	replacementSyncErr := s.syncTakeReplacementFiles(ctx, cfg, taken.ReplacementFiles)
 	if taken.Pending {
 		order.Status = "waiting_inventory"
-		return s.store.UpdateSupplyOrder(ctx, order)
+		if err := s.store.UpdateSupplyOrder(ctx, order); err != nil {
+			return err
+		}
+		return replacementSyncErr
 	}
 	normalized := make([]normalizedSupplyAccount, 0, len(taken.Accounts))
 	for index, raw := range taken.Accounts {
@@ -1520,7 +1552,132 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	if err := s.store.UpdateSupplyOrder(ctx, order); err != nil {
 		return err
 	}
-	return s.importItems(ctx, cfg, &order)
+	if err := s.importItems(ctx, cfg, &order); err != nil {
+		return err
+	}
+	return replacementSyncErr
+}
+
+func (s *Service) syncTakeReplacementFiles(ctx context.Context, cfg store.ManagerConfig, files []supplyclient.ReplacementFile) error {
+	if len(files) == 0 {
+		return nil
+	}
+	credentials := credentialsFromConfig(cfg.Supply)
+	recoveries := make([]store.SupplyRecovery, 0, len(files))
+	for _, file := range files {
+		remote := supplyclient.Recovery{
+			ID:                strings.TrimSpace(file.RecoveryID),
+			DeliveryStatus:    "pending",
+			Product:           file.Product,
+			OriginalEmail:     file.OriginalEmail,
+			OriginalAccount:   file.OriginalAccount,
+			OriginalAuthIndex: file.OriginalAuthIndex,
+			ClaimURL:          file.ClaimURL,
+			StatusURL:         file.StatusURL,
+			CredentialVersion: file.CredentialVersion,
+			Raw:               file.Raw,
+		}
+		if file.Ready {
+			remote.DeliveryStatus = "ready"
+			if strings.TrimSpace(file.StatusURL) != "" {
+				latest, err := s.supplyClient.GetRecovery(ctx, credentials, file.RecoveryID, file.StatusURL)
+				if err != nil {
+					local := supplyRecoveryFromClient(remote)
+					local.LastError = "replacement status refresh deferred: " + safeError(err)
+					recoveries = append(recoveries, local)
+					continue
+				}
+				mergeSupplyRecovery(&remote, latest)
+			}
+		}
+		recoveries = append(recoveries, supplyRecoveryFromClient(remote))
+	}
+	_, err := s.store.UpsertSupplyRecoveries(ctx, recoveries)
+	return err
+}
+
+func mergeSupplyRecovery(target *supplyclient.Recovery, source supplyclient.Recovery) {
+	if target == nil {
+		return
+	}
+	if source.ID != "" {
+		target.ID = source.ID
+	}
+	if source.DeliveryStatus != "" {
+		target.DeliveryStatus = source.DeliveryStatus
+	}
+	if source.Product != "" {
+		target.Product = source.Product
+	}
+	if source.OriginalEmail != "" {
+		target.OriginalEmail = source.OriginalEmail
+	}
+	if source.OriginalAccount != "" {
+		target.OriginalAccount = source.OriginalAccount
+	}
+	if source.OriginalAuthIndex != "" {
+		target.OriginalAuthIndex = source.OriginalAuthIndex
+	}
+	if source.ClaimURL != "" {
+		target.ClaimURL = source.ClaimURL
+	}
+	if source.StatusURL != "" {
+		target.StatusURL = source.StatusURL
+	}
+	if source.CredentialVersion > target.CredentialVersion {
+		target.CredentialVersion = source.CredentialVersion
+	}
+	if source.RefundedFen > 0 {
+		target.RefundedFen = source.RefundedFen
+	}
+	if len(source.Raw) > 0 {
+		target.Raw = source.Raw
+	}
+}
+
+func (s *Service) retryUncertainCreate(ctx context.Context, cfg store.ManagerConfig, attempt store.SupplyOrder) error {
+	remote, err := s.supplyClient.CreateOrder(ctx, credentialsFromConfig(cfg.Supply), attempt.Product, attempt.RequestedQuantity, attempt.OrderID)
+	if err != nil {
+		attempt.LastError = safeError(err)
+		attempt.NextPollAtMS = nextSupplierRetryAt(cfg.Supply, err)
+		if isDefiniteCreateFailure(err) {
+			attempt.Status = "failed"
+			attempt.CompletedAtMS = time.Now().UnixMilli()
+		}
+		if updateErr := s.store.UpdateSupplyOrder(ctx, attempt); updateErr != nil {
+			return updateErr
+		}
+		return err
+	}
+	order := supplyOrderFromCreateResponse(attempt, remote, cfg.Supply)
+	if err := s.store.PromoteSupplyCreateAttempt(ctx, attempt.OrderID, order); err != nil {
+		return err
+	}
+	if order.Status == "ready" || order.Status == "taking" {
+		return s.processOrder(ctx, cfg, order)
+	}
+	return nil
+}
+
+func supplyOrderFromCreateResponse(attempt store.SupplyOrder, remote supplyclient.Order, cfg store.ManagerSupplyConfig) store.SupplyOrder {
+	return store.SupplyOrder{
+		OrderID:              remote.ID,
+		Product:              attempt.Product,
+		RequestedQuantity:    attempt.RequestedQuantity,
+		Automatic:            attempt.Automatic,
+		Strategy:             attempt.Strategy,
+		TriggerReason:        attempt.TriggerReason,
+		Status:               localOrderStatus(remote.Status),
+		RemoteStatus:         remote.Status,
+		ReadyQuantity:        remote.ReadyQuantity,
+		Progress:             remote.Progress,
+		StatusURL:            remote.StatusURL,
+		TakeURL:              remote.TakeURL,
+		ChargedFen:           remote.ChargedFen,
+		ReleasedFen:          remote.ReleasedFen,
+		NextPollAtMS:         nextPollAt(cfg, remote.RetryAfterSeconds),
+		SupplierRetryUntilMS: supplierRetryUntilMS(remote.RetryAfterSeconds),
+	}
 }
 
 // autoReleaseAutomaticOrderIfNotNeeded finishes an automatic order locally
@@ -1610,7 +1767,14 @@ func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, orde
 	}
 	var firstErr error
 	for _, item := range items {
-		payload, _, fileName, err := normalizeAccountPayloadForImport(item.PayloadJSON)
+		payload, _, normalizedFileName, err := normalizeAccountPayloadForImport(item.PayloadJSON)
+		fileName := normalizedFileName
+		if order.Strategy == "recovery" && strings.TrimSpace(item.FileName) != "" {
+			// Replacement credentials are independent versioned artifacts. Keep
+			// the recovery/version filename instead of collapsing it back onto the
+			// deterministic filename used by the original pickup payload.
+			fileName = item.FileName
+		}
 		if err == nil && fileName != item.FileName {
 			err = s.store.UpdateSupplyImportItemFileName(ctx, item.ID, fileName)
 		}
@@ -3280,7 +3444,11 @@ func (s *Service) syncRecoveriesOnce(ctx context.Context, cfg store.ManagerConfi
 		}
 		if err := s.claimRecovery(ctx, cfg, recovery); err != nil {
 			result.Failed++
-			_ = s.store.MarkSupplyRecoveryFailed(ctx, recovery.RecoveryID, safeError(err))
+			if retryErr := s.markRecoveryClaimRetry(ctx, recovery, err); retryErr != nil && firstErr == nil {
+				firstErr = retryErr
+			} else if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		result.Claimed++
@@ -3300,6 +3468,9 @@ func (s *Service) claimRecovery(ctx context.Context, cfg store.ManagerConfig, re
 	claimed, err := s.supplyClient.ClaimRecovery(ctx, credentialsFromConfig(cfg.Supply), recovery.RecoveryID, recovery.ClaimURL)
 	if err != nil {
 		return err
+	}
+	if claimed.CredentialVersion <= 1 {
+		return fmt.Errorf("recovery claim returned invalid credential_version %d", claimed.CredentialVersion)
 	}
 	normalized := make([]normalizedSupplyAccount, 0, len(claimed.Accounts))
 	for index, raw := range claimed.Accounts {
@@ -3337,6 +3508,7 @@ func (s *Service) claimRecovery(ctx context.Context, cfg store.ManagerConfig, re
 	items := make([]store.SupplyImportItem, 0, len(normalized))
 	seen := make(map[string]struct{}, len(normalized))
 	for _, account := range normalized {
+		account.fileName = recoveryCredentialFileName(recovery.RecoveryID, claimed.CredentialVersion, account.itemKey)
 		if _, duplicate := seen[account.itemKey]; duplicate {
 			continue
 		}
@@ -3359,7 +3531,59 @@ func (s *Service) claimRecovery(ctx context.Context, cfg store.ManagerConfig, re
 	if err := s.store.MarkSupplyRecoveryClaimed(ctx, recovery.RecoveryID, orderID, inserted, time.Now().UnixMilli()); err != nil {
 		return err
 	}
+	if claimed.CredentialVersion > recovery.CredentialVersion {
+		recovery.CredentialVersion = claimed.CredentialVersion
+		recovery.Status = "importing"
+		recovery.DeliveryStatus = firstNonEmptyString(claimed.Recovery.DeliveryStatus, "claimed")
+		recovery.ClaimOrderID = orderID
+		recovery.ItemCount = inserted
+		recovery.LastSeenAtMS = time.Now().UnixMilli()
+		if _, err := s.store.UpsertSupplyRecoveries(ctx, []store.SupplyRecovery{recovery}); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (s *Service) markRecoveryClaimRetry(ctx context.Context, recovery store.SupplyRecovery, claimErr error) error {
+	recovery.Status = "claimable"
+	if isHTTPStatus(claimErr, http.StatusConflict) {
+		// A 409 means the signed URL is stale or already consumed. Keep the
+		// record visible but wait for the next recovery listing to issue a new URL.
+		recovery.Status = "seen"
+	}
+	recovery.LastError = safeError(claimErr)
+	recovery.LastSeenAtMS = time.Now().UnixMilli()
+	_, err := s.store.UpsertSupplyRecoveries(ctx, []store.SupplyRecovery{recovery})
+	return err
+}
+
+func recoveryCredentialFileName(recoveryID string, credentialVersion int, itemKey string) string {
+	digest := strings.TrimSpace(itemKey)
+	if len(digest) > 20 {
+		digest = digest[:20]
+	}
+	return fmt.Sprintf("codex-recovery-%s-v%d-%s.json", recoveryFileComponent(recoveryID), credentialVersion, digest)
+}
+
+func recoveryFileComponent(value string) string {
+	var builder strings.Builder
+	for _, r := range strings.TrimSpace(value) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			builder.WriteRune(r)
+		default:
+			builder.WriteByte('-')
+		}
+	}
+	result := strings.Trim(builder.String(), "-_")
+	if result == "" {
+		return "unknown"
+	}
+	if len(result) > 40 {
+		return result[:40]
+	}
+	return result
 }
 
 func (s *Service) processPendingRecoveryImports(ctx context.Context, cfg store.ManagerConfig, limit int) (int, int, error) {
@@ -4306,7 +4530,10 @@ func (s *Service) requireCredentials(cfg store.ManagerSupplyConfig) error {
 
 func (s *Service) updateOrderError(ctx context.Context, order *store.SupplyOrder, err error, cfg store.ManagerSupplyConfig) error {
 	order.LastError = safeError(err)
-	if order.Status == "taking" {
+	if retryAtMS := supplierRetryAtMS(err); retryAtMS > 0 {
+		order.NextPollAtMS = retryAtMS
+		order.SupplierRetryUntilMS = retryAtMS
+	} else if order.Status == "taking" {
 		order.NextPollAtMS = time.Now().Add(supplyTakeRetryDelay(cfg)).UnixMilli()
 	} else {
 		order.NextPollAtMS = nextPollAt(cfg, 0)
@@ -4520,6 +4747,11 @@ func recoveryClaimBatchSize(cfg store.ManagerSupplyConfig) int {
 }
 
 func recoverySyncInterval(cfg store.ManagerSupplyConfig, err error) time.Duration {
+	var upstreamErr *supplyclient.HTTPError
+	if errors.As(err, &upstreamErr) && upstreamErr.RetryAfterSeconds > 0 {
+		seconds := clampInt(upstreamErr.RetryAfterSeconds, 1, 3600)
+		return time.Duration(seconds) * time.Second
+	}
 	seconds := cfg.RecoverySyncIntervalSeconds
 	if seconds <= 0 {
 		seconds = 60
@@ -4550,6 +4782,7 @@ func supplyRecoveryFromClient(remote supplyclient.Recovery) store.SupplyRecovery
 		OriginalFileName:  originalFileName,
 		OriginalAuthIndex: strings.TrimSpace(remote.OriginalAuthIndex),
 		OriginalEmail:     strings.TrimSpace(remote.OriginalEmail),
+		CredentialVersion: remote.CredentialVersion,
 		ClaimURL:          strings.TrimSpace(remote.ClaimURL),
 		RefundedFen:       remote.RefundedFen,
 		RawJSON:           string(remote.Raw),
@@ -4666,11 +4899,26 @@ func isDefiniteCreateFailure(err error) bool {
 	switch upstreamErr.StatusCode {
 	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,
 		http.StatusNotFound, http.StatusPaymentRequired, http.StatusConflict,
-		http.StatusUnprocessableEntity, http.StatusTooManyRequests:
+		http.StatusUnprocessableEntity:
 		return true
 	default:
 		return false
 	}
+}
+
+func supplierRetryAtMS(err error) int64 {
+	var upstreamErr *supplyclient.HTTPError
+	if !errors.As(err, &upstreamErr) || upstreamErr.RetryAfterSeconds <= 0 {
+		return 0
+	}
+	return time.Now().Add(time.Duration(upstreamErr.RetryAfterSeconds) * time.Second).UnixMilli()
+}
+
+func nextSupplierRetryAt(cfg store.ManagerSupplyConfig, err error) int64 {
+	if retryAtMS := supplierRetryAtMS(err); retryAtMS > 0 {
+		return retryAtMS
+	}
+	return nextPollAt(cfg, 0)
 }
 
 func newCreateAttemptID() string {

@@ -427,6 +427,7 @@ func Migrate(db *sql.DB) error {
 			product text,
 			delivery_status text not null,
 			status text not null,
+			credential_version integer not null default 0,
 			original_file_name text,
 			original_auth_index text,
 			original_email text,
@@ -476,6 +477,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureSupplyImportItemColumns(db); err != nil {
+		return err
+	}
+	if err := ensureSupplyRecoveryColumns(db); err != nil {
 		return err
 	}
 	if err := ensureUsageRollupLongContextColumns(db); err != nil {
@@ -583,6 +587,37 @@ func ensureSupplyImportItemColumns(db *sql.DB) error {
 		return err
 	}
 	_, err = db.Exec(`create index if not exists idx_supply_import_items_active_lease on supply_import_items(status, lease_expires_at_ms)`)
+	return err
+}
+
+func ensureSupplyRecoveryColumns(db *sql.DB) error {
+	rows, err := db.Query(`pragma table_info(supply_recoveries)`)
+	if err != nil {
+		return err
+	}
+	existing := map[string]struct{}{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if _, ok := existing["credential_version"]; ok {
+		return nil
+	}
+	_, err = db.Exec(`alter table supply_recoveries add column credential_version integer not null default 0`)
 	return err
 }
 

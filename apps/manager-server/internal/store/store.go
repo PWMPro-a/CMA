@@ -40,6 +40,7 @@ type ManagerSupplyConfig = model.ManagerSupplyConfig
 type SupplyOrder = model.SupplyOrder
 type SupplyImportItem = model.SupplyImportItem
 type SupplyRecovery = model.SupplyRecovery
+type SupplyRecoveryImportItem = model.SupplyRecoveryImportItem
 type CodexInspectionRun = model.CodexInspectionRun
 type CodexInspectionResult = model.CodexInspectionResult
 type CodexInspectionLog = model.CodexInspectionLog
@@ -380,6 +381,10 @@ func (s *Store) InsertSupplyImportItems(ctx context.Context, orderID string, ite
 
 func (s *Store) ListSupplyImportItems(ctx context.Context, limit int, status string) ([]SupplyImportItem, error) {
 	return s.SupplyOrders.ListItems(ctx, limit, status)
+}
+
+func (s *Store) ListSupplyImportItemsByOrderIDs(ctx context.Context, orderIDs []string) ([]SupplyImportItem, error) {
+	return s.SupplyOrders.ListItemsByOrderIDs(ctx, orderIDs)
 }
 
 func (s *Store) ListSupplyImportItemsBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]SupplyImportItem, error) {

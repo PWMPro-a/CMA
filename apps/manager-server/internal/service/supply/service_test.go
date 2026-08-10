@@ -331,7 +331,7 @@ func TestRecoverySyncClaimsImportsAndDisablesOriginalAccount(t *testing.T) {
 			if got := r.URL.Query().Get("ticket"); got != "ticket-1" {
 				t.Fatalf("claim ticket = %q", got)
 			}
-			_, _ = w.Write([]byte(`{"payload":{"accounts":[{"type":"oauth","name":"replacement","platform":"openai","credentials":{"access_token":"access-new","refresh_token":"refresh-new","email":"new@example.com","chatgpt_account_id":"acct-new","chatgpt_plan_type":"team","workspace_id":"workspace-new"}}]}}`))
+			_, _ = w.Write([]byte(`{"credential_version":2,"payload":{"type":"oauth","name":"replacement","platform":"openai","credentials":{"access_token":"access-new","refresh_token":"refresh-new","email":"new@example.com","chatgpt_account_id":"acct-new","chatgpt_plan_type":"team","workspace_id":"workspace-new"}}}`))
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
 			if r.Header.Get("Authorization") != "Bearer management-key" {
 				t.Fatalf("management authorization = %q", r.Header.Get("Authorization"))
@@ -359,6 +359,9 @@ func TestRecoverySyncClaimsImportsAndDisablesOriginalAccount(t *testing.T) {
 				}
 				if item.FormName() != "file" {
 					continue
+				}
+				if !strings.Contains(item.FileName(), "codex-recovery-rec-1-v2-") {
+					t.Fatalf("replacement filename = %q", item.FileName())
 				}
 				uploadedNames.Store(item.FileName(), struct{}{})
 				data, _ := io.ReadAll(item)
@@ -435,12 +438,157 @@ func TestRecoverySyncClaimsImportsAndDisablesOriginalAccount(t *testing.T) {
 	}
 	recoveries, err := service.ListRecoveries(context.Background(), 10, "")
 	if err != nil || len(recoveries) != 1 || recoveries[0].Status != "imported" ||
-		recoveries[0].ImportedCount != 1 || recoveries[0].ClaimOrderID != "recovery-rec-1" {
+		recoveries[0].ImportedCount != 1 || recoveries[0].ClaimOrderID != "recovery-rec-1" ||
+		recoveries[0].CredentialVersion != 2 || len(recoveries[0].ImportedFileNames) != 1 || recoveries[0].LastImportedAtMS <= 0 ||
+		len(recoveries[0].ImportItems) != 1 || recoveries[0].ImportItems[0].Status != "imported" ||
+		recoveries[0].ImportItems[0].FileName != recoveries[0].ImportedFileNames[0] {
 		t.Fatalf("recoveries=%#v err=%v", recoveries, err)
 	}
 	order, found, err := st.GetSupplyOrder(context.Background(), "recovery-rec-1")
 	if err != nil || !found || order.Status != "completed" || order.ImportedCount != 1 {
 		t.Fatalf("recovery order=%#v found=%v err=%v", order, found, err)
+	}
+}
+
+func TestRecoveryClaimConflictWaitsForFreshClaimURL(t *testing.T) {
+	var listCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/recoveries" && r.Method == http.MethodGet:
+			call := listCalls.Add(1)
+			ticket := "old"
+			if call > 1 {
+				ticket = "fresh"
+			}
+			_, _ = w.Write([]byte(`{"recoveries":[{"id":"rec-conflict","delivery_status":"claimable","claim_url":"/api/customer/recoveries/rec-conflict/claim?ticket=` + ticket + `"}]}`))
+		case r.URL.Path == "/api/customer/recoveries/rec-conflict/claim":
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"message":"ticket expired"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "recovery-conflict.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_30d",
+			RecoverySyncEnabled: &enabled, RecoveryAutoClaim: &enabled,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	autoClaim := true
+	if _, err := service.SyncRecoveries(context.Background(), RecoverySyncRequest{AutoClaim: &autoClaim}); err == nil {
+		t.Fatal("expected stale ticket conflict")
+	}
+	recovery, found, err := st.GetSupplyRecovery(context.Background(), "rec-conflict")
+	if err != nil || !found || recovery.Status != "seen" || !strings.Contains(recovery.LastError, "HTTP 409") {
+		t.Fatalf("recovery=%#v found=%v err=%v", recovery, found, err)
+	}
+	autoClaim = false
+	if _, err := service.SyncRecoveries(context.Background(), RecoverySyncRequest{AutoClaim: &autoClaim}); err != nil {
+		t.Fatalf("refresh recovery URL: %v", err)
+	}
+	recovery, found, err = st.GetSupplyRecovery(context.Background(), "rec-conflict")
+	if err != nil || !found || recovery.Status != "claimable" || !strings.Contains(recovery.ClaimURL, "ticket=fresh") || recovery.LastError != "" {
+		t.Fatalf("refreshed recovery=%#v found=%v err=%v", recovery, found, err)
+	}
+}
+
+func TestRecoveryPayloadServerErrorKeepsTicketClaimable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/recoveries" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"recoveries":[{"id":"rec-retry","delivery_status":"claimable","claim_url":"/api/customer/recoveries/rec-retry/claim?ticket=keep-me"}]}`))
+		case r.URL.Path == "/api/customer/recoveries/rec-retry/claim":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":{"code":"recovery_payload_invalid","message":"payload temporarily unavailable"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "recovery-server-retry.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_30d",
+			RecoverySyncEnabled: &enabled, RecoveryAutoClaim: &enabled,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	autoClaim := true
+	if _, err := service.SyncRecoveries(context.Background(), RecoverySyncRequest{AutoClaim: &autoClaim}); err == nil {
+		t.Fatal("expected temporary claim failure")
+	}
+	recovery, found, err := st.GetSupplyRecovery(context.Background(), "rec-retry")
+	if err != nil || !found || recovery.Status != "claimable" || !strings.Contains(recovery.ClaimURL, "ticket=keep-me") ||
+		!strings.Contains(recovery.LastError, "recovery_payload_invalid") {
+		t.Fatalf("recovery=%#v found=%v err=%v", recovery, found, err)
+	}
+}
+
+func TestTakeReplacementFileRefreshesLatestClaimURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case "/api/customer/recoveries/rec-from-take":
+			_, _ = w.Write([]byte(`{"recovery":{"id":"rec-from-take","delivery_status":"claimable","product":"oauth_30d","claim_url":"/api/customer/recoveries/rec-from-take/claim?ticket=latest","credential_version":3}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "take-replacement.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := store.ManagerConfig{Supply: store.ManagerSupplyConfig{
+		BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_30d",
+	}}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	if err := service.syncTakeReplacementFiles(context.Background(), cfg, []supplyclient.ReplacementFile{{
+		RecoveryID: "rec-from-take", Ready: true, StatusURL: "/api/customer/recoveries/rec-from-take", CredentialVersion: 2,
+	}}); err != nil {
+		t.Fatalf("sync replacement: %v", err)
+	}
+	recovery, found, err := st.GetSupplyRecovery(context.Background(), "rec-from-take")
+	if err != nil || !found || recovery.Status != "claimable" || recovery.CredentialVersion != 3 ||
+		!strings.Contains(recovery.ClaimURL, "ticket=latest") {
+		t.Fatalf("recovery=%#v found=%v err=%v", recovery, found, err)
+	}
+}
+
+func TestRecoverySyncIntervalHonorsRetryAfter(t *testing.T) {
+	interval := recoverySyncInterval(store.ManagerSupplyConfig{RecoverySyncIntervalSeconds: 60}, &supplyclient.HTTPError{
+		StatusCode: http.StatusTooManyRequests, RetryAfterSeconds: 17,
+	})
+	if interval != 17*time.Second {
+		t.Fatalf("interval = %s", interval)
 	}
 }
 
@@ -868,29 +1016,19 @@ func TestRecoverySyncDoesNotClaimBeforeCPAConnectionIsConfigured(t *testing.T) {
 	}
 }
 
-func TestCreateResultUncertainBlocksDuplicateOrdersUntilDismissed(t *testing.T) {
+func TestCreateResultUncertainRetriesWithPersistedIdempotencyKey(t *testing.T) {
 	var createCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/api/customer/login":
 			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
-		case r.URL.Path == "/api/customer/inventory":
-			_, _ = w.Write([]byte(`{"available":1,"estimated_total_fen":100}`))
-		case r.URL.Path == "/api/customer/balance":
-			_, _ = w.Write([]byte(`{"available_fen":10000}`))
-		case r.URL.Path == "/v0/management/auth-files":
-			_, _ = w.Write([]byte(`{"files":[]}`))
 		case r.URL.Path == "/api/customer/pickup/orders":
 			createCalls.Add(1)
-			hijacker, ok := w.(http.Hijacker)
-			if !ok {
-				t.Fatal("response writer does not support hijacking")
+			if key := r.Header.Get("Idempotency-Key"); key != "create-attempt-persisted" {
+				t.Fatalf("idempotency key = %q", key)
 			}
-			connection, _, err := hijacker.Hijack()
-			if err != nil {
-				t.Fatalf("hijack: %v", err)
-			}
-			_ = connection.Close()
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"order":{"id":"supplier-order-1","status":"waiting_inventory","quantity":1}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -914,26 +1052,23 @@ func TestCreateResultUncertainBlocksDuplicateOrdersUntilDismissed(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
-	if err := service.RunAutomatic(context.Background()); !errors.Is(err, ErrCreateUncertain) {
-		t.Fatalf("first automatic run error = %v", err)
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "create-attempt-persisted", Product: "oauth_30d", RequestedQuantity: 1,
+		Automatic: true, Strategy: "strong_supply", TriggerReason: "emergency_pool_vacuum",
+		Status: "create_uncertain", LastError: "request timed out after supplier accepted it",
+	}); err != nil {
+		t.Fatalf("create uncertain attempt: %v", err)
 	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
 	if err := service.RunAutomatic(context.Background()); err != nil {
-		t.Fatalf("second automatic run: %v", err)
+		t.Fatalf("retry automatic run: %v", err)
 	}
 	if createCalls.Load() != 1 {
 		t.Fatalf("create calls = %d, want 1", createCalls.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
-	if err != nil || status.ActiveOrder == nil || status.ActiveOrder.Status != "create_uncertain" {
+	if err != nil || status.ActiveOrder == nil || status.ActiveOrder.Status == "create_uncertain" || status.ActiveOrder.OrderID != "supplier-order-1" {
 		t.Fatalf("status=%#v err=%v", status, err)
-	}
-	if _, err := service.DismissCreateUncertain(context.Background(), status.ActiveOrder.OrderID); err != nil {
-		t.Fatalf("dismiss uncertain order: %v", err)
-	}
-	status, err = service.GetStatus(context.Background(), 10)
-	if err != nil || status.ActiveOrder != nil || status.Orders[0].Status != "dismissed" {
-		t.Fatalf("dismissed status=%#v err=%v", status, err)
 	}
 }
 

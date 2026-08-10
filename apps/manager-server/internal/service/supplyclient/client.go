@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -22,15 +23,25 @@ const (
 )
 
 type HTTPError struct {
-	StatusCode int
-	Message    string
+	StatusCode        int
+	Message           string
+	Code              string
+	RetryAfterSeconds int
 }
 
 func (e *HTTPError) Error() string {
-	if e.Message == "" {
+	detail := strings.TrimSpace(e.Message)
+	if strings.TrimSpace(e.Code) != "" && !strings.Contains(detail, e.Code) {
+		if detail == "" {
+			detail = e.Code
+		} else {
+			detail = e.Code + ": " + detail
+		}
+	}
+	if detail == "" {
 		return fmt.Sprintf("supply API returned HTTP %d", e.StatusCode)
 	}
-	return fmt.Sprintf("supply API returned HTTP %d: %s", e.StatusCode, e.Message)
+	return fmt.Sprintf("supply API returned HTTP %d: %s", e.StatusCode, detail)
 }
 
 type Credentials struct {
@@ -77,6 +88,7 @@ type TakeResult struct {
 	Accounts             []json.RawMessage
 	OrderItems           []OrderItem
 	ItemRemainingSeconds []int64
+	ReplacementFiles     []ReplacementFile
 	Pending              bool
 }
 
@@ -95,13 +107,34 @@ type Recovery struct {
 	OriginalAccount   string          `json:"originalAccount,omitempty"`
 	OriginalAuthIndex string          `json:"originalAuthIndex,omitempty"`
 	ClaimURL          string          `json:"claimUrl,omitempty"`
+	StatusURL         string          `json:"statusUrl,omitempty"`
+	CredentialVersion int             `json:"credentialVersion,omitempty"`
 	RefundedFen       int64           `json:"refundedFen,omitempty"`
 	Raw               json.RawMessage `json:"-"`
 }
 
 type RecoveryClaimResult struct {
-	Recovery Recovery
-	Accounts []json.RawMessage
+	Recovery          Recovery
+	Accounts          []json.RawMessage
+	CredentialVersion int
+}
+
+type ReplacementFile struct {
+	RecoveryID        string
+	Ready             bool
+	StatusURL         string
+	ClaimURL          string
+	CredentialVersion int
+	Product           string
+	OriginalEmail     string
+	OriginalAccount   string
+	OriginalAuthIndex string
+	Raw               json.RawMessage
+}
+
+type RecoveryPage struct {
+	Recoveries   []Recovery
+	NextBeforeID string
 }
 
 type tokenState struct {
@@ -174,9 +207,13 @@ func (c *Client) Balance(ctx context.Context, credentials Credentials) (Balance,
 	}, nil
 }
 
-func (c *Client) CreateOrder(ctx context.Context, credentials Credentials, product string, quantity int) (Order, error) {
+func (c *Client) CreateOrder(ctx context.Context, credentials Credentials, product string, quantity int, idempotencyKey ...string) (Order, error) {
 	payload := map[string]any{"product": strings.TrimSpace(product), "quantity": quantity}
-	value, _, err := c.doAuthenticated(ctx, credentials, http.MethodPost, "/api/customer/pickup/orders", payload)
+	headers := make(http.Header)
+	if len(idempotencyKey) > 0 && strings.TrimSpace(idempotencyKey[0]) != "" {
+		headers.Set("Idempotency-Key", strings.TrimSpace(idempotencyKey[0]))
+	}
+	value, _, err := c.doAuthenticatedWithHeaders(ctx, credentials, http.MethodPost, "/api/customer/pickup/orders", payload, headers, c.timeout)
 	if err != nil {
 		return Order{}, err
 	}
@@ -223,14 +260,51 @@ func (c *Client) Take(ctx context.Context, credentials Credentials, orderID stri
 		Accounts:             accounts,
 		OrderItems:           items,
 		ItemRemainingSeconds: orderItemRemainingSeconds(items),
+		ReplacementFiles:     replacementFiles(value),
 		Pending:              status == http.StatusAccepted,
 	}, nil
 }
 
 func (c *Client) Recoveries(ctx context.Context, credentials Credentials) ([]Recovery, error) {
-	value, _, err := c.doAuthenticated(ctx, credentials, http.MethodGet, "/api/customer/recoveries", nil)
+	const pageLimit = 100
+	const maximumPages = 100
+	result := make([]Recovery, 0, pageLimit)
+	beforeID := ""
+	seenCursors := make(map[string]struct{})
+	for pageIndex := 0; pageIndex < maximumPages; pageIndex++ {
+		page, err := c.RecoveriesPage(ctx, credentials, beforeID, pageLimit)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, page.Recoveries...)
+		next := strings.TrimSpace(page.NextBeforeID)
+		if next == "" || len(page.Recoveries) == 0 {
+			break
+		}
+		if _, duplicate := seenCursors[next]; duplicate {
+			return nil, errors.New("supply recovery pagination returned a repeated next_before_id")
+		}
+		if pageIndex == maximumPages-1 {
+			return nil, fmt.Errorf("supply recovery pagination exceeded %d pages", maximumPages)
+		}
+		seenCursors[next] = struct{}{}
+		beforeID = next
+	}
+	return result, nil
+}
+
+func (c *Client) RecoveriesPage(ctx context.Context, credentials Credentials, beforeID string, limit int) (RecoveryPage, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	query := url.Values{}
+	query.Set("limit", strconv.Itoa(limit))
+	if strings.TrimSpace(beforeID) != "" {
+		query.Set("before_id", strings.TrimSpace(beforeID))
+	}
+	value, _, err := c.doAuthenticated(ctx, credentials, http.MethodGet, "/api/customer/recoveries?"+query.Encode(), nil)
 	if err != nil {
-		return nil, err
+		return RecoveryPage{}, err
 	}
 	objects := recoveryObjects(value)
 	recoveries := make([]Recovery, 0, len(objects))
@@ -241,7 +315,26 @@ func (c *Client) Recoveries(ctx context.Context, credentials Credentials) ([]Rec
 		}
 		recoveries = append(recoveries, recovery)
 	}
-	return recoveries, nil
+	return RecoveryPage{
+		Recoveries:   recoveries,
+		NextBeforeID: findString(value, "next_before_id", "nextBeforeId"),
+	}, nil
+}
+
+func (c *Client) GetRecovery(ctx context.Context, credentials Credentials, recoveryID string, statusURL string) (Recovery, error) {
+	endpoint := strings.TrimSpace(statusURL)
+	if endpoint == "" {
+		endpoint = "/api/customer/recoveries/" + url.PathEscape(strings.TrimSpace(recoveryID))
+	}
+	value, _, err := c.doAuthenticated(ctx, credentials, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return Recovery{}, err
+	}
+	recovery := parseRecoveryValue(value)
+	if recovery.ID == "" {
+		recovery.ID = strings.TrimSpace(recoveryID)
+	}
+	return recovery, nil
 }
 
 func (c *Client) ClaimRecovery(ctx context.Context, credentials Credentials, recoveryID string, claimURL string) (RecoveryClaimResult, error) {
@@ -249,7 +342,9 @@ func (c *Client) ClaimRecovery(ctx context.Context, credentials Credentials, rec
 	if endpoint == "" {
 		endpoint = "/api/customer/recoveries/" + url.PathEscape(strings.TrimSpace(recoveryID)) + "/claim"
 	}
-	value, _, err := c.doAuthenticatedWithTimeout(ctx, credentials, http.MethodPost, endpoint, nil, c.takeTimeout)
+	headers := make(http.Header)
+	headers.Set("Accept", "application/json")
+	value, _, err := c.doAuthenticatedWithHeaders(ctx, credentials, http.MethodPost, endpoint, nil, headers, c.takeTimeout)
 	if err != nil {
 		return RecoveryClaimResult{}, err
 	}
@@ -258,21 +353,26 @@ func (c *Client) ClaimRecovery(ctx context.Context, credentials Credentials, rec
 		recovery.ID = strings.TrimSpace(recoveryID)
 	}
 	return RecoveryClaimResult{
-		Recovery: recovery,
-		Accounts: rawAccounts(value),
+		Recovery:          recovery,
+		Accounts:          recoveryClaimAccounts(value),
+		CredentialVersion: int(findInt64(value, "credential_version", "credentialVersion")),
 	}, nil
 }
 
 func (c *Client) doAuthenticated(ctx context.Context, credentials Credentials, method string, path string, body any) (any, int, error) {
-	return c.doAuthenticatedWithTimeout(ctx, credentials, method, path, body, c.timeout)
+	return c.doAuthenticatedWithHeaders(ctx, credentials, method, path, body, nil, c.timeout)
 }
 
 func (c *Client) doAuthenticatedWithTimeout(ctx context.Context, credentials Credentials, method string, path string, body any, requestTimeout time.Duration) (any, int, error) {
+	return c.doAuthenticatedWithHeaders(ctx, credentials, method, path, body, nil, requestTimeout)
+}
+
+func (c *Client) doAuthenticatedWithHeaders(ctx context.Context, credentials Credentials, method string, path string, body any, headers http.Header, requestTimeout time.Duration) (any, int, error) {
 	token, err := c.login(ctx, credentials, false)
 	if err != nil {
 		return nil, 0, err
 	}
-	value, status, err := c.requestWithTimeout(ctx, credentials.BaseURL, method, path, body, token, requestTimeout)
+	value, status, err := c.requestWithHeaders(ctx, credentials.BaseURL, method, path, body, token, headers, requestTimeout)
 	var httpErr *HTTPError
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized {
 		return value, status, err
@@ -282,7 +382,7 @@ func (c *Client) doAuthenticatedWithTimeout(ctx context.Context, credentials Cre
 	if err != nil {
 		return nil, 0, err
 	}
-	return c.requestWithTimeout(ctx, credentials.BaseURL, method, path, body, token, requestTimeout)
+	return c.requestWithHeaders(ctx, credentials.BaseURL, method, path, body, token, headers, requestTimeout)
 }
 
 func (c *Client) login(ctx context.Context, credentials Credentials, force bool) (string, error) {
@@ -303,7 +403,7 @@ func (c *Client) login(ctx context.Context, credentials Credentials, force bool)
 	if token == "" {
 		return "", errors.New("supply login response did not include token")
 	}
-	c.token = tokenState{key: key, token: token, expiresAt: time.Now().Add(11*time.Hour + 45*time.Minute)}
+	c.token = tokenState{key: key, token: token, expiresAt: time.Now().Add(29 * 24 * time.Hour)}
 	return token, nil
 }
 
@@ -320,6 +420,10 @@ func (c *Client) request(ctx context.Context, baseURL string, method string, end
 }
 
 func (c *Client) requestWithTimeout(ctx context.Context, baseURL string, method string, endpointRef string, body any, token string, requestTimeout time.Duration) (any, int, error) {
+	return c.requestWithHeaders(ctx, baseURL, method, endpointRef, body, token, nil, requestTimeout)
+}
+
+func (c *Client) requestWithHeaders(ctx context.Context, baseURL string, method string, endpointRef string, body any, token string, headers http.Header, requestTimeout time.Duration) (any, int, error) {
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -347,6 +451,11 @@ func (c *Client) requestWithTimeout(ctx context.Context, baseURL string, method 
 	if token != "" {
 		req.Header.Set("X-Customer-Token", token)
 	}
+	for key, values := range headers {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
 	res, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("%s %s: %w", method, endpointRef, err)
@@ -361,7 +470,12 @@ func (c *Client) requestWithTimeout(ctx context.Context, baseURL string, method 
 		return nil, res.StatusCode, errors.New("supply API response exceeded size limit")
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, res.StatusCode, &HTTPError{StatusCode: res.StatusCode, Message: errorMessage(data)}
+		return nil, res.StatusCode, &HTTPError{
+			StatusCode:        res.StatusCode,
+			Message:           errorMessage(data),
+			Code:              errorCode(data),
+			RetryAfterSeconds: retryAfterSeconds(res.Header.Get("Retry-After"), time.Now()),
+		}
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		return map[string]any{}, res.StatusCode, nil
@@ -551,9 +665,97 @@ func parseRecovery(root map[string]any) Recovery {
 		OriginalAccount:   stringValue(root, "original_account", "originalAccount", "auth_file_name", "authFileName", "file_name", "fileName", "account"),
 		OriginalAuthIndex: stringValue(root, "original_auth_index", "originalAuthIndex", "auth_index", "authIndex"),
 		ClaimURL:          claimURL,
+		StatusURL:         stringValue(root, "status_url", "statusUrl"),
+		CredentialVersion: int(int64Value(root, "credential_version", "credentialVersion")),
 		RefundedFen:       int64Value(root, "refunded_fen", "refundedFen", "refund_fen", "refundFen"),
 		Raw:               raw,
 	}
+}
+
+func replacementFiles(value any) []ReplacementFile {
+	root, _ := value.(map[string]any)
+	if root == nil {
+		return nil
+	}
+	if values, ok := root["replacement_files"].([]any); ok {
+		return parseReplacementFiles(values)
+	}
+	if values, ok := root["replacementFiles"].([]any); ok {
+		return parseReplacementFiles(values)
+	}
+	for _, key := range []string{"payload", "data", "result", "order"} {
+		if child, ok := root[key]; ok {
+			if result := replacementFiles(child); len(result) > 0 {
+				return result
+			}
+		}
+	}
+	return nil
+}
+
+func parseReplacementFiles(values []any) []ReplacementFile {
+	result := make([]ReplacementFile, 0, len(values))
+	for _, value := range values {
+		object, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		raw, _ := json.Marshal(object)
+		claimURL := stringValue(object, "claim_url", "claimUrl")
+		recoveryID := stringValue(object, "recovery_id", "recoveryId", "id")
+		if recoveryID == "" {
+			recoveryID = recoveryIDFromClaimURL(claimURL)
+		}
+		result = append(result, ReplacementFile{
+			RecoveryID:        recoveryID,
+			Ready:             boolValue(object, "ready") || strings.EqualFold(stringValue(object, "delivery_status", "deliveryStatus", "status"), "claimable"),
+			StatusURL:         stringValue(object, "status_url", "statusUrl"),
+			ClaimURL:          claimURL,
+			CredentialVersion: int(int64Value(object, "credential_version", "credentialVersion")),
+			Product:           stringValue(object, "product"),
+			OriginalEmail:     stringValue(object, "original_email", "originalEmail", "email"),
+			OriginalAccount:   stringValue(object, "original_account", "originalAccount", "auth_file_name", "authFileName", "file_name", "fileName"),
+			OriginalAuthIndex: stringValue(object, "original_auth_index", "originalAuthIndex", "auth_index", "authIndex"),
+			Raw:               raw,
+		})
+	}
+	return result
+}
+
+func recoveryClaimAccounts(value any) []json.RawMessage {
+	if accounts := rawAccounts(value); len(accounts) > 0 {
+		return accounts
+	}
+	root, _ := value.(map[string]any)
+	if root == nil {
+		return nil
+	}
+	if looksLikeCredentialPayload(root) {
+		data, err := json.Marshal(root)
+		if err == nil && len(data) > 0 {
+			return []json.RawMessage{data}
+		}
+	}
+	for _, key := range []string{"payload", "data", "result"} {
+		child, ok := root[key]
+		if !ok || child == nil {
+			continue
+		}
+		if object, ok := child.(map[string]any); ok && looksLikeCredentialPayload(object) {
+			data, err := json.Marshal(object)
+			if err == nil && len(data) > 0 {
+				return []json.RawMessage{data}
+			}
+		}
+	}
+	return nil
+}
+
+func looksLikeCredentialPayload(value map[string]any) bool {
+	if _, ok := value["credentials"].(map[string]any); ok {
+		return true
+	}
+	return stringValue(value, "access_token", "accessToken", "session_access_token", "sessionAccessToken") != ""
 }
 
 func recoveryIDFromClaimURL(claimURL string) string {
@@ -667,7 +869,7 @@ func findString(value any, keys ...string) string {
 		if result := stringValue(root, keys...); result != "" {
 			return result
 		}
-		for _, key := range []string{"data", "payload", "result"} {
+		for _, key := range []string{"data", "payload", "result", "error", "recovery"} {
 			if child, exists := root[key]; exists {
 				if result := findString(child, keys...); result != "" {
 					return result
@@ -676,6 +878,22 @@ func findString(value any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func findInt64(value any, keys ...string) int64 {
+	if root, ok := value.(map[string]any); ok {
+		if result, found := int64ValueOK(root, keys...); found && result != 0 {
+			return result
+		}
+		for _, key := range []string{"data", "payload", "result", "recovery"} {
+			if child, exists := root[key]; exists {
+				if result := findInt64(child, keys...); result != 0 {
+					return result
+				}
+			}
+		}
+	}
+	return 0
 }
 
 func stringValue(root map[string]any, keys ...string) string {
@@ -751,8 +969,16 @@ func errorMessage(data []byte) string {
 	decoder.UseNumber()
 	var value any
 	if decoder.Decode(&value) == nil {
-		if message := findString(value, "message", "error", "detail"); message != "" {
+		if message := findString(value, "message", "detail", "error_description", "errorDescription"); message != "" {
 			return message
+		}
+		if root, ok := value.(map[string]any); ok {
+			if message, ok := root["error"].(string); ok && strings.TrimSpace(message) != "" {
+				return strings.TrimSpace(message)
+			}
+		}
+		if code := findString(value, "code", "error_code", "errorCode"); code != "" {
+			return code
 		}
 	}
 	message := strings.TrimSpace(string(data))
@@ -760,6 +986,32 @@ func errorMessage(data []byte) string {
 		message = message[:512]
 	}
 	return message
+}
+
+func errorCode(data []byte) string {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if decoder.Decode(&value) != nil {
+		return ""
+	}
+	return findString(value, "code", "error_code", "errorCode")
+}
+
+func retryAfterSeconds(value string, now time.Time) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		return max(seconds, 0)
+	}
+	deadline, err := http.ParseTime(value)
+	if err != nil {
+		return 0
+	}
+	seconds := int(math.Ceil(deadline.Sub(now).Seconds()))
+	return max(seconds, 0)
 }
 
 func credentialKey(credentials Credentials) string {

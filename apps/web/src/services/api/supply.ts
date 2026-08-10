@@ -237,6 +237,7 @@ export interface SupplyRecovery {
   product?: string;
   deliveryStatus: string;
   status: string;
+  credentialVersion?: number;
   originalFileName?: string;
   originalAuthIndex?: string;
   originalEmail?: string;
@@ -247,7 +248,22 @@ export interface SupplyRecovery {
   lastError?: string;
   lastSeenAtMs: number;
   claimedAtMs?: number;
+  importedFileNames?: string[];
+  importPendingCount?: number;
+  importFailedCount?: number;
+  lastImportedAtMs?: number;
+  importItems?: SupplyRecoveryImportItem[];
   createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface SupplyRecoveryImportItem {
+  fileName?: string;
+  status: string;
+  lastError?: string;
+  attemptCount: number;
+  nextRetryAtMs?: number;
+  importedAtMs?: number;
   updatedAtMs: number;
 }
 
