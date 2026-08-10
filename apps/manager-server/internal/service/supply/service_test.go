@@ -228,12 +228,12 @@ func TestLiveAccountPoolCapsStaleInspectionCapacityAndRecalculatesShortage(t *te
 	}
 
 	recalculateSmartResourceCapacityPlan(cfg, &resource)
-	if resource.HealthLevel != smartHealthWarning || resource.EstimatedRequiredAccounts != 10 ||
-		resource.AccountQuantityDeficit != 5 {
+	if resource.HealthLevel != smartHealthCritical || resource.EstimatedRequiredAccounts != 109 ||
+		resource.AccountQuantityDeficit != 104 || resource.SuggestedQuantity != 3 {
 		t.Fatalf("live five-account shortage plan = %#v", resource)
 	}
-	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 1 {
-		t.Fatalf("live five-account quota shortage should request one account, got %d", quantity)
+	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 3 {
+		t.Fatalf("live five-account quota shortage should request a staged batch of three, got %d", quantity)
 	}
 }
 

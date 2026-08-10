@@ -4213,9 +4213,12 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 	if smartResourceEmergency(resource) {
 		limit := smartAutomaticOrderQuantityLimit(cfg, resource)
 		minimum := min(smartPrelockMinQuantity(cfg), limit)
-		reason := resource.DecisionReason
+		reason := firstNonEmptyString(resource.EmergencyReason, resource.DecisionReason)
 		if reason == "" {
 			reason = "emergency_capacity_shortage"
+		}
+		if !smartAccountAvailabilityEmergency(resource) {
+			reason = "low_water_staged_batch"
 		}
 		return clampInt(quantity, minimum, limit), reason
 	}
@@ -4229,10 +4232,10 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 	minimumQuantity := min(smartPrelockMinQuantity(cfg), maxQuantity)
 	quantity = clampInt(quantity, minimumQuantity, maxQuantity)
 	if smartResourceAtOrBelowWarning(resource) {
-		if resource.HealthLevel == smartHealthCritical {
-			return quantity, "low_water_critical_full_batch"
+		if smartAccountAvailabilityEmergency(resource) {
+			return quantity, firstNonEmptyString(resource.EmergencyReason, "critical_available_accounts")
 		}
-		return quantity, "low_water_warning_full_batch"
+		return quantity, "low_water_staged_batch"
 	}
 	if !smartPrelockEnabled(cfg) {
 		return quantity, ""

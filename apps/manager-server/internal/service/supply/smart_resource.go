@@ -763,20 +763,29 @@ func applySmartAccountQuantityEstimate(cfg store.ManagerSupplyConfig, resource *
 		return
 	}
 	projected := max(0, resource.AvailableAccounts)
-	required := smartHealthyAvailableAccounts(cfg)
+	healthyFloor := smartHealthyAvailableAccounts(cfg)
 	// Required account count uses the conservative quota estimate for a new
-	// credential. 401 request/time thresholds stay in the risk and waterline
-	// model and never become an RCU conversion factor.
+	// credential. 401 request/time thresholds are churn warnings only: they do
+	// not become an RCU conversion factor or cap the pool-wide waterline.
 	unit := smartEstimatedNewAccountCapacityRCU(cfg)
 	if unit <= 0 && resource.UnitCapacityRCU > 0 {
 		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
 	}
-	if resource.TargetCapacityRCU > 0 && unit > 0 {
-		required = max(required, int(math.Ceil(resource.TargetCapacityRCU/unit)))
+	if unit > 0 && resource.PrelockedCapacityRCU > 0 {
+		projected += int(math.Ceil(resource.PrelockedCapacityRCU / unit))
 	}
-	resource.EstimatedRequiredAccounts = max(0, required)
+	countFloorDeficit := max(0, healthyFloor-projected)
+	capacityDeficit := 0
+	if unit > 0 && resource.CapacityGapRCU > 0 {
+		// CapacityGapRCU already subtracts verified current quota and in-flight
+		// capacity. Derive the additional account need from that real deficit;
+		// do not subtract every enabled-but-nearly-empty account a second time.
+		capacityDeficit = int(math.Ceil(resource.CapacityGapRCU / unit))
+	}
+	additional := max(countFloorDeficit, capacityDeficit)
+	resource.EstimatedRequiredAccounts = projected + additional
 	resource.ProjectedAvailableAccounts = projected
-	resource.AccountQuantityDeficit = max(0, resource.EstimatedRequiredAccounts-projected)
+	resource.AccountQuantityDeficit = additional
 }
 
 type smartUsageAggregate struct {
@@ -1519,17 +1528,12 @@ func smartUsefulAccountLifetimeMinutes() int {
 }
 
 func smartEffectiveHealthyMinutesTarget(cfg store.ManagerSupplyConfig) int {
-	target := min(smartHealthyMinutesTarget(cfg), smartUsefulAccountLifetimeMinutes())
-	if !smartSupplyStrategyConfigured(cfg) {
-		return target
-	}
-	// The supply strategies describe credentials that commonly turn 401 after
-	// only a few minutes. Planning a 55-minute reserve for a credential with a
-	// 120-second reliable horizon produces a huge, self-contradictory deficit.
-	// Keep at least one complete minute and round down partial minutes so a
-	// partial high-risk minute does not become guaranteed reserve capacity.
-	riskMinutes := max(1, smartAccountMaxUsefulSecondsBefore401(cfg)/60)
-	return min(target, riskMinutes)
+	// The configured waterline describes how many minutes the whole pool should
+	// sustain current demand. A single credential's observed 401 age is only a
+	// churn warning and must not cap that pool-wide reserve. Otherwise the
+	// default 120-second warning incorrectly turns a configured 60-minute
+	// waterline into two minutes and suppresses replenishment.
+	return min(smartHealthyMinutesTarget(cfg), smartUsefulAccountLifetimeMinutes())
 }
 
 func smartWarningMinutes(cfg store.ManagerSupplyConfig) int {
@@ -1687,19 +1691,40 @@ func smartReplenishBatchLimit(cfg store.ManagerSupplyConfig) int {
 	return clampInt(positiveOr(cfg.ReplenishBatchSize, smartPrelockMaxQuantity(cfg)), 1, 100)
 }
 
-// smartAutomaticOrderQuantityLimit keeps normal prelocks inside their
-// conservative cap. At or below warning water, ReplenishBatchSize becomes the
-// active safety cap so a configured 15-account recovery batch is not silently
-// reduced by a smaller routine-prelock setting such as 7.
+// smartAutomaticOrderQuantityLimit separates pool availability emergencies
+// from quota-capacity deficits. Only an actual account-count critical line or
+// vacuum may use the configured recovery batch; every capacity-driven order is
+// deliberately staged at three credentials or fewer.
 func smartAutomaticOrderQuantityLimit(cfg store.ManagerSupplyConfig, resource SmartResource) int {
-	if smartResourceEmergency(resource) || smartResourceAtOrBelowWarning(resource) {
+	// An actual account-count emergency (critical line or vacuum) may refill to
+	// the configured healthy account line in one guarded order. A quota-only
+	// capacity shortage is different: short-window token demand can move sharply,
+	// so buy at most three credentials, wait for import/inspection, then
+	// recalculate. This keeps low quota responsive without recreating the former
+	// multi-order burst problem.
+	if smartAccountAvailabilityEmergency(resource) {
 		return smartReplenishBatchLimit(cfg)
 	}
 	limit := smartReplenishBatchLimit(cfg)
 	if smartPrelockEnabled(cfg) {
 		limit = min(limit, smartPrelockMaxQuantity(cfg))
 	}
+	if resource.CapacityGapRCU > 0 || smartResourceEmergency(resource) || smartResourceAtOrBelowWarning(resource) {
+		limit = min(limit, 3)
+	}
 	return max(1, limit)
+}
+
+func smartAccountAvailabilityEmergency(resource SmartResource) bool {
+	if resource.PoolVacuumActive {
+		return true
+	}
+	switch resource.EmergencyReason {
+	case "critical_available_accounts", "emergency_pool_vacuum":
+		return true
+	default:
+		return false
+	}
 }
 
 func smartRisingObservationQuantity(cfg store.ManagerSupplyConfig, resource SmartResource) int {
