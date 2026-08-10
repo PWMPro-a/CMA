@@ -631,6 +631,12 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 			applySmartAccountQuantityEstimate(cfg.Supply, &resource)
 		}
 	}
+	// smartResource() publishes the inspection-derived state before the live CPA
+	// account list is reconciled above. Persist the final reconciled result too;
+	// otherwise dashboard polling can leave the worker scheduled from stale
+	// inspection account counts even while the page correctly shows a critical
+	// live pool.
+	s.setSmartResource(resource)
 	// Overview used to live only in process memory. Recreating the Manager
 	// therefore made inventory and balance look empty until a later automation
 	// branch happened to refresh them; an open order can keep that branch from
@@ -1124,10 +1130,6 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 		return s.withRecoveryInterval(time.Minute, cfg.Supply)
 	}
 	resource := s.currentSmartResource(cfg.Supply)
-	if smartResourceEmergency(resource) {
-		seconds := smartCreateCooldownForResource(cfg.Supply, resource)
-		return s.withRecoveryInterval(time.Duration(max(1, seconds))*time.Second, cfg.Supply)
-	}
 	seconds := smartAutomaticCheckIntervalSeconds(cfg.Supply, resource)
 	return s.withRecoveryInterval(time.Duration(seconds)*time.Second, cfg.Supply)
 }
@@ -4453,7 +4455,7 @@ func smartAutomaticCheckIntervalSeconds(cfg store.ManagerSupplyConfig, resource 
 		seconds = 60
 	}
 	if smartResourceEmergency(resource) {
-		return max(1, smartCreateCooldownForResource(cfg, resource))
+		return max(1, min(seconds, smartCreateCooldownForResource(cfg, resource)))
 	}
 	if smartResourceAtOrBelowWarning(resource) {
 		seconds = min(seconds, smartCreateCooldownForResource(cfg, resource))

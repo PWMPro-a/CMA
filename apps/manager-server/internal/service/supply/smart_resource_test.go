@@ -634,6 +634,11 @@ func TestSmartEmergencyShortageKeepsHardCreateCooldown(t *testing.T) {
 	if got := smartAutomaticCheckIntervalSeconds(cfg, emergency); got != 60 {
 		t.Fatalf("emergency check interval=%d, want 60", got)
 	}
+	fastCheck := cfg
+	fastCheck.CheckIntervalSeconds = 10
+	if got := smartAutomaticCheckIntervalSeconds(fastCheck, emergency); got != 10 {
+		t.Fatalf("configured ten-second emergency observation interval=%d, want 10", got)
+	}
 
 	buffered := emergency
 	buffered.EstimatedSustainMinutes = 32
@@ -2270,6 +2275,48 @@ func TestSmartEmergencyAccountWaterlineKeepsAutomaticOrderWhenQuotaIsHealthy(t *
 	if !smartResourceEmergency(resource) || resource.DecisionReason != "critical_available_accounts" ||
 		resource.LockedOrderID != order.OrderID || resource.SuggestedQuantity != 4 {
 		t.Fatalf("live-account emergency resource = %#v", resource)
+	}
+}
+
+func TestGetStatusPublishesLiveAccountEmergencyToWorkerState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"files":[{"name":"live-only.json","provider":"codex","status":"ready","remaining_rcu":2000}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "status-live-emergency.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	cfg := store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, Product: "oauth_7d", Strategy: managerconfigsvc.SupplyStrategyBalanced,
+			CriticalAvailableAccounts: 1, HealthyAvailableAccounts: 5, DefaultEmergencyMinAccounts: 3,
+		},
+	}
+	if err := st.SaveManagerConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(0), quotaInspectionResult(0))
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	if status.SmartResource.AvailableAccounts != 1 || status.SmartResource.EmergencyReason != "critical_available_accounts" {
+		t.Fatalf("live status emergency = %#v", status.SmartResource)
+	}
+	workerState := service.currentSmartResource(cfg.Supply)
+	if workerState.AvailableAccounts != 1 || workerState.EmergencyReason != "critical_available_accounts" || !smartResourceEmergency(workerState) {
+		t.Fatalf("worker did not retain reconciled live emergency = %#v", workerState)
 	}
 }
 
