@@ -1705,6 +1705,26 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 			// reservation. Continue the normal status polling path instead.
 			return false, nil
 		}
+		// A quota snapshot can remain healthy while the live CPA pool has just
+		// lost several credentials to 401/quarantine. Refresh the live account
+		// waterline before releasing a waiting order; otherwise the worker can
+		// release the emergency reservation and submit another one on the next
+		// cooldown tick, creating a vacuum and a chain of held reservations.
+		_, emergencyQuantity, emergencyReason, accountLoaded, err := s.smartEmergencyAvailability(ctx, cfg, &resource)
+		if err != nil {
+			return false, err
+		}
+		if accountLoaded && emergencyQuantity > 0 {
+			resource.LockedOrderID = order.OrderID
+			resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
+			resource.EmergencyShortage = true
+			resource.EmergencyReason = emergencyReason
+			resource.SuggestedAction = smartActionEmergencyReplenish
+			resource.DecisionReason = emergencyReason
+			resource.SuggestedQuantity = emergencyQuantity
+			s.setSmartResource(resource)
+			return false, nil
+		}
 		resource.LockedOrderID = order.OrderID
 		resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
 		if resource.HealthLevel != smartHealthHealthy && resource.CapacityGapRCU > 0 {

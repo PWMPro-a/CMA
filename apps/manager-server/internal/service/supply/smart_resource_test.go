@@ -1707,6 +1707,12 @@ func Test401ChurnThresholdsDoNotChangeQuotaCapacityUnits(t *testing.T) {
 	if got := smartEstimatedNewAccountCapacityRCU(cfg); got != 3_080 {
 		t.Fatalf("new-account conservative quota capacity = %f", got)
 	}
+	otherThresholds := cfg
+	otherThresholds.AccountMaxRequestsBefore401 = 50
+	otherThresholds.AccountMaxUsefulSeconds401 = 180
+	if got := smartEstimatedNewAccountCapacityRCU(otherThresholds); got != 3_080 {
+		t.Fatalf("401 warning thresholds must not change quota capacity, got %f", got)
+	}
 	if got := smartEffectiveHealthyMinutesTarget(cfg); got != 2 {
 		t.Fatalf("401-aware healthy runway = %d, want 2", got)
 	}
@@ -2063,7 +2069,7 @@ func TestSmartReadySmallOrderReleasesWhenQuotaCapacityIsHealthy(t *testing.T) {
 				_, _ = w.Write([]byte(`{"files":[{"name":"` + name + `","provider":"codex","status":"ready"}]}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex","status":"ready","remaining_rcu":80},{"name":"b.json","provider":"codex","status":"ready","remaining_rcu":80}]}`))
+			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex","status":"ready","remaining_rcu":80},{"name":"b.json","provider":"codex","status":"ready","remaining_rcu":80},{"name":"c.json","provider":"codex","status":"ready","remaining_rcu":80}]}`))
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodPost:
 			uploadCalls.Add(1)
 			part, err := r.MultipartReader()
@@ -2143,6 +2149,67 @@ func TestSmartReadySmallOrderReleasesWhenQuotaCapacityIsHealthy(t *testing.T) {
 	}
 }
 
+func TestSmartEmergencyAccountWaterlineKeepsAutomaticOrderWhenQuotaIsHealthy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"files":[{"name":"live.json","provider":"codex","status":"ready","remaining_rcu":2000}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "smart-live-waterline.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	cfg := store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, Product: "oauth_7d", Strategy: managerconfigsvc.SupplyStrategyBalanced,
+			HealthyMinutesTarget: 60, NewAccountConfidence: 0.7,
+			CriticalAvailableAccounts: 1, HealthyAvailableAccounts: 5, DefaultEmergencyMinAccounts: 3,
+		},
+	}
+	if err := st.SaveManagerConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(0), quotaInspectionResult(0))
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	now := time.Now()
+	events := make([]usage.Event, 0, 120)
+	for minute := 0; minute < 30; minute++ {
+		for index := 0; index < 4; index++ {
+			events = append(events, usage.Event{
+				TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+				Provider:    "codex",
+				AuthIndex:   "live.json",
+				TotalTokens: 100,
+			})
+		}
+	}
+	service.recordSmartUsageEvents(events, now)
+	order := store.SupplyOrder{
+		OrderID: "order-live-waterline", Product: "oauth_7d", RequestedQuantity: 4,
+		Automatic: true, Status: "waiting_inventory", CreatedAtMS: now.Add(-time.Minute).UnixMilli(),
+	}
+
+	released, err := service.autoReleaseAutomaticOrderIfNotNeeded(context.Background(), cfg, &order, true)
+	if err != nil {
+		t.Fatalf("check automatic release: %v", err)
+	}
+	if released {
+		t.Fatal("critical live-account waterline must keep the existing reservation")
+	}
+	resource := service.currentSmartResource(cfg.Supply)
+	if !smartResourceEmergency(resource) || resource.DecisionReason != "critical_available_accounts" ||
+		resource.LockedOrderID != order.OrderID || resource.SuggestedQuantity != 4 {
+		t.Fatalf("live-account emergency resource = %#v", resource)
+	}
+}
+
 func TestSmartEmergencyReadyOrderTakesWithoutConfirmationRounds(t *testing.T) {
 	var takeCalls atomic.Int32
 	var uploadCalls atomic.Int32
@@ -2208,7 +2275,10 @@ func TestSmartEmergencyReadyOrderTakesWithoutConfirmationRounds(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create order: %v", err)
 	}
-	seedCompletedQuotaInspection(t, st, quotaInspectionResult(99.9))
+	// Keep the inspected quota healthy. The ready order must still be taken
+	// because the live account waterline is critical; quota capacity must not
+	// hide a real schedulable-account shortage.
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(0))
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
 	now := time.Now()
 	events := make([]usage.Event, 0, 180)
