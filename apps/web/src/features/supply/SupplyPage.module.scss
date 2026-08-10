@@ -491,14 +491,25 @@
   gap: 3px;
 }
 
-.executionCell span,
-.executionCell small {
+.executionCell span {
   overflow: hidden;
   color: var(--text-secondary);
   font-size: 11px;
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.executionCell small {
+  display: -webkit-box;
+  overflow: hidden;
+  min-height: 28px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .executionCell strong {

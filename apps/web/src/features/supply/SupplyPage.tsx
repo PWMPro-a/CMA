@@ -621,6 +621,9 @@ export function SupplyPage() {
   const autoSupplyEnabled = status?.config?.enabled ?? draft.enabled ?? false;
   const smartModeEnabled = smart?.enabled ?? draft.smartEnabled !== false;
   const activeOrder = status?.activeOrder;
+  const latestAutomaticOrder = status?.orders?.find(
+    (order) => order.automatic && order.strategy !== 'recovery'
+  );
   const orderCount = status?.orders?.length ?? 0;
   const recoveryCount = recovery?.total ?? recoveries.length;
   const revenueMultiplier = status?.config?.revenueMultiplier ?? draft.revenueMultiplier ?? 0.06;
@@ -655,21 +658,32 @@ export function SupplyPage() {
         ? t('supply.snapshot_refreshing')
         : t('supply.snapshot_stale')
     : t('supply.no_snapshot');
+  const nextExecutionDue = Boolean(
+    autoSupplyEnabled &&
+    !automation?.running &&
+    !status?.running &&
+    automation?.nextExecutionAtMs &&
+    automation.nextExecutionAtMs <= nowMs
+  );
   const nextExecutionCountdown = !autoSupplyEnabled
     ? t('supply.automation_disabled_short')
     : automation?.running || status?.running
       ? t('supply.automation_running')
-      : automation?.nextExecutionAtMs
-        ? formatCountdown(automation.nextExecutionAtMs, nowMs)
-        : t('supply.automation_waiting');
+      : nextExecutionDue
+        ? t('supply.automation_checking')
+        : automation?.nextExecutionAtMs
+          ? formatCountdown(automation.nextExecutionAtMs, nowMs)
+          : t('supply.automation_waiting');
   const nextExecutionDetail = !autoSupplyEnabled
     ? t('supply.automation_disabled_detail')
-    : automation?.nextExecutionAtMs
-      ? t('supply.automation_next_execution_detail', {
-          value: formatTime(automation.nextExecutionAtMs),
-          seconds: automation.intervalSeconds ?? draft.checkIntervalSeconds,
-        })
-      : t('supply.automation_waiting_detail');
+    : automation?.running || status?.running || nextExecutionDue
+      ? t('supply.automation_checking_detail')
+      : automation?.nextExecutionAtMs
+        ? t('supply.automation_next_execution_detail', {
+            value: formatTime(automation.nextExecutionAtMs),
+            seconds: automation.intervalSeconds ?? draft.checkIntervalSeconds,
+          })
+        : t('supply.automation_waiting_detail');
   const lastExecutionResult = automation?.lastResult || 'scheduled';
   const lastExecutionAction = automation?.lastAction || suggestedAction;
   const lastExecutionReason = automation?.lastReason || decisionReason;
@@ -684,8 +698,35 @@ export function SupplyPage() {
   const lastExecutionReasonLabel = t(`supply.smart_reason_${lastExecutionReason}`, {
     defaultValue: lastExecutionReason,
   });
-  const lastExecutionContext = `${lastExecutionDetail} · ${lastExecutionActionLabel}`;
-  const lastExecutionTooltip = `${lastExecutionContext} · ${lastExecutionReasonLabel}`;
+  const lastExecutionResultLabel = t(`supply.automation_result_${lastExecutionResult}`, {
+    defaultValue: lastExecutionResult,
+  });
+  const lastExecutionCreatedOrder = Boolean(
+    latestAutomaticOrder &&
+    automation?.lastStartedAtMs &&
+    latestAutomaticOrder.createdAtMs >= automation.lastStartedAtMs - 1_000 &&
+    latestAutomaticOrder.createdAtMs <=
+      (automation.lastFinishedAtMs ?? nowMs) + Math.max(5_000, automation.intervalSeconds ?? 0)
+  );
+  const lastExecutionOutcome =
+    automation?.lastError || lastExecutionResult === 'failed'
+      ? t('supply.automation_execution_failed')
+      : lastExecutionCreatedOrder && latestAutomaticOrder
+        ? t('supply.automation_execution_order_created', {
+            quantity: latestAutomaticOrder.requestedQuantity,
+          })
+        : activeOrder
+          ? t('supply.automation_execution_order_continued', {
+              orderId: shortOrderId(activeOrder.orderId),
+            })
+          : t('supply.automation_execution_no_order');
+  const lastExecutionSummary = t('supply.automation_last_execution_summary', {
+    result: lastExecutionResultLabel,
+    value: automation?.lastFinishedAtMs ? formatTime(automation.lastFinishedAtMs) : '-',
+    action: lastExecutionActionLabel,
+    reason: lastExecutionReasonLabel,
+  });
+  const lastExecutionTooltip = `${lastExecutionDetail} · ${lastExecutionOutcome} · ${lastExecutionActionLabel} · ${lastExecutionReasonLabel}`;
   const activeOrderDetail = activeOrder
     ? activeOrder.nextPollAtMs && activeOrder.nextPollAtMs > nowMs
       ? t('supply.automation_order_poll_detail', {
@@ -693,6 +734,29 @@ export function SupplyPage() {
         })
       : t('supply.automation_order_processing_detail')
     : t('supply.automation_no_active_order_detail');
+  const displayedOrder = activeOrder || latestAutomaticOrder;
+  const displayedOrderStatus = displayedOrder
+    ? t(`supply.status_${displayedOrder.status}`, { defaultValue: displayedOrder.status })
+    : t('supply.no_active_order_short');
+  const orderExecutionTitle = activeOrder
+    ? t('supply.automation_active_order_status', { status: displayedOrderStatus })
+    : latestAutomaticOrder
+      ? t('supply.automation_latest_order_status', { status: displayedOrderStatus })
+      : displayedOrderStatus;
+  const displayedOrderSummary = displayedOrder
+    ? t('supply.automation_order_summary', {
+        orderId: shortOrderId(displayedOrder.orderId),
+        quantity: displayedOrder.requestedQuantity,
+        imported: displayedOrder.importedCount,
+        cost: formatMoney(displayedOrder.chargedFen),
+        time: formatTime(displayedOrder.updatedAtMs),
+      })
+    : activeOrderDetail;
+  const orderExecutionDetail = displayedOrder?.lastError
+    ? `${displayedOrderSummary} · ${t('supply.automation_order_error')}: ${displayedOrder.lastError}`
+    : activeOrder
+      ? `${displayedOrderSummary} · ${activeOrderDetail}`
+      : displayedOrderSummary;
   const emergencyShortage = smart?.emergencyShortage || suggestedAction === 'emergency_replenish';
   const displayDemandStrategy = emergencyShortage ? 'emergency' : demandTrend;
   const demandStrategy = t(`supply.demand_strategy_${displayDemandStrategy}`, {
@@ -1367,12 +1431,8 @@ export function SupplyPage() {
                     </div>
                     <div>
                       <span>{t('supply.automation_last_execution')}</span>
-                      <strong>
-                        {t(`supply.automation_result_${lastExecutionResult}`, {
-                          defaultValue: lastExecutionResult,
-                        })}
-                      </strong>
-                      <small title={lastExecutionTooltip}>{lastExecutionContext}</small>
+                      <strong>{lastExecutionOutcome}</strong>
+                      <small title={lastExecutionTooltip}>{lastExecutionSummary}</small>
                     </div>
                   </div>
                   <div className={styles.executionCell}>
@@ -1381,14 +1441,8 @@ export function SupplyPage() {
                     </div>
                     <div>
                       <span>{t('supply.automation_order_execution')}</span>
-                      <strong>
-                        {activeOrder
-                          ? t(`supply.status_${activeOrder.status}`, {
-                              defaultValue: activeOrder.status,
-                            })
-                          : t('supply.no_active_order_short')}
-                      </strong>
-                      <small title={activeOrderDetail}>{activeOrderDetail}</small>
+                      <strong>{orderExecutionTitle}</strong>
+                      <small title={orderExecutionDetail}>{orderExecutionDetail}</small>
                     </div>
                   </div>
                 </div>
