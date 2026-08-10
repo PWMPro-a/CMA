@@ -34,6 +34,10 @@ type Repository interface {
 	MarkItemImported(ctx context.Context, id int64, importedAtMS int64) error
 	MarkItemFailed(ctx context.Context, id int64, lastError string, nextRetryAtMS int64) error
 	UpdateItemFileName(ctx context.Context, id int64, fileName string) error
+	UpdateItemImportPlan(ctx context.Context, id int64, accountName string, nameKey string, fileName string, importAction string, replacedFileName string) error
+	UpdateItemAccountMetadata(ctx context.Context, id int64, accountName string, nameKey string) error
+	ListItemsMissingAccountMetadata(ctx context.Context, limit int) ([]model.SupplyImportItem, error)
+	ListCurrentItemsByNameKey(ctx context.Context, nameKey string) ([]model.SupplyImportItem, error)
 	Counts(ctx context.Context, orderID string) (total int, imported int, err error)
 }
 
@@ -385,9 +389,11 @@ func (r *repository) InsertItems(ctx context.Context, orderID string, items []mo
 			return 0, err
 		}
 		result, err := tx.ExecContext(ctx, `insert or ignore into supply_import_items (
-			order_id, item_key, file_name, status, payload_json, attempt_count, lease_expires_at_ms,
+			order_id, item_key, account_name, name_key, file_name, import_action, replaced_file_name,
+			status, payload_json, attempt_count, lease_expires_at_ms,
 			base_price_fen, charged_fen, created_at_ms, updated_at_ms
-		) values (?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?, ?)`, orderID, item.ItemKey, item.FileName, payload,
+		) values (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?, ?)`, orderID, item.ItemKey,
+			nullString(item.AccountName), nullString(item.NameKey), item.FileName, nullString(item.ImportAction), nullString(item.ReplacedFileName), payload,
 			nullPositive(item.LeaseExpiresAtMS), item.BasePriceFen, item.ChargedFen, now, now)
 		if err != nil {
 			return 0, err
@@ -407,10 +413,7 @@ func (r *repository) ListItems(ctx context.Context, limit int, status string) ([
 		limit = 200
 	}
 	status = strings.ToLower(strings.TrimSpace(status))
-	query := `select id, order_id, item_key, file_name, status,
-		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms,
-		base_price_fen, charged_fen, created_at_ms, updated_at_ms
-		from supply_import_items`
+	query := importItemSelect + ` from supply_import_items`
 	args := make([]any, 0, 2)
 	if status != "" && status != "all" {
 		query += ` where status = ?`
@@ -458,10 +461,7 @@ func (r *repository) ListItemsByOrderIDs(ctx context.Context, orderIDs []string)
 		placeholders[index] = "?"
 		args[index] = orderID
 	}
-	query := `select id, order_id, item_key, file_name, status,
-		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms,
-		base_price_fen, charged_fen, created_at_ms, updated_at_ms
-		from supply_import_items where order_id in (` + strings.Join(placeholders, ",") + `)
+	query := importItemSelect + ` from supply_import_items where order_id in (` + strings.Join(placeholders, ",") + `)
 		order by order_id asc, id asc`
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -483,10 +483,7 @@ func (r *repository) ListItemsBetween(ctx context.Context, fromMS int64, toMS in
 	if limit <= 0 || limit > 10000 {
 		limit = 5000
 	}
-	rows, err := r.db.QueryContext(ctx, `select id, order_id, item_key, file_name, status,
-		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms,
-		base_price_fen, charged_fen, created_at_ms, updated_at_ms
-		from supply_import_items where
+	rows, err := r.db.QueryContext(ctx, importItemSelect+` from supply_import_items where
 		(created_at_ms >= ? and created_at_ms < ?) or
 		(updated_at_ms >= ? and updated_at_ms < ?) or
 		(coalesce(imported_at_ms, 0) >= ? and coalesce(imported_at_ms, 0) < ?)
@@ -511,15 +508,13 @@ func (r *repository) ListImportedItemsOverlapping(ctx context.Context, fromMS in
 	if limit <= 0 || limit > 20000 {
 		limit = 10000
 	}
-	rows, err := r.db.QueryContext(ctx, `select id, order_id, item_key, file_name, status,
-		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms,
-		base_price_fen, charged_fen, created_at_ms, updated_at_ms
-		from supply_import_items
+	rows, err := r.db.QueryContext(ctx, importItemSelect+` from supply_import_items
 		where status = 'imported'
 			and coalesce(file_name, '') <> ''
 			and coalesce(imported_at_ms, 0) < ?
 			and (coalesce(lease_expires_at_ms, 0) = 0 or lease_expires_at_ms >= ?)
-		order by imported_at_ms desc, id desc limit ?`, toMS, fromMS, limit)
+			and (coalesce(superseded_at_ms, 0) = 0 or superseded_at_ms > ?)
+		order by imported_at_ms desc, id desc limit ?`, toMS, fromMS, fromMS, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -539,10 +534,7 @@ func (r *repository) ListPendingItems(ctx context.Context, orderID string, nowMS
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := r.db.QueryContext(ctx, `select id, order_id, item_key, file_name, status,
-		payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, lease_expires_at_ms,
-		base_price_fen, charged_fen, created_at_ms, updated_at_ms
-		from supply_import_items
+	rows, err := r.db.QueryContext(ctx, importItemSelect+` from supply_import_items
 		where order_id = ? and status in ('pending','failed') and coalesce(next_retry_at_ms, 0) <= ?
 		order by id asc limit ?`, orderID, nowMS, limit)
 	if err != nil {
@@ -568,7 +560,7 @@ func (r *repository) ListActiveImportedItems(ctx context.Context, nowMS int64) (
 	}
 	rows, err := r.db.QueryContext(ctx, `select file_name, imported_at_ms, lease_expires_at_ms
 		from supply_import_items
-		where status = 'imported' and lease_expires_at_ms > ?
+		where status = 'imported' and lease_expires_at_ms > ? and coalesce(superseded_at_ms, 0) = 0
 		order by lease_expires_at_ms asc`, nowMS)
 	if err != nil {
 		return nil, err
@@ -589,10 +581,37 @@ func (r *repository) MarkItemImported(ctx context.Context, id int64, importedAtM
 	if importedAtMS <= 0 {
 		importedAtMS = time.Now().UnixMilli()
 	}
-	_, err := r.db.ExecContext(ctx, `update supply_import_items set status = 'imported', last_error = null,
-		attempt_count = attempt_count + 1, next_retry_at_ms = null, imported_at_ms = ?, updated_at_ms = ? where id = ?`,
-		importedAtMS, importedAtMS, id)
-	return err
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var fileName string
+	if err := tx.QueryRowContext(ctx, `select file_name from supply_import_items where id = ?`, id).Scan(&fileName); err != nil {
+		return err
+	}
+	var supersedesItemID any
+	var previousID int64
+	err = tx.QueryRowContext(ctx, `select id from supply_import_items
+			where id <> ? and file_name = ? and status = 'imported' and coalesce(superseded_at_ms, 0) = 0
+			order by coalesce(effective_from_ms, imported_at_ms, updated_at_ms) desc, id desc limit 1`, id, fileName).Scan(&previousID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err == nil {
+		supersedesItemID = previousID
+		if _, err := tx.ExecContext(ctx, `update supply_import_items set superseded_at_ms = ?, updated_at_ms = ?
+				where id <> ? and file_name = ? and status = 'imported' and coalesce(superseded_at_ms, 0) = 0`, importedAtMS, importedAtMS, id, fileName); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `update supply_import_items set status = 'imported', last_error = null,
+		attempt_count = attempt_count + 1, next_retry_at_ms = null, imported_at_ms = ?, effective_from_ms = ?,
+		supersedes_item_id = ?, updated_at_ms = ? where id = ?`,
+		importedAtMS, importedAtMS, supersedesItemID, importedAtMS, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *repository) MarkItemFailed(ctx context.Context, id int64, lastError string, nextRetryAtMS int64) error {
@@ -612,6 +631,67 @@ func (r *repository) UpdateItemFileName(ctx context.Context, id int64, fileName 
 	return err
 }
 
+func (r *repository) UpdateItemImportPlan(ctx context.Context, id int64, accountName string, nameKey string, fileName string, importAction string, replacedFileName string) error {
+	fileName = strings.TrimSpace(fileName)
+	if fileName == "" {
+		return errors.New("supply import file name is required")
+	}
+	importAction = strings.ToLower(strings.TrimSpace(importAction))
+	if importAction != "add" && importAction != "replace" {
+		return errors.New("supply import action must be add or replace")
+	}
+	_, err := r.db.ExecContext(ctx, `update supply_import_items set account_name = ?, name_key = ?, file_name = ?,
+		import_action = ?, replaced_file_name = ?, updated_at_ms = ? where id = ?`,
+		nullString(accountName), nullString(nameKey), fileName, importAction, nullString(replacedFileName), time.Now().UnixMilli(), id)
+	return err
+}
+
+func (r *repository) UpdateItemAccountMetadata(ctx context.Context, id int64, accountName string, nameKey string) error {
+	_, err := r.db.ExecContext(ctx, `update supply_import_items set account_name = ?, name_key = ?, updated_at_ms = ? where id = ?`,
+		nullString(accountName), nullString(nameKey), time.Now().UnixMilli(), id)
+	return err
+}
+
+func (r *repository) ListItemsMissingAccountMetadata(ctx context.Context, limit int) ([]model.SupplyImportItem, error) {
+	if limit <= 0 || limit > 5000 {
+		limit = 1000
+	}
+	rows, err := r.db.QueryContext(ctx, importItemSelect+` from supply_import_items
+		where coalesce(name_key, '') = '' order by id asc limit ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]model.SupplyImportItem, 0)
+	for rows.Next() {
+		item, err := r.scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *repository) ListCurrentItemsByNameKey(ctx context.Context, nameKey string) ([]model.SupplyImportItem, error) {
+	rows, err := r.db.QueryContext(ctx, importItemSelect+` from supply_import_items
+		where name_key = ? and status = 'imported' and coalesce(superseded_at_ms, 0) = 0
+		order by coalesce(effective_from_ms, imported_at_ms, updated_at_ms) desc, id desc`, strings.TrimSpace(nameKey))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]model.SupplyImportItem, 0)
+	for rows.Next() {
+		item, err := r.scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (r *repository) Counts(ctx context.Context, orderID string) (int, int, error) {
 	var total, imported int
 	err := r.db.QueryRowContext(ctx, `select count(*), coalesce(sum(case when status = 'imported' then 1 else 0 end), 0)
@@ -623,6 +703,11 @@ const orderSelect = `select id, order_id, product, requested_quantity, automatic
 	ready_quantity, progress, status_url, take_url, charged_fen, released_fen, item_count,
 	imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms, created_at_ms, updated_at_ms
 	from supply_orders`
+
+const importItemSelect = `select id, order_id, item_key, account_name, name_key, file_name,
+	import_action, replaced_file_name, supersedes_item_id, status,
+	payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, effective_from_ms, superseded_at_ms,
+	lease_expires_at_ms, base_price_fen, charged_fen, created_at_ms, updated_at_ms`
 
 type scanner interface{ Scan(...any) error }
 
@@ -655,9 +740,11 @@ func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {
 	var item model.SupplyImportItem
 	var payload string
 	var lastError sql.NullString
-	var nextRetryAtMS, importedAtMS, leaseExpiresAtMS sql.NullInt64
-	if err := row.Scan(&item.ID, &item.OrderID, &item.ItemKey, &item.FileName, &item.Status,
-		&payload, &lastError, &item.AttemptCount, &nextRetryAtMS, &importedAtMS, &leaseExpiresAtMS,
+	var accountName, nameKey, importAction, replacedFileName sql.NullString
+	var supersedesItemID, nextRetryAtMS, importedAtMS, effectiveFromMS, supersededAtMS, leaseExpiresAtMS sql.NullInt64
+	if err := row.Scan(&item.ID, &item.OrderID, &item.ItemKey, &accountName, &nameKey, &item.FileName,
+		&importAction, &replacedFileName, &supersedesItemID, &item.Status,
+		&payload, &lastError, &item.AttemptCount, &nextRetryAtMS, &importedAtMS, &effectiveFromMS, &supersededAtMS, &leaseExpiresAtMS,
 		&item.BasePriceFen, &item.ChargedFen, &item.CreatedAtMS, &item.UpdatedAtMS); err != nil {
 		return model.SupplyImportItem{}, err
 	}
@@ -666,9 +753,16 @@ func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {
 		return model.SupplyImportItem{}, err
 	}
 	item.PayloadJSON = unprotected
+	item.AccountName = accountName.String
+	item.NameKey = nameKey.String
+	item.ImportAction = importAction.String
+	item.ReplacedFileName = replacedFileName.String
+	item.SupersedesItemID = supersedesItemID.Int64
 	item.LastError = lastError.String
 	item.NextRetryAtMS = nextRetryAtMS.Int64
 	item.ImportedAtMS = importedAtMS.Int64
+	item.EffectiveFromMS = effectiveFromMS.Int64
+	item.SupersededAtMS = supersededAtMS.Int64
 	item.LeaseExpiresAtMS = leaseExpiresAtMS.Int64
 	return item, nil
 }

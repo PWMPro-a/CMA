@@ -2392,9 +2392,35 @@ export function SupplyPage() {
                                       defaultValue: importItem.status || '-',
                                     })}
                                   </span>
-                                  <span className={styles.importFileName}>
-                                    {importItem.fileName || t('supply.unnamed_import_file')}
-                                  </span>
+                                  <div className={styles.importFileName}>
+                                    {importItem.importAction ? (
+                                      <span
+                                        className={`${styles.statusPill} ${
+                                          importItem.importAction === 'replace'
+                                            ? styles.active
+                                            : styles.success
+                                        }`}
+                                      >
+                                        {t(`supply.import_action_${importItem.importAction}`, {
+                                          defaultValue: importItem.importAction,
+                                        })}
+                                      </span>
+                                    ) : null}
+                                    <span className={styles.mono}>
+                                      {importItem.importAction === 'replace' &&
+                                      importItem.replacedFileName
+                                        ? `${importItem.replacedFileName} → ${
+                                            importItem.fileName || importItem.replacedFileName
+                                          }`
+                                        : importItem.fileName ||
+                                          t('supply.unnamed_import_file')}
+                                    </span>
+                                    {importItem.accountName ? (
+                                      <small>
+                                        {t('supply.import_account_name')}: {importItem.accountName}
+                                      </small>
+                                    ) : null}
+                                  </div>
                                 </div>
                               ))}
                               {importItems.length > 4 ? (

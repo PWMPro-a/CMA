@@ -246,8 +246,10 @@ func TestEnsureSupplyImportItemColumnsBackfillsExistingEmptyLeases(t *testing.T)
 		t.Fatalf("retry supply import lease backfill: %v", err)
 	}
 	columns := migrationTableColumns(t, db, "supply_import_items")
-	if !columns["base_price_fen"] || !columns["charged_fen"] {
-		t.Fatalf("legacy supply import columns = %#v, want per-item price columns", columns)
+	for _, column := range []string{"base_price_fen", "charged_fen", "account_name", "name_key", "import_action", "replaced_file_name", "supersedes_item_id", "effective_from_ms", "superseded_at_ms"} {
+		if !columns[column] {
+			t.Fatalf("legacy supply import columns = %#v, missing %s", columns, column)
+		}
 	}
 	rows, err := db.Query(`select id, lease_expires_at_ms from supply_import_items order by id`)
 	if err != nil {
@@ -277,6 +279,51 @@ func TestEnsureSupplyImportItemColumnsBackfillsExistingEmptyLeases(t *testing.T)
 	}
 	if index != len(want) {
 		t.Fatalf("lease row count=%d, want %d", index, len(want))
+	}
+}
+
+func TestMigrateLegacySupplyImportItemsAddsLineageBeforeIndexes(t *testing.T) {
+	db, err := sql.Open("sqlite", dataSourceName(filepath.Join(t.TempDir(), "legacy-supply-lineage.sqlite")))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`create table supply_import_items (
+		id integer primary key autoincrement,
+		order_id text not null,
+		item_key text not null,
+		file_name text not null,
+		status text not null,
+		payload_json text not null,
+		last_error text,
+		attempt_count integer not null default 0,
+		next_retry_at_ms integer,
+		imported_at_ms integer,
+		lease_expires_at_ms integer,
+		base_price_fen integer not null default 0,
+		charged_fen integer not null default 0,
+		created_at_ms integer not null,
+		updated_at_ms integer not null
+	)`); err != nil {
+		t.Fatalf("create legacy supply import table: %v", err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("migrate legacy supply import table: %v", err)
+	}
+	columns := migrationTableColumns(t, db, "supply_import_items")
+	for _, column := range []string{"account_name", "name_key", "import_action", "replaced_file_name", "supersedes_item_id", "effective_from_ms", "superseded_at_ms"} {
+		if !columns[column] {
+			t.Fatalf("legacy supply import columns = %#v, missing %s", columns, column)
+		}
+	}
+	for _, index := range []string{"idx_supply_import_items_name_current", "idx_supply_import_items_file_current"} {
+		var count int
+		if err := db.QueryRow(`select count(*) from sqlite_master where type = 'index' and name = ?`, index).Scan(&count); err != nil {
+			t.Fatalf("read index %s: %v", index, err)
+		}
+		if count != 1 {
+			t.Fatalf("index %s count = %d, want 1", index, count)
+		}
 	}
 }
 

@@ -415,6 +415,22 @@ func (s *Store) UpdateSupplyImportItemFileName(ctx context.Context, id int64, fi
 	return s.SupplyOrders.UpdateItemFileName(ctx, id, fileName)
 }
 
+func (s *Store) UpdateSupplyImportItemPlan(ctx context.Context, id int64, accountName string, nameKey string, fileName string, importAction string, replacedFileName string) error {
+	return s.SupplyOrders.UpdateItemImportPlan(ctx, id, accountName, nameKey, fileName, importAction, replacedFileName)
+}
+
+func (s *Store) UpdateSupplyImportItemAccountMetadata(ctx context.Context, id int64, accountName string, nameKey string) error {
+	return s.SupplyOrders.UpdateItemAccountMetadata(ctx, id, accountName, nameKey)
+}
+
+func (s *Store) ListSupplyImportItemsMissingAccountMetadata(ctx context.Context, limit int) ([]SupplyImportItem, error) {
+	return s.SupplyOrders.ListItemsMissingAccountMetadata(ctx, limit)
+}
+
+func (s *Store) ListCurrentSupplyImportItemsByNameKey(ctx context.Context, nameKey string) ([]SupplyImportItem, error) {
+	return s.SupplyOrders.ListCurrentItemsByNameKey(ctx, nameKey)
+}
+
 func (s *Store) SupplyImportCounts(ctx context.Context, orderID string) (int, int, error) {
 	return s.SupplyOrders.Counts(ctx, orderID)
 }
@@ -425,6 +441,10 @@ func (s *Store) UpsertSupplyRecoveries(ctx context.Context, recoveries []SupplyR
 
 func (s *Store) GetSupplyRecovery(ctx context.Context, recoveryID string) (SupplyRecovery, bool, error) {
 	return s.SupplyRecoveries.Get(ctx, recoveryID)
+}
+
+func (s *Store) GetSupplyRecoveryByClaimOrder(ctx context.Context, claimOrderID string) (SupplyRecovery, bool, error) {
+	return s.SupplyRecoveries.GetByClaimOrder(ctx, claimOrderID)
 }
 
 func (s *Store) ListSupplyRecoveries(ctx context.Context, limit int, status string) ([]SupplyRecovery, error) {

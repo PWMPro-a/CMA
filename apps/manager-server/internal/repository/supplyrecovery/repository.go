@@ -23,6 +23,7 @@ type Summary struct {
 type Repository interface {
 	UpsertMany(ctx context.Context, recoveries []model.SupplyRecovery) (int, error)
 	Get(ctx context.Context, recoveryID string) (model.SupplyRecovery, bool, error)
+	GetByClaimOrder(ctx context.Context, claimOrderID string) (model.SupplyRecovery, bool, error)
 	List(ctx context.Context, limit int, status string) ([]model.SupplyRecovery, error)
 	ListBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyRecovery, error)
 	ListClaimable(ctx context.Context, limit int) ([]model.SupplyRecovery, error)
@@ -129,6 +130,15 @@ func (r *repository) UpsertMany(ctx context.Context, recoveries []model.SupplyRe
 
 func (r *repository) Get(ctx context.Context, recoveryID string) (model.SupplyRecovery, bool, error) {
 	row := r.db.QueryRowContext(ctx, recoverySelect+` where recovery_id = ?`, strings.TrimSpace(recoveryID))
+	recovery, err := r.scan(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.SupplyRecovery{}, false, nil
+	}
+	return recovery, err == nil, err
+}
+
+func (r *repository) GetByClaimOrder(ctx context.Context, claimOrderID string) (model.SupplyRecovery, bool, error) {
+	row := r.db.QueryRowContext(ctx, recoverySelect+` where claim_order_id = ? order by updated_at_ms desc limit 1`, strings.TrimSpace(claimOrderID))
 	recovery, err := r.scan(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.SupplyRecovery{}, false, nil

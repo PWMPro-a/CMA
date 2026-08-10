@@ -258,7 +258,10 @@ export interface SupplyRecovery {
 }
 
 export interface SupplyRecoveryImportItem {
+  accountName?: string;
   fileName?: string;
+  importAction?: 'add' | 'replace' | string;
+  replacedFileName?: string;
   status: string;
   lastError?: string;
   attemptCount: number;

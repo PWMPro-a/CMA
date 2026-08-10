@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -460,6 +461,7 @@ type Service struct {
 	automation         AutomationExecution
 	recoveryMu         sync.Mutex
 	recoveryState      RecoverySummary
+	importMu           sync.Mutex
 	poolVacuumMu       sync.Mutex
 	poolVacuumStarted  int64
 
@@ -898,13 +900,16 @@ func (s *Service) ListRecoveries(ctx context.Context, limit int, status string) 
 	for index := range recoveries {
 		for _, item := range byOrder[recoveries[index].ClaimOrderID] {
 			recoveries[index].ImportItems = append(recoveries[index].ImportItems, store.SupplyRecoveryImportItem{
-				FileName:      item.FileName,
-				Status:        strings.ToLower(strings.TrimSpace(item.Status)),
-				LastError:     item.LastError,
-				AttemptCount:  item.AttemptCount,
-				NextRetryAtMS: item.NextRetryAtMS,
-				ImportedAtMS:  item.ImportedAtMS,
-				UpdatedAtMS:   item.UpdatedAtMS,
+				AccountName:      item.AccountName,
+				FileName:         item.FileName,
+				ImportAction:     item.ImportAction,
+				ReplacedFileName: item.ReplacedFileName,
+				Status:           strings.ToLower(strings.TrimSpace(item.Status)),
+				LastError:        item.LastError,
+				AttemptCount:     item.AttemptCount,
+				NextRetryAtMS:    item.NextRetryAtMS,
+				ImportedAtMS:     item.ImportedAtMS,
+				UpdatedAtMS:      item.UpdatedAtMS,
 			})
 			switch strings.ToLower(strings.TrimSpace(item.Status)) {
 			case "imported":
@@ -998,9 +1003,16 @@ func (s *Service) ListAccounts(ctx context.Context, req SupplyAccountsRequest) (
 		Items: make([]SupplyAccountItem, 0, min(len(items), req.Limit)),
 	}
 	for _, item := range items {
+		if item.SupersededAtMS > 0 {
+			continue
+		}
 		fileName := strings.TrimSpace(item.FileName)
 		file, found := cpaFiles[fileName]
-		account := supplyAccountItemFromStore(item, orders[item.OrderID], usageByFile[fileName], file, cpaLookupKnown, found, now, issuesByFile[fileName], recoveriesByFile[fileName])
+		issue := issuesByFile[fileName]
+		if effectiveFrom := max(item.EffectiveFromMS, item.ImportedAtMS); effectiveFrom > 0 && issue.Auth401AtMS < effectiveFrom {
+			issue = supplyAccountIssue{}
+		}
+		account := supplyAccountItemFromStore(item, orders[item.OrderID], usageByFile[fileName], file, cpaLookupKnown, found, now, issue, recoveriesByFile[fileName])
 		if !supplyAccountStatusMatches(statusFilter, account) {
 			continue
 		}
@@ -1063,7 +1075,7 @@ func (s *Service) Report(ctx context.Context, req ReportRequest) (Report, error)
 	report.Executive.RevenueMultiplier = revenueMultiplier
 	applyUsageRevenueToReport(&report, modelStats, usageTimeline, prices, revenueMultiplier)
 	report.Executive.Auth401Rate = math.Min(1, reportRatio(float64(report.Executive.Auth401Events), float64(report.Executive.UsageCalls)))
-	report.Reconciliation = buildReportReconciliation(orders, recoveries, reconciliationItems, orderLookup, accountUsage, supplyAccountIssuesByFileFromCandidates(actionCandidates), time.Now())
+	report.Reconciliation = buildReportReconciliation(req, orders, recoveries, reconciliationItems, orderLookup, accountUsage, supplyAccountIssuesByFileFromCandidates(actionCandidates), time.Now())
 	report.Range.Truncated = len(orders) >= req.Limit || len(recoveries) >= req.Limit ||
 		len(items) >= req.Limit || len(actionCandidates) >= req.Limit || len(usageItems) >= req.Limit*2
 	return report, nil
@@ -1539,6 +1551,8 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		items = append(items, store.SupplyImportItem{
 			OrderID:          order.OrderID,
 			ItemKey:          account.itemKey,
+			AccountName:      account.accountName,
+			NameKey:          account.nameKey,
 			FileName:         account.fileName,
 			PayloadJSON:      string(account.payload),
 			LeaseExpiresAtMS: account.leaseExpiresAtMS,
@@ -1788,30 +1802,52 @@ func (s *Service) markAutomaticOrderReleasedLocally(ctx context.Context, order *
 }
 
 func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, order *store.SupplyOrder) error {
+	s.importMu.Lock()
+	defer s.importMu.Unlock()
 	items, err := s.store.ListPendingSupplyImportItems(ctx, order.OrderID, time.Now().UnixMilli(), 100)
 	if err != nil {
 		return err
 	}
+	primaryRecoveryItemID := int64(0)
+	if strings.EqualFold(strings.TrimSpace(order.Strategy), "recovery") {
+		allItems, listErr := s.store.ListSupplyImportItemsByOrderIDs(ctx, []string{order.OrderID})
+		if listErr != nil {
+			return listErr
+		}
+		for _, candidate := range allItems {
+			if primaryRecoveryItemID == 0 || candidate.ID < primaryRecoveryItemID {
+				primaryRecoveryItemID = candidate.ID
+			}
+		}
+	}
 	var firstErr error
 	for _, item := range items {
-		payload, _, normalizedFileName, err := normalizeAccountPayloadForImport(item.PayloadJSON)
-		fileName := normalizedFileName
-		if order.Strategy == "recovery" && strings.TrimSpace(item.FileName) != "" {
-			// Replacement credentials are independent versioned artifacts. Keep
-			// the recovery/version filename instead of collapsing it back onto the
-			// deterministic filename used by the original pickup payload.
-			fileName = item.FileName
-		}
-		if err == nil && fileName != item.FileName {
-			err = s.store.UpdateSupplyImportItemFileName(ctx, item.ID, fileName)
+		account, err := normalizeAccountForImport(item.PayloadJSON)
+		fileName := item.FileName
+		importAction := strings.ToLower(strings.TrimSpace(item.ImportAction))
+		if err == nil && (importAction != "add" && importAction != "replace") {
+			plan, planErr := s.resolveSupplyImportPlan(ctx, cfg, *order, item, account, primaryRecoveryItemID == 0 || item.ID == primaryRecoveryItemID)
+			if planErr != nil {
+				err = planErr
+			} else {
+				fileName = plan.fileName
+				importAction = plan.action
+				item.AccountName = account.accountName
+				item.NameKey = account.nameKey
+				item.FileName = fileName
+				item.ImportAction = importAction
+				item.ReplacedFileName = plan.replacedFileName
+				err = s.store.UpdateSupplyImportItemPlan(ctx, item.ID, item.AccountName, item.NameKey, fileName, importAction, plan.replacedFileName)
+			}
 		}
 		if err == nil {
-			err = s.ensureCPAAccountImported(ctx, cfg, fileName, payload)
+			err = s.ensureCPAAccountImported(ctx, cfg, fileName, account.payload, importAction, account)
 		}
 		if err == nil {
 			if markErr := s.store.MarkSupplyImportItemImported(ctx, item.ID, time.Now().UnixMilli()); markErr != nil {
 				return markErr
 			}
+			s.invalidateAuthFilesCache()
 			continue
 		}
 		if firstErr == nil {
@@ -2935,7 +2971,7 @@ func applyUsageRevenueToReport(report *Report, stats []store.ModelStat, timeline
 	sort.Slice(report.Timeline, func(i, j int) bool { return report.Timeline[i].BucketMS < report.Timeline[j].BucketMS })
 }
 
-func buildReportReconciliation(orders []store.SupplyOrder, recoveries []store.SupplyRecovery, items []store.SupplyImportItem, orderLookup map[string]store.SupplyOrder, usageByFile map[string]supplyAccountUsage, issuesByFile map[string]supplyAccountIssue, now time.Time) ReportReconciliation {
+func buildReportReconciliation(req ReportRequest, orders []store.SupplyOrder, recoveries []store.SupplyRecovery, items []store.SupplyImportItem, orderLookup map[string]store.SupplyOrder, usageByFile map[string]supplyAccountUsage, issuesByFile map[string]supplyAccountIssue, now time.Time) ReportReconciliation {
 	reconciliation := ReportReconciliation{
 		Summary: ReportReconciliationSummary{
 			UsageRevenueCurrency: "USD",
@@ -2969,6 +3005,28 @@ func buildReportReconciliation(orders []store.SupplyOrder, recoveries []store.Su
 	}
 
 	accountIndexesByOrder := make(map[string][]int)
+	type usageVersion struct {
+		id              int64
+		effectiveFromMS int64
+	}
+	usageVersionByFile := make(map[string]usageVersion)
+	for _, item := range items {
+		if !strings.EqualFold(strings.TrimSpace(item.Status), "imported") {
+			continue
+		}
+		fileName := strings.TrimSpace(item.FileName)
+		if fileName == "" {
+			continue
+		}
+		effectiveFromMS := reportFirstPositiveMS(item.EffectiveFromMS, item.ImportedAtMS, item.CreatedAtMS)
+		if effectiveFromMS >= req.ToMS || (item.SupersededAtMS > 0 && item.SupersededAtMS <= req.FromMS) {
+			continue
+		}
+		current, found := usageVersionByFile[fileName]
+		if !found || effectiveFromMS > current.effectiveFromMS || (effectiveFromMS == current.effectiveFromMS && item.ID > current.id) {
+			usageVersionByFile[fileName] = usageVersion{id: item.ID, effectiveFromMS: effectiveFromMS}
+		}
+	}
 	for _, item := range items {
 		order := orderLookup[item.OrderID]
 		source := "unknown"
@@ -2979,8 +3037,15 @@ func buildReportReconciliation(orders []store.SupplyOrder, recoveries []store.Su
 		} else if strings.HasPrefix(item.OrderID, "recovery-") {
 			source = "recovery"
 		}
-		usage := usageByFile[strings.TrimSpace(item.FileName)]
+		fileName := strings.TrimSpace(item.FileName)
+		usage := supplyAccountUsage{}
+		if usageVersionByFile[fileName].id == item.ID {
+			usage = usageByFile[fileName]
+		}
 		issue := issuesByFile[strings.TrimSpace(item.FileName)]
+		if effectiveFrom := max(item.EffectiveFromMS, item.ImportedAtMS); effectiveFrom > 0 && issue.Auth401AtMS < effectiveFrom {
+			issue = supplyAccountIssue{}
+		}
 		row := ReportAccountLedgerRow{
 			FileName:             item.FileName,
 			OrderID:              item.OrderID,
@@ -3132,14 +3197,14 @@ func mergeSupplyImportItems(groups ...[]store.SupplyImportItem) []store.SupplyIm
 }
 
 func supplyImportItemMergeKey(item store.SupplyImportItem) string {
-	if strings.TrimSpace(item.FileName) != "" {
-		return "file:" + strings.TrimSpace(item.FileName)
+	if item.ID > 0 {
+		return "id:" + strconv.FormatInt(item.ID, 10)
 	}
 	if strings.TrimSpace(item.OrderID) != "" && strings.TrimSpace(item.ItemKey) != "" {
 		return "order:" + strings.TrimSpace(item.OrderID) + ":" + strings.TrimSpace(item.ItemKey)
 	}
-	if item.ID > 0 {
-		return "id:" + strconv.FormatInt(item.ID, 10)
+	if strings.TrimSpace(item.FileName) != "" {
+		return "file:" + strings.TrimSpace(item.FileName)
 	}
 	return ""
 }
@@ -3392,6 +3457,9 @@ func (s *Service) fetchSupplyOverview(ctx context.Context, cfg store.ManagerSupp
 func (s *Service) syncRecoveriesOnce(ctx context.Context, cfg store.ManagerConfig, autoClaim bool, limit int, recoveryID string) (RecoverySyncResult, error) {
 	var result RecoverySyncResult
 	var firstErr error
+	if err := s.backfillSupplyAccountMetadata(ctx); err != nil {
+		firstErr = err
+	}
 	mergePendingResult := func(imported int, failed int, err error) {
 		result.Imported += imported
 		result.Failed += failed
@@ -3539,7 +3607,6 @@ func (s *Service) claimRecovery(ctx context.Context, cfg store.ManagerConfig, re
 	items := make([]store.SupplyImportItem, 0, len(normalized))
 	seen := make(map[string]struct{}, len(normalized))
 	for _, account := range normalized {
-		account.fileName = recoveryCredentialFileName(recovery.RecoveryID, claimed.CredentialVersion, account.itemKey)
 		if _, duplicate := seen[account.itemKey]; duplicate {
 			continue
 		}
@@ -3547,6 +3614,8 @@ func (s *Service) claimRecovery(ctx context.Context, cfg store.ManagerConfig, re
 		items = append(items, store.SupplyImportItem{
 			OrderID:          orderID,
 			ItemKey:          account.itemKey,
+			AccountName:      account.accountName,
+			NameKey:          account.nameKey,
 			FileName:         account.fileName,
 			PayloadJSON:      string(account.payload),
 			LeaseExpiresAtMS: account.leaseExpiresAtMS,
@@ -3587,14 +3656,6 @@ func (s *Service) markRecoveryClaimRetry(ctx context.Context, recovery store.Sup
 	recovery.LastSeenAtMS = time.Now().UnixMilli()
 	_, err := s.store.UpsertSupplyRecoveries(ctx, []store.SupplyRecovery{recovery})
 	return err
-}
-
-func recoveryCredentialFileName(recoveryID string, credentialVersion int, itemKey string) string {
-	digest := strings.TrimSpace(itemKey)
-	if len(digest) > 20 {
-		digest = digest[:20]
-	}
-	return fmt.Sprintf("codex-recovery-%s-v%d-%s.json", recoveryFileComponent(recoveryID), credentialVersion, digest)
 }
 
 func recoveryFileComponent(value string) string {
@@ -3699,6 +3760,16 @@ func (s *Service) disableRecoveredOriginal(ctx context.Context, cfg store.Manage
 	if !recoveryDisableOriginalEnabled(cfg.Supply) || strings.TrimSpace(recovery.OriginalFileName) == "" ||
 		strings.TrimSpace(cfg.CPAConnection.CPABaseURL) == "" || strings.TrimSpace(cfg.CPAConnection.ManagementKey) == "" {
 		return nil
+	}
+	claimOrderID := firstNonEmptyString(recovery.ClaimOrderID, recoveryOrderID(recovery.RecoveryID))
+	items, err := s.store.ListSupplyImportItemsByOrderIDs(ctx, []string{claimOrderID})
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item.FileName), strings.TrimSpace(recovery.OriginalFileName)) {
+			return nil
+		}
 	}
 	return s.authFiles.PatchDisabled(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey,
 		recovery.OriginalFileName, true, recovery.OriginalAuthIndex)
@@ -4765,7 +4836,7 @@ func (s *Service) updateCPAOverviewIfLegacy(cfg store.ManagerSupplyConfig, avail
 	s.updateCPAOverview(available, cfg.TargetAvailableAccounts)
 }
 
-func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.ManagerConfig, fileName string, payload []byte) error {
+func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.ManagerConfig, fileName string, payload []byte, importAction string, account normalizedSupplyAccount) error {
 	find := func() error {
 		file, found, err := s.authFiles.Find(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName, "")
 		if err != nil {
@@ -4783,8 +4854,15 @@ func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.Manage
 		}
 		return nil
 	}
-	if err := find(); err == nil {
-		return nil
+	if existing, found, err := s.authFiles.Find(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName, ""); err != nil {
+		return err
+	} else if found && strings.EqualFold(strings.TrimSpace(importAction), "add") {
+		if !supplyCPAFileMatchesAccount(existing, account) {
+			return fmt.Errorf("CPA auth file %q already belongs to another account", fileName)
+		}
+		if err := find(); err == nil {
+			return nil
+		}
 	}
 	if err := s.authFiles.Upload(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey,
 		fileName, payload, cfg.Supply.DefaultWebsockets); err != nil {
@@ -4800,6 +4878,196 @@ func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.Manage
 		time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
 	}
 	return lastErr
+}
+
+type supplyImportPlan struct {
+	fileName         string
+	action           string
+	replacedFileName string
+}
+
+func (s *Service) resolveSupplyImportPlan(ctx context.Context, cfg store.ManagerConfig, order store.SupplyOrder, item store.SupplyImportItem, account normalizedSupplyAccount, allowRecoveryOriginal bool) (supplyImportPlan, error) {
+	if strings.EqualFold(strings.TrimSpace(order.Strategy), "recovery") {
+		if recovery, found, err := s.store.GetSupplyRecoveryByClaimOrder(ctx, order.OrderID); err != nil {
+			return supplyImportPlan{}, err
+		} else if found {
+			if allowRecoveryOriginal {
+				if plan, ok, err := s.resolveRecoveryOriginalPlan(ctx, cfg, recovery); err != nil || ok {
+					return plan, err
+				}
+			}
+			bindings, err := s.store.ListCurrentSupplyImportItemsByNameKey(ctx, account.nameKey)
+			if err != nil {
+				return supplyImportPlan{}, err
+			}
+			if binding, ok := matchRecoveryBinding(bindings, recovery, account); ok {
+				return s.planForBoundFile(ctx, cfg, binding.FileName)
+			}
+		}
+	}
+
+	bindings, err := s.store.ListCurrentSupplyImportItemsByNameKey(ctx, account.nameKey)
+	if err != nil {
+		return supplyImportPlan{}, err
+	}
+	for _, binding := range bindings {
+		if binding.ItemKey == account.itemKey {
+			return s.planForBoundFile(ctx, cfg, binding.FileName)
+		}
+	}
+	return s.planForCandidateFile(ctx, cfg, account.fileName, account)
+}
+
+func (s *Service) resolveRecoveryOriginalPlan(ctx context.Context, cfg store.ManagerConfig, recovery store.SupplyRecovery) (supplyImportPlan, bool, error) {
+	originalFileName := strings.TrimSpace(recovery.OriginalFileName)
+	if safeSupplyAuthFileName(originalFileName) {
+		file, found, err := s.findCPAAuthFile(ctx, cfg, originalFileName, "")
+		if err != nil {
+			return supplyImportPlan{}, false, err
+		}
+		if found {
+			return supplyImportPlan{fileName: file.Name, action: "replace", replacedFileName: file.Name}, true, nil
+		}
+	}
+	if authIndex := strings.TrimSpace(recovery.OriginalAuthIndex); authIndex != "" {
+		file, found, err := s.findCPAAuthFile(ctx, cfg, "", authIndex)
+		if err != nil {
+			return supplyImportPlan{}, false, err
+		}
+		if found && safeSupplyAuthFileName(file.Name) {
+			return supplyImportPlan{fileName: file.Name, action: "replace", replacedFileName: file.Name}, true, nil
+		}
+	}
+	if safeSupplyAuthFileName(originalFileName) {
+		return supplyImportPlan{fileName: originalFileName, action: "add"}, true, nil
+	}
+	return supplyImportPlan{}, false, nil
+}
+
+func (s *Service) planForBoundFile(ctx context.Context, cfg store.ManagerConfig, fileName string) (supplyImportPlan, error) {
+	fileName = strings.TrimSpace(fileName)
+	file, found, err := s.findCPAAuthFile(ctx, cfg, fileName, "")
+	if err != nil {
+		return supplyImportPlan{}, err
+	}
+	if found {
+		return supplyImportPlan{fileName: file.Name, action: "replace", replacedFileName: file.Name}, nil
+	}
+	return supplyImportPlan{fileName: fileName, action: "add"}, nil
+}
+
+func (s *Service) planForCandidateFile(ctx context.Context, cfg store.ManagerConfig, candidate string, account normalizedSupplyAccount) (supplyImportPlan, error) {
+	for attempt := 0; attempt < 100; attempt++ {
+		fileName := candidate
+		if attempt == 1 {
+			fileName = supplyAccountFileNameWithIdentity(account.accountName, account.itemKey)
+		} else if attempt > 1 {
+			base := strings.TrimSuffix(supplyAccountFileNameWithIdentity(account.accountName, account.itemKey), ".json")
+			fileName = fmt.Sprintf("%s-%d.json", base, attempt)
+		}
+		file, found, err := s.findCPAAuthFile(ctx, cfg, fileName, "")
+		if err != nil {
+			return supplyImportPlan{}, err
+		}
+		if !found {
+			return supplyImportPlan{fileName: fileName, action: "add"}, nil
+		}
+		if supplyCPAFileMatchesAccount(file, account) {
+			return supplyImportPlan{fileName: file.Name, action: "replace", replacedFileName: file.Name}, nil
+		}
+	}
+	return supplyImportPlan{}, errors.New("could not allocate a unique CPA auth file name")
+}
+
+func (s *Service) findCPAAuthFile(ctx context.Context, cfg store.ManagerConfig, fileName string, authIndex string) (cpaauthfiles.File, bool, error) {
+	file, found, err := s.authFiles.Find(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName, authIndex)
+	if err != nil || found {
+		return file, found, err
+	}
+	var matched cpaauthfiles.File
+	err = s.authFiles.Visit(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, func(candidate cpaauthfiles.File) (bool, error) {
+		if fileName != "" && candidate.Name != strings.TrimSpace(fileName) {
+			return false, nil
+		}
+		if authIndex != "" && candidate.AuthIndex != strings.TrimSpace(authIndex) {
+			return false, nil
+		}
+		matched = candidate
+		return true, nil
+	})
+	if err != nil {
+		return cpaauthfiles.File{}, false, err
+	}
+	return matched, strings.TrimSpace(matched.Name) != "", nil
+}
+
+func matchRecoveryBinding(bindings []store.SupplyImportItem, recovery store.SupplyRecovery, account normalizedSupplyAccount) (store.SupplyImportItem, bool) {
+	if len(bindings) == 1 {
+		return bindings[0], true
+	}
+	originalEmail := strings.ToLower(strings.TrimSpace(recovery.OriginalEmail))
+	for _, binding := range bindings {
+		if binding.ItemKey == account.itemKey {
+			return binding, true
+		}
+		if originalEmail == "" {
+			continue
+		}
+		normalized, err := normalizeAccountForImport(binding.PayloadJSON)
+		if err != nil {
+			continue
+		}
+		var metadata map[string]any
+		if json.Unmarshal(normalized.payload, &metadata) == nil && strings.EqualFold(stringFromMap(metadata, "email"), originalEmail) {
+			return binding, true
+		}
+	}
+	return store.SupplyImportItem{}, false
+}
+
+func supplyCPAFileMatchesAccount(file cpaauthfiles.File, account normalizedSupplyAccount) bool {
+	var metadata map[string]any
+	if json.Unmarshal(account.payload, &metadata) != nil {
+		return false
+	}
+	accountID := stringFromMap(metadata, "account_id", "chatgpt_account_id")
+	email := stringFromMap(metadata, "email")
+	if accountID != "" && file.AccountID != "" {
+		return strings.EqualFold(accountID, file.AccountID)
+	}
+	if email != "" && file.AccountSnapshot != "" {
+		return strings.EqualFold(email, file.AccountSnapshot)
+	}
+	return false
+}
+
+func safeSupplyAuthFileName(fileName string) bool {
+	fileName = strings.TrimSpace(fileName)
+	return fileName != "" && strings.HasSuffix(strings.ToLower(fileName), ".json") &&
+		!strings.ContainsAny(fileName, `/\\`) && fileName != "." && fileName != ".."
+}
+
+func (s *Service) backfillSupplyAccountMetadata(ctx context.Context) error {
+	items, err := s.store.ListSupplyImportItemsMissingAccountMetadata(ctx, 5000)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		account, err := normalizeAccountForImport(item.PayloadJSON)
+		if err != nil {
+			continue
+		}
+		if err := s.store.UpdateSupplyImportItemAccountMetadata(ctx, item.ID, account.accountName, account.nameKey); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) invalidateAuthFilesCache() {
+	s.authCacheMu.Lock()
+	s.authCache = authFileSnapshot{}
+	s.authCacheMu.Unlock()
 }
 
 func (s *Service) recordError(err error) {
@@ -5138,6 +5406,8 @@ func automaticSettleWindow(cfg store.ManagerSupplyConfig) time.Duration {
 type normalizedSupplyAccount struct {
 	payload          []byte
 	itemKey          string
+	accountName      string
+	nameKey          string
 	fileName         string
 	leaseExpiresAtMS int64
 	basePriceFen     int64
@@ -5270,12 +5540,70 @@ func normalizeSupplyAccountObject(object map[string]any, exportedAt any) (normal
 	}
 	sum := sha256.Sum256([]byte(identity))
 	digest := hex.EncodeToString(sum[:])
+	accountName := firstNonEmptyString(stringFromMap(metadata, "name"), stringFromMap(metadata, "email"), stringFromMap(metadata, "account_id"), "OpenAI OAuth Account")
+	nameKey := supplyAccountNameKey(accountName)
 	return normalizedSupplyAccount{
 		payload:          normalized,
 		itemKey:          digest,
-		fileName:         "codex-supply-" + digest[:20] + ".json",
+		accountName:      accountName,
+		nameKey:          nameKey,
+		fileName:         stableSupplyAccountFileName(accountName),
 		leaseExpiresAtMS: supplyDeliveryLeaseExpiresAtMS(object, time.Now()),
 	}, nil
+}
+
+func stableSupplyAccountFileName(accountName string) string {
+	return "codex-" + safeSupplyFileComponent(accountName) + ".json"
+}
+
+func supplyAccountFileNameWithIdentity(accountName string, itemKey string) string {
+	digest := strings.ToLower(strings.TrimSpace(itemKey))
+	if len(digest) > 12 {
+		digest = digest[:12]
+	}
+	if digest == "" {
+		sum := sha256.Sum256([]byte(strings.TrimSpace(accountName)))
+		digest = hex.EncodeToString(sum[:6])
+	}
+	return "codex-" + safeSupplyFileComponent(accountName) + "-" + digest + ".json"
+}
+
+func supplyAccountNameKey(accountName string) string {
+	return strings.ToLower(safeSupplyFileComponent(accountName))
+}
+
+func safeSupplyFileComponent(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasSuffix(strings.ToLower(value), ".json") {
+		value = strings.TrimSpace(value[:len(value)-len(".json")])
+	}
+	var builder strings.Builder
+	lastSeparator := false
+	for _, r := range strings.ToLower(value) {
+		allowed := unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("@._+-", r)
+		if allowed {
+			if (r == '.' || r == '-' || r == '_') && builder.Len() == 0 {
+				continue
+			}
+			builder.WriteRune(r)
+			lastSeparator = r == '-'
+		} else if builder.Len() > 0 && !lastSeparator {
+			builder.WriteByte('-')
+			lastSeparator = true
+		}
+		if len([]rune(builder.String())) >= 80 {
+			break
+		}
+	}
+	result := strings.Trim(builder.String(), ".-_ ")
+	if result == "" {
+		result = "account"
+	}
+	switch result {
+	case "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9":
+		result += "-account"
+	}
+	return result
 }
 
 // supplyDeliveryLeaseExpiresAtMS is deliberately based on the supplier's
@@ -5357,7 +5685,22 @@ func applySupplyOrderItemLeases(accounts []normalizedSupplyAccount, remainingSec
 }
 
 func normalizeAccountPayloadForImport(payloadJSON string) ([]byte, string, string, error) {
-	return normalizeAccountPayload(json.RawMessage(strings.TrimSpace(payloadJSON)))
+	account, err := normalizeAccountForImport(payloadJSON)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return account.payload, account.itemKey, account.fileName, nil
+}
+
+func normalizeAccountForImport(payloadJSON string) (normalizedSupplyAccount, error) {
+	accounts, err := normalizeAccountPayloads(json.RawMessage(strings.TrimSpace(payloadJSON)))
+	if err != nil {
+		return normalizedSupplyAccount{}, err
+	}
+	if len(accounts) != 1 {
+		return normalizedSupplyAccount{}, fmt.Errorf("expected one supply account payload, got %d", len(accounts))
+	}
+	return accounts[0], nil
 }
 
 func convertSub2AccountToCPAPayload(account map[string]any, credentials map[string]any, exportedAt any) map[string]any {

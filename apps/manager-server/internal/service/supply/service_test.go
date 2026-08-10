@@ -414,7 +414,7 @@ func TestRecoverySyncClaimsImportsAndDisablesOriginalAccount(t *testing.T) {
 				if item.FormName() != "file" {
 					continue
 				}
-				if !strings.Contains(item.FileName(), "codex-recovery-rec-1-v2-") {
+				if item.FileName() != "old.json" {
 					t.Fatalf("replacement filename = %q", item.FileName())
 				}
 				uploadedNames.Store(item.FileName(), struct{}{})
@@ -487,7 +487,7 @@ func TestRecoverySyncClaimsImportsAndDisablesOriginalAccount(t *testing.T) {
 		summary.StoredImported != 1 || summary.LastResult != "completed" {
 		t.Fatalf("summary = %#v", summary)
 	}
-	if claimCalls.Load() != 1 || uploadCalls.Load() != 1 || disableCalls.Load() != 1 {
+	if claimCalls.Load() != 1 || uploadCalls.Load() != 1 || disableCalls.Load() != 0 {
 		t.Fatalf("calls claim=%d upload=%d disable=%d", claimCalls.Load(), uploadCalls.Load(), disableCalls.Load())
 	}
 	recoveries, err := service.ListRecoveries(context.Background(), 10, "")
@@ -495,6 +495,7 @@ func TestRecoverySyncClaimsImportsAndDisablesOriginalAccount(t *testing.T) {
 		recoveries[0].ImportedCount != 1 || recoveries[0].ClaimOrderID != "recovery-rec-1" ||
 		recoveries[0].CredentialVersion != 2 || len(recoveries[0].ImportedFileNames) != 1 || recoveries[0].LastImportedAtMS <= 0 ||
 		len(recoveries[0].ImportItems) != 1 || recoveries[0].ImportItems[0].Status != "imported" ||
+		recoveries[0].ImportItems[0].ImportAction != "replace" || recoveries[0].ImportItems[0].ReplacedFileName != "old.json" ||
 		recoveries[0].ImportItems[0].FileName != recoveries[0].ImportedFileNames[0] {
 		t.Fatalf("recoveries=%#v err=%v", recoveries, err)
 	}
@@ -1222,8 +1223,178 @@ func TestNormalizeSub2AccountPayloadForCPA(t *testing.T) {
 		result["expired"] != "2026-07-30T00:00:00Z" || result["max_concurrency"] != float64(8) {
 		t.Fatalf("normalized metadata = %#v", result)
 	}
-	if len(key) != 64 || len(fileName) != len("codex-supply-")+20+len(".json") || fileName[:13] != "codex-supply-" {
+	if len(key) != 64 || fileName != "codex-team-user.json" {
 		t.Fatalf("stable identity outputs key=%q file=%q", key, fileName)
+	}
+}
+
+func TestSupplyFileNameStaysStableWhenCredentialsChange(t *testing.T) {
+	first, err := normalizeAccountPayloads([]byte(`{"name":"Stable Team / Main","type":"oauth","platform":"openai","credentials":{"access_token":"access-one","refresh_token":"refresh-one","chatgpt_account_id":"account-one","email":"one@example.com"}}`))
+	if err != nil || len(first) != 1 {
+		t.Fatalf("normalize first account: %#v err=%v", first, err)
+	}
+	second, err := normalizeAccountPayloads([]byte(`{"name":"Stable Team / Main","type":"oauth","platform":"openai","credentials":{"access_token":"access-two","refresh_token":"refresh-two","chatgpt_account_id":"account-two","email":"two@example.com"}}`))
+	if err != nil || len(second) != 1 {
+		t.Fatalf("normalize replacement account: %#v err=%v", second, err)
+	}
+	if first[0].fileName != "codex-stable-team-main.json" || second[0].fileName != first[0].fileName {
+		t.Fatalf("stable account filenames first=%q second=%q", first[0].fileName, second[0].fileName)
+	}
+	if first[0].itemKey == second[0].itemKey {
+		t.Fatal("credential identity should still distinguish different underlying accounts")
+	}
+}
+
+func TestReplacingSupplyImportSupersedesPreviousFileVersion(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-lineage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	for _, orderID := range []string{"original-order", "recovery-order"} {
+		if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{OrderID: orderID, Product: "oauth_30d", Status: "completed"}); err != nil {
+			t.Fatalf("create %s: %v", orderID, err)
+		}
+	}
+	if _, err := st.InsertSupplyImportItems(ctx, "original-order", []store.SupplyImportItem{{
+		ItemKey: "original", AccountName: "Stable Team", NameKey: "stable-team", FileName: "codex-stable-team.json",
+		ImportAction: "add", PayloadJSON: `{"type":"codex","name":"Stable Team","account_id":"original"}`,
+	}}); err != nil {
+		t.Fatalf("insert original: %v", err)
+	}
+	items, _ := st.ListSupplyImportItems(ctx, 10, "")
+	if err := st.MarkSupplyImportItemImported(ctx, items[0].ID, 1000); err != nil {
+		t.Fatalf("mark original imported: %v", err)
+	}
+	if _, err := st.InsertSupplyImportItems(ctx, "recovery-order", []store.SupplyImportItem{{
+		ItemKey: "replacement", AccountName: "Stable Team", NameKey: "stable-team", FileName: "codex-stable-team.json",
+		ImportAction: "replace", ReplacedFileName: "codex-stable-team.json", PayloadJSON: `{"type":"codex","name":"Stable Team","account_id":"replacement"}`,
+	}}); err != nil {
+		t.Fatalf("insert replacement: %v", err)
+	}
+	items, _ = st.ListSupplyImportItems(ctx, 10, "")
+	var replacementID int64
+	for _, item := range items {
+		if item.OrderID == "recovery-order" {
+			replacementID = item.ID
+		}
+	}
+	if err := st.MarkSupplyImportItemImported(ctx, replacementID, 2000); err != nil {
+		t.Fatalf("mark replacement imported: %v", err)
+	}
+	items, err = st.ListSupplyImportItems(ctx, 10, "")
+	if err != nil || len(items) != 2 {
+		t.Fatalf("lineage items=%#v err=%v", items, err)
+	}
+	var original, replacement store.SupplyImportItem
+	for _, item := range items {
+		if item.OrderID == "original-order" {
+			original = item
+		} else {
+			replacement = item
+		}
+	}
+	if original.SupersededAtMS != 2000 || replacement.SupersedesItemID != original.ID || replacement.EffectiveFromMS != 2000 {
+		t.Fatalf("lineage original=%#v replacement=%#v", original, replacement)
+	}
+}
+
+func TestStableFileCredentialVersionsRemainDistinctAndUseTheOverlappingVersion(t *testing.T) {
+	items := []store.SupplyImportItem{
+		{
+			ID: 1, OrderID: "original-order", ItemKey: "original", FileName: "codex-stable-team.json",
+			Status: "imported", ImportedAtMS: 100, EffectiveFromMS: 100, SupersededAtMS: 250,
+		},
+		{
+			ID: 2, OrderID: "recovery-order", ItemKey: "replacement", FileName: "codex-stable-team.json",
+			Status: "imported", ImportedAtMS: 250, EffectiveFromMS: 250,
+		},
+	}
+	merged := mergeSupplyImportItems(items, items[:1])
+	if len(merged) != 2 {
+		t.Fatalf("merged credential versions = %#v, want two distinct rows", merged)
+	}
+	usage := map[string]supplyAccountUsage{
+		"codex-stable-team.json": {Calls: 7, SuccessCalls: 6, FailureCalls: 1, Tokens: 700},
+	}
+	beforeReplacement := buildReportReconciliation(
+		ReportRequest{FromMS: 150, ToMS: 200}, nil, nil, merged, map[string]store.SupplyOrder{}, usage, nil, time.UnixMilli(200),
+	)
+	if len(beforeReplacement.Accounts) != 2 || beforeReplacement.Accounts[0].UsageCalls != 7 || beforeReplacement.Accounts[1].UsageCalls != 0 {
+		t.Fatalf("historical usage attribution = %#v", beforeReplacement.Accounts)
+	}
+	afterReplacement := buildReportReconciliation(
+		ReportRequest{FromMS: 260, ToMS: 300}, nil, nil, merged, map[string]store.SupplyOrder{}, usage, nil, time.UnixMilli(300),
+	)
+	if len(afterReplacement.Accounts) != 2 || afterReplacement.Accounts[0].UsageCalls != 0 || afterReplacement.Accounts[1].UsageCalls != 7 {
+		t.Fatalf("replacement usage attribution = %#v", afterReplacement.Accounts)
+	}
+}
+
+func TestRecoveryWithoutOriginalFileReusesUniqueAccountNameBinding(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/auth-files" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"files":[{"name":"legacy-stable-file.json","auth_index":"17","provider":"codex","account":"old@example.com","account_id":"old-account","disabled":true,"status":"unauthorized"}]}`))
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "recovery-name-binding.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{OrderID: "original", Product: "oauth_30d", Status: "completed"}); err != nil {
+		t.Fatalf("create original order: %v", err)
+	}
+	if _, err := st.InsertSupplyImportItems(ctx, "original", []store.SupplyImportItem{{
+		ItemKey: "old-key", AccountName: "Stable Team", NameKey: "stable-team", FileName: "legacy-stable-file.json",
+		ImportAction: "add", PayloadJSON: `{"type":"codex","name":"Stable Team","email":"old@example.com","account_id":"old-account"}`,
+	}}); err != nil {
+		t.Fatalf("insert original item: %v", err)
+	}
+	items, _ := st.ListSupplyImportItems(ctx, 10, "")
+	if err := st.MarkSupplyImportItemImported(ctx, items[0].ID, 1000); err != nil {
+		t.Fatalf("mark original imported: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{OrderID: "recovery-rec-name", Product: "oauth_30d", Strategy: "recovery", Status: "completed"}); err != nil {
+		t.Fatalf("create recovery order: %v", err)
+	}
+	if _, err := st.UpsertSupplyRecoveries(ctx, []store.SupplyRecovery{{
+		RecoveryID: "rec-name", DeliveryStatus: "claimed", Status: "importing", ClaimOrderID: "recovery-rec-name", LastSeenAtMS: 1000,
+	}}); err != nil {
+		t.Fatalf("insert recovery: %v", err)
+	}
+	account, err := normalizeAccountForImport(`{"type":"codex","name":"Stable Team","email":"new@example.com","account_id":"new-account","access_token":"new-token"}`)
+	if err != nil {
+		t.Fatalf("normalize replacement: %v", err)
+	}
+	service := New(st, nil, server.Client())
+	plan, err := service.resolveSupplyImportPlan(ctx, store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+	}, store.SupplyOrder{OrderID: "recovery-rec-name", Strategy: "recovery"}, store.SupplyImportItem{}, account, true)
+	if err != nil {
+		t.Fatalf("resolve recovery plan: %v", err)
+	}
+	if plan.action != "replace" || plan.fileName != "legacy-stable-file.json" || plan.replacedFileName != "legacy-stable-file.json" {
+		t.Fatalf("recovery plan = %#v", plan)
+	}
+	secondAccount, err := normalizeAccountForImport(`{"type":"codex","name":"Second Team","email":"second@example.com","account_id":"second-account","access_token":"second-token"}`)
+	if err != nil {
+		t.Fatalf("normalize second replacement: %v", err)
+	}
+	secondPlan, err := service.resolveSupplyImportPlan(ctx, store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+	}, store.SupplyOrder{OrderID: "recovery-rec-name", Strategy: "recovery"}, store.SupplyImportItem{}, secondAccount, false)
+	if err != nil {
+		t.Fatalf("resolve second recovery plan: %v", err)
+	}
+	if secondPlan.action != "add" || secondPlan.fileName != "codex-second-team.json" {
+		t.Fatalf("second recovery plan reused original file: %#v", secondPlan)
 	}
 }
 
@@ -1891,7 +2062,7 @@ func TestLegacySupplyImportRepairConvertsAndVerifiesCPAFile(t *testing.T) {
 	if err != nil || !found || repaired.Status != "completed" || repaired.ImportedCount != 1 {
 		t.Fatalf("repaired order=%#v found=%v err=%v", repaired, found, err)
 	}
-	if uploadCalls.Load() != 1 || len(uploadedName) < 13 || uploadedName[:13] != "codex-supply-" {
+	if uploadCalls.Load() != 1 || uploadedName != "codex-legacy.json" {
 		t.Fatalf("upload calls=%d uploaded name=%q", uploadCalls.Load(), uploadedName)
 	}
 }

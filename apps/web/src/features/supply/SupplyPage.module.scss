@@ -891,16 +891,26 @@
   font-size: 11px;
 }
 
-.importFileName,
-.recoveryReason {
-  display: block;
+.importFileName {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
   max-width: 280px;
+  min-width: 0;
+  white-space: normal;
+}
+
+.importFileName .mono {
+  display: block;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .recoveryReason {
+  display: block;
   max-width: 240px;
   color: var(--text-secondary);
   white-space: normal;
