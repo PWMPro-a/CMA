@@ -192,18 +192,16 @@ func TestAccountPoolStatsSeparateTotalAvailableHealthyAndDisabled(t *testing.T) 
 
 func TestLiveAccountPoolCapsStaleInspectionCapacityAndRecalculatesShortage(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
-		Product:                     "oauth_7d",
-		Strategy:                    managerconfigsvc.SupplyStrategyStrongSupply,
-		HealthyMinutesTarget:        60,
-		WarningMinutes:              30,
-		CriticalMinutes:             20,
-		HealthyAvailableAccounts:    10,
-		CriticalAvailableAccounts:   2,
-		AccountMaxRequestsBefore401: 30,
-		AccountMaxUsefulSeconds401:  120,
-		NewAccountConfidence:        0.7,
-		ReplenishBatchSize:          50,
-		PrelockMaxQuantity:          20,
+		Product:                   "oauth_7d",
+		Strategy:                  managerconfigsvc.SupplyStrategyStrongSupply,
+		HealthyMinutesTarget:      60,
+		WarningMinutes:            30,
+		CriticalMinutes:           20,
+		HealthyAvailableAccounts:  10,
+		CriticalAvailableAccounts: 2,
+		NewAccountConfidence:      0.7,
+		ReplenishBatchSize:        50,
+		PrelockMaxQuantity:        20,
 	}
 	resource := defaultSmartResource(cfg)
 	resource.AvailableAccounts = 41
@@ -211,33 +209,31 @@ func TestLiveAccountPoolCapsStaleInspectionCapacityAndRecalculatesShortage(t *te
 	resource.HealthyAccounts = 41
 	resource.PendingInspectionAccounts = 3
 	resource.PendingInspectionCapacityRCU = 150
-	resource.RequestDemandRCUPerMinute = 252
-	resource.ConsumeRCUPerMinute = 635.15
+	resource.RequestDemandRCUPerMinute = 3_000
+	resource.ConsumeRCUPerMinute = 3_000
 	resource.DemandTrend = smartDemandTrendStable
-	verifiedUnit := smart401RiskCapacityRCU(cfg, resource, false)
-	resource.RiskAdjustedUnitCapacityRCU = smart401RiskCapacityRCU(cfg, resource, true)
-	resource.CurrentCapacityRCU = round2(41 * verifiedUnit)
-	resource.TimeLimitedCapacityRCU = resource.CurrentCapacityRCU
+	resource.CurrentCapacityRCU = 41_000
+	resource.TimeLimitedCapacityRCU = 41_000
 
 	applyAccountPoolStats(&resource, accountPoolStats{total: 1220, available: 5})
-	if !reconcileSmartCapacityWithAccountPool(cfg, &resource) {
+	if !reconcileSmartCapacityWithAccountPool(&resource, 41) {
 		t.Fatal("live account decrease must cap stale inspection capacity")
 	}
-	wantCapacity := round2(5 * verifiedUnit)
+	wantCapacity := round2(41_000 * 5.0 / 41.0)
 	if resource.CurrentCapacityRCU != wantCapacity || resource.TimeLimitedCapacityRCU != wantCapacity {
-		t.Fatalf("live capacity cap = %#v, want %.2f RCU", resource, wantCapacity)
+		t.Fatalf("live capacity ratio = %#v, want %.2f RCU", resource, wantCapacity)
 	}
 	if resource.PendingInspectionAccounts != 0 || resource.PendingInspectionCapacityRCU != 0 {
 		t.Fatalf("stale pending capacity must not outlive the live pool: %#v", resource)
 	}
 
 	recalculateSmartResourceCapacityPlan(cfg, &resource)
-	if resource.HealthLevel != smartHealthCritical || resource.EstimatedRequiredAccounts != 17 ||
-		resource.AccountQuantityDeficit != 12 {
+	if resource.HealthLevel != smartHealthWarning || resource.EstimatedRequiredAccounts != 10 ||
+		resource.AccountQuantityDeficit != 5 {
 		t.Fatalf("live five-account shortage plan = %#v", resource)
 	}
-	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 12 {
-		t.Fatalf("live five-account shortage should request twelve accounts, got %d", quantity)
+	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 1 {
+		t.Fatalf("live five-account quota shortage should request one account, got %d", quantity)
 	}
 }
 

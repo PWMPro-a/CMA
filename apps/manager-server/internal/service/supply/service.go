@@ -622,8 +622,9 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		snapshot, snapshotErr := s.cachedAuthFiles(authCtx, cfg, false)
 		cancel()
 		if snapshotErr == nil || len(snapshot.files) > 0 {
+			inspectedAvailable := resource.AvailableAccounts
 			applyAccountPoolStats(&resource, accountPoolStatsFromFiles(snapshot.files))
-			if reconcileSmartCapacityWithAccountPool(cfg.Supply, &resource) {
+			if reconcileSmartCapacityWithAccountPool(&resource, inspectedAvailable) {
 				recalculateSmartResourceCapacityPlan(cfg.Supply, &resource)
 			}
 			s.reconcileSmartAccountPoolGuard(cfg.Supply, &resource)
@@ -1369,7 +1370,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			return nil
 		}
 		resource.SuggestedQuantity = quantity
-		resource.PrelockedCapacityRCU = estimatedSupplyOrderCapacityRCU(supplyCfg, resource, quantity)
+		resource.PrelockedCapacityRCU = estimatedSupplyOrderCapacityRCU(supplyCfg, quantity)
 		s.setSmartResource(resource)
 	}
 
@@ -1842,8 +1843,9 @@ func (s *Service) refreshOverview(ctx context.Context, cfg store.ManagerConfig, 
 		if err != nil {
 			return err
 		}
+		inspectedAvailable := resource.AvailableAccounts
 		applyAccountPoolStats(&resource, poolStats)
-		if reconcileSmartCapacityWithAccountPool(cfg.Supply, &resource) {
+		if reconcileSmartCapacityWithAccountPool(&resource, inspectedAvailable) {
 			recalculateSmartResourceCapacityPlan(cfg.Supply, &resource)
 		}
 		applySmartAccountQuantityEstimate(cfg.Supply, &resource)
@@ -3734,36 +3736,49 @@ func applyAccountPoolStats(resource *SmartResource, stats accountPoolStats) {
 // retaining capacity for credentials that have already disappeared from the
 // live CPA schedulable pool. The live list is intentionally only a downward
 // bound: newly visible files still need an inspection or import overlay before
-// they can add capacity, while a rapid 401/disable must remove stale capacity
-// immediately instead of waiting for the next full inspection.
-func reconcileSmartCapacityWithAccountPool(cfg store.ManagerSupplyConfig, resource *SmartResource) bool {
-	if resource == nil || !smartSupplyStrategyConfigured(cfg) {
+// they can add capacity, while a rapid 401/disable proportionally removes stale
+// inspected quota. Request-count risk thresholds are intentionally absent from
+// this calculation.
+func reconcileSmartCapacityWithAccountPool(resource *SmartResource, inspectedAvailable int) bool {
+	if resource == nil {
 		return false
 	}
-	verifiedUnit := smart401RiskCapacityRCU(cfg, *resource, false)
-	if verifiedUnit <= 0 {
+	liveAvailable := max(0, resource.AvailableAccounts)
+	inspectedAvailable = max(0, inspectedAvailable)
+	if inspectedAvailable <= 0 {
+		if liveAvailable == 0 && resource.CurrentCapacityRCU > 0 {
+			resource.CurrentCapacityRCU = 0
+			resource.TimeLimitedCapacityRCU = 0
+			resource.PendingInspectionCapacityRCU = 0
+			resource.PendingInspectionAccounts = 0
+			return true
+		}
 		return false
 	}
-	maximumLiveCapacity := round2(float64(max(0, resource.AvailableAccounts)) * verifiedUnit)
+	if liveAvailable >= inspectedAvailable {
+		return false
+	}
+	ratio := float64(liveAvailable) / float64(inspectedAvailable)
+	adjust := func(value float64) float64 { return round2(math.Max(0, value) * ratio) }
 	changed := false
-	if resource.CurrentCapacityRCU > maximumLiveCapacity {
-		resource.CurrentCapacityRCU = maximumLiveCapacity
+	currentCapacity := adjust(resource.CurrentCapacityRCU)
+	if resource.CurrentCapacityRCU != currentCapacity {
+		resource.CurrentCapacityRCU = currentCapacity
 		changed = true
 	}
-	if resource.TimeLimitedCapacityRCU > maximumLiveCapacity {
-		resource.TimeLimitedCapacityRCU = maximumLiveCapacity
+	timeLimitedCapacity := adjust(resource.TimeLimitedCapacityRCU)
+	if resource.TimeLimitedCapacityRCU != timeLimitedCapacity {
+		resource.TimeLimitedCapacityRCU = timeLimitedCapacity
 		changed = true
 	}
-	maximumPending := max(0, resource.AvailableAccounts-resource.HealthyAccounts)
+	maximumPending := max(0, liveAvailable-resource.HealthyAccounts)
 	if resource.PendingInspectionAccounts > maximumPending {
+		previousPending := resource.PendingInspectionAccounts
 		resource.PendingInspectionAccounts = maximumPending
 		if maximumPending == 0 {
 			resource.PendingInspectionCapacityRCU = 0
-		} else {
-			resource.PendingInspectionCapacityRCU = math.Min(
-				resource.PendingInspectionCapacityRCU,
-				float64(maximumPending)*resource.RiskAdjustedUnitCapacityRCU,
-			)
+		} else if previousPending > 0 {
+			resource.PendingInspectionCapacityRCU = round2(resource.PendingInspectionCapacityRCU * float64(maximumPending) / float64(previousPending))
 		}
 		changed = true
 	}
@@ -3837,8 +3852,9 @@ func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.Mana
 	if err != nil {
 		return 0, 0, "", false, err
 	}
+	inspectedAvailable := resource.AvailableAccounts
 	applyAccountPoolStats(resource, poolStats)
-	if reconcileSmartCapacityWithAccountPool(cfg.Supply, resource) {
+	if reconcileSmartCapacityWithAccountPool(resource, inspectedAvailable) {
 		recalculateSmartResourceCapacityPlan(cfg.Supply, resource)
 	}
 	available := poolStats.available
@@ -4276,9 +4292,9 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	}
 	quantity := resource.SuggestedQuantity
 	if quantity <= 0 && resource.CapacityGapRCU > 0 && resource.UnitCapacityRCU > 0 {
-		unit := resource.RiskAdjustedUnitCapacityRCU
+		unit := smartEstimatedNewAccountCapacityRCU(cfg)
 		if unit <= 0 {
-			unit = smartEstimatedNewAccountCapacityRCU(cfg)
+			unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
 		}
 		quantity = int(math.Ceil(resource.CapacityGapRCU / unit))
 	}
@@ -4312,14 +4328,11 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	return clampInt(quantity, 1, 100)
 }
 
-func estimatedSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, resource SmartResource, quantity int) float64 {
+func estimatedSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, quantity int) float64 {
 	if quantity <= 0 {
 		return 0
 	}
-	unit := resource.RiskAdjustedUnitCapacityRCU
-	if unit <= 0 {
-		unit = smartEstimatedNewAccountCapacityRCU(cfg)
-	}
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
 	return round2(float64(quantity) * unit)
 }
 

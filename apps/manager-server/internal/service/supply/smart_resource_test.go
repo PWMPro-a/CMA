@@ -1696,7 +1696,7 @@ func TestSupplyOrderTriggerReasonPreservesWaterlineAndVirtualDemandReasons(t *te
 	}
 }
 
-func Test401ChurnThresholdsBoundRiskAdjustedCapacity(t *testing.T) {
+func Test401ChurnThresholdsDoNotChangeQuotaCapacityUnits(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		Product:                     "oauth_30d",
 		Strategy:                    managerconfigsvc.SupplyStrategyStrongSupply,
@@ -1705,20 +1705,10 @@ func Test401ChurnThresholdsBoundRiskAdjustedCapacity(t *testing.T) {
 		NewAccountConfidence:        0.7,
 	}
 	if got := smartEstimatedNewAccountCapacityRCU(cfg); got != 3_080 {
-		t.Fatalf("new-account raw quota capacity = %f", got)
-	}
-	resource := SmartResource{ConsumeRCUPerMinute: 400, RequestDemandRCUPerMinute: 100}
-	if got := smart401RiskCapacityRCU(cfg, resource, false); got != 120 {
-		t.Fatalf("verified-account 401 risk capacity = %f, want 120", got)
-	}
-	if got := smart401RiskCapacityRCU(cfg, resource, true); got != 84 {
-		t.Fatalf("new-account 401 risk capacity = %f, want 84", got)
+		t.Fatalf("new-account conservative quota capacity = %f", got)
 	}
 	if got := smartEffectiveHealthyMinutesTarget(cfg); got != 2 {
 		t.Fatalf("401-aware healthy runway = %d, want 2", got)
-	}
-	if got := smartReliableAccountCapacityRCU(0, 120); got != 0 {
-		t.Fatalf("exhausted quota must not be restored by risk capacity, got %f", got)
 	}
 }
 
@@ -1751,14 +1741,14 @@ func Test401AgeDoesNotEraseVerifiedAccountQuotaCapacity(t *testing.T) {
 	}, now)
 
 	if resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 || resource.WeakAccounts != 0 {
-		t.Fatalf("risk lifetime must affect capacity, not account health counts: %#v", resource)
+		t.Fatalf("risk lifetime must affect the health window, not account health counts: %#v", resource)
 	}
-	if resource.RawCapacityRCU != 2_200 || resource.CurrentCapacityRCU != 50 {
-		t.Fatalf("verified quota must remain visible while reliable capacity is 401-bounded: %#v", resource)
+	if resource.RawCapacityRCU != 2_200 || resource.CurrentCapacityRCU != 2_200 {
+		t.Fatalf("a fresh successful inspection must retain verified quota capacity: %#v", resource)
 	}
 }
 
-func TestStrongSupplyTreatsTwentyOne401RiskBoundedAccountsAsHealthy(t *testing.T) {
+func TestStrongSupplyUsesQuotaCapacityForPlanning(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		Product:                     "oauth_7d",
 		Strategy:                    managerconfigsvc.SupplyStrategyStrongSupply,
@@ -1777,14 +1767,15 @@ func TestStrongSupplyTreatsTwentyOne401RiskBoundedAccountsAsHealthy(t *testing.T
 	resource.HealthyAccounts = 21
 	resource.RequestDemandRCUPerMinute = 149
 	resource.ConsumeRCUPerMinute = 391.62
-	verifiedUnit := smart401RiskCapacityRCU(cfg, resource, false)
-	resource.RiskAdjustedUnitCapacityRCU = smart401RiskCapacityRCU(cfg, resource, true)
-	resource.CurrentCapacityRCU = float64(resource.AvailableAccounts) * verifiedUnit
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	resource.RiskAdjustedUnitCapacityRCU = unit
+	resource.CurrentCapacityRCU = float64(resource.AvailableAccounts) * unit
 	resource.DemandTrend = smartDemandTrendStable
 
 	recalculateSmartResourceCapacityPlan(cfg, &resource)
 
-	if resource.EffectiveHealthyMinutes != 2 || resource.HealthLevel != smartHealthHealthy ||
+	if resource.EffectiveHealthyMinutes != 2 || resource.EstimatedSustainMinutes <= 2 ||
+		resource.HealthLevel != smartHealthHealthy ||
 		resource.SuggestedQuantity != 0 || resource.AccountQuantityDeficit != 0 ||
 		resource.EstimatedRequiredAccounts != 10 {
 		t.Fatalf("21-account reliable capacity plan = %#v", resource)
@@ -1793,13 +1784,45 @@ func TestStrongSupplyTreatsTwentyOne401RiskBoundedAccountsAsHealthy(t *testing.T
 	resource.AvailableAccounts = 5
 	resource.SchedulableAccounts = 5
 	resource.HealthyAccounts = 5
-	resource.CurrentCapacityRCU = 5 * verifiedUnit
+	resource.CurrentCapacityRCU = 5 * unit
 	recalculateSmartResourceCapacityPlan(cfg, &resource)
-	if resource.HealthLevel != smartHealthCritical || resource.AccountQuantityDeficit != 5 {
-		t.Fatalf("five-account reliable capacity plan = %#v", resource)
+	if resource.HealthLevel != smartHealthHealthy || resource.AccountQuantityDeficit != 5 {
+		t.Fatalf("five-account quota capacity plan = %#v", resource)
 	}
-	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 5 {
-		t.Fatalf("five-account reliable deficit should request five accounts, got %d", quantity)
+	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 0 {
+		t.Fatalf("five-account quota capacity should not trigger a capacity order, got %d", quantity)
+	}
+}
+
+func TestStrongSupplyRunwayUsesActualPoolQuotaInsteadOfRequestThreshold(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Product:                     "oauth_30d",
+		Strategy:                    managerconfigsvc.SupplyStrategyStrongSupply,
+		HealthyMinutesTarget:        60,
+		HealthyAvailableAccounts:    10,
+		AccountMaxRequestsBefore401: 30,
+		AccountMaxUsefulSeconds401:  120,
+		NewAccountConfidence:        0.7,
+	}
+	resource := defaultSmartResource(cfg)
+	resource.AvailableAccounts = 38
+	resource.SchedulableAccounts = 38
+	resource.HealthyAccounts = 38
+	resource.RawCapacityRCU = 45_380.8
+	resource.CurrentCapacityRCU = 45_380.8
+	resource.TimeLimitedCapacityRCU = 45_380.8
+	resource.ConsumeRCUPerMinute = 1_028.6
+	resource.RequestDemandRCUPerMinute = 274
+	resource.DemandTrend = smartDemandTrendStable
+
+	recalculateSmartResourceCapacityPlan(cfg, &resource)
+
+	if resource.CurrentCapacityRCU != 45_380.8 || resource.EstimatedSustainMinutes != 44.1 {
+		t.Fatalf("actual quota runway was altered by 401 thresholds: %#v", resource)
+	}
+	if resource.HealthLevel != smartHealthHealthy || resource.SuggestedQuantity != 0 ||
+		resource.EstimatedRequiredAccounts != 10 || resource.AccountQuantityDeficit != 0 {
+		t.Fatalf("38-account quota plan = %#v", resource)
 	}
 }
 
@@ -1932,7 +1955,7 @@ func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *t
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if createQuantity.Load() != 2 {
+	if createQuantity.Load() != 1 {
 		t.Fatalf("quota-capacity sizing should avoid inflating the emergency batch, quantity=%d", createQuantity.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
@@ -1946,7 +1969,7 @@ func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *t
 	}
 }
 
-func TestSmartAutomaticKeepsFullBatchWhenSupplyIsScarce(t *testing.T) {
+func TestSmartAutomaticUsesQuotaSizedBatchWhenSupplyIsScarce(t *testing.T) {
 	var createQuantity atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -2007,8 +2030,8 @@ func TestSmartAutomaticKeepsFullBatchWhenSupplyIsScarce(t *testing.T) {
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if createQuantity.Load() <= 1 {
-		t.Fatalf("scarce supply should keep the recommended batch, quantity=%d", createQuantity.Load())
+	if createQuantity.Load() != 1 {
+		t.Fatalf("scarce supply must retain quota-based sizing, quantity=%d", createQuantity.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
 	if err != nil {
@@ -2021,7 +2044,7 @@ func TestSmartAutomaticKeepsFullBatchWhenSupplyIsScarce(t *testing.T) {
 	}
 }
 
-func TestSmartReadySmallOrderReleasesWhen401AwareCapacityIsHealthy(t *testing.T) {
+func TestSmartReadySmallOrderReleasesWhenQuotaCapacityIsHealthy(t *testing.T) {
 	var takeCalls atomic.Int32
 	var uploadCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2109,7 +2132,7 @@ func TestSmartReadySmallOrderReleasesWhen401AwareCapacityIsHealthy(t *testing.T)
 		t.Fatalf("run automatic: %v", err)
 	}
 	if takeCalls.Load() != 0 || uploadCalls.Load() != 0 {
-		t.Fatalf("healthy 401-aware capacity should avoid an unnecessary take, take=%d upload=%d", takeCalls.Load(), uploadCalls.Load())
+		t.Fatalf("healthy quota capacity should release an unnecessary ready order, take=%d upload=%d", takeCalls.Load(), uploadCalls.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
 	if err != nil {

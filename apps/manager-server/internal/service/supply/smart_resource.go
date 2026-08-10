@@ -160,9 +160,9 @@ type SmartResource struct {
 	AccountMaxRequestsBefore401    int     `json:"accountMaxRequestsBefore401,omitempty"`
 	AccountMaxUsefulSeconds401     int     `json:"accountMaxUsefulSecondsBefore401,omitempty"`
 	EstimatedNewAccountCapacityRCU float64 `json:"estimatedNewAccountCapacityRcu,omitempty"`
-	// RiskAdjustedUnitCapacityRCU is the reliable capacity expected from one
-	// newly supplied credential after applying the configured 401 request/time
-	// limits and the new-account confidence discount.
+	// RiskAdjustedUnitCapacityRCU is retained for API compatibility. It is the
+	// conservative quota estimate for one newly supplied credential. 401
+	// thresholds are operational risk signals and do not change this value.
 	RiskAdjustedUnitCapacityRCU float64 `json:"riskAdjustedUnitCapacityRcu,omitempty"`
 }
 
@@ -232,7 +232,7 @@ func defaultSmartResource(cfg store.ManagerSupplyConfig) SmartResource {
 		AccountMaxRequestsBefore401:    smartAccountMaxRequestsBefore401(cfg),
 		AccountMaxUsefulSeconds401:     smartAccountMaxUsefulSecondsBefore401(cfg),
 		EstimatedNewAccountCapacityRCU: round2(smartEstimatedNewAccountCapacityRCU(cfg)),
-		RiskAdjustedUnitCapacityRCU:    round2(smart401RiskCapacityRCU(cfg, SmartResource{}, true)),
+		RiskAdjustedUnitCapacityRCU:    round2(smartEstimatedNewAccountCapacityRCU(cfg)),
 	}
 }
 
@@ -367,7 +367,6 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	usageStats := s.smartUsageSnapshot(now)
 	resource.UnitCapacityRCU = smartProductUnitCapacity(cfg.Product)
 	consumeRCUPerMinute := applySmartUsage(&resource, usageStats, resource.UnitCapacityRCU)
-	resource.RiskAdjustedUnitCapacityRCU = round2(smart401RiskCapacityRCU(cfg, resource, true))
 
 	if !smartInspectionSnapshotComplete(snapshot) {
 		resource.SnapshotFresh = false
@@ -379,7 +378,6 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	}
 
 	capacityItems := make([]smartCapacityItem, 0, len(snapshot.results))
-	riskCapacityPerVerifiedAccount := smart401RiskCapacityRCU(cfg, resource, false)
 	inspectedFiles := make(map[string]struct{}, len(snapshot.results))
 	eligible := 0
 	withQuotaEvidence := 0
@@ -435,29 +433,26 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		if !hasCapacityQuota && hasActiveLease {
 			withQuotaEvidence++
 		}
-		quotaCapacity := 0.0
+		capacity := 0.0
 		switch {
 		case hasCapacityQuota:
-			quotaCapacity = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * remaining
+			capacity = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * remaining
 		case hasActiveLease:
 			// The completed probe proved that the credential works, while the
 			// supplier's delivery record bounds how long it can remain usable.
 			// This is intentionally a conservative lease estimate, not a
 			// conversion of the excluded monthly allowance.
-			quotaCapacity = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * smartNewAccountConfidence(cfg)
+			capacity = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * smartNewAccountConfidence(cfg)
 			resource.LeaseEstimatedAccounts++
-			resource.LeaseEstimatedCapacityRCU += quotaCapacity
+			resource.LeaseEstimatedCapacityRCU += capacity
 		default:
 			continue
 		}
-		resource.RawCapacityRCU += math.Max(0, quotaCapacity)
-		capacity := smartReliableAccountCapacityRCU(quotaCapacity, riskCapacityPerVerifiedAccount)
 		if capacity <= 0 {
 			continue
 		}
 		// A successful current quota inspection is direct evidence that the
-		// credential is alive. Keep it in the healthy count while using the 401
-		// thresholds only as a forward-looking reliable-capacity ceiling.
+		// credential is alive. 401 thresholds do not reduce its actual quota.
 		resource.HealthyAccounts++
 		capacityItems = append(capacityItems, smartCapacityItem{
 			capacityRCU:      capacity,
@@ -491,9 +486,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		}
 		overlaidFiles[fileName] = struct{}{}
 		remainingMinutes := clampFloat(time.UnixMilli(item.LeaseExpiresAtMS).Sub(now).Minutes(), 0, float64(smartUsefulAccountLifetimeMinutes()))
-		quotaCapacity := smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * smartNewAccountConfidence(cfg)
-		resource.RawCapacityRCU += math.Max(0, quotaCapacity)
-		capacity := smartReliableAccountCapacityRCU(quotaCapacity, resource.RiskAdjustedUnitCapacityRCU)
+		capacity := smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * smartNewAccountConfidence(cfg)
 		if capacity <= 0 {
 			continue
 		}
@@ -525,11 +518,11 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	// Delivery-lease coverage is retained as an observability signal. It does
 	// not override a current successful quota probe: live usability and quota
 	// evidence decide whether a credential contributes capacity.
-	resource.RawCapacityRCU = round2(resource.RawCapacityRCU)
 	for _, item := range capacityItems {
-		resource.CurrentCapacityRCU += item.capacityRCU
+		resource.RawCapacityRCU += item.capacityRCU
 	}
-	resource.CurrentCapacityRCU = round2(resource.CurrentCapacityRCU)
+	resource.RawCapacityRCU = round2(resource.RawCapacityRCU)
+	resource.CurrentCapacityRCU = resource.RawCapacityRCU
 	if consumeRCUPerMinute > 0 {
 		usableCapacity, wasteRisk := smartExpiryLimitedCapacity(capacityItems, consumeRCUPerMinute)
 		resource.TimeLimitedCapacityRCU = round2(usableCapacity)
@@ -601,10 +594,7 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 	unit := smartProductUnitCapacity(cfg.Product)
 	resource.UnitCapacityRCU = unit
 	consumeRCUPerMinute := applySmartUsage(&resource, usageStats, unit)
-	resource.RiskAdjustedUnitCapacityRCU = round2(smart401RiskCapacityRCU(cfg, resource, true))
 	var weightedCapacity float64
-	var totalRawCapacity float64
-	riskCapacityPerVerifiedAccount := smart401RiskCapacityRCU(cfg, resource, false)
 	var effectiveAvailable float64
 	capacityItems := make([]smartCapacityItem, 0, len(authSnapshot.files))
 	for _, file := range authSnapshot.files {
@@ -626,16 +616,14 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		resource.AvailableAccounts++
 		resource.HealthyAccounts++
 		remainingMinutes := smartAccountRemainingMinutes(file.Raw, now, smartAccountLifetimeMinutes())
-		accountRawCapacity, ok := smartAccountCapacityRCU(file.Raw, unit, remainingMinutes)
+		rawCapacity, ok := smartAccountCapacityRCU(file.Raw, unit, remainingMinutes)
 		if !ok {
-			accountRawCapacity = smartEstimatedAccountCapacityRCU(unit, remainingMinutes)
+			rawCapacity = smartEstimatedAccountCapacityRCU(unit, remainingMinutes)
 		}
-		totalRawCapacity += accountRawCapacity
-		reliableCapacity := smartReliableAccountCapacityRCU(accountRawCapacity, riskCapacityPerVerifiedAccount)
-		weightedCapacity += reliableCapacity
-		if reliableCapacity > 0 {
+		weightedCapacity += rawCapacity
+		if rawCapacity > 0 {
 			capacityItems = append(capacityItems, smartCapacityItem{
-				capacityRCU:      reliableCapacity,
+				capacityRCU:      rawCapacity,
 				remainingMinutes: remainingMinutes,
 			})
 		}
@@ -643,8 +631,8 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 	}
 	resource.AvailableAccounts = int(effectiveAvailable)
 	resource.WeakAccounts = max(0, resource.AvailableAccounts-resource.HealthyAccounts)
-	resource.RawCapacityRCU = round2(totalRawCapacity)
-	resource.CurrentCapacityRCU = round2(weightedCapacity)
+	resource.RawCapacityRCU = round2(weightedCapacity)
+	resource.CurrentCapacityRCU = resource.RawCapacityRCU
 	if consumeRCUPerMinute > 0 {
 		usableCapacity, wasteRisk := smartExpiryLimitedCapacity(capacityItems, consumeRCUPerMinute)
 		resource.TimeLimitedCapacityRCU = round2(usableCapacity)
@@ -749,9 +737,9 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 		return
 	}
 
-	unitForNew := resource.RiskAdjustedUnitCapacityRCU
+	unitForNew := smartEstimatedNewAccountCapacityRCU(cfg)
 	if unitForNew <= 0 {
-		unitForNew = smartEstimatedNewAccountCapacityRCU(cfg)
+		unitForNew = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
 	}
 	maxUsefulNewCapacity := math.Max(0, resource.ConsumeRCUPerMinute*float64(smartUsefulAccountLifetimeMinutes())-resource.CurrentCapacityRCU-resource.PrelockedCapacityRCU)
 	gapForOrder := math.Min(resource.CapacityGapRCU, maxUsefulNewCapacity)
@@ -776,17 +764,10 @@ func applySmartAccountQuantityEstimate(cfg store.ManagerSupplyConfig, resource *
 	}
 	projected := max(0, resource.AvailableAccounts)
 	required := smartHealthyAvailableAccounts(cfg)
-	// Required account count describes the steady verified pool, so use the
-	// full forward-looking risk unit. The confidence-discounted new-account unit
-	// still sizes provisional capacity and the capacity gap, but must not make a
-	// healthy ten-account waterline display as fifteen required accounts.
-	unit := smart401RiskCapacityRCU(cfg, *resource, false)
-	if unit <= 0 {
-		unit = resource.RiskAdjustedUnitCapacityRCU
-	}
-	if unit <= 0 {
-		unit = smartEstimatedNewAccountCapacityRCU(cfg)
-	}
+	// Required account count uses the conservative quota estimate for a new
+	// credential. 401 request/time thresholds stay in the risk and waterline
+	// model and never become an RCU conversion factor.
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
 	if unit <= 0 && resource.UnitCapacityRCU > 0 {
 		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
 	}
@@ -1500,7 +1481,7 @@ func (s *Service) currentSmartResource(cfg store.ManagerSupplyConfig) SmartResou
 	resource.AccountMaxRequestsBefore401 = smartAccountMaxRequestsBefore401(cfg)
 	resource.AccountMaxUsefulSeconds401 = smartAccountMaxUsefulSecondsBefore401(cfg)
 	resource.EstimatedNewAccountCapacityRCU = round2(smartEstimatedNewAccountCapacityRCU(cfg))
-	resource.RiskAdjustedUnitCapacityRCU = round2(smart401RiskCapacityRCU(cfg, resource, true))
+	resource.RiskAdjustedUnitCapacityRCU = round2(smartEstimatedNewAccountCapacityRCU(cfg))
 	configChanged := previousEffectiveMinutes != resource.EffectiveHealthyMinutes ||
 		previousWarningMinutes != resource.WarningMinutes ||
 		previousCriticalMinutes != resource.CriticalMinutes ||
@@ -1731,9 +1712,9 @@ func smartRisingObservationQuantity(cfg store.ManagerSupplyConfig, resource Smar
 	// reservation to 1/2/3 credentials according to the currently observed
 	// shortfall, then let the next complete minute and 5/10-minute windows
 	// decide whether another batch is justified.
-	unit := resource.RiskAdjustedUnitCapacityRCU
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
 	if unit <= 0 {
-		unit = smartEstimatedNewAccountCapacityRCU(cfg)
+		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
 	}
 	needed := 1
 	if unit > 0 && resource.CapacityGapRCU > 0 {
@@ -1816,64 +1797,6 @@ func smartEstimatedNewAccountCapacityRCU(cfg store.ManagerSupplyConfig) float64 
 		confidence = 1
 	}
 	return capacity * confidence
-}
-
-// smart401RiskCapacityRCU translates the configured 401 request/time limits
-// into the same RCU unit used by quota capacity. A request costs at least one
-// RCU; token-heavy traffic raises the average RCU per successful request. The
-// request and time limits are parallel failure bounds, so the lower one wins.
-// A successful inspection starts a fresh forward-looking risk window; account
-// age never removes an otherwise live credential from the available count.
-func smart401RiskCapacityRCU(cfg store.ManagerSupplyConfig, resource SmartResource, forNewAccount bool) float64 {
-	if !smartSupplyStrategyConfigured(cfg) {
-		return 0
-	}
-	requestLimit := smartAccountMaxRequestsBefore401(cfg)
-	secondsLimit := smartAccountMaxUsefulSecondsBefore401(cfg)
-	averageRequestRCU := 1.0
-	requestRate := resource.RequestDemandRCUPerMinute
-	if requestRate <= 0 {
-		requestRate = resource.RPM30M
-	}
-	if resource.ConsumeRCUPerMinute > 0 && requestRate > 0 {
-		averageRequestRCU = math.Max(1, resource.ConsumeRCUPerMinute/requestRate)
-	}
-	requestCapacity := float64(requestLimit) * averageRequestRCU
-	timeCapacity := 0.0
-	if resource.ConsumeRCUPerMinute > 0 && secondsLimit > 0 {
-		timeCapacity = resource.ConsumeRCUPerMinute * float64(secondsLimit) / 60
-	}
-	capacity := lowestPositive(requestCapacity, timeCapacity)
-	if capacity <= 0 {
-		return 0
-	}
-	if forNewAccount {
-		capacity *= smartNewAccountConfidence(cfg)
-	}
-	return capacity
-}
-
-func smartReliableAccountCapacityRCU(quotaCapacity float64, riskCapacity float64) float64 {
-	if quotaCapacity <= 0 {
-		return 0
-	}
-	if riskCapacity <= 0 {
-		return quotaCapacity
-	}
-	return math.Min(quotaCapacity, riskCapacity)
-}
-
-func lowestPositive(values ...float64) float64 {
-	result := 0.0
-	for _, value := range values {
-		if value <= 0 {
-			continue
-		}
-		if result <= 0 || value < result {
-			result = value
-		}
-	}
-	return result
 }
 
 func smartConsumeRCUPerMinute(rpm30 float64, rpm5Peak float64, tpm30 float64, unit float64) float64 {

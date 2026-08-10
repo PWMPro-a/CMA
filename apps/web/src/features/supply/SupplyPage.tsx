@@ -1001,14 +1001,10 @@ export function SupplyPage() {
         {
           label: t('supply.effective_capacity_1h'),
           value: formatRcu(smart?.currentCapacityRcu),
-          detail: t('supply.reliable_capacity_detail', {
+          detail: t('supply.raw_capacity_waste_detail', {
             raw: formatNumber(smart?.rawCapacityRcu ?? smart?.currentCapacityRcu),
-            unit: formatNumber(smart?.riskAdjustedUnitCapacityRcu),
-            requests:
-              smart?.accountMaxRequestsBefore401 ?? draft.accountMaxRequestsBefore401,
-            seconds:
-              smart?.accountMaxUsefulSecondsBefore401 ??
-              draft.accountMaxUsefulSecondsBefore401,
+            waste: formatNumber(smart?.expiryWasteRiskRcu ?? 0),
+            minutes: smart?.accountLifetimeMinutes ?? 60,
           }),
           icon: <IconDatabaseZap size={18} />,
           tone: 'teal',
@@ -1089,8 +1085,6 @@ export function SupplyPage() {
     ];
   }, [
     balance,
-    draft.accountMaxRequestsBefore401,
-    draft.accountMaxUsefulSecondsBefore401,
     draft.healthyMinutesTarget,
     draft.smartEnabled,
     draft.targetAvailableAccounts,
