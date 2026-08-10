@@ -4526,11 +4526,14 @@ func (s *Service) automaticBaselineBlockReason(resource SmartResource) string {
 	if accountAtMS < baselineAtMS {
 		return "initial_account_snapshot_pending"
 	}
-	if !resource.SnapshotFresh {
-		s.requestStaleInspectionSnapshotRefresh()
-		return "initial_capacity_snapshot_pending"
-	}
-	if s.hasInspectionSnapshotRefresher() && (resource.CapacitySnapshotAtMS < baselineAtMS || resource.SnapshotRefreshInProgress) {
+	// A process restart must not invalidate a completed, still-fresh quota
+	// snapshot. Requiring CapacitySnapshotAtMS >= baselineAtMS made every deploy
+	// wait for another full-pool inspection even though live account counts were
+	// already refreshed and the existing quota evidence was valid. That can
+	// strand a critical pool for many minutes. Missing/stale evidence still
+	// blocks, and imported accounts remain protected by the separate pending
+	// inspection guard below.
+	if !resource.SnapshotFresh || resource.CapacitySnapshotAtMS <= 0 {
 		s.requestStaleInspectionSnapshotRefresh()
 		return "initial_capacity_snapshot_pending"
 	}

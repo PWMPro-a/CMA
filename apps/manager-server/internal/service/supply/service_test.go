@@ -145,13 +145,20 @@ func TestAutomaticSupplyGuardRequiresFreshBaselineAndSettledImports(t *testing.T
 	service.inspectionSnapshotRefresh.refresh = func(context.Context) error { return nil }
 
 	resource := SmartResource{SnapshotFresh: true, CapacitySnapshotAtMS: nowMS - 1}
-	if reason := service.automaticSupplyGuardReason(resource); reason != "initial_capacity_snapshot_pending" {
-		t.Fatalf("old capacity baseline reason = %q", reason)
-	}
-	resource.CapacitySnapshotAtMS = nowMS
 	if reason := service.automaticSupplyGuardReason(resource); reason != "" {
-		t.Fatalf("fresh baseline reason = %q", reason)
+		t.Fatalf("fresh persisted capacity snapshot must survive a process restart, reason = %q", reason)
 	}
+	resource.SnapshotRefreshInProgress = true
+	if reason := service.automaticSupplyGuardReason(resource); reason != "" {
+		t.Fatalf("background refresh must not hide a still-fresh completed snapshot, reason = %q", reason)
+	}
+	resource.SnapshotFresh = false
+	if reason := service.automaticSupplyGuardReason(resource); reason != "initial_capacity_snapshot_pending" {
+		t.Fatalf("stale capacity baseline reason = %q", reason)
+	}
+	resource.SnapshotFresh = true
+	resource.SnapshotRefreshInProgress = false
+	resource.CapacitySnapshotAtMS = nowMS
 	resource.PendingInspectionAccounts = 6
 	if reason := service.automaticSupplyGuardReason(resource); reason != "pending_account_inspection" {
 		t.Fatalf("pending import guard reason = %q", reason)
