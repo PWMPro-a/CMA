@@ -852,6 +852,28 @@
   color: var(--text-tertiary);
 }
 
+.recoveryProcessNote {
+  display: grid;
+  gap: 4px;
+  margin: 0 14px 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 24%, var(--border-color));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.recoveryProcessNote strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.recoveryProcessNote small {
+  color: var(--text-tertiary);
+}
+
 .recoveryImportCell {
   display: grid;
   min-width: 150px;
@@ -915,6 +937,11 @@
   color: var(--text-secondary);
   white-space: normal;
   line-height: 1.4;
+}
+
+.recoveryRetryHint {
+  color: #b36905;
+  line-height: 1.35;
 }
 
 .statusPill.warning,

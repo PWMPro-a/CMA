@@ -267,9 +267,17 @@ const shortOrderId = (value?: string) => {
 };
 
 const orderTone = (status: string) => {
-  if (status === 'completed' || status === 'released') return styles.success;
+  if (status === 'completed' || status === 'released' || status === 'imported')
+    return styles.success;
   if (status === 'failed' || status === 'cancelled' || status === 'dismissed') return styles.error;
-  if (status === 'partial' || status === 'recovery_partial' || status === 'create_uncertain')
+  if (
+    status === 'partial' ||
+    status === 'recovery_partial' ||
+    status === 'create_uncertain' ||
+    status === 'retry_scheduled' ||
+    status === 'claimed_waiting_task' ||
+    status === 'refunded'
+  )
     return styles.warning;
   return styles.active;
 };
@@ -320,7 +328,14 @@ export function SupplyPage() {
   const [reportRangePreset, setReportRangePreset] = useState<ReportRangePreset>('today');
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [action, setAction] = useState<
-    'save' | 'check' | 'replenish' | 'dismiss' | 'syncRecoveries' | 'claimRecovery' | null
+    | 'save'
+    | 'check'
+    | 'replenish'
+    | 'dismiss'
+    | 'syncRecoveries'
+    | 'claimRecovery'
+    | 'retryRecoveryImport'
+    | null
   >(null);
   const configDirtyRef = useRef(false);
   const loadInFlightRef = useRef(false);
@@ -592,6 +607,25 @@ export function SupplyPage() {
       showNotification(t('supply.recovery_claim_success'), 'success');
     } catch (error) {
       showNotification(error instanceof Error ? error.message : t('common.unknown_error'), 'error');
+    } finally {
+      setAction(null);
+    }
+  };
+
+  const retryRecoveryImport = async (recoveryId: string) => {
+    setAction('retryRecoveryImport');
+    try {
+      await supplyApi.retryRecoveryImport(recoveryId);
+      await Promise.all([
+        load(true, true),
+        loadRecoveries(true),
+        activeTab === 'accounts' ? loadAccounts(true) : Promise.resolve(),
+        activeTab === 'reports' ? loadReport(true) : Promise.resolve(),
+      ]);
+      showNotification(t('supply.recovery_import_retry_success'), 'success');
+    } catch (error) {
+      showNotification(error instanceof Error ? error.message : t('common.unknown_error'), 'error');
+      await loadRecoveries(true);
     } finally {
       setAction(null);
     }
@@ -2284,6 +2318,11 @@ export function SupplyPage() {
               {recovery?.lastError ? (
                 <div className={styles.errorBanner}>{recovery.lastError}</div>
               ) : null}
+              <div className={styles.recoveryProcessNote}>
+                <strong>{t('supply.recovery_process_title')}</strong>
+                <span>{t('supply.recovery_process_steps')}</span>
+                <small>{t('supply.recovery_process_complete_hint')}</small>
+              </div>
               <div className={styles.tableWrap}>
                 <table>
                   <thead>
@@ -2309,7 +2348,25 @@ export function SupplyPage() {
                       const firstImportError = importItems.find(
                         (importItem) => importItem.lastError
                       )?.lastError;
-                      const failureReason = item.lastError || firstImportError;
+                      const rawFailureReason = item.lastError || firstImportError;
+                      const importStatus = item.importStatus || item.status || 'importing';
+                      const importStageHint = t(`supply.recovery_import_${importStatus}_hint`, {
+                        defaultValue: item.importMessage || '',
+                      });
+                      const databaseBusy = /database (?:table )?is locked|sqlite_busy|locked \(517\)/i.test(
+                        rawFailureReason || ''
+                      );
+                      const failureReason = databaseBusy
+                        ? t('supply.recovery_import_database_busy')
+                        : rawFailureReason || importStageHint;
+                      const retryableImport =
+                        Boolean(item.claimOrderId) &&
+                        importStatus !== 'imported' &&
+                        importStatus !== 'refunded' &&
+                        (Boolean(item.importFailedCount) ||
+                          importStatus === 'failed' ||
+                          importStatus === 'partial' ||
+                          importStatus === 'retry_scheduled');
                       return (
                         <tr key={item.recoveryId}>
                           <td>
@@ -2339,9 +2396,9 @@ export function SupplyPage() {
                             </span>
                           </td>
                           <td>
-                            <span className={`${styles.statusPill} ${orderTone(item.status)}`}>
-                              {t(`supply.recovery_status_${item.status}`, {
-                                defaultValue: item.status,
+                            <span className={`${styles.statusPill} ${orderTone(importStatus)}`}>
+                              {t(`supply.recovery_import_${importStatus}`, {
+                                defaultValue: importStatus,
                               })}
                             </span>
                             <div className={styles.recoveryImportCell}>
@@ -2350,7 +2407,9 @@ export function SupplyPage() {
                                 <small>
                                   {itemCount > 0
                                     ? `${importedCount}/${itemCount}`
-                                    : t('supply.import_not_started')}
+                                    : t(`supply.recovery_import_${importStatus}`, {
+                                        defaultValue: t('supply.import_not_started'),
+                                      })}
                                 </small>
                               </div>
                               <div className={styles.progressTrack}>
@@ -2370,6 +2429,14 @@ export function SupplyPage() {
                                   ? t('supply.import_complete')
                                   : ''}
                               </small>
+                              {item.importNextRetryAtMs ? (
+                                <small className={styles.recoveryRetryHint}>
+                                  {t('supply.recovery_import_auto_retry_at', {
+                                    time: formatTime(item.importNextRetryAtMs),
+                                    countdown: formatCountdown(item.importNextRetryAtMs, nowMs),
+                                  })}
+                                </small>
+                              ) : null}
                             </div>
                             {item.refundedFen ? (
                               <small>
@@ -2434,7 +2501,12 @@ export function SupplyPage() {
                                   ))
                                 : null}
                               {!importItems.length && !item.importedFileNames?.length ? (
-                                <span className={styles.muted}>-</span>
+                                <div className={styles.accountMeta}>
+                                  <span className={styles.muted}>
+                                    {t('supply.recovery_import_file_not_ready')}
+                                  </span>
+                                  <small>{t('supply.recovery_import_file_after_success')}</small>
+                                </div>
                               ) : null}
                             </div>
                           </td>
@@ -2458,12 +2530,25 @@ export function SupplyPage() {
                             </div>
                           </td>
                           <td>
-                            <span className={styles.recoveryReason} title={failureReason || ''}>
+                            <span
+                              className={styles.recoveryReason}
+                              title={rawFailureReason || item.importMessage || ''}
+                            >
                               {failureReason || t('supply.no_failure_reason')}
                             </span>
                           </td>
                           <td>
-                            {item.status === 'claimable' ? (
+                            {retryableImport ? (
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                loading={action === 'retryRecoveryImport'}
+                                onClick={() => void retryRecoveryImport(item.recoveryId)}
+                              >
+                                <IconRefreshCw size={14} />{' '}
+                                {t('supply.recovery_import_retry_now')}
+                              </Button>
+                            ) : item.status === 'claimable' ? (
                               recovery?.autoClaim !== false ? (
                                 <span className={`${styles.statusPill} ${styles.active}`}>
                                   {t('supply.recovery_auto_queued')}
@@ -2478,6 +2563,14 @@ export function SupplyPage() {
                                   {t('supply.recovery_claim_now')}
                                 </Button>
                               )
+                            ) : importStatus === 'claimed_waiting_task' ? (
+                              <span className={`${styles.statusPill} ${styles.warning}`}>
+                                {t('supply.recovery_waiting_next_sync')}
+                              </span>
+                            ) : importStatus === 'retry_scheduled' ? (
+                              <span className={`${styles.statusPill} ${styles.active}`}>
+                                {t('supply.recovery_auto_retry_queued')}
+                              </span>
                             ) : (
                               '-'
                             )}

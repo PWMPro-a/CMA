@@ -37,6 +37,7 @@ var (
 	ErrCreateUncertain             = errors.New("supply order creation result is uncertain")
 	ErrOrderNotFound               = errors.New("supply order was not found")
 	ErrNotCreateUncertain          = errors.New("supply order is not waiting for create-result confirmation")
+	ErrRecoveryImportNotReady      = errors.New("recovery has no local CPA import task to retry")
 	ErrCapacitySnapshotUnavailable = errors.New("quota inspection snapshot is unavailable")
 )
 
@@ -919,12 +920,106 @@ func (s *Service) ListRecoveries(ctx context.Context, limit int, status string) 
 				}
 			case "failed":
 				recoveries[index].ImportFailedCount++
+				if item.NextRetryAtMS > 0 && (recoveries[index].ImportNextRetryAtMS == 0 || item.NextRetryAtMS < recoveries[index].ImportNextRetryAtMS) {
+					recoveries[index].ImportNextRetryAtMS = item.NextRetryAtMS
+				}
 			default:
 				recoveries[index].ImportPendingCount++
 			}
 		}
+		applyRecoveryImportStage(&recoveries[index])
 	}
 	return recoveries, nil
+}
+
+func (s *Service) RetryRecoveryImport(ctx context.Context, recoveryID string) (store.SupplyRecovery, error) {
+	if s == nil || s.store == nil || s.managerConfig == nil {
+		return store.SupplyRecovery{}, ErrNotConfigured
+	}
+	recoveryID = strings.TrimSpace(recoveryID)
+	recovery, found, err := s.store.GetSupplyRecovery(ctx, recoveryID)
+	if err != nil {
+		return store.SupplyRecovery{}, err
+	}
+	if !found {
+		return store.SupplyRecovery{}, ErrOrderNotFound
+	}
+	if strings.TrimSpace(recovery.ClaimOrderID) == "" {
+		return recovery, ErrRecoveryImportNotReady
+	}
+	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		return recovery, err
+	}
+	if !cpaManagementConfigured(cfg) {
+		return recovery, ErrNotConfigured
+	}
+	reset, err := s.store.ResetSupplyRecoveryImport(ctx, recoveryID, time.Now().UnixMilli())
+	if err != nil {
+		return recovery, err
+	}
+	if !reset {
+		if recovery.ItemCount > 0 && recovery.ImportedCount >= recovery.ItemCount {
+			return recovery, nil
+		}
+		return recovery, ErrRecoveryImportNotReady
+	}
+	recovery, found, err = s.store.GetSupplyRecovery(ctx, recoveryID)
+	if err != nil || !found {
+		return recovery, err
+	}
+	_, _, processErr := s.processRecoveryImport(ctx, cfg, recovery)
+	latest, _, getErr := s.store.GetSupplyRecovery(ctx, recoveryID)
+	if getErr != nil {
+		return recovery, getErr
+	}
+	return latest, processErr
+}
+
+func applyRecoveryImportStage(recovery *store.SupplyRecovery) {
+	if recovery == nil {
+		return
+	}
+	status := strings.ToLower(strings.TrimSpace(recovery.Status))
+	deliveryStatus := strings.ToLower(strings.TrimSpace(recovery.DeliveryStatus))
+	switch {
+	case status == "refunded" || deliveryStatus == "refunded":
+		recovery.ImportStatus = "refunded"
+		recovery.ImportMessage = "supplier refunded this recovery; no CPA import is expected"
+	case recovery.ItemCount > 0 && recovery.ImportedCount >= recovery.ItemCount:
+		recovery.ImportStatus = "imported"
+		recovery.ImportMessage = "all replacement files are registered in the CPA account pool"
+	case status == "imported":
+		recovery.ImportStatus = "imported"
+		recovery.ImportMessage = "replacement files are registered in the CPA account pool"
+	case strings.TrimSpace(recovery.ClaimOrderID) == "" && (status == "claimable" || status == "seen"):
+		recovery.ImportStatus = "waiting_claim"
+		recovery.ImportMessage = "waiting for automatic claim before a local import task can be created"
+	case strings.TrimSpace(recovery.ClaimOrderID) == "" && status == "claiming":
+		recovery.ImportStatus = "claiming"
+		recovery.ImportMessage = "the supplier claim is running; the local import task will be created next"
+	case strings.TrimSpace(recovery.ClaimOrderID) == "":
+		recovery.ImportStatus = "claimed_waiting_task"
+		recovery.ImportMessage = "supplier delivery is marked claimed, but the local CPA import task has not been created"
+	case recovery.ItemCount == 0 || len(recovery.ImportItems) == 0:
+		recovery.ImportStatus = "claimed_waiting_task"
+		recovery.ImportMessage = "the claim is stored, but no local import item is available yet"
+	case recovery.ImportFailedCount > 0 && recovery.ImportNextRetryAtMS > 0:
+		recovery.ImportStatus = "retry_scheduled"
+		recovery.ImportMessage = "a CPA import attempt failed and automatic retry is scheduled"
+	case recovery.ImportFailedCount > 0:
+		recovery.ImportStatus = "failed"
+		recovery.ImportMessage = "the latest CPA import attempt failed"
+	case recovery.ImportedCount > 0:
+		recovery.ImportStatus = "partial"
+		recovery.ImportMessage = "some replacement files are imported and the remainder is still processing"
+	case recovery.ImportPendingCount > 0:
+		recovery.ImportStatus = "task_pending"
+		recovery.ImportMessage = "the local import task is ready and waiting for execution"
+	default:
+		recovery.ImportStatus = "importing"
+		recovery.ImportMessage = "the replacement is being written to the CPA account pool"
+	}
 }
 
 func (s *Service) ListAccounts(ctx context.Context, req SupplyAccountsRequest) (SupplyAccountList, error) {
@@ -3583,26 +3678,9 @@ func (s *Service) claimRecovery(ctx context.Context, cfg store.ManagerConfig, re
 		return errors.New("recovery claim response did not include importable accounts")
 	}
 	orderID := recoveryOrderID(recovery.RecoveryID)
-	if _, found, err := s.store.GetSupplyOrder(ctx, orderID); err != nil {
-		return err
-	} else if !found {
-		product := firstNonEmptyString(recovery.Product, cfg.Supply.Product)
-		if product == "" {
-			product = "oauth_30d"
-		}
-		if _, err := s.store.CreateSupplyOrder(ctx, store.SupplyOrder{
-			OrderID:           orderID,
-			Product:           product,
-			RequestedQuantity: len(normalized),
-			Automatic:         true,
-			Strategy:          "recovery",
-			TriggerReason:     "recovery_claimed",
-			Status:            "recovery_importing",
-			RemoteStatus:      "recovery_claimed",
-			ItemCount:         len(normalized),
-		}); err != nil {
-			return err
-		}
+	product := firstNonEmptyString(recovery.Product, cfg.Supply.Product)
+	if product == "" {
+		product = "oauth_30d"
 	}
 	items := make([]store.SupplyImportItem, 0, len(normalized))
 	seen := make(map[string]struct{}, len(normalized))
@@ -3621,26 +3699,30 @@ func (s *Service) claimRecovery(ctx context.Context, cfg store.ManagerConfig, re
 			LeaseExpiresAtMS: account.leaseExpiresAtMS,
 		})
 	}
-	inserted, err := s.store.InsertSupplyImportItems(ctx, orderID, items)
-	if err != nil {
+	claimedAtMS := time.Now().UnixMilli()
+	recovery.CredentialVersion = max(recovery.CredentialVersion, claimed.CredentialVersion)
+	recovery.Status = "importing"
+	recovery.DeliveryStatus = firstNonEmptyString(claimed.Recovery.DeliveryStatus, "claimed")
+	recovery.ClaimOrderID = orderID
+	recovery.ItemCount = len(items)
+	recovery.LastSeenAtMS = claimedAtMS
+	order := store.SupplyOrder{
+		OrderID:           orderID,
+		Product:           product,
+		RequestedQuantity: len(items),
+		Automatic:         true,
+		Strategy:          "recovery",
+		TriggerReason:     "recovery_claimed",
+		Status:            "recovery_importing",
+		RemoteStatus:      "recovery_claimed",
+		ItemCount:         len(items),
+	}
+	// The supplier ticket is consumed before local persistence. Keep the local
+	// order, encrypted payloads, and recovery state in one retried transaction
+	// so SQLite writer contention cannot leave a claimed replacement without an
+	// import task.
+	if err := s.store.PersistSupplyRecoveryClaim(ctx, recovery, order, items, claimedAtMS); err != nil {
 		return err
-	}
-	if inserted == 0 && len(items) > 0 {
-		inserted = len(items)
-	}
-	if err := s.store.MarkSupplyRecoveryClaimed(ctx, recovery.RecoveryID, orderID, inserted, time.Now().UnixMilli()); err != nil {
-		return err
-	}
-	if claimed.CredentialVersion > recovery.CredentialVersion {
-		recovery.CredentialVersion = claimed.CredentialVersion
-		recovery.Status = "importing"
-		recovery.DeliveryStatus = firstNonEmptyString(claimed.Recovery.DeliveryStatus, "claimed")
-		recovery.ClaimOrderID = orderID
-		recovery.ItemCount = inserted
-		recovery.LastSeenAtMS = time.Now().UnixMilli()
-		if _, err := s.store.UpsertSupplyRecoveries(ctx, []store.SupplyRecovery{recovery}); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -3687,73 +3769,82 @@ func (s *Service) processPendingRecoveryImports(ctx context.Context, cfg store.M
 	failedRecoveries := 0
 	var firstErr error
 	for _, recovery := range recoveries {
-		if strings.TrimSpace(recovery.ClaimOrderID) == "" {
-			continue
-		}
-		order, found, err := s.store.GetSupplyOrder(ctx, recovery.ClaimOrderID)
-		if err != nil {
-			failedRecoveries++
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		if !found {
-			err := fmt.Errorf("recovery import order %s was not found", recovery.ClaimOrderID)
-			_ = s.store.MarkSupplyRecoveryFailed(ctx, recovery.RecoveryID, safeError(err))
-			failedRecoveries++
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		err = s.importItems(ctx, cfg, &order)
-		total, imported, countsErr := s.store.SupplyImportCounts(ctx, recovery.ClaimOrderID)
-		if countsErr != nil {
-			failedRecoveries++
-			if firstErr == nil {
-				firstErr = countsErr
-			}
-			continue
-		}
-		if total > 0 && imported == total {
-			if markErr := s.store.MarkSupplyRecoveryImported(ctx, recovery.RecoveryID, imported); markErr != nil {
-				failedRecoveries++
-				if firstErr == nil {
-					firstErr = markErr
-				}
-				continue
-			}
+		imported, failed, err := s.processRecoveryImport(ctx, cfg, recovery)
+		if imported {
 			importedRecoveries++
-			if disableErr := s.disableRecoveredOriginal(ctx, cfg, recovery); disableErr != nil {
-				message := "original account disable failed: " + safeError(disableErr)
-				_ = s.store.SetSupplyRecoveryLastError(ctx, recovery.RecoveryID, message)
-				failedRecoveries++
-				if firstErr == nil {
-					firstErr = errors.New(message)
-				}
-			}
-			continue
 		}
-		message := ""
-		if err != nil {
-			message = safeError(err)
-		}
-		if markErr := s.store.MarkSupplyRecoveryImportProgress(ctx, recovery.RecoveryID, total, imported, message); markErr != nil {
+		if failed {
 			failedRecoveries++
-			if firstErr == nil {
-				firstErr = markErr
-			}
-			continue
 		}
-		if err != nil {
-			failedRecoveries++
-			if firstErr == nil {
-				firstErr = err
-			}
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 	return importedRecoveries, failedRecoveries, firstErr
+}
+
+func (s *Service) processRecoveryImport(ctx context.Context, cfg store.ManagerConfig, recovery store.SupplyRecovery) (bool, bool, error) {
+	orderID := strings.TrimSpace(recovery.ClaimOrderID)
+	if orderID == "" {
+		// Older builds could persist the local order and encrypted import item,
+		// then lose only the final recovery link to a SQLite writer conflict.
+		// Recover that deterministic link without claiming the supplier ticket a
+		// second time.
+		orderID = recoveryOrderID(recovery.RecoveryID)
+	}
+	order, found, err := s.store.GetSupplyOrder(ctx, orderID)
+	if err != nil {
+		return false, true, err
+	}
+	if !found {
+		if strings.TrimSpace(recovery.ClaimOrderID) == "" {
+			return false, false, nil
+		}
+		err := fmt.Errorf("recovery import order %s was not found", orderID)
+		_ = s.store.MarkSupplyRecoveryFailed(ctx, recovery.RecoveryID, safeError(err))
+		return false, true, err
+	}
+	if strings.TrimSpace(recovery.ClaimOrderID) == "" {
+		total, _, countsErr := s.store.SupplyImportCounts(ctx, orderID)
+		if countsErr != nil {
+			return false, true, countsErr
+		}
+		if total == 0 {
+			return false, false, nil
+		}
+		if err := s.store.MarkSupplyRecoveryClaimed(ctx, recovery.RecoveryID, orderID, total, time.Now().UnixMilli()); err != nil {
+			return false, true, err
+		}
+		recovery.ClaimOrderID = orderID
+		recovery.ItemCount = total
+	}
+	err = s.importItems(ctx, cfg, &order)
+	total, imported, countsErr := s.store.SupplyImportCounts(ctx, orderID)
+	if countsErr != nil {
+		return false, true, countsErr
+	}
+	if total > 0 && imported == total {
+		if markErr := s.store.MarkSupplyRecoveryImported(ctx, recovery.RecoveryID, imported); markErr != nil {
+			return false, true, markErr
+		}
+		if disableErr := s.disableRecoveredOriginal(ctx, cfg, recovery); disableErr != nil {
+			message := "original account disable failed: " + safeError(disableErr)
+			_ = s.store.SetSupplyRecoveryLastError(ctx, recovery.RecoveryID, message)
+			return true, true, errors.New(message)
+		}
+		return true, false, nil
+	}
+	message := ""
+	if err != nil {
+		message = safeError(err)
+	}
+	if markErr := s.store.MarkSupplyRecoveryImportProgress(ctx, recovery.RecoveryID, total, imported, message); markErr != nil {
+		return false, true, markErr
+	}
+	if err != nil {
+		return false, true, err
+	}
+	return false, false, nil
 }
 
 func (s *Service) disableRecoveredOriginal(ctx context.Context, cfg store.ManagerConfig, recovery store.SupplyRecovery) error {

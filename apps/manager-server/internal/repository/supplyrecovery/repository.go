@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 )
 
@@ -29,6 +30,8 @@ type Repository interface {
 	ListClaimable(ctx context.Context, limit int) ([]model.SupplyRecovery, error)
 	ListImportPending(ctx context.Context, limit int) ([]model.SupplyRecovery, error)
 	ClaimForProcessing(ctx context.Context, recoveryID string, nowMS int64) (model.SupplyRecovery, bool, error)
+	PersistClaim(ctx context.Context, recovery model.SupplyRecovery, order model.SupplyOrder, items []model.SupplyImportItem, claimedAtMS int64) error
+	ResetImport(ctx context.Context, recoveryID string, nowMS int64) (bool, error)
 	MarkClaimed(ctx context.Context, recoveryID string, claimOrderID string, itemCount int, claimedAtMS int64) error
 	MarkImportProgress(ctx context.Context, recoveryID string, itemCount int, importedCount int, lastError string) error
 	MarkImported(ctx context.Context, recoveryID string, importedCount int) error
@@ -55,33 +58,30 @@ func (r *repository) UpsertMany(ctx context.Context, recoveries []model.SupplyRe
 	if len(recoveries) == 0 {
 		return 0, nil
 	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UnixMilli()
 	updated := 0
-	for _, recovery := range recoveries {
-		recovery.RecoveryID = strings.TrimSpace(recovery.RecoveryID)
-		if recovery.RecoveryID == "" {
-			continue
-		}
-		if recovery.Status == "" {
-			recovery.Status = statusFromDelivery(recovery.DeliveryStatus, recovery.ClaimURL, recovery.RefundedFen)
-		}
-		if recovery.LastSeenAtMS <= 0 {
-			recovery.LastSeenAtMS = now
-		}
-		claimURL, err := r.protect(recovery.ClaimURL)
-		if err != nil {
-			return updated, err
-		}
-		rawJSON, err := r.protect(recovery.RawJSON)
-		if err != nil {
-			return updated, err
-		}
-		result, err := tx.ExecContext(ctx, `insert into supply_recoveries (
+	err := sqliterepo.WithTxBusyRetry(ctx, r.db, func(tx *sql.Tx) error {
+		updated = 0
+		for _, recovery := range recoveries {
+			recovery.RecoveryID = strings.TrimSpace(recovery.RecoveryID)
+			if recovery.RecoveryID == "" {
+				continue
+			}
+			if recovery.Status == "" {
+				recovery.Status = statusFromDelivery(recovery.DeliveryStatus, recovery.ClaimURL, recovery.RefundedFen)
+			}
+			if recovery.LastSeenAtMS <= 0 {
+				recovery.LastSeenAtMS = now
+			}
+			claimURL, err := r.protect(recovery.ClaimURL)
+			if err != nil {
+				return err
+			}
+			rawJSON, err := r.protect(recovery.RawJSON)
+			if err != nil {
+				return err
+			}
+			result, err := tx.ExecContext(ctx, `insert into supply_recoveries (
 			recovery_id, product, delivery_status, status, credential_version, original_file_name, original_auth_index,
 			original_email, claim_url, claim_order_id, item_count, imported_count, refunded_fen,
 			last_error, raw_json, last_seen_at_ms, claimed_at_ms, created_at_ms, updated_at_ms
@@ -108,24 +108,23 @@ func (r *repository) UpsertMany(ctx context.Context, recoveries []model.SupplyRe
 			raw_json = coalesce(nullif(excluded.raw_json, ''), supply_recoveries.raw_json),
 			last_seen_at_ms = excluded.last_seen_at_ms,
 			updated_at_ms = excluded.updated_at_ms`,
-			recovery.RecoveryID, nullString(recovery.Product), strings.ToLower(strings.TrimSpace(recovery.DeliveryStatus)), recovery.Status,
-			recovery.CredentialVersion,
-			nullString(recovery.OriginalFileName), nullString(recovery.OriginalAuthIndex), nullString(recovery.OriginalEmail),
-			nullString(claimURL), nullString(recovery.ClaimOrderID), recovery.ItemCount, recovery.ImportedCount,
-			recovery.RefundedFen, nullString(recovery.LastError), nullString(rawJSON), recovery.LastSeenAtMS,
-			nullPositive(recovery.ClaimedAtMS), now, now,
-		)
-		if err != nil {
-			return updated, err
+				recovery.RecoveryID, nullString(recovery.Product), strings.ToLower(strings.TrimSpace(recovery.DeliveryStatus)), recovery.Status,
+				recovery.CredentialVersion,
+				nullString(recovery.OriginalFileName), nullString(recovery.OriginalAuthIndex), nullString(recovery.OriginalEmail),
+				nullString(claimURL), nullString(recovery.ClaimOrderID), recovery.ItemCount, recovery.ImportedCount,
+				recovery.RefundedFen, nullString(recovery.LastError), nullString(rawJSON), recovery.LastSeenAtMS,
+				nullPositive(recovery.ClaimedAtMS), now, now,
+			)
+			if err != nil {
+				return err
+			}
+			if affected, _ := result.RowsAffected(); affected > 0 {
+				updated += int(affected)
+			}
 		}
-		if affected, _ := result.RowsAffected(); affected > 0 {
-			updated += int(affected)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return updated, err
-	}
-	return updated, nil
+		return nil
+	})
+	return updated, err
 }
 
 func (r *repository) Get(ctx context.Context, recoveryID string) (model.SupplyRecovery, bool, error) {
@@ -187,7 +186,13 @@ func (r *repository) ListImportPending(ctx context.Context, limit int) ([]model.
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	return r.list(ctx, recoverySelect+` where status in ('importing','partial') and coalesce(claim_order_id, '') <> ''
+	return r.list(ctx, recoverySelect+` where
+		(status in ('importing','partial') and coalesce(claim_order_id, '') <> '')
+		or (status in ('claimed','claiming') and exists (
+			select 1 from supply_orders o
+			where o.order_id = 'recovery-' || supply_recoveries.recovery_id
+			and exists (select 1 from supply_import_items i where i.order_id = o.order_id)
+		))
 		order by updated_at_ms asc, id asc limit ?`, limit)
 }
 
@@ -199,42 +204,153 @@ func (r *repository) ClaimForProcessing(ctx context.Context, recoveryID string, 
 	if nowMS <= 0 {
 		nowMS = time.Now().UnixMilli()
 	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return model.SupplyRecovery{}, false, err
+	var recovery model.SupplyRecovery
+	claimed := false
+	err := sqliterepo.WithTxBusyRetry(ctx, r.db, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `update supply_recoveries set status = 'claiming', last_error = null, updated_at_ms = ?
+			where recovery_id = ? and status = 'claimable' and coalesce(claim_url, '') <> ''`, nowMS, recoveryID)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			claimed = false
+			return nil
+		}
+		recovery, err = r.scan(tx.QueryRowContext(ctx, recoverySelect+` where recovery_id = ?`, recoveryID))
+		if err != nil {
+			return err
+		}
+		claimed = true
+		return nil
+	})
+	return recovery, claimed, err
+}
+
+func (r *repository) PersistClaim(ctx context.Context, recovery model.SupplyRecovery, order model.SupplyOrder, items []model.SupplyImportItem, claimedAtMS int64) error {
+	recovery.RecoveryID = strings.TrimSpace(recovery.RecoveryID)
+	order.OrderID = strings.TrimSpace(order.OrderID)
+	if recovery.RecoveryID == "" || order.OrderID == "" || len(items) == 0 {
+		return errors.New("recovery claim persistence requires recovery, order, and import items")
 	}
-	defer func() { _ = tx.Rollback() }()
-	result, err := tx.ExecContext(ctx, `update supply_recoveries set status = 'claiming', last_error = null, updated_at_ms = ?
-		where recovery_id = ? and status = 'claimable' and coalesce(claim_url, '') <> ''`, nowMS, recoveryID)
-	if err != nil {
-		return model.SupplyRecovery{}, false, err
+	if claimedAtMS <= 0 {
+		claimedAtMS = time.Now().UnixMilli()
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return model.SupplyRecovery{}, false, err
+	type protectedItem struct {
+		item    model.SupplyImportItem
+		payload string
 	}
-	if affected != 1 {
-		return model.SupplyRecovery{}, false, nil
+	protected := make([]protectedItem, 0, len(items))
+	for _, item := range items {
+		payload, err := r.protect(item.PayloadJSON)
+		if err != nil {
+			return err
+		}
+		protected = append(protected, protectedItem{item: item, payload: payload})
 	}
-	recovery, err := r.scan(tx.QueryRowContext(ctx, recoverySelect+` where recovery_id = ?`, recoveryID))
-	if err != nil {
-		return model.SupplyRecovery{}, false, err
+	return sqliterepo.WithTxBusyRetry(ctx, r.db, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `insert or ignore into supply_orders (
+			order_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
+			ready_quantity, progress, status_url, take_url, charged_fen, released_fen,
+			item_count, imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms,
+			created_at_ms, updated_at_ms
+		) values (?, ?, ?, 1, 'recovery', 'recovery_claimed', 'recovery_importing', 'recovery_claimed',
+			0, 0, null, null, 0, 0, ?, 0, null, null, null, null, ?, ?)`,
+			order.OrderID, order.Product, len(protected), len(protected), claimedAtMS, claimedAtMS)
+		if err != nil {
+			return err
+		}
+		for _, protectedItem := range protected {
+			item := protectedItem.item
+			if _, err := tx.ExecContext(ctx, `insert or ignore into supply_import_items (
+				order_id, item_key, account_name, name_key, file_name, import_action, replaced_file_name,
+				status, payload_json, attempt_count, lease_expires_at_ms,
+				base_price_fen, charged_fen, created_at_ms, updated_at_ms
+			) values (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?, ?)`, order.OrderID, item.ItemKey,
+				nullString(item.AccountName), nullString(item.NameKey), item.FileName, nullString(item.ImportAction), nullString(item.ReplacedFileName), protectedItem.payload,
+				nullPositive(item.LeaseExpiresAtMS), item.BasePriceFen, item.ChargedFen, claimedAtMS, claimedAtMS); err != nil {
+				return err
+			}
+		}
+		result, err := tx.ExecContext(ctx, `update supply_recoveries set status = 'importing',
+			delivery_status = coalesce(nullif(?, ''), delivery_status), credential_version = case when ? > credential_version then ? else credential_version end,
+			claim_url = null, claim_order_id = ?, item_count = ?, imported_count = 0, last_error = null,
+			claimed_at_ms = ?, updated_at_ms = ? where recovery_id = ?`,
+			strings.ToLower(strings.TrimSpace(recovery.DeliveryStatus)), recovery.CredentialVersion, recovery.CredentialVersion,
+			order.OrderID, len(protected), claimedAtMS, claimedAtMS, recovery.RecoveryID)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return errors.New("supply recovery disappeared while persisting claim")
+		}
+		return nil
+	})
+}
+
+func (r *repository) ResetImport(ctx context.Context, recoveryID string, nowMS int64) (bool, error) {
+	recoveryID = strings.TrimSpace(recoveryID)
+	if recoveryID == "" {
+		return false, errors.New("supply recovery id is required")
 	}
-	if err := tx.Commit(); err != nil {
-		return model.SupplyRecovery{}, false, err
+	if nowMS <= 0 {
+		nowMS = time.Now().UnixMilli()
 	}
-	return recovery, true, nil
+	reset := false
+	err := sqliterepo.WithTxBusyRetry(ctx, r.db, func(tx *sql.Tx) error {
+		var orderID string
+		if err := tx.QueryRowContext(ctx, `select coalesce(claim_order_id, '') from supply_recoveries where recovery_id = ?`, recoveryID).Scan(&orderID); err != nil {
+			return err
+		}
+		if strings.TrimSpace(orderID) == "" {
+			reset = false
+			return nil
+		}
+		var total, imported int
+		if err := tx.QueryRowContext(ctx, `select count(*), coalesce(sum(case when status = 'imported' then 1 else 0 end), 0)
+			from supply_import_items where order_id = ?`, orderID).Scan(&total, &imported); err != nil {
+			return err
+		}
+		if total == 0 || imported >= total {
+			reset = false
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, `update supply_import_items set status = 'pending', last_error = null,
+			next_retry_at_ms = null, updated_at_ms = ? where order_id = ? and status in ('pending','failed')`, nowMS, orderID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `update supply_orders set status = 'recovery_importing', imported_count = ?,
+			last_error = null, next_poll_at_ms = null, completed_at_ms = null, updated_at_ms = ? where order_id = ?`, imported, nowMS, orderID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `update supply_recoveries set status = 'importing', item_count = ?, imported_count = ?,
+			last_error = null, updated_at_ms = ? where recovery_id = ?`, total, imported, nowMS, recoveryID); err != nil {
+			return err
+		}
+		reset = true
+		return nil
+	})
+	return reset, err
 }
 
 func (r *repository) MarkClaimed(ctx context.Context, recoveryID string, claimOrderID string, itemCount int, claimedAtMS int64) error {
 	if claimedAtMS <= 0 {
 		claimedAtMS = time.Now().UnixMilli()
 	}
-	_, err := r.db.ExecContext(ctx, `update supply_recoveries set status = 'importing',
+	return sqliterepo.WithBusyRetry(ctx, func() error {
+		_, err := r.db.ExecContext(ctx, `update supply_recoveries set status = 'importing',
 		claim_order_id = ?, item_count = ?, imported_count = 0, last_error = null,
 		claimed_at_ms = ?, updated_at_ms = ? where recovery_id = ?`,
-		strings.TrimSpace(claimOrderID), itemCount, claimedAtMS, claimedAtMS, strings.TrimSpace(recoveryID))
-	return err
+			strings.TrimSpace(claimOrderID), itemCount, claimedAtMS, claimedAtMS, strings.TrimSpace(recoveryID))
+		return err
+	})
 }
 
 func (r *repository) MarkImportProgress(ctx context.Context, recoveryID string, itemCount int, importedCount int, lastError string) error {
@@ -243,40 +359,50 @@ func (r *repository) MarkImportProgress(ctx context.Context, recoveryID string, 
 	if itemCount > 0 && importedCount < itemCount {
 		status = "partial"
 	}
-	_, err := r.db.ExecContext(ctx, `update supply_recoveries set status = ?,
+	return sqliterepo.WithBusyRetry(ctx, func() error {
+		_, err := r.db.ExecContext(ctx, `update supply_recoveries set status = ?,
 		item_count = ?, imported_count = ?, last_error = ?, updated_at_ms = ? where recovery_id = ?`,
-		status, itemCount, importedCount, nullString(lastError), now, strings.TrimSpace(recoveryID))
-	return err
+			status, itemCount, importedCount, nullString(lastError), now, strings.TrimSpace(recoveryID))
+		return err
+	})
 }
 
 func (r *repository) MarkImported(ctx context.Context, recoveryID string, importedCount int) error {
 	now := time.Now().UnixMilli()
-	_, err := r.db.ExecContext(ctx, `update supply_recoveries set status = 'imported',
+	return sqliterepo.WithBusyRetry(ctx, func() error {
+		_, err := r.db.ExecContext(ctx, `update supply_recoveries set status = 'imported',
 		imported_count = ?, last_error = null, updated_at_ms = ? where recovery_id = ?`,
-		importedCount, now, strings.TrimSpace(recoveryID))
-	return err
+			importedCount, now, strings.TrimSpace(recoveryID))
+		return err
+	})
 }
 
 func (r *repository) MarkRefunded(ctx context.Context, recoveryID string, refundedFen int64) error {
 	now := time.Now().UnixMilli()
-	_, err := r.db.ExecContext(ctx, `update supply_recoveries set status = 'refunded',
+	return sqliterepo.WithBusyRetry(ctx, func() error {
+		_, err := r.db.ExecContext(ctx, `update supply_recoveries set status = 'refunded',
 		refunded_fen = ?, updated_at_ms = ? where recovery_id = ?`,
-		refundedFen, now, strings.TrimSpace(recoveryID))
-	return err
+			refundedFen, now, strings.TrimSpace(recoveryID))
+		return err
+	})
 }
 
 func (r *repository) MarkFailed(ctx context.Context, recoveryID string, lastError string) error {
 	now := time.Now().UnixMilli()
-	_, err := r.db.ExecContext(ctx, `update supply_recoveries set status = 'failed',
+	return sqliterepo.WithBusyRetry(ctx, func() error {
+		_, err := r.db.ExecContext(ctx, `update supply_recoveries set status = 'failed',
 		last_error = ?, updated_at_ms = ? where recovery_id = ?`,
-		nullString(lastError), now, strings.TrimSpace(recoveryID))
-	return err
+			nullString(lastError), now, strings.TrimSpace(recoveryID))
+		return err
+	})
 }
 
 func (r *repository) SetLastError(ctx context.Context, recoveryID string, lastError string) error {
-	_, err := r.db.ExecContext(ctx, `update supply_recoveries set last_error = ?, updated_at_ms = ? where recovery_id = ?`,
-		nullString(lastError), time.Now().UnixMilli(), strings.TrimSpace(recoveryID))
-	return err
+	return sqliterepo.WithBusyRetry(ctx, func() error {
+		_, err := r.db.ExecContext(ctx, `update supply_recoveries set last_error = ?, updated_at_ms = ? where recovery_id = ?`,
+			nullString(lastError), time.Now().UnixMilli(), strings.TrimSpace(recoveryID))
+		return err
+	})
 }
 
 func (r *repository) Summary(ctx context.Context) (Summary, error) {

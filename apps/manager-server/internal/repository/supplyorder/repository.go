@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 )
 
@@ -84,14 +85,19 @@ func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model
 		) select ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		where not exists (select 1 from supply_orders where status in (` + openOrderStatusClause + `))`
 	}
-	result, err := r.db.ExecContext(ctx, statement,
-		order.OrderID, order.Product, order.RequestedQuantity, boolInt(order.Automatic),
-		nullString(order.Strategy), nullString(order.TriggerReason), order.Status,
-		nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress, nullString(order.StatusURL),
-		nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen, order.ItemCount,
-		order.ImportedCount, nullString(order.LastError), nullPositive(order.NextPollAtMS),
-		nullPositive(order.SupplierRetryUntilMS), nullPositive(order.CompletedAtMS), order.CreatedAtMS, order.UpdatedAtMS,
-	)
+	var result sql.Result
+	err := sqliterepo.WithBusyRetry(ctx, func() error {
+		var execErr error
+		result, execErr = r.db.ExecContext(ctx, statement,
+			order.OrderID, order.Product, order.RequestedQuantity, boolInt(order.Automatic),
+			nullString(order.Strategy), nullString(order.TriggerReason), order.Status,
+			nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress, nullString(order.StatusURL),
+			nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen, order.ItemCount,
+			order.ImportedCount, nullString(order.LastError), nullPositive(order.NextPollAtMS),
+			nullPositive(order.SupplierRetryUntilMS), nullPositive(order.CompletedAtMS), order.CreatedAtMS, order.UpdatedAtMS,
+		)
+		return execErr
+	})
 	if err != nil {
 		return model.SupplyOrder{}, err
 	}
@@ -315,16 +321,18 @@ func (r *repository) Update(ctx context.Context, order model.SupplyOrder) error 
 		return errors.New("supply order id is required")
 	}
 	order.UpdatedAtMS = time.Now().UnixMilli()
-	_, err := r.db.ExecContext(ctx, `update supply_orders set
-		strategy = ?, trigger_reason = ?, status = ?, remote_status = ?, ready_quantity = ?, progress = ?, status_url = ?,
-		take_url = ?, charged_fen = ?, released_fen = ?, item_count = ?, imported_count = ?,
-		last_error = ?, next_poll_at_ms = ?, supplier_retry_until_ms = ?, completed_at_ms = ?, updated_at_ms = ? where order_id = ?`,
-		nullString(order.Strategy), nullString(order.TriggerReason), order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
-		nullString(order.StatusURL), nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen,
-		order.ItemCount, order.ImportedCount, nullString(order.LastError), nullPositive(order.NextPollAtMS),
-		nullPositive(order.SupplierRetryUntilMS), nullPositive(order.CompletedAtMS), order.UpdatedAtMS, order.OrderID,
-	)
-	return err
+	return sqliterepo.WithBusyRetry(ctx, func() error {
+		_, err := r.db.ExecContext(ctx, `update supply_orders set
+			strategy = ?, trigger_reason = ?, status = ?, remote_status = ?, ready_quantity = ?, progress = ?, status_url = ?,
+			take_url = ?, charged_fen = ?, released_fen = ?, item_count = ?, imported_count = ?,
+			last_error = ?, next_poll_at_ms = ?, supplier_retry_until_ms = ?, completed_at_ms = ?, updated_at_ms = ? where order_id = ?`,
+			nullString(order.Strategy), nullString(order.TriggerReason), order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
+			nullString(order.StatusURL), nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen,
+			order.ItemCount, order.ImportedCount, nullString(order.LastError), nullPositive(order.NextPollAtMS),
+			nullPositive(order.SupplierRetryUntilMS), nullPositive(order.CompletedAtMS), order.UpdatedAtMS, order.OrderID,
+		)
+		return err
+	})
 }
 
 func (r *repository) List(ctx context.Context, limit int) ([]model.SupplyOrder, error) {
@@ -376,36 +384,32 @@ func (r *repository) InsertItems(ctx context.Context, orderID string, items []mo
 	if len(items) == 0 {
 		return 0, nil
 	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UnixMilli()
 	inserted := 0
-	for _, item := range items {
-		payload, err := r.protect(item.PayloadJSON)
-		if err != nil {
-			return 0, err
-		}
-		result, err := tx.ExecContext(ctx, `insert or ignore into supply_import_items (
+	err := sqliterepo.WithTxBusyRetry(ctx, r.db, func(tx *sql.Tx) error {
+		inserted = 0
+		for _, item := range items {
+			payload, err := r.protect(item.PayloadJSON)
+			if err != nil {
+				return err
+			}
+			result, err := tx.ExecContext(ctx, `insert or ignore into supply_import_items (
 			order_id, item_key, account_name, name_key, file_name, import_action, replaced_file_name,
 			status, payload_json, attempt_count, lease_expires_at_ms,
 			base_price_fen, charged_fen, created_at_ms, updated_at_ms
 		) values (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?, ?)`, orderID, item.ItemKey,
-			nullString(item.AccountName), nullString(item.NameKey), item.FileName, nullString(item.ImportAction), nullString(item.ReplacedFileName), payload,
-			nullPositive(item.LeaseExpiresAtMS), item.BasePriceFen, item.ChargedFen, now, now)
-		if err != nil {
-			return 0, err
+				nullString(item.AccountName), nullString(item.NameKey), item.FileName, nullString(item.ImportAction), nullString(item.ReplacedFileName), payload,
+				nullPositive(item.LeaseExpiresAtMS), item.BasePriceFen, item.ChargedFen, now, now)
+			if err != nil {
+				return err
+			}
+			if affected, _ := result.RowsAffected(); affected > 0 {
+				inserted += int(affected)
+			}
 		}
-		if affected, _ := result.RowsAffected(); affected > 0 {
-			inserted += int(affected)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return inserted, nil
+		return nil
+	})
+	return inserted, err
 }
 
 func (r *repository) ListItems(ctx context.Context, limit int, status string) ([]model.SupplyImportItem, error) {
@@ -583,44 +587,43 @@ func (r *repository) MarkItemImported(ctx context.Context, id int64, importedAtM
 	if importedAtMS <= 0 {
 		importedAtMS = time.Now().UnixMilli()
 	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	var fileName string
-	if err := tx.QueryRowContext(ctx, `select file_name from supply_import_items where id = ?`, id).Scan(&fileName); err != nil {
-		return err
-	}
-	var supersedesItemID any
-	var previousID int64
-	err = tx.QueryRowContext(ctx, `select id from supply_import_items
-			where id <> ? and file_name = ? and status = 'imported' and coalesce(superseded_at_ms, 0) = 0
-			order by coalesce(effective_from_ms, imported_at_ms, updated_at_ms) desc, id desc limit 1`, id, fileName).Scan(&previousID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	if err == nil {
-		supersedesItemID = previousID
-		if _, err := tx.ExecContext(ctx, `update supply_import_items set superseded_at_ms = ?, updated_at_ms = ?
-				where id <> ? and file_name = ? and status = 'imported' and coalesce(superseded_at_ms, 0) = 0`, importedAtMS, importedAtMS, id, fileName); err != nil {
+	return sqliterepo.WithTxBusyRetry(ctx, r.db, func(tx *sql.Tx) error {
+		var fileName string
+		if err := tx.QueryRowContext(ctx, `select file_name from supply_import_items where id = ?`, id).Scan(&fileName); err != nil {
 			return err
 		}
-	}
-	if _, err := tx.ExecContext(ctx, `update supply_import_items set status = 'imported', last_error = null,
+		var supersedesItemID any
+		var previousID int64
+		err := tx.QueryRowContext(ctx, `select id from supply_import_items
+			where id <> ? and file_name = ? and status = 'imported' and coalesce(superseded_at_ms, 0) = 0
+			order by coalesce(effective_from_ms, imported_at_ms, updated_at_ms) desc, id desc limit 1`, id, fileName).Scan(&previousID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil {
+			supersedesItemID = previousID
+			if _, err := tx.ExecContext(ctx, `update supply_import_items set superseded_at_ms = ?, updated_at_ms = ?
+				where id <> ? and file_name = ? and status = 'imported' and coalesce(superseded_at_ms, 0) = 0`, importedAtMS, importedAtMS, id, fileName); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `update supply_import_items set status = 'imported', last_error = null,
 		attempt_count = attempt_count + 1, next_retry_at_ms = null, imported_at_ms = ?, effective_from_ms = ?,
 		supersedes_item_id = ?, updated_at_ms = ? where id = ?`,
-		importedAtMS, importedAtMS, supersedesItemID, importedAtMS, id); err != nil {
-		return err
-	}
-	return tx.Commit()
+			importedAtMS, importedAtMS, supersedesItemID, importedAtMS, id); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func (r *repository) MarkItemFailed(ctx context.Context, id int64, lastError string, nextRetryAtMS int64) error {
-	_, err := r.db.ExecContext(ctx, `update supply_import_items set status = 'failed', last_error = ?,
-		attempt_count = attempt_count + 1, next_retry_at_ms = ?, updated_at_ms = ? where id = ?`,
-		strings.TrimSpace(lastError), nextRetryAtMS, time.Now().UnixMilli(), id)
-	return err
+	return sqliterepo.WithBusyRetry(ctx, func() error {
+		_, err := r.db.ExecContext(ctx, `update supply_import_items set status = 'failed', last_error = ?,
+			attempt_count = attempt_count + 1, next_retry_at_ms = ?, updated_at_ms = ? where id = ?`,
+			strings.TrimSpace(lastError), nextRetryAtMS, time.Now().UnixMilli(), id)
+		return err
+	})
 }
 
 func (r *repository) UpdateItemFileName(ctx context.Context, id int64, fileName string) error {
@@ -628,9 +631,11 @@ func (r *repository) UpdateItemFileName(ctx context.Context, id int64, fileName 
 	if fileName == "" {
 		return errors.New("supply import file name is required")
 	}
-	_, err := r.db.ExecContext(ctx, `update supply_import_items set file_name = ?, updated_at_ms = ? where id = ?`,
-		fileName, time.Now().UnixMilli(), id)
-	return err
+	return sqliterepo.WithBusyRetry(ctx, func() error {
+		_, err := r.db.ExecContext(ctx, `update supply_import_items set file_name = ?, updated_at_ms = ? where id = ?`,
+			fileName, time.Now().UnixMilli(), id)
+		return err
+	})
 }
 
 func (r *repository) UpdateItemImportPlan(ctx context.Context, id int64, accountName string, nameKey string, fileName string, importAction string, replacedFileName string) error {
@@ -642,16 +647,20 @@ func (r *repository) UpdateItemImportPlan(ctx context.Context, id int64, account
 	if importAction != "add" && importAction != "replace" {
 		return errors.New("supply import action must be add or replace")
 	}
-	_, err := r.db.ExecContext(ctx, `update supply_import_items set account_name = ?, name_key = ?, file_name = ?,
-		import_action = ?, replaced_file_name = ?, updated_at_ms = ? where id = ?`,
-		nullString(accountName), nullString(nameKey), fileName, importAction, nullString(replacedFileName), time.Now().UnixMilli(), id)
-	return err
+	return sqliterepo.WithBusyRetry(ctx, func() error {
+		_, err := r.db.ExecContext(ctx, `update supply_import_items set account_name = ?, name_key = ?, file_name = ?,
+			import_action = ?, replaced_file_name = ?, updated_at_ms = ? where id = ?`,
+			nullString(accountName), nullString(nameKey), fileName, importAction, nullString(replacedFileName), time.Now().UnixMilli(), id)
+		return err
+	})
 }
 
 func (r *repository) UpdateItemAccountMetadata(ctx context.Context, id int64, accountName string, nameKey string) error {
-	_, err := r.db.ExecContext(ctx, `update supply_import_items set account_name = ?, name_key = ?, updated_at_ms = ? where id = ?`,
-		nullString(accountName), nullString(nameKey), time.Now().UnixMilli(), id)
-	return err
+	return sqliterepo.WithBusyRetry(ctx, func() error {
+		_, err := r.db.ExecContext(ctx, `update supply_import_items set account_name = ?, name_key = ?, updated_at_ms = ? where id = ?`,
+			nullString(accountName), nullString(nameKey), time.Now().UnixMilli(), id)
+		return err
+	})
 }
 
 func (r *repository) ListItemsMissingAccountMetadata(ctx context.Context, limit int) ([]model.SupplyImportItem, error) {

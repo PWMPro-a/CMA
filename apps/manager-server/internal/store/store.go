@@ -467,6 +467,14 @@ func (s *Store) ClaimSupplyRecoveryForProcessing(ctx context.Context, recoveryID
 	return s.SupplyRecoveries.ClaimForProcessing(ctx, recoveryID, nowMS)
 }
 
+func (s *Store) PersistSupplyRecoveryClaim(ctx context.Context, recovery SupplyRecovery, order SupplyOrder, items []SupplyImportItem, claimedAtMS int64) error {
+	return s.SupplyRecoveries.PersistClaim(ctx, recovery, order, items, claimedAtMS)
+}
+
+func (s *Store) ResetSupplyRecoveryImport(ctx context.Context, recoveryID string, nowMS int64) (bool, error) {
+	return s.SupplyRecoveries.ResetImport(ctx, recoveryID, nowMS)
+}
+
 func (s *Store) MarkSupplyRecoveryClaimed(ctx context.Context, recoveryID string, claimOrderID string, itemCount int, claimedAtMS int64) error {
 	return s.SupplyRecoveries.MarkClaimed(ctx, recoveryID, claimOrderID, itemCount, claimedAtMS)
 }

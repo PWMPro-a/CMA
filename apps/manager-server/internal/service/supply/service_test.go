@@ -2241,6 +2241,132 @@ func TestHydrateOverviewIfNeededRestoresSupplierSnapshotAfterRestart(t *testing.
 	}
 }
 
+func TestRetryRecoveryImportRunsImmediatelyWithoutClaimingAgain(t *testing.T) {
+	var uploads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			name := r.URL.Query().Get("name")
+			if name != "" && uploads.Load() > 0 {
+				_, _ = w.Write([]byte(`{"files":[{"name":"` + name + `","provider":"codex","disabled":false,"status":"ready"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodPost:
+			uploads.Add(1)
+			_, _ = io.Copy(io.Discard, r.Body)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
+			t.Fatalf("unexpected request during local import retry: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "recovery-manual-retry.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply:        store.ManagerSupplyConfig{Product: "oauth_30d"},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	const orderID = "recovery-manual-retry"
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: orderID, Product: "oauth_30d", RequestedQuantity: 1, Automatic: true,
+		Strategy: "recovery", Status: "recovery_partial", RemoteStatus: "recovery_claimed", ItemCount: 1,
+	}); err != nil {
+		t.Fatalf("create recovery order: %v", err)
+	}
+	if _, err := st.InsertSupplyImportItems(context.Background(), orderID, []store.SupplyImportItem{{
+		OrderID: orderID, ItemKey: "retry-account", FileName: "retry-account.json",
+		PayloadJSON: `{"type":"codex","access_token":"access","refresh_token":"refresh","account_id":"account-retry","email":"retry@example.com"}`,
+	}}); err != nil {
+		t.Fatalf("insert recovery item: %v", err)
+	}
+	items, err := st.ListSupplyImportItemsByOrderIDs(context.Background(), []string{orderID})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("recovery items=%#v err=%v", items, err)
+	}
+	if err := st.MarkSupplyImportItemFailed(context.Background(), items[0].ID, "database is locked (517)", time.Now().Add(time.Hour).UnixMilli()); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+	if _, err := st.UpsertSupplyRecoveries(context.Background(), []store.SupplyRecovery{{
+		RecoveryID: "manual-retry", Product: "oauth_30d", DeliveryStatus: "claimed", Status: "partial",
+		ClaimOrderID: orderID, ItemCount: 1, LastError: "database is locked (517)", LastSeenAtMS: time.Now().UnixMilli(),
+	}}); err != nil {
+		t.Fatalf("upsert recovery: %v", err)
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	recovery, err := service.RetryRecoveryImport(context.Background(), "manual-retry")
+	if err != nil {
+		t.Fatalf("retry recovery import: %v", err)
+	}
+	if uploads.Load() != 1 {
+		t.Fatalf("uploads = %d, want 1", uploads.Load())
+	}
+	if recovery.Status != "imported" || recovery.ImportedCount != 1 {
+		t.Fatalf("recovery after retry = %#v", recovery)
+	}
+	items, err = st.ListSupplyImportItemsByOrderIDs(context.Background(), []string{orderID})
+	if err != nil || len(items) != 1 || items[0].Status != "imported" || items[0].LastError != "" || items[0].NextRetryAtMS != 0 {
+		t.Fatalf("items after retry=%#v err=%v", items, err)
+	}
+}
+
+func TestListRecoveriesSeparatesClaimedFromImported(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "recovery-stage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.UpsertSupplyRecoveries(context.Background(), []store.SupplyRecovery{{
+		RecoveryID: "claimed-no-task", DeliveryStatus: "claimed", Status: "claimed", LastSeenAtMS: time.Now().UnixMilli(),
+	}}); err != nil {
+		t.Fatalf("upsert recovery: %v", err)
+	}
+	service := New(st, nil)
+	recoveries, err := service.ListRecoveries(context.Background(), 10, "")
+	if err != nil || len(recoveries) != 1 {
+		t.Fatalf("recoveries=%#v err=%v", recoveries, err)
+	}
+	if recoveries[0].ImportStatus != "claimed_waiting_task" || recoveries[0].ImportedCount != 0 {
+		t.Fatalf("recovery import stage = %#v", recoveries[0])
+	}
+}
+
+func TestImportPendingFindsLegacyClaimWithPersistedLocalTask(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "recovery-legacy-link.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	const orderID = "recovery-legacy-link"
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: orderID, Product: "oauth_30d", RequestedQuantity: 1, Automatic: true,
+		Strategy: "recovery", Status: "recovery_importing", ItemCount: 1,
+	}); err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	if _, err := st.InsertSupplyImportItems(context.Background(), orderID, []store.SupplyImportItem{{
+		OrderID: orderID, ItemKey: "legacy-link-item", FileName: "legacy-link.json", PayloadJSON: `{"type":"codex"}`,
+	}}); err != nil {
+		t.Fatalf("insert item: %v", err)
+	}
+	if _, err := st.UpsertSupplyRecoveries(context.Background(), []store.SupplyRecovery{{
+		RecoveryID: "legacy-link", DeliveryStatus: "claimed", Status: "claimed", LastSeenAtMS: time.Now().UnixMilli(),
+	}}); err != nil {
+		t.Fatalf("upsert recovery: %v", err)
+	}
+	pending, err := st.ListImportPendingSupplyRecoveries(context.Background(), 10)
+	if err != nil || len(pending) != 1 || pending[0].RecoveryID != "legacy-link" {
+		t.Fatalf("legacy pending=%#v err=%v", pending, err)
+	}
+}
+
 func supplyReportEvent(
 	hash string,
 	timestampMS int64,

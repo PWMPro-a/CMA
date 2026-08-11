@@ -34,6 +34,15 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		h.writeResult(w, result, err)
 		return
 	}
+	if recoveryID, ok := retryRecoveryImportID(path); ok {
+		if r.Method != http.MethodPost {
+			response.MethodNotAllowed(w)
+			return
+		}
+		result, err := h.App.SupplyService.RetryRecoveryImport(r.Context(), recoveryID)
+		h.writeResult(w, result, err)
+		return
+	}
 	if recoveryID, ok := claimRecoveryID(path); ok {
 		if r.Method != http.MethodPost {
 			response.MethodNotAllowed(w)
@@ -197,6 +206,8 @@ func (h *Handler) writeResult(w http.ResponseWriter, result any, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, supplysvc.ErrNotCreateUncertain):
 		status = http.StatusConflict
+	case errors.Is(err, supplysvc.ErrRecoveryImportNotReady):
+		status = http.StatusConflict
 	case errors.Is(err, supplysvc.ErrInsufficientBalance):
 		status = http.StatusPaymentRequired
 	case errors.As(err, &upstreamErr):
@@ -227,6 +238,16 @@ func dismissUncertainOrderID(path string) (string, bool) {
 func claimRecoveryID(path string) (string, bool) {
 	const prefix = "/v0/management/supply/recoveries/"
 	const suffix = "/claim"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", false
+	}
+	recoveryID := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix))
+	return recoveryID, recoveryID != "" && !strings.Contains(recoveryID, "/")
+}
+
+func retryRecoveryImportID(path string) (string, bool) {
+	const prefix = "/v0/management/supply/recoveries/"
+	const suffix = "/retry-import"
 	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
 		return "", false
 	}

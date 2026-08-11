@@ -54,31 +54,34 @@ type SupplyImportItem struct {
 }
 
 type SupplyRecovery struct {
-	ID                 int64                      `json:"id"`
-	RecoveryID         string                     `json:"recoveryId"`
-	Product            string                     `json:"product,omitempty"`
-	DeliveryStatus     string                     `json:"deliveryStatus"`
-	Status             string                     `json:"status"`
-	CredentialVersion  int                        `json:"credentialVersion,omitempty"`
-	OriginalFileName   string                     `json:"originalFileName,omitempty"`
-	OriginalAuthIndex  string                     `json:"originalAuthIndex,omitempty"`
-	OriginalEmail      string                     `json:"originalEmail,omitempty"`
-	ClaimURL           string                     `json:"-"`
-	ClaimOrderID       string                     `json:"claimOrderId,omitempty"`
-	ItemCount          int                        `json:"itemCount"`
-	ImportedCount      int                        `json:"importedCount"`
-	RefundedFen        int64                      `json:"refundedFen,omitempty"`
-	LastError          string                     `json:"lastError,omitempty"`
-	RawJSON            string                     `json:"-"`
-	LastSeenAtMS       int64                      `json:"lastSeenAtMs"`
-	ClaimedAtMS        int64                      `json:"claimedAtMs,omitempty"`
-	CreatedAtMS        int64                      `json:"createdAtMs"`
-	UpdatedAtMS        int64                      `json:"updatedAtMs"`
-	ImportedFileNames  []string                   `json:"importedFileNames,omitempty"`
-	ImportPendingCount int                        `json:"importPendingCount,omitempty"`
-	ImportFailedCount  int                        `json:"importFailedCount,omitempty"`
-	LastImportedAtMS   int64                      `json:"lastImportedAtMs,omitempty"`
-	ImportItems        []SupplyRecoveryImportItem `json:"importItems,omitempty"`
+	ID                  int64                      `json:"id"`
+	RecoveryID          string                     `json:"recoveryId"`
+	Product             string                     `json:"product,omitempty"`
+	DeliveryStatus      string                     `json:"deliveryStatus"`
+	Status              string                     `json:"status"`
+	CredentialVersion   int                        `json:"credentialVersion,omitempty"`
+	OriginalFileName    string                     `json:"originalFileName,omitempty"`
+	OriginalAuthIndex   string                     `json:"originalAuthIndex,omitempty"`
+	OriginalEmail       string                     `json:"originalEmail,omitempty"`
+	ClaimURL            string                     `json:"-"`
+	ClaimOrderID        string                     `json:"claimOrderId,omitempty"`
+	ItemCount           int                        `json:"itemCount"`
+	ImportedCount       int                        `json:"importedCount"`
+	RefundedFen         int64                      `json:"refundedFen,omitempty"`
+	LastError           string                     `json:"lastError,omitempty"`
+	RawJSON             string                     `json:"-"`
+	LastSeenAtMS        int64                      `json:"lastSeenAtMs"`
+	ClaimedAtMS         int64                      `json:"claimedAtMs,omitempty"`
+	CreatedAtMS         int64                      `json:"createdAtMs"`
+	UpdatedAtMS         int64                      `json:"updatedAtMs"`
+	ImportedFileNames   []string                   `json:"importedFileNames,omitempty"`
+	ImportPendingCount  int                        `json:"importPendingCount,omitempty"`
+	ImportFailedCount   int                        `json:"importFailedCount,omitempty"`
+	LastImportedAtMS    int64                      `json:"lastImportedAtMs,omitempty"`
+	ImportStatus        string                     `json:"importStatus,omitempty"`
+	ImportMessage       string                     `json:"importMessage,omitempty"`
+	ImportNextRetryAtMS int64                      `json:"importNextRetryAtMs,omitempty"`
+	ImportItems         []SupplyRecoveryImportItem `json:"importItems,omitempty"`
 }
 
 // SupplyRecoveryImportItem is the display-safe import state for one

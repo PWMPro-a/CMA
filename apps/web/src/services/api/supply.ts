@@ -252,6 +252,20 @@ export interface SupplyRecovery {
   importPendingCount?: number;
   importFailedCount?: number;
   lastImportedAtMs?: number;
+  importStatus?:
+    | 'waiting_claim'
+    | 'claiming'
+    | 'claimed_waiting_task'
+    | 'task_pending'
+    | 'importing'
+    | 'retry_scheduled'
+    | 'partial'
+    | 'failed'
+    | 'imported'
+    | 'refunded'
+    | string;
+  importMessage?: string;
+  importNextRetryAtMs?: number;
   importItems?: SupplyRecoveryImportItem[];
   createdAtMs: number;
   updatedAtMs: number;
@@ -609,6 +623,9 @@ export const supplyApi = {
 
   claimRecovery: (recoveryId: string): Promise<SupplyRecoverySummary> =>
     apiClient.post(`/supply/recoveries/${encodeURIComponent(recoveryId)}/claim`),
+
+  retryRecoveryImport: (recoveryId: string): Promise<SupplyRecovery> =>
+    apiClient.post(`/supply/recoveries/${encodeURIComponent(recoveryId)}/retry-import`),
 
   replenish: (quantity: number): Promise<SupplyStatus> =>
     apiClient.post('/supply/replenish', { quantity }),

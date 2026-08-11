@@ -26,7 +26,7 @@ func TestDataSourceNameEncodesWindowsDrivePath(t *testing.T) {
 		t.Fatalf("path = %q, want %q", parsed.Path, want)
 	}
 	wantPragmas := []string{
-		"busy_timeout(5000)",
+		"busy_timeout(30000)",
 		"foreign_keys(1)",
 		"synchronous(FULL)",
 	}
@@ -99,7 +99,7 @@ func assertConnectionPragmas(t *testing.T, conn *sql.Conn) {
 		query string
 		want  int
 	}{
-		{name: "busy timeout", query: "pragma busy_timeout", want: 5000},
+		{name: "busy timeout", query: "pragma busy_timeout", want: busyTimeoutMS},
 		{name: "foreign keys", query: "pragma foreign_keys", want: 1},
 		{name: "synchronous", query: "pragma synchronous", want: 2},
 	} {
