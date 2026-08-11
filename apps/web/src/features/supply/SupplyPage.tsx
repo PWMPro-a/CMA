@@ -276,6 +276,9 @@ const orderTone = (status: string) => {
     status === 'create_uncertain' ||
     status === 'retry_scheduled' ||
     status === 'claimed_waiting_task' ||
+    status === 'claimed_without_local_payload' ||
+    status === 'not_this_pool' ||
+    status === 'ownership_unknown' ||
     status === 'refunded'
   )
     return styles.warning;
@@ -2314,6 +2317,10 @@ export function SupplyPage() {
                   <span>{t('supply.recovery_failed')}</span>
                   <strong>{recovery?.storedFailed ?? recovery?.failed ?? 0}</strong>
                 </div>
+                <div>
+                  <span>{t('supply.recovery_other_pool')}</span>
+                  <strong>{recovery?.external ?? 0}</strong>
+                </div>
               </div>
               {recovery?.lastError ? (
                 <div className={styles.errorBanner}>{recovery.lastError}</div>
@@ -2376,6 +2383,25 @@ export function SupplyPage() {
                           <td>
                             <div className={styles.mono}>{item.originalFileName || '-'}</div>
                             <small>{item.originalEmail || item.originalAuthIndex || '-'}</small>
+                            <div>
+                              <span
+                                className={`${styles.statusPill} ${
+                                  item.ownership === 'local'
+                                    ? styles.success
+                                    : item.ownership === 'external'
+                                      ? styles.warning
+                                      : styles.active
+                                }`}
+                              >
+                                {t(`supply.recovery_ownership_${item.ownership || 'unknown'}`, {
+                                  defaultValue: item.ownership || 'unknown',
+                                })}
+                              </span>
+                            </div>
+                            <small title={item.sourceOrderId || ''}>
+                              {t('supply.recovery_source_order')}:{' '}
+                              {item.sourceOrderId ? shortOrderId(item.sourceOrderId) : '-'}
+                            </small>
                           </td>
                           <td>
                             {item.credentialVersion ? (
@@ -2548,6 +2574,18 @@ export function SupplyPage() {
                                 <IconRefreshCw size={14} />{' '}
                                 {t('supply.recovery_import_retry_now')}
                               </Button>
+                            ) : importStatus === 'not_this_pool' ? (
+                              <span className={`${styles.statusPill} ${styles.warning}`}>
+                                {t('supply.recovery_other_pool_no_action')}
+                              </span>
+                            ) : importStatus === 'claimed_without_local_payload' ? (
+                              <span className={`${styles.statusPill} ${styles.warning}`}>
+                                {t('supply.recovery_no_local_payload_retry')}
+                              </span>
+                            ) : importStatus === 'ownership_unknown' ? (
+                              <span className={`${styles.statusPill} ${styles.warning}`}>
+                                {t('supply.recovery_waiting_ownership')}
+                              </span>
                             ) : item.status === 'claimable' ? (
                               recovery?.autoClaim !== false ? (
                                 <span className={`${styles.statusPill} ${styles.active}`}>

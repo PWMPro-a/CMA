@@ -103,6 +103,7 @@ type Recovery struct {
 	ID                string          `json:"id"`
 	DeliveryStatus    string          `json:"deliveryStatus"`
 	Product           string          `json:"product,omitempty"`
+	SourceOrderID     string          `json:"sourceOrderId,omitempty"`
 	OriginalEmail     string          `json:"originalEmail,omitempty"`
 	OriginalAccount   string          `json:"originalAccount,omitempty"`
 	OriginalAuthIndex string          `json:"originalAuthIndex,omitempty"`
@@ -126,6 +127,7 @@ type ReplacementFile struct {
 	ClaimURL          string
 	CredentialVersion int
 	Product           string
+	SourceOrderID     string
 	OriginalEmail     string
 	OriginalAccount   string
 	OriginalAuthIndex string
@@ -661,6 +663,7 @@ func parseRecovery(root map[string]any) Recovery {
 		ID:                id,
 		DeliveryStatus:    strings.ToLower(stringValue(root, "delivery_status", "deliveryStatus", "status")),
 		Product:           stringValue(root, "product"),
+		SourceOrderID:     stringValue(root, "source_order_id", "sourceOrderId"),
 		OriginalEmail:     stringValue(root, "original_email", "originalEmail", "account_email", "accountEmail", "email"),
 		OriginalAccount:   stringValue(root, "original_account", "originalAccount", "auth_file_name", "authFileName", "file_name", "fileName", "account"),
 		OriginalAuthIndex: stringValue(root, "original_auth_index", "originalAuthIndex", "auth_index", "authIndex"),
@@ -713,6 +716,7 @@ func parseReplacementFiles(values []any) []ReplacementFile {
 			ClaimURL:          claimURL,
 			CredentialVersion: int(int64Value(object, "credential_version", "credentialVersion")),
 			Product:           stringValue(object, "product"),
+			SourceOrderID:     stringValue(object, "source_order_id", "sourceOrderId"),
 			OriginalEmail:     stringValue(object, "original_email", "originalEmail", "email"),
 			OriginalAccount:   stringValue(object, "original_account", "originalAccount", "auth_file_name", "authFileName", "file_name", "fileName"),
 			OriginalAuthIndex: stringValue(object, "original_auth_index", "originalAuthIndex", "auth_index", "authIndex"),

@@ -225,6 +225,7 @@ export interface SupplyRecoverySummary {
   refunded: number;
   failed: number;
   total: number;
+  external: number;
   importing: number;
   storedImported: number;
   storedRefunded: number;
@@ -238,6 +239,7 @@ export interface SupplyRecovery {
   deliveryStatus: string;
   status: string;
   credentialVersion?: number;
+  sourceOrderId?: string;
   originalFileName?: string;
   originalAuthIndex?: string;
   originalEmail?: string;
@@ -256,6 +258,9 @@ export interface SupplyRecovery {
     | 'waiting_claim'
     | 'claiming'
     | 'claimed_waiting_task'
+    | 'claimed_without_local_payload'
+    | 'not_this_pool'
+    | 'ownership_unknown'
     | 'task_pending'
     | 'importing'
     | 'retry_scheduled'
@@ -265,6 +270,7 @@ export interface SupplyRecovery {
     | 'refunded'
     | string;
   importMessage?: string;
+  ownership?: 'local' | 'external' | 'unknown' | string;
   importNextRetryAtMs?: number;
   importItems?: SupplyRecoveryImportItem[];
   createdAtMs: number;

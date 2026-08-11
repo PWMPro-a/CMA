@@ -435,6 +435,7 @@ func Migrate(db *sql.DB) error {
 			delivery_status text not null,
 			status text not null,
 			credential_version integer not null default 0,
+			source_order_id text,
 			original_file_name text,
 			original_auth_index text,
 			original_email text,
@@ -654,10 +655,21 @@ func ensureSupplyRecoveryColumns(db *sql.DB) error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	if _, ok := existing["credential_version"]; ok {
-		return nil
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "credential_version", definition: "integer not null default 0"},
+		{name: "source_order_id", definition: "text"},
+	} {
+		if _, ok := existing[column.name]; ok {
+			continue
+		}
+		if _, err := db.Exec(`alter table supply_recoveries add column ` + column.name + ` ` + column.definition); err != nil {
+			return err
+		}
 	}
-	_, err = db.Exec(`alter table supply_recoveries add column credential_version integer not null default 0`)
+	_, err = db.Exec(`create index if not exists idx_supply_recoveries_source_order on supply_recoveries(source_order_id)`)
 	return err
 }
 

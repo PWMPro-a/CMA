@@ -14,6 +14,7 @@ import (
 
 type Summary struct {
 	Total     int `json:"total"`
+	External  int `json:"external"`
 	Claimable int `json:"claimable"`
 	Importing int `json:"importing"`
 	Imported  int `json:"imported"`
@@ -82,10 +83,10 @@ func (r *repository) UpsertMany(ctx context.Context, recoveries []model.SupplyRe
 				return err
 			}
 			result, err := tx.ExecContext(ctx, `insert into supply_recoveries (
-			recovery_id, product, delivery_status, status, credential_version, original_file_name, original_auth_index,
+			recovery_id, product, delivery_status, status, credential_version, source_order_id, original_file_name, original_auth_index,
 			original_email, claim_url, claim_order_id, item_count, imported_count, refunded_fen,
 			last_error, raw_json, last_seen_at_ms, claimed_at_ms, created_at_ms, updated_at_ms
-		) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		on conflict(recovery_id) do update set
 			product = excluded.product,
 			delivery_status = excluded.delivery_status,
@@ -99,6 +100,7 @@ func (r *repository) UpsertMany(ctx context.Context, recoveries []model.SupplyRe
 				when excluded.status = 'claimable' then 'claimable'
 				else excluded.status
 			end,
+			source_order_id = coalesce(nullif(excluded.source_order_id, ''), supply_recoveries.source_order_id),
 			original_file_name = coalesce(nullif(excluded.original_file_name, ''), supply_recoveries.original_file_name),
 			original_auth_index = coalesce(nullif(excluded.original_auth_index, ''), supply_recoveries.original_auth_index),
 			original_email = coalesce(nullif(excluded.original_email, ''), supply_recoveries.original_email),
@@ -109,7 +111,7 @@ func (r *repository) UpsertMany(ctx context.Context, recoveries []model.SupplyRe
 			last_seen_at_ms = excluded.last_seen_at_ms,
 			updated_at_ms = excluded.updated_at_ms`,
 				recovery.RecoveryID, nullString(recovery.Product), strings.ToLower(strings.TrimSpace(recovery.DeliveryStatus)), recovery.Status,
-				recovery.CredentialVersion,
+				recovery.CredentialVersion, nullString(recovery.SourceOrderID),
 				nullString(recovery.OriginalFileName), nullString(recovery.OriginalAuthIndex), nullString(recovery.OriginalEmail),
 				nullString(claimURL), nullString(recovery.ClaimOrderID), recovery.ItemCount, recovery.ImportedCount,
 				recovery.RefundedFen, nullString(recovery.LastError), nullString(rawJSON), recovery.LastSeenAtMS,
@@ -165,11 +167,11 @@ func (r *repository) ListBetween(ctx context.Context, fromMS int64, toMS int64, 
 	if limit <= 0 || limit > 10000 {
 		limit = 5000
 	}
-	return r.list(ctx, recoverySelect+` where
+	return r.list(ctx, recoverySelect+` where (`+localRecoveryOwnershipClause+`) and (
 		(created_at_ms >= ? and created_at_ms < ?) or
 		(updated_at_ms >= ? and updated_at_ms < ?) or
 		(last_seen_at_ms >= ? and last_seen_at_ms < ?) or
-		(coalesce(claimed_at_ms, 0) >= ? and coalesce(claimed_at_ms, 0) < ?)
+		(coalesce(claimed_at_ms, 0) >= ? and coalesce(claimed_at_ms, 0) < ?))
 		order by updated_at_ms desc, id desc limit ?`,
 		fromMS, toMS, fromMS, toMS, fromMS, toMS, fromMS, toMS, limit)
 }
@@ -179,6 +181,7 @@ func (r *repository) ListClaimable(ctx context.Context, limit int) ([]model.Supp
 		limit = 20
 	}
 	return r.list(ctx, recoverySelect+` where status = 'claimable' and coalesce(claim_url, '') <> ''
+		and (`+localRecoveryOwnershipClause+`)
 		order by updated_at_ms asc, id asc limit ?`, limit)
 }
 
@@ -208,7 +211,8 @@ func (r *repository) ClaimForProcessing(ctx context.Context, recoveryID string, 
 	claimed := false
 	err := sqliterepo.WithTxBusyRetry(ctx, r.db, func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx, `update supply_recoveries set status = 'claiming', last_error = null, updated_at_ms = ?
-			where recovery_id = ? and status = 'claimable' and coalesce(claim_url, '') <> ''`, nowMS, recoveryID)
+			where recovery_id = ? and status = 'claimable' and coalesce(claim_url, '') <> ''
+			and (`+localRecoveryOwnershipClause+`)`, nowMS, recoveryID)
 		if err != nil {
 			return err
 		}
@@ -406,7 +410,9 @@ func (r *repository) SetLastError(ctx context.Context, recoveryID string, lastEr
 }
 
 func (r *repository) Summary(ctx context.Context) (Summary, error) {
-	rows, err := r.db.QueryContext(ctx, `select status, count(*) from supply_recoveries group by status`)
+	rows, err := r.db.QueryContext(ctx, `select status,
+		case when (`+localRecoveryOwnershipClause+`) then 1 else 0 end as local_owner,
+		count(*) from supply_recoveries group by status, local_owner`)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -414,9 +420,14 @@ func (r *repository) Summary(ctx context.Context) (Summary, error) {
 	var summary Summary
 	for rows.Next() {
 		var status string
+		var localOwner int
 		var count int
-		if err := rows.Scan(&status, &count); err != nil {
+		if err := rows.Scan(&status, &localOwner, &count); err != nil {
 			return Summary{}, err
+		}
+		if localOwner == 0 {
+			summary.External += count
+			continue
 		}
 		summary.Total += count
 		switch status {
@@ -453,7 +464,7 @@ func (r *repository) list(ctx context.Context, query string, args ...any) ([]mod
 }
 
 const recoverySelect = `select id, recovery_id, product, delivery_status, status, original_file_name,
-	credential_version, original_auth_index, original_email, claim_url, claim_order_id, item_count, imported_count,
+	credential_version, source_order_id, original_auth_index, original_email, claim_url, claim_order_id, item_count, imported_count,
 	refunded_fen, last_error, raw_json, last_seen_at_ms, claimed_at_ms, created_at_ms, updated_at_ms
 	from supply_recoveries`
 
@@ -461,10 +472,10 @@ type scanner interface{ Scan(...any) error }
 
 func (r *repository) scan(row scanner) (model.SupplyRecovery, error) {
 	var recovery model.SupplyRecovery
-	var product, originalFileName, originalAuthIndex, originalEmail, claimURL, claimOrderID, lastError, rawJSON sql.NullString
+	var product, originalFileName, sourceOrderID, originalAuthIndex, originalEmail, claimURL, claimOrderID, lastError, rawJSON sql.NullString
 	var claimedAtMS sql.NullInt64
 	if err := row.Scan(&recovery.ID, &recovery.RecoveryID, &product, &recovery.DeliveryStatus, &recovery.Status,
-		&originalFileName, &recovery.CredentialVersion, &originalAuthIndex, &originalEmail, &claimURL, &claimOrderID, &recovery.ItemCount,
+		&originalFileName, &recovery.CredentialVersion, &sourceOrderID, &originalAuthIndex, &originalEmail, &claimURL, &claimOrderID, &recovery.ItemCount,
 		&recovery.ImportedCount, &recovery.RefundedFen, &lastError, &rawJSON, &recovery.LastSeenAtMS,
 		&claimedAtMS, &recovery.CreatedAtMS, &recovery.UpdatedAtMS); err != nil {
 		return model.SupplyRecovery{}, err
@@ -478,6 +489,7 @@ func (r *repository) scan(row scanner) (model.SupplyRecovery, error) {
 		return model.SupplyRecovery{}, err
 	}
 	recovery.Product = product.String
+	recovery.SourceOrderID = sourceOrderID.String
 	recovery.OriginalFileName = originalFileName.String
 	recovery.OriginalAuthIndex = originalAuthIndex.String
 	recovery.OriginalEmail = originalEmail.String
@@ -488,6 +500,19 @@ func (r *repository) scan(row scanner) (model.SupplyRecovery, error) {
 	recovery.ClaimedAtMS = claimedAtMS.Int64
 	return recovery, nil
 }
+
+// localRecoveryOwnershipClause scopes one-time supplier recovery tickets to
+// the CPAM instance that owns the original pickup order. Claim-order linkage
+// keeps already imported legacy rows local, while the filename fallback covers
+// older supplier payloads that predate source_order_id.
+const localRecoveryOwnershipClause = `(coalesce(supply_recoveries.claim_order_id, '') <> ''
+	or (coalesce(supply_recoveries.source_order_id, '') <> '' and exists (
+		select 1 from supply_orders source_order where source_order.order_id = supply_recoveries.source_order_id
+	))
+	or (coalesce(supply_recoveries.source_order_id, '') = '' and coalesce(supply_recoveries.original_file_name, '') <> '' and exists (
+		select 1 from supply_import_items source_item
+		where lower(source_item.file_name) = lower(supply_recoveries.original_file_name)
+	)))`
 
 func statusFromDelivery(deliveryStatus string, claimURL string, refundedFen int64) string {
 	status := strings.ToLower(strings.TrimSpace(deliveryStatus))

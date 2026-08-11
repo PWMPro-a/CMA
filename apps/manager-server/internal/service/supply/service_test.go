@@ -58,6 +58,20 @@ func TestAutomationExecutionTracksScheduledAndCompletedCycles(t *testing.T) {
 	}
 }
 
+func createRecoverySourceOrder(t *testing.T, st *store.Store, orderID string) {
+	t.Helper()
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID:           orderID,
+		Product:           "oauth_30d",
+		RequestedQuantity: 1,
+		Automatic:         true,
+		Status:            "completed",
+		CompletedAtMS:     time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("create recovery source order %s: %v", orderID, err)
+	}
+}
+
 func TestSupplyAuth401CandidateOnlyAcceptsManagedSupplyAccounts(t *testing.T) {
 	nowMS := time.Now().UnixMilli()
 	event := usage.Event{
@@ -379,7 +393,7 @@ func TestRecoverySyncClaimsImportsAndDisablesOriginalAccount(t *testing.T) {
 			if got := r.Header.Get("X-Customer-Token"); got != "customer-token" {
 				t.Fatalf("recoveries token = %q", got)
 			}
-			_, _ = w.Write([]byte(`{"payload":{"recoveries":[{"id":"rec-1","delivery_status":"claimable","product":"oauth_30d","original_email":"old@example.com","original_account":"old.json","original_auth_index":"auth-1","claim_url":"` + server.URL + `/api/customer/recoveries/rec-1/claim?ticket=ticket-1"}]}}`))
+			_, _ = w.Write([]byte(`{"payload":{"recoveries":[{"id":"rec-1","delivery_status":"claimable","product":"oauth_30d","source_order_id":"source-rec-1","original_email":"old@example.com","original_account":"old.json","original_auth_index":"auth-1","claim_url":"` + server.URL + `/api/customer/recoveries/rec-1/claim?ticket=ticket-1"}]}}`))
 		case r.URL.Path == "/api/customer/recoveries/rec-1/claim" && r.Method == http.MethodPost:
 			claimCalls.Add(1)
 			if got := r.URL.Query().Get("ticket"); got != "ticket-1" {
@@ -472,6 +486,7 @@ func TestRecoverySyncClaimsImportsAndDisablesOriginalAccount(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
+	createRecoverySourceOrder(t, st, "source-rec-1")
 
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
 	autoClaim := true
@@ -505,6 +520,53 @@ func TestRecoverySyncClaimsImportsAndDisablesOriginalAccount(t *testing.T) {
 	}
 }
 
+func TestRecoveryOwnershipSeparatesLocalAndOtherPoolTickets(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "recovery-ownership.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	createRecoverySourceOrder(t, st, "source-local")
+	nowMS := time.Now().UnixMilli()
+	if _, err := st.UpsertSupplyRecoveries(ctx, []store.SupplyRecovery{
+		{RecoveryID: "local-claimed", SourceOrderID: "source-local", DeliveryStatus: "claimed", Status: "claimed", CredentialVersion: 2, LastSeenAtMS: nowMS},
+		{RecoveryID: "external-claimed", SourceOrderID: "source-other", DeliveryStatus: "claimed", Status: "claimed", CredentialVersion: 2, LastSeenAtMS: nowMS},
+		{RecoveryID: "local-claimable", SourceOrderID: "source-local", DeliveryStatus: "claimable", Status: "claimable", ClaimURL: "/claim/local", LastSeenAtMS: nowMS},
+		{RecoveryID: "external-claimable", SourceOrderID: "source-other", DeliveryStatus: "claimable", Status: "claimable", ClaimURL: "/claim/external", LastSeenAtMS: nowMS},
+	}); err != nil {
+		t.Fatalf("upsert recoveries: %v", err)
+	}
+	claimable, err := st.ListClaimableSupplyRecoveries(ctx, 20)
+	if err != nil || len(claimable) != 1 || claimable[0].RecoveryID != "local-claimable" {
+		t.Fatalf("owned claimable recoveries=%#v err=%v", claimable, err)
+	}
+	summary, err := st.SupplyRecoverySummary(ctx)
+	if err != nil || summary.Total != 2 || summary.External != 2 || summary.Claimable != 1 {
+		t.Fatalf("recovery ownership summary=%#v err=%v", summary, err)
+	}
+	recoveries, err := New(st, nil).ListRecoveries(ctx, 20, "")
+	if err != nil {
+		t.Fatalf("list recoveries: %v", err)
+	}
+	byID := make(map[string]store.SupplyRecovery, len(recoveries))
+	for _, recovery := range recoveries {
+		byID[recovery.RecoveryID] = recovery
+	}
+	if got := byID["local-claimed"]; got.Ownership != "local" || got.ImportStatus != "claimed_without_local_payload" || got.SourceOrderID != "source-local" {
+		t.Fatalf("local claimed recovery=%#v", got)
+	}
+	if got := byID["external-claimed"]; got.Ownership != "external" || got.ImportStatus != "not_this_pool" {
+		t.Fatalf("external claimed recovery=%#v", got)
+	}
+	if got := byID["local-claimable"]; got.Ownership != "local" || got.ImportStatus != "waiting_claim" {
+		t.Fatalf("local claimable recovery=%#v", got)
+	}
+	if got := byID["external-claimable"]; got.Ownership != "external" || got.ImportStatus != "not_this_pool" {
+		t.Fatalf("external claimable recovery=%#v", got)
+	}
+}
+
 func TestRecoveryClaimConflictWaitsForFreshClaimURL(t *testing.T) {
 	var listCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -517,7 +579,7 @@ func TestRecoveryClaimConflictWaitsForFreshClaimURL(t *testing.T) {
 			if call > 1 {
 				ticket = "fresh"
 			}
-			_, _ = w.Write([]byte(`{"recoveries":[{"id":"rec-conflict","delivery_status":"claimable","claim_url":"/api/customer/recoveries/rec-conflict/claim?ticket=` + ticket + `"}]}`))
+			_, _ = w.Write([]byte(`{"recoveries":[{"id":"rec-conflict","delivery_status":"claimable","source_order_id":"source-conflict","claim_url":"/api/customer/recoveries/rec-conflict/claim?ticket=` + ticket + `"}]}`))
 		case r.URL.Path == "/api/customer/recoveries/rec-conflict/claim":
 			w.WriteHeader(http.StatusConflict)
 			_, _ = w.Write([]byte(`{"message":"ticket expired"}`))
@@ -542,6 +604,7 @@ func TestRecoveryClaimConflictWaitsForFreshClaimURL(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
+	createRecoverySourceOrder(t, st, "source-conflict")
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
 	autoClaim := true
 	if _, err := service.SyncRecoveries(context.Background(), RecoverySyncRequest{AutoClaim: &autoClaim}); err == nil {
@@ -567,7 +630,7 @@ func TestRecoveryPayloadServerErrorKeepsTicketClaimable(t *testing.T) {
 		case r.URL.Path == "/api/customer/login":
 			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
 		case r.URL.Path == "/api/customer/recoveries" && r.Method == http.MethodGet:
-			_, _ = w.Write([]byte(`{"recoveries":[{"id":"rec-retry","delivery_status":"claimable","claim_url":"/api/customer/recoveries/rec-retry/claim?ticket=keep-me"}]}`))
+			_, _ = w.Write([]byte(`{"recoveries":[{"id":"rec-retry","delivery_status":"claimable","source_order_id":"source-retry","claim_url":"/api/customer/recoveries/rec-retry/claim?ticket=keep-me"}]}`))
 		case r.URL.Path == "/api/customer/recoveries/rec-retry/claim":
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":{"code":"recovery_payload_invalid","message":"payload temporarily unavailable"}}`))
@@ -592,6 +655,7 @@ func TestRecoveryPayloadServerErrorKeepsTicketClaimable(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
+	createRecoverySourceOrder(t, st, "source-retry")
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
 	autoClaim := true
 	if _, err := service.SyncRecoveries(context.Background(), RecoverySyncRequest{AutoClaim: &autoClaim}); err == nil {
@@ -626,14 +690,14 @@ func TestTakeReplacementFileRefreshesLatestClaimURL(t *testing.T) {
 		BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_30d",
 	}}
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
-	if err := service.syncTakeReplacementFiles(context.Background(), cfg, []supplyclient.ReplacementFile{{
+	if err := service.syncTakeReplacementFiles(context.Background(), cfg, "source-take", []supplyclient.ReplacementFile{{
 		RecoveryID: "rec-from-take", Ready: true, StatusURL: "/api/customer/recoveries/rec-from-take", CredentialVersion: 2,
 	}}); err != nil {
 		t.Fatalf("sync replacement: %v", err)
 	}
 	recovery, found, err := st.GetSupplyRecovery(context.Background(), "rec-from-take")
 	if err != nil || !found || recovery.Status != "claimable" || recovery.CredentialVersion != 3 ||
-		!strings.Contains(recovery.ClaimURL, "ticket=latest") {
+		recovery.SourceOrderID != "source-take" || !strings.Contains(recovery.ClaimURL, "ticket=latest") {
 		t.Fatalf("recovery=%#v found=%v err=%v", recovery, found, err)
 	}
 }
@@ -709,6 +773,7 @@ func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 	if _, err := st.UpsertSupplyRecoveries(ctx, []store.SupplyRecovery{
 		{
 			RecoveryID:     "rec-imported",
+			SourceOrderID:  "order-report-1",
 			Product:        "oauth_30d",
 			DeliveryStatus: "claimable",
 			Status:         "imported",
@@ -719,6 +784,7 @@ func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 		},
 		{
 			RecoveryID:     "rec-refunded",
+			SourceOrderID:  "order-report-1",
 			Product:        "oauth_30d",
 			DeliveryStatus: "refunded",
 			Status:         "refunded",
@@ -2323,8 +2389,9 @@ func TestListRecoveriesSeparatesClaimedFromImported(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	createRecoverySourceOrder(t, st, "source-claimed-no-task")
 	if _, err := st.UpsertSupplyRecoveries(context.Background(), []store.SupplyRecovery{{
-		RecoveryID: "claimed-no-task", DeliveryStatus: "claimed", Status: "claimed", LastSeenAtMS: time.Now().UnixMilli(),
+		RecoveryID: "claimed-no-task", SourceOrderID: "source-claimed-no-task", DeliveryStatus: "claimed", Status: "claimed", LastSeenAtMS: time.Now().UnixMilli(),
 	}}); err != nil {
 		t.Fatalf("upsert recovery: %v", err)
 	}
@@ -2333,7 +2400,7 @@ func TestListRecoveriesSeparatesClaimedFromImported(t *testing.T) {
 	if err != nil || len(recoveries) != 1 {
 		t.Fatalf("recoveries=%#v err=%v", recoveries, err)
 	}
-	if recoveries[0].ImportStatus != "claimed_waiting_task" || recoveries[0].ImportedCount != 0 {
+	if recoveries[0].ImportStatus != "claimed_without_local_payload" || recoveries[0].ImportedCount != 0 {
 		t.Fatalf("recovery import stage = %#v", recoveries[0])
 	}
 }

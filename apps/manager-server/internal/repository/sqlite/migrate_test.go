@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func TestSupplyRecoveryUpgradeAddsCredentialVersion(t *testing.T) {
+func TestSupplyRecoveryUpgradeAddsOwnershipColumns(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "supply-recovery-upgrade.sqlite")
 	db, err := Open(path)
 	if err != nil {
@@ -16,6 +16,14 @@ func TestSupplyRecoveryUpgradeAddsCredentialVersion(t *testing.T) {
 	if _, err := db.Exec(`alter table supply_recoveries drop column credential_version`); err != nil {
 		_ = db.Close()
 		t.Fatalf("remove new column for legacy fixture: %v", err)
+	}
+	if _, err := db.Exec(`drop index idx_supply_recoveries_source_order`); err != nil {
+		_ = db.Close()
+		t.Fatalf("remove source order index for legacy fixture: %v", err)
+	}
+	if _, err := db.Exec(`alter table supply_recoveries drop column source_order_id`); err != nil {
+		_ = db.Close()
+		t.Fatalf("remove source order column for legacy fixture: %v", err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close legacy sqlite: %v", err)
@@ -27,7 +35,7 @@ func TestSupplyRecoveryUpgradeAddsCredentialVersion(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	columns := migrationTableColumns(t, db, "supply_recoveries")
-	if !columns["credential_version"] {
+	if !columns["credential_version"] || !columns["source_order_id"] {
 		t.Fatalf("supply recovery columns = %#v", columns)
 	}
 }

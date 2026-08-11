@@ -103,6 +103,7 @@ type RecoverySummary struct {
 	Refunded       int    `json:"refunded"`
 	Failed         int    `json:"failed"`
 	Total          int    `json:"total"`
+	External       int    `json:"external"`
 	Importing      int    `json:"importing"`
 	StoredImported int    `json:"storedImported"`
 	StoredRefunded int    `json:"storedRefunded"`
@@ -899,6 +900,11 @@ func (s *Service) ListRecoveries(ctx context.Context, limit int, status string) 
 		byOrder[item.OrderID] = append(byOrder[item.OrderID], item)
 	}
 	for index := range recoveries {
+		ownership, ownershipErr := s.recoveryOwnership(ctx, recoveries[index])
+		if ownershipErr != nil {
+			return nil, ownershipErr
+		}
+		recoveries[index].Ownership = ownership
 		for _, item := range byOrder[recoveries[index].ClaimOrderID] {
 			recoveries[index].ImportItems = append(recoveries[index].ImportItems, store.SupplyRecoveryImportItem{
 				AccountName:      item.AccountName,
@@ -930,6 +936,24 @@ func (s *Service) ListRecoveries(ctx context.Context, limit int, status string) 
 		applyRecoveryImportStage(&recoveries[index])
 	}
 	return recoveries, nil
+}
+
+func (s *Service) recoveryOwnership(ctx context.Context, recovery store.SupplyRecovery) (string, error) {
+	if strings.TrimSpace(recovery.ClaimOrderID) != "" {
+		return "local", nil
+	}
+	sourceOrderID := strings.TrimSpace(recovery.SourceOrderID)
+	if sourceOrderID == "" {
+		return "unknown", nil
+	}
+	_, found, err := s.store.GetSupplyOrder(ctx, sourceOrderID)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		return "local", nil
+	}
+	return "external", nil
 }
 
 func (s *Service) RetryRecoveryImport(ctx context.Context, recoveryID string) (store.SupplyRecovery, error) {
@@ -992,6 +1016,12 @@ func applyRecoveryImportStage(recovery *store.SupplyRecovery) {
 	case status == "imported":
 		recovery.ImportStatus = "imported"
 		recovery.ImportMessage = "replacement files are registered in the CPA account pool"
+	case recovery.Ownership == "external":
+		recovery.ImportStatus = "not_this_pool"
+		recovery.ImportMessage = "the source pickup order belongs to another CPAM pool; this instance only mirrors supplier status and does not claim the one-time ticket"
+	case recovery.Ownership == "unknown" && strings.TrimSpace(recovery.ClaimOrderID) == "":
+		recovery.ImportStatus = "ownership_unknown"
+		recovery.ImportMessage = "the supplier did not include enough source identity to safely assign this one-time ticket to the current CPAM pool"
 	case strings.TrimSpace(recovery.ClaimOrderID) == "" && (status == "claimable" || status == "seen"):
 		recovery.ImportStatus = "waiting_claim"
 		recovery.ImportMessage = "waiting for automatic claim before a local import task can be created"
@@ -999,8 +1029,8 @@ func applyRecoveryImportStage(recovery *store.SupplyRecovery) {
 		recovery.ImportStatus = "claiming"
 		recovery.ImportMessage = "the supplier claim is running; the local import task will be created next"
 	case strings.TrimSpace(recovery.ClaimOrderID) == "":
-		recovery.ImportStatus = "claimed_waiting_task"
-		recovery.ImportMessage = "supplier delivery is marked claimed, but the local CPA import task has not been created"
+		recovery.ImportStatus = "claimed_without_local_payload"
+		recovery.ImportMessage = "the supplier ticket was claimed, but this CPAM instance did not receive or persist the replacement payload"
 	case recovery.ItemCount == 0 || len(recovery.ImportItems) == 0:
 		recovery.ImportStatus = "claimed_waiting_task"
 		recovery.ImportMessage = "the claim is stored, but no local import item is available yet"
@@ -1614,7 +1644,7 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		return s.updateOrderError(ctx, &order, err, cfg.Supply)
 	}
 	applyRemoteOrder(&order, taken.Order, cfg.Supply)
-	replacementSyncErr := s.syncTakeReplacementFiles(ctx, cfg, taken.ReplacementFiles)
+	replacementSyncErr := s.syncTakeReplacementFiles(ctx, cfg, order.OrderID, taken.ReplacementFiles)
 	if taken.Pending {
 		order.Status = "waiting_inventory"
 		if err := s.store.UpdateSupplyOrder(ctx, order); err != nil {
@@ -1674,17 +1704,19 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	return replacementSyncErr
 }
 
-func (s *Service) syncTakeReplacementFiles(ctx context.Context, cfg store.ManagerConfig, files []supplyclient.ReplacementFile) error {
+func (s *Service) syncTakeReplacementFiles(ctx context.Context, cfg store.ManagerConfig, sourceOrderID string, files []supplyclient.ReplacementFile) error {
 	if len(files) == 0 {
 		return nil
 	}
 	credentials := credentialsFromConfig(cfg.Supply)
 	recoveries := make([]store.SupplyRecovery, 0, len(files))
 	for _, file := range files {
+		file.SourceOrderID = firstNonEmptyString(file.SourceOrderID, sourceOrderID)
 		remote := supplyclient.Recovery{
 			ID:                strings.TrimSpace(file.RecoveryID),
 			DeliveryStatus:    "pending",
 			Product:           file.Product,
+			SourceOrderID:     file.SourceOrderID,
 			OriginalEmail:     file.OriginalEmail,
 			OriginalAccount:   file.OriginalAccount,
 			OriginalAuthIndex: file.OriginalAuthIndex,
@@ -1724,6 +1756,9 @@ func mergeSupplyRecovery(target *supplyclient.Recovery, source supplyclient.Reco
 	}
 	if source.Product != "" {
 		target.Product = source.Product
+	}
+	if source.SourceOrderID != "" {
+		target.SourceOrderID = source.SourceOrderID
 	}
 	if source.OriginalEmail != "" {
 		target.OriginalEmail = source.OriginalEmail
@@ -4877,6 +4912,7 @@ func (s *Service) currentRecoverySummary(ctx context.Context, cfg store.ManagerS
 	if s != nil && s.store != nil {
 		if stored, err := s.store.SupplyRecoverySummary(ctx); err == nil {
 			summary.Total = stored.Total
+			summary.External = stored.External
 			summary.Claimable = stored.Claimable
 			summary.Importing = stored.Importing
 			summary.StoredImported = stored.Imported
@@ -5413,6 +5449,7 @@ func supplyRecoveryFromClient(remote supplyclient.Recovery) store.SupplyRecovery
 		Product:           strings.TrimSpace(remote.Product),
 		DeliveryStatus:    strings.ToLower(strings.TrimSpace(remote.DeliveryStatus)),
 		Status:            status,
+		SourceOrderID:     strings.TrimSpace(remote.SourceOrderID),
 		OriginalFileName:  originalFileName,
 		OriginalAuthIndex: strings.TrimSpace(remote.OriginalAuthIndex),
 		OriginalEmail:     strings.TrimSpace(remote.OriginalEmail),

@@ -298,7 +298,7 @@ func TestClientListsAndClaimsRecoveries(t *testing.T) {
 			if got := r.Header.Get("X-Customer-Token"); got != "token" {
 				t.Fatalf("recoveries token = %q", got)
 			}
-			_, _ = w.Write([]byte(`{"payload":{"recoveries":[{"recovery_id":"recovery-1","delivery_status":"claimable","product":"oauth_30d","original_email":"old@example.com","auth_file_name":"old.json","auth_index":"auth-1","claim_url":"` + server.URL + `/api/customer/recoveries/recovery-1/claim?ticket=ticket-1"}]}}`))
+			_, _ = w.Write([]byte(`{"payload":{"recoveries":[{"recovery_id":"recovery-1","delivery_status":"claimable","product":"oauth_30d","source_order_id":8123,"original_email":"old@example.com","auth_file_name":"old.json","auth_index":"auth-1","claim_url":"` + server.URL + `/api/customer/recoveries/recovery-1/claim?ticket=ticket-1"}]}}`))
 		case "/api/customer/recoveries/recovery-1/claim":
 			claimCalls.Add(1)
 			if got := r.URL.Query().Get("ticket"); got != "ticket-1" {
@@ -324,6 +324,7 @@ func TestClientListsAndClaimsRecoveries(t *testing.T) {
 		t.Fatalf("recoveries: %v", err)
 	}
 	if len(recoveries) != 1 || recoveries[0].ID != "recovery-1" || recoveries[0].ClaimURL == "" ||
+		recoveries[0].SourceOrderID != "8123" ||
 		recoveries[0].OriginalAccount != "old.json" || recoveries[0].OriginalEmail != "old@example.com" ||
 		recoveries[0].OriginalAuthIndex != "auth-1" {
 		t.Fatalf("recoveries = %#v", recoveries)

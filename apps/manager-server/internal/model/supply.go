@@ -60,6 +60,7 @@ type SupplyRecovery struct {
 	DeliveryStatus      string                     `json:"deliveryStatus"`
 	Status              string                     `json:"status"`
 	CredentialVersion   int                        `json:"credentialVersion,omitempty"`
+	SourceOrderID       string                     `json:"sourceOrderId,omitempty"`
 	OriginalFileName    string                     `json:"originalFileName,omitempty"`
 	OriginalAuthIndex   string                     `json:"originalAuthIndex,omitempty"`
 	OriginalEmail       string                     `json:"originalEmail,omitempty"`
@@ -80,6 +81,7 @@ type SupplyRecovery struct {
 	LastImportedAtMS    int64                      `json:"lastImportedAtMs,omitempty"`
 	ImportStatus        string                     `json:"importStatus,omitempty"`
 	ImportMessage       string                     `json:"importMessage,omitempty"`
+	Ownership           string                     `json:"ownership,omitempty"`
 	ImportNextRetryAtMS int64                      `json:"importNextRetryAtMs,omitempty"`
 	ImportItems         []SupplyRecoveryImportItem `json:"importItems,omitempty"`
 }
