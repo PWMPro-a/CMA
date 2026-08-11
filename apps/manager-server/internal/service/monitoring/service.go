@@ -167,6 +167,7 @@ type Include struct {
 	RecentFailures     int               `json:"recent_failures"`
 	EventsPage         *EventsPage       `json:"events_page"`
 	DrilldownPreview   *DrilldownPreview `json:"drilldown_preview"`
+	RoutingDiagnostics bool              `json:"routing_diagnostics"`
 	Granularity        string            `json:"granularity"`
 }
 
@@ -205,6 +206,30 @@ type Response struct {
 	RecentFailures     []RecentFailure           `json:"recent_failures,omitempty"`
 	Events             *EventsResponse           `json:"events,omitempty"`
 	DrilldownPreview   *EventsResponse           `json:"drilldown_preview,omitempty"`
+	RoutingDiagnostics *RoutingDiagnostics       `json:"routing_diagnostics,omitempty"`
+}
+
+type RoutingDiagnosticCount struct {
+	Key   string `json:"key"`
+	Count int64  `json:"count"`
+}
+
+type RoutingDiagnostics struct {
+	TotalDiagnostics     int64                    `json:"total_diagnostics"`
+	CacheHits            int64                    `json:"cache_hits"`
+	ColdBinds            int64                    `json:"cold_binds"`
+	Failovers            int64                    `json:"failovers"`
+	ConcurrentReuses     int64                    `json:"concurrent_reuses"`
+	FallbackAliasHits    int64                    `json:"fallback_alias_hits"`
+	BindingReuseRate     float64                  `json:"binding_reuse_rate"`
+	MaxBindingGeneration int64                    `json:"max_binding_generation"`
+	QuotaSnapshotSamples int64                    `json:"quota_snapshot_samples"`
+	AverageQuotaUsed     float64                  `json:"average_quota_used_percent"`
+	PCKShadowSamples     int64                    `json:"pck_shadow_samples"`
+	DistinctPCKs         int64                    `json:"distinct_pcks"`
+	PCKContextConflicts  int64                    `json:"pck_context_conflicts"`
+	Outcomes             []RoutingDiagnosticCount `json:"outcomes"`
+	SessionSources       []RoutingDiagnosticCount `json:"session_sources"`
 }
 
 type HeaderSnapshotsRequest struct {
@@ -1009,6 +1034,15 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 		})
 	}
 
+	var routingDiagnostics store.RoutingDiagnostics
+	if req.Include.RoutingDiagnostics {
+		queries.Go(func(queryCtx context.Context) error {
+			var queryErr error
+			routingDiagnostics, queryErr = s.store.RoutingDiagnosticsWithFilter(queryCtx, filter)
+			return queryErr
+		})
+	}
+
 	var eventsPage store.EventsPage
 	if req.Include.EventsPage != nil {
 		limit := req.Include.EventsPage.Limit
@@ -1139,6 +1173,9 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 	}
 	if err := queries.Wait(); err != nil {
 		return Response{}, err
+	}
+	if req.Include.RoutingDiagnostics {
+		response.RoutingDiagnostics = buildRoutingDiagnostics(routingDiagnostics)
 	}
 	if deriveChannelStatsFromAccounts {
 		channelStats = channelModelStatsFromAccountStats(accountStats)
@@ -1279,6 +1316,37 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 	}
 
 	return response, nil
+}
+
+func buildRoutingDiagnostics(source store.RoutingDiagnostics) *RoutingDiagnostics {
+	if source.TotalDiagnostics == 0 {
+		return nil
+	}
+	reused := source.CacheHits + source.ConcurrentReuses + source.FallbackAliasHits
+	result := &RoutingDiagnostics{
+		TotalDiagnostics:     source.TotalDiagnostics,
+		CacheHits:            source.CacheHits,
+		ColdBinds:            source.ColdBinds,
+		Failovers:            source.Failovers,
+		ConcurrentReuses:     source.ConcurrentReuses,
+		FallbackAliasHits:    source.FallbackAliasHits,
+		BindingReuseRate:     ratio(reused, source.TotalDiagnostics),
+		MaxBindingGeneration: source.MaxBindingGeneration,
+		QuotaSnapshotSamples: source.QuotaSnapshotSamples,
+		AverageQuotaUsed:     source.AverageQuotaUsed,
+		PCKShadowSamples:     source.PCKShadowSamples,
+		DistinctPCKs:         source.DistinctPCKs,
+		PCKContextConflicts:  source.PCKContextConflicts,
+		Outcomes:             make([]RoutingDiagnosticCount, 0, len(source.Outcomes)),
+		SessionSources:       make([]RoutingDiagnosticCount, 0, len(source.SessionSources)),
+	}
+	for _, item := range source.Outcomes {
+		result.Outcomes = append(result.Outcomes, RoutingDiagnosticCount{Key: item.Key, Count: item.Count})
+	}
+	for _, item := range source.SessionSources {
+		result.SessionSources = append(result.SessionSources, RoutingDiagnosticCount{Key: item.Key, Count: item.Count})
+	}
+	return result
 }
 
 func (s *Service) AccountHistory(ctx context.Context, req AccountHistoryRequest) (AccountHistoryResponse, error) {

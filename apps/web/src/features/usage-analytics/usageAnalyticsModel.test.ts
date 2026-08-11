@@ -108,6 +108,7 @@ describe('usage analytics request model', () => {
       channel_share: true,
       api_key_stats: true,
       anomaly_points: true,
+      routing_diagnostics: true,
       granularity: 'day',
     });
     expect(

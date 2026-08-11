@@ -84,6 +84,14 @@ where
 		(raw_json like '%X-Zero-Retention%' or raw_json like '%X-Zero-Data-Retention%')
 		and json_type(metadata_json, '$.data_policy.zero_retention') is null
 	)
+	or (raw_json like '%X-Cpa-Affinity-Outcome%' and json_type(metadata_json, '$.routing.affinity_outcome') is null)
+	or (raw_json like '%X-Cpa-Session-Source%' and json_type(metadata_json, '$.routing.session_source') is null)
+	or (raw_json like '%X-Cpa-Binding-Generation%' and json_type(metadata_json, '$.routing.binding_generation') is null)
+	or (raw_json like '%X-Cpa-Quota-Used-Percent%' and json_type(metadata_json, '$.routing.quota_used_percent') is null)
+	or (raw_json like '%X-Cpa-Pck-Shadow-Sampled%' and json_type(metadata_json, '$.routing.pck_shadow_sampled') is null)
+	or (raw_json like '%X-Cpa-Pck-Original-Hash%' and json_type(metadata_json, '$.routing.pck_original_hash') is null)
+	or (raw_json like '%X-Cpa-Pck-Context-Root-Hash%' and json_type(metadata_json, '$.routing.pck_context_root_hash') is null)
+	or (raw_json like '%X-Cpa-Pck-Prefix-Generation%' and json_type(metadata_json, '$.routing.pck_prefix_generation') is null)
 order by id
 limit ?`
 

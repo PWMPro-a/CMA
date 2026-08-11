@@ -16,6 +16,7 @@ type Repository interface {
 	ListSupplyUsageMinutes(ctx context.Context, sinceMS int64) ([]SupplyUsageMinute, error)
 	ModelUsageSummary(ctx context.Context, limit int) (model.ModelUsageSummary, error)
 	BackfillResponseMetadata(ctx context.Context, batchLimit int) (int, error)
+	BackfillRoutingDiagnostics(ctx context.Context, batchLimit int) (int, error)
 	Count(ctx context.Context) (int64, error)
 	ExportJSONL(ctx context.Context) ([]byte, error)
 	WriteCompatibleUsage(ctx context.Context, writer io.Writer, limit int) error
@@ -51,6 +52,7 @@ type Repository interface {
 	LatestHeaderSnapshots(ctx context.Context, sinceMS int64, limit int) ([]HeaderSnapshot, error)
 	ActiveDaysWithFilter(ctx context.Context, filter AnalyticsFilter, location *time.Location) (int64, error)
 	ZeroTokenModelsWithFilter(ctx context.Context, filter AnalyticsFilter) ([]string, error)
+	RoutingDiagnosticsWithFilter(ctx context.Context, filter AnalyticsFilter) (RoutingDiagnostics, error)
 }
 
 // SupplyUsageMinute is the small restart-recovery snapshot consumed by smart
@@ -136,6 +138,15 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 		return model.InsertResult{}, err
 	}
 	defer stmt.Close()
+
+	routingStmt, err := tx.PrepareContext(ctx, `insert or replace into usage_routing_diagnostics (
+		event_hash, timestamp_ms, affinity_outcome, session_source, binding_generation,
+		quota_used_percent, pck_shadow_sampled, pck_original_hash, pck_context_root_hash, pck_prefix_generation
+	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return model.InsertResult{}, err
+	}
+	defer routingStmt.Close()
 
 	result := model.InsertResult{}
 	for _, event := range events {
@@ -277,6 +288,23 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 			}
 			result.Inserted++
 			result.InsertedEventHashes = append(result.InsertedEventHashes, event.EventHash)
+			if routing := usageRoutingDiagnostics(event.ResponseMetadata); routing != nil {
+				if _, err := routingStmt.ExecContext(
+					ctx,
+					event.EventHash,
+					event.TimestampMS,
+					nullString(routing.AffinityOutcome),
+					nullString(routing.SessionSource),
+					routing.BindingGeneration,
+					nullFloat(routing.QuotaUsedPercent),
+					boolInt(routing.PCKShadowSampled != nil && *routing.PCKShadowSampled),
+					nullString(routing.PCKOriginalHash),
+					nullString(routing.PCKContextRootHash),
+					nullString(routing.PCKPrefixGeneration),
+				); err != nil {
+					return model.InsertResult{}, err
+				}
+			}
 		} else {
 			if _, err := attachExistingLedgerStmt.ExecContext(
 				ctx,
@@ -296,6 +324,26 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 		return model.InsertResult{}, err
 	}
 	return result, nil
+}
+
+func usageRoutingDiagnostics(metadata *usage.ResponseHeaderMetadata) *usage.HeaderRoutingMetadata {
+	if metadata == nil || metadata.Routing == nil {
+		return nil
+	}
+	routing := metadata.Routing
+	if routing.AffinityOutcome == "" && routing.SessionSource == "" && routing.BindingGeneration == 0 &&
+		routing.QuotaUsedPercent == nil && routing.PCKShadowSampled == nil && routing.PCKOriginalHash == "" &&
+		routing.PCKContextRootHash == "" && routing.PCKPrefixGeneration == "" {
+		return nil
+	}
+	return routing
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func (r *repository) ListSupplyUsageMinutes(ctx context.Context, sinceMS int64) ([]SupplyUsageMinute, error) {

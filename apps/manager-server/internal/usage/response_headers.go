@@ -73,15 +73,23 @@ type HeaderTraceMetadata struct {
 }
 
 type HeaderRoutingMetadata struct {
-	OpenAIProxyWasm string `json:"openai_proxy_wasm,omitempty"`
-	ModelsETag      string `json:"models_etag,omitempty"`
-	NewAPIVersion   string `json:"new_api_version,omitempty"`
-	Server          string `json:"server,omitempty"`
-	Via             string `json:"via,omitempty"`
-	CFCacheStatus   string `json:"cf_cache_status,omitempty"`
-	SiteCacheStatus string `json:"site_cache_status,omitempty"`
-	ServedBy        string `json:"served_by,omitempty"`
-	MiFEUpstream    string `json:"mife_upstream_status,omitempty"`
+	OpenAIProxyWasm     string   `json:"openai_proxy_wasm,omitempty"`
+	ModelsETag          string   `json:"models_etag,omitempty"`
+	NewAPIVersion       string   `json:"new_api_version,omitempty"`
+	Server              string   `json:"server,omitempty"`
+	Via                 string   `json:"via,omitempty"`
+	CFCacheStatus       string   `json:"cf_cache_status,omitempty"`
+	SiteCacheStatus     string   `json:"site_cache_status,omitempty"`
+	ServedBy            string   `json:"served_by,omitempty"`
+	MiFEUpstream        string   `json:"mife_upstream_status,omitempty"`
+	AffinityOutcome     string   `json:"affinity_outcome,omitempty"`
+	SessionSource       string   `json:"session_source,omitempty"`
+	BindingGeneration   int64    `json:"binding_generation,omitempty"`
+	QuotaUsedPercent    *float64 `json:"quota_used_percent,omitempty"`
+	PCKShadowSampled    *bool    `json:"pck_shadow_sampled,omitempty"`
+	PCKOriginalHash     string   `json:"pck_original_hash,omitempty"`
+	PCKContextRootHash  string   `json:"pck_context_root_hash,omitempty"`
+	PCKPrefixGeneration string   `json:"pck_prefix_generation,omitempty"`
 }
 
 type HeaderResponseMetadata struct {
@@ -572,6 +580,14 @@ func isResponseHeaderAllowed(key string) bool {
 		"x-site-cache-status",
 		"x-served-by",
 		"x-mife-upstream-status",
+		"x-cpa-affinity-outcome",
+		"x-cpa-session-source",
+		"x-cpa-binding-generation",
+		"x-cpa-quota-used-percent",
+		"x-cpa-pck-shadow-sampled",
+		"x-cpa-pck-original-hash",
+		"x-cpa-pck-context-root-hash",
+		"x-cpa-pck-prefix-generation",
 		"content-type",
 		"content-length",
 		"content-disposition",
@@ -774,15 +790,29 @@ func parseTraceHeaders(headers map[string][]string) *HeaderTraceMetadata {
 
 func parseRoutingHeaders(headers map[string][]string) *HeaderRoutingMetadata {
 	routing := &HeaderRoutingMetadata{
-		OpenAIProxyWasm: normalizeHeaderValue(headerFirst(headers, "x-openai-proxy-wasm")),
-		ModelsETag:      normalizeHeaderValue(headerFirst(headers, "x-models-etag")),
-		NewAPIVersion:   normalizeHeaderValue(headerFirst(headers, "x-new-api-version")),
-		Server:          normalizeHeaderValue(headerFirst(headers, "server")),
-		Via:             normalizeHeaderValue(headerFirst(headers, "via")),
-		CFCacheStatus:   normalizeHeaderValue(headerFirst(headers, "cf-cache-status")),
-		SiteCacheStatus: normalizeHeaderValue(headerFirst(headers, "x-site-cache-status")),
-		ServedBy:        normalizeHeaderValue(headerFirst(headers, "x-served-by")),
-		MiFEUpstream:    normalizeHeaderValue(headerFirst(headers, "x-mife-upstream-status")),
+		OpenAIProxyWasm:     normalizeHeaderValue(headerFirst(headers, "x-openai-proxy-wasm")),
+		ModelsETag:          normalizeHeaderValue(headerFirst(headers, "x-models-etag")),
+		NewAPIVersion:       normalizeHeaderValue(headerFirst(headers, "x-new-api-version")),
+		Server:              normalizeHeaderValue(headerFirst(headers, "server")),
+		Via:                 normalizeHeaderValue(headerFirst(headers, "via")),
+		CFCacheStatus:       normalizeHeaderValue(headerFirst(headers, "cf-cache-status")),
+		SiteCacheStatus:     normalizeHeaderValue(headerFirst(headers, "x-site-cache-status")),
+		ServedBy:            normalizeHeaderValue(headerFirst(headers, "x-served-by")),
+		MiFEUpstream:        normalizeHeaderValue(headerFirst(headers, "x-mife-upstream-status")),
+		AffinityOutcome:     normalizeHeaderValue(headerFirst(headers, "x-cpa-affinity-outcome")),
+		SessionSource:       normalizeHeaderValue(headerFirst(headers, "x-cpa-session-source")),
+		PCKOriginalHash:     normalizeHeaderValue(headerFirst(headers, "x-cpa-pck-original-hash")),
+		PCKContextRootHash:  normalizeHeaderValue(headerFirst(headers, "x-cpa-pck-context-root-hash")),
+		PCKPrefixGeneration: normalizeHeaderValue(headerFirst(headers, "x-cpa-pck-prefix-generation")),
+	}
+	if value, ok := parseIntHeader(headerFirst(headers, "x-cpa-binding-generation")); ok && value > 0 {
+		routing.BindingGeneration = value
+	}
+	if value, ok := parseFloatHeader(headerFirst(headers, "x-cpa-quota-used-percent")); ok && value >= 0 && value <= 100 {
+		routing.QuotaUsedPercent = &value
+	}
+	if value, ok := parseBoolHeader(headerFirst(headers, "x-cpa-pck-shadow-sampled")); ok {
+		routing.PCKShadowSampled = &value
 	}
 	if routing.isEmpty() {
 		return nil
@@ -1288,7 +1318,15 @@ func (r *HeaderRoutingMetadata) isEmpty() bool {
 			r.CFCacheStatus == "" &&
 			r.SiteCacheStatus == "" &&
 			r.ServedBy == "" &&
-			r.MiFEUpstream == "")
+			r.MiFEUpstream == "" &&
+			r.AffinityOutcome == "" &&
+			r.SessionSource == "" &&
+			r.BindingGeneration == 0 &&
+			r.QuotaUsedPercent == nil &&
+			r.PCKShadowSampled == nil &&
+			r.PCKOriginalHash == "" &&
+			r.PCKContextRootHash == "" &&
+			r.PCKPrefixGeneration == "")
 }
 
 func (r *HeaderResponseMetadata) isEmpty() bool {

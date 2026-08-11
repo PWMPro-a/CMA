@@ -114,6 +114,90 @@ describe('usageAnalyticsPresentation', () => {
     expect(cards[7]).toMatchObject({ value: '8.0K', valueTitle: '8,000' });
   });
 
+  it('adds binding reuse and PCK shadow diagnostics to the overview', () => {
+    const cards = buildUsageOverviewSummaryCards({
+      anomalyCount: 0,
+      locale: 'en',
+      reasoningTokens: 0,
+      routingDiagnostics: {
+        total_diagnostics: 100,
+        cache_hits: 94,
+        cold_binds: 3,
+        failovers: 1,
+        concurrent_reuses: 1,
+        fallback_alias_hits: 1,
+        binding_reuse_rate: 0.96,
+        max_binding_generation: 2,
+        quota_snapshot_samples: 10,
+        average_quota_used_percent: 50,
+        pck_shadow_samples: 20,
+        distinct_pcks: 12,
+        pck_context_conflicts: 1,
+        outcomes: [],
+        session_sources: [],
+      },
+      summary,
+      summaryDelta,
+      t,
+    });
+
+    expect(cards).toHaveLength(13);
+    expect(cards[8]).toMatchObject({
+      label: 'usage_analytics.binding_reuse_rate',
+      tone: 'good',
+      value: '96.0%',
+    });
+    expect(cards[9]).toMatchObject({
+      label: 'usage_analytics.routing_failover_rate',
+      tone: 'warn',
+      value: '1.0%',
+    });
+    expect(cards[10]).toMatchObject({
+      label: 'usage_analytics.concurrent_reuses',
+      value: '1',
+    });
+    expect(cards[11]).toMatchObject({
+      label: 'usage_analytics.average_quota_used',
+      value: '50.0%',
+    });
+    expect(cards[12]).toMatchObject({
+      accent: 'red',
+      label: 'usage_analytics.pck_context_conflicts',
+      tone: 'bad',
+      value: '1',
+    });
+  });
+
+  it('does not render routing health cards without diagnostic samples', () => {
+    const cards = buildUsageOverviewSummaryCards({
+      anomalyCount: 0,
+      locale: 'en',
+      reasoningTokens: 0,
+      routingDiagnostics: {
+        total_diagnostics: 0,
+        cache_hits: 0,
+        cold_binds: 0,
+        failovers: 0,
+        concurrent_reuses: 0,
+        fallback_alias_hits: 0,
+        binding_reuse_rate: 0,
+        max_binding_generation: 0,
+        quota_snapshot_samples: 0,
+        average_quota_used_percent: 0,
+        pck_shadow_samples: 0,
+        distinct_pcks: 0,
+        pck_context_conflicts: 0,
+        outcomes: [],
+        session_sources: [],
+      },
+      summary,
+      summaryDelta,
+      t,
+    });
+
+    expect(cards).toHaveLength(8);
+  });
+
   it('shows fine-grained cache buckets in credential detail cache totals', () => {
     const cards = buildCredentialDetailCards({
       locale: 'en',

@@ -234,6 +234,7 @@ describe('useUsageAnalytics request orchestration', () => {
       channel_share: true,
       api_key_stats: true,
       anomaly_points: true,
+      routing_diagnostics: true,
       granularity: 'hour',
     });
     expect(JSON.parse(overview?.dataScopeKey ?? '{}')).toMatchObject({ activeTab: 'overview' });

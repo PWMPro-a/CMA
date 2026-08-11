@@ -101,6 +101,8 @@ type AccountWindowUsageQuery = usageevent.AccountWindowUsageQuery
 type AccountWindowModelStat = usageevent.AccountWindowModelStat
 type LatestAccountRequestQuery = usageevent.LatestAccountRequestQuery
 type LatestAccountRequest = usageevent.LatestAccountRequest
+type RoutingDiagnostics = usageevent.RoutingDiagnostics
+type RoutingDiagnosticCount = usageevent.RoutingDiagnosticCount
 type UsageRollupCheckpoint = usagerollup.Checkpoint
 type UsageRollupCatchUpResult = usagerollup.CatchUpResult
 type AccountHistoryRollupRow = usagerollup.AccountHistoryRow
@@ -946,6 +948,10 @@ func (s *Store) BackfillUsageResponseMetadata(ctx context.Context, batchLimit in
 	return s.UsageEvents.BackfillResponseMetadata(ctx, batchLimit)
 }
 
+func (s *Store) BackfillUsageRoutingDiagnostics(ctx context.Context, batchLimit int) (int, error) {
+	return s.UsageEvents.BackfillRoutingDiagnostics(ctx, batchLimit)
+}
+
 func (s *Store) Counts(ctx context.Context) (events int64, deadLetters int64, err error) {
 	events, err = s.UsageEvents.Count(ctx)
 	if err != nil {
@@ -1096,4 +1102,8 @@ func (s *Store) ActiveDaysWithFilter(ctx context.Context, filter AnalyticsFilter
 
 func (s *Store) ZeroTokenModelsWithFilter(ctx context.Context, filter AnalyticsFilter) ([]string, error) {
 	return s.UsageEvents.ZeroTokenModelsWithFilter(ctx, filter)
+}
+
+func (s *Store) RoutingDiagnosticsWithFilter(ctx context.Context, filter AnalyticsFilter) (RoutingDiagnostics, error) {
+	return s.UsageEvents.RoutingDiagnosticsWithFilter(ctx, filter)
 }

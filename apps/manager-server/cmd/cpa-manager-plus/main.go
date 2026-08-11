@@ -232,6 +232,8 @@ func runServer() {
 			if dashboardHourlyRollupWorker != nil {
 				dashboardHourlyRollupWorker.Wake()
 			}
+			log.Printf("usage routing diagnostics backfill starting")
+			runUsageRoutingDiagnosticsBackfill(ctx, db)
 		}()
 	})
 	usageCacheAccountingMigrationWorker.Start(ctx)
@@ -346,4 +348,43 @@ func runUsageResponseMetadataBackfill(ctx context.Context, db *store.Store) {
 		}
 	}
 	log.Printf("usage response metadata backfill paused after startup slice: updated=%d batch_limit=%d max_batches=%d", total, batchLimit, maxStartupBatches)
+}
+
+func runUsageRoutingDiagnosticsBackfill(ctx context.Context, db *store.Store) {
+	const batchLimit = 250
+	const batchTimeout = 5 * time.Second
+	const batchDelay = 250 * time.Millisecond
+	const retryDelay = 5 * time.Second
+	total := 0
+	for {
+		batchCtx, cancel := context.WithTimeout(ctx, batchTimeout)
+		updated, err := db.BackfillUsageRoutingDiagnostics(batchCtx, batchLimit)
+		cancel()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				log.Printf("usage routing diagnostics backfill waiting after timeout: updated=%d batch_limit=%d timeout=%s", total, batchLimit, batchTimeout)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(retryDelay):
+					continue
+				}
+			}
+			log.Printf("usage routing diagnostics backfill: %v", err)
+			return
+		}
+		if updated == 0 {
+			log.Printf("usage routing diagnostics backfill completed: updated=%d", total)
+			return
+		}
+		total += updated
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(batchDelay):
+		}
+	}
 }

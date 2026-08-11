@@ -2569,6 +2569,7 @@ function UsageAnalyticsPageInner() {
         reasoningTokens: overviewReasoningTokens,
         summary: usage.summary,
         summaryDelta: usage.summaryDelta,
+        routingDiagnostics: usage.routingDiagnostics,
         t,
       }),
     [
@@ -2578,6 +2579,7 @@ function UsageAnalyticsPageInner() {
       usage.anomalyPoints.length,
       usage.summary,
       usage.summaryDelta,
+      usage.routingDiagnostics,
     ]
   );
   const trendSummaryCards = useMemo(

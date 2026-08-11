@@ -106,6 +106,26 @@ func Migrate(db *sql.DB) error {
 		`create index if not exists idx_usage_events_model on usage_events(model)`,
 		`create index if not exists idx_usage_events_auth_index on usage_events(auth_index)`,
 		`create index if not exists idx_usage_events_endpoint on usage_events(endpoint)`,
+		`create table if not exists usage_routing_diagnostics (
+			event_hash text primary key,
+			timestamp_ms integer not null,
+			affinity_outcome text,
+			session_source text,
+			binding_generation integer not null default 0,
+			quota_used_percent real,
+			pck_shadow_sampled integer not null default 0,
+			pck_original_hash text,
+			pck_context_root_hash text,
+			pck_prefix_generation text
+		)`,
+		`create index if not exists idx_usage_routing_diagnostics_timestamp on usage_routing_diagnostics(timestamp_ms)`,
+		`create index if not exists idx_usage_routing_diagnostics_outcome on usage_routing_diagnostics(affinity_outcome, timestamp_ms)`,
+		`create index if not exists idx_usage_routing_diagnostics_pck on usage_routing_diagnostics(pck_original_hash, timestamp_ms)`,
+		`create trigger if not exists trg_usage_events_delete_routing_diagnostics
+			after delete on usage_events
+			begin
+				delete from usage_routing_diagnostics where event_hash = old.event_hash;
+			end`,
 		`create table if not exists usage_rollup_checkpoints (
 			name text primary key,
 			last_event_id integer not null default 0,

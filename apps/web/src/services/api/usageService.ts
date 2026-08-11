@@ -801,7 +801,31 @@ export interface MonitoringAnalyticsInclude {
   recent_failures?: number;
   events_page?: MonitoringAnalyticsEventsPageRequest;
   drilldown_preview?: MonitoringAnalyticsDrilldownPreviewRequest;
+  routing_diagnostics?: boolean;
   granularity?: 'hour' | 'day' | string;
+}
+
+export interface MonitoringRoutingDiagnosticCount {
+  key: string;
+  count: number;
+}
+
+export interface MonitoringRoutingDiagnostics {
+  total_diagnostics: number;
+  cache_hits: number;
+  cold_binds: number;
+  failovers: number;
+  concurrent_reuses: number;
+  fallback_alias_hits: number;
+  binding_reuse_rate: number;
+  max_binding_generation: number;
+  quota_snapshot_samples: number;
+  average_quota_used_percent: number;
+  pck_shadow_samples: number;
+  distinct_pcks: number;
+  pck_context_conflicts: number;
+  outcomes: MonitoringRoutingDiagnosticCount[];
+  session_sources: MonitoringRoutingDiagnosticCount[];
 }
 
 export interface MonitoringAnalyticsRequest {
@@ -1657,6 +1681,14 @@ export interface ResponseHeaderRoutingMetadata {
   site_cache_status?: string;
   served_by?: string;
   mife_upstream_status?: string;
+  affinity_outcome?: string;
+  session_source?: string;
+  binding_generation?: number;
+  quota_used_percent?: number;
+  pck_shadow_sampled?: boolean;
+  pck_original_hash?: string;
+  pck_context_root_hash?: string;
+  pck_prefix_generation?: string;
 }
 
 export interface ResponseHeaderResponseMetadata {
@@ -1844,6 +1876,7 @@ export interface MonitoringAnalyticsResponse {
   recent_failures?: MonitoringAnalyticsRecentFailure[];
   events?: MonitoringAnalyticsEventsResponse;
   drilldown_preview?: MonitoringAnalyticsEventsResponse;
+  routing_diagnostics?: MonitoringRoutingDiagnostics;
 }
 
 const USAGE_SERVICE_TIMEOUT_MS = 30 * 1000;

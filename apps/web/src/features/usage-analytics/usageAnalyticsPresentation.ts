@@ -10,6 +10,7 @@ import {
   type UsageRankRow,
   type UsageSummaryDelta,
   type UsageSummaryMetrics,
+  type UsageRoutingDiagnostics,
   type UsageTimelinePoint,
 } from './usageAnalyticsModel';
 
@@ -56,6 +57,7 @@ type OverviewSummaryCardsInput = CommonSummaryContext & {
   reasoningTokens: number;
   summary: UsageSummaryMetrics;
   summaryDelta: UsageSummaryDelta;
+  routingDiagnostics?: UsageRoutingDiagnostics | null;
 };
 
 type TrendSummaryCardsInput = CommonSummaryContext & {
@@ -164,6 +166,7 @@ export const buildUsageOverviewSummaryCards = ({
   reasoningTokens,
   summary,
   summaryDelta,
+  routingDiagnostics = null,
   t,
 }: OverviewSummaryCardsInput): UsageSummaryCard[] => {
   const cacheTokens = getUsageCacheTokens(summary);
@@ -174,7 +177,7 @@ export const buildUsageOverviewSummaryCards = ({
       : t('usage_analytics.metric_p95_latency');
   const p95LatencyValue = summary.p95LatencyMs ?? summary.p95TtftMs;
 
-  return [
+  const cards: UsageSummaryCard[] = [
     {
       accent: 'blue',
       fullLabel: t('usage_analytics.metric_request_count'),
@@ -256,6 +259,71 @@ export const buildUsageOverviewSummaryCards = ({
       variant: 'secondary',
     },
   ];
+  if (routingDiagnostics && routingDiagnostics.total_diagnostics > 0) {
+    const failoverRate = routingDiagnostics.failovers / routingDiagnostics.total_diagnostics;
+    const primarySessionSource = routingDiagnostics.session_sources[0];
+    cards.push(
+      {
+        accent: 'green',
+        fullLabel: t('usage_analytics.binding_reuse_rate'),
+        icon: 'cache',
+        label: t('usage_analytics.binding_reuse_rate'),
+        meta: `${t('usage_analytics.cold_binds')} ${formatCompactNumber(routingDiagnostics.cold_binds)} · ${t('usage_analytics.session_source')} ${primarySessionSource ? `${primarySessionSource.key} ${formatCompactNumber(primarySessionSource.count)}` : '-'}`,
+        tone:
+          routingDiagnostics.binding_reuse_rate >= 0.95
+            ? 'good'
+            : routingDiagnostics.binding_reuse_rate >= 0.9
+              ? 'warn'
+              : 'bad',
+        value: formatPercent(routingDiagnostics.binding_reuse_rate),
+        variant: 'secondary',
+      },
+      {
+        accent: failoverRate >= 0.05 ? 'red' : failoverRate >= 0.01 ? 'amber' : 'green',
+        fullLabel: t('usage_analytics.routing_failover_rate'),
+        icon: 'failure',
+        label: t('usage_analytics.routing_failover_rate'),
+        meta: `${t('usage_analytics.failovers')} ${formatCompactNumber(routingDiagnostics.failovers)} · ${t('usage_analytics.max_binding_generation')} ${formatCompactNumber(routingDiagnostics.max_binding_generation)}`,
+        tone: failoverRate >= 0.05 ? 'bad' : failoverRate >= 0.01 ? 'warn' : 'good',
+        value: formatPercent(failoverRate),
+        variant: 'secondary',
+      },
+      {
+        accent: 'blue',
+        fullLabel: t('usage_analytics.concurrent_reuses'),
+        icon: 'calls',
+        label: t('usage_analytics.concurrent_reuses'),
+        meta: `${t('usage_analytics.fallback_alias_hits')} ${formatCompactNumber(routingDiagnostics.fallback_alias_hits)}`,
+        tone: 'good',
+        value: formatCompactNumber(routingDiagnostics.concurrent_reuses),
+        variant: 'secondary',
+      },
+      {
+        accent: routingDiagnostics.average_quota_used_percent >= 85 ? 'amber' : 'teal',
+        fullLabel: t('usage_analytics.average_quota_used'),
+        icon: 'tokens',
+        label: t('usage_analytics.average_quota_used'),
+        meta: `${t('usage_analytics.quota_routing_samples')} ${formatCompactNumber(routingDiagnostics.quota_snapshot_samples)}`,
+        tone: routingDiagnostics.average_quota_used_percent >= 85 ? 'warn' : 'good',
+        value:
+          routingDiagnostics.quota_snapshot_samples > 0
+            ? formatPercent(routingDiagnostics.average_quota_used_percent / 100)
+            : '-',
+        variant: 'secondary',
+      },
+      {
+        accent: routingDiagnostics.pck_context_conflicts > 0 ? 'red' : 'teal',
+        fullLabel: t('usage_analytics.pck_context_conflicts'),
+        icon: 'credential',
+        label: t('usage_analytics.pck_context_conflicts'),
+        meta: `${t('usage_analytics.pck_shadow_samples')} ${formatCompactNumber(routingDiagnostics.pck_shadow_samples)} · ${t('usage_analytics.distinct_pcks')} ${formatCompactNumber(routingDiagnostics.distinct_pcks)}`,
+        tone: routingDiagnostics.pck_context_conflicts > 0 ? 'bad' : 'good',
+        value: formatCompactNumber(routingDiagnostics.pck_context_conflicts),
+        variant: 'secondary',
+      }
+    );
+  }
+  return cards;
 };
 
 export const buildUsageTrendSummaryCards = ({

@@ -19,6 +19,12 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
+func TestBuildRoutingDiagnosticsOmitsEmptySample(t *testing.T) {
+	if got := buildRoutingDiagnostics(store.RoutingDiagnostics{}); got != nil {
+		t.Fatalf("buildRoutingDiagnostics(empty) = %#v, want nil", got)
+	}
+}
+
 func TestAnalyticsQueryGroupBoundsConcurrency(t *testing.T) {
 	group := newAnalyticsQueryGroup(context.Background(), 2)
 	release := make(chan struct{})

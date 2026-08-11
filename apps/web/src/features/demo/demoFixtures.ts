@@ -4351,6 +4351,37 @@ const buildMonitoringAnalytics = (
     recent_failures: recentFailures,
     events: eventsPage,
     drilldown_preview: drilldownPreview,
+    ...(request?.include?.routing_diagnostics
+      ? {
+          routing_diagnostics: {
+            total_diagnostics: 18_640,
+            cache_hits: 17_912,
+            cold_binds: 428,
+            failovers: 96,
+            concurrent_reuses: 112,
+            fallback_alias_hits: 92,
+            binding_reuse_rate: 0.969,
+            max_binding_generation: 4,
+            quota_snapshot_samples: 1_284,
+            average_quota_used_percent: 62.4,
+            pck_shadow_samples: 1_860,
+            distinct_pcks: 612,
+            pck_context_conflicts: 3,
+            outcomes: [
+              { key: 'cache_hit', count: 17_912 },
+              { key: 'cold_bind', count: 428 },
+              { key: 'concurrent_reuse', count: 112 },
+              { key: 'failover', count: 96 },
+              { key: 'fallback_alias_hit', count: 92 },
+            ],
+            session_sources: [
+              { key: 'pck', count: 11_420 },
+              { key: 'conversation', count: 5_180 },
+              { key: 'header', count: 2_040 },
+            ],
+          },
+        }
+      : {}),
   };
 };
 

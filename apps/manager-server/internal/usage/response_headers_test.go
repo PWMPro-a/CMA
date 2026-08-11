@@ -51,6 +51,32 @@ func TestParseResponseHeaderMetadataCodexQuotaAndTrace(t *testing.T) {
 	}
 }
 
+func TestParseResponseHeaderMetadataRoutingDiagnostics(t *testing.T) {
+	metadata := ParseResponseHeaderMetadata(map[string]any{
+		"X-Cpa-Affinity-Outcome":      []any{"concurrent_reuse"},
+		"X-Cpa-Session-Source":        []any{"pck"},
+		"X-Cpa-Binding-Generation":    []any{"4"},
+		"X-Cpa-Quota-Used-Percent":    []any{"81.250"},
+		"X-Cpa-Pck-Shadow-Sampled":    []any{"true"},
+		"X-Cpa-Pck-Original-Hash":     []any{"original-hash"},
+		"X-Cpa-Pck-Context-Root-Hash": []any{"context-hash"},
+		"X-Cpa-Pck-Prefix-Generation": []any{"prefix-hash"},
+	}, time.Unix(1_780_000_000, 0))
+	if metadata == nil || metadata.Routing == nil {
+		t.Fatalf("routing metadata missing: %#v", metadata)
+	}
+	routing := metadata.Routing
+	if routing.AffinityOutcome != "concurrent_reuse" || routing.SessionSource != "pck" || routing.BindingGeneration != 4 {
+		t.Fatalf("routing binding metadata = %#v", routing)
+	}
+	if routing.QuotaUsedPercent == nil || *routing.QuotaUsedPercent != 81.25 {
+		t.Fatalf("routing quota metadata = %#v", routing.QuotaUsedPercent)
+	}
+	if routing.PCKShadowSampled == nil || !*routing.PCKShadowSampled || routing.PCKOriginalHash != "original-hash" || routing.PCKContextRootHash != "context-hash" || routing.PCKPrefixGeneration != "prefix-hash" {
+		t.Fatalf("routing PCK metadata = %#v", routing)
+	}
+}
+
 func TestParseResponseHeaderMetadataKeepsRecoverAtOnSummaryWindow(t *testing.T) {
 	base := time.Unix(1_780_000_000, 0)
 	metadata := ParseResponseHeaderMetadata(map[string]any{

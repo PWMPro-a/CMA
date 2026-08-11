@@ -12,6 +12,7 @@ import type {
   MonitoringAnalyticsInclude,
   MonitoringAnalyticsModelStat,
   MonitoringAnalyticsResponse,
+  MonitoringRoutingDiagnostics,
   MonitoringAnalyticsSummary,
   MonitoringAnalyticsSummaryComparison,
   MonitoringAnalyticsTimelinePoint,
@@ -136,6 +137,8 @@ export type UsageSummaryDelta = {
   totalTokens: number;
   estimatedCost: number;
 };
+
+export type UsageRoutingDiagnostics = MonitoringRoutingDiagnostics;
 
 export type UsageApiKeyContextRow = {
   id: string;
@@ -744,6 +747,7 @@ export const buildUsageAnalyticsInclude = (
         channel_share: true,
         api_key_stats: true,
         anomaly_points: true,
+        routing_diagnostics: true,
       });
       break;
     case 'trends':
@@ -2406,6 +2410,7 @@ export const adaptUsageAnalyticsData = (
       apiKeyDisplayMap
     ),
     filterOptions: data?.filter_options,
+    routingDiagnostics: data?.routing_diagnostics ?? null,
   };
 };
 
