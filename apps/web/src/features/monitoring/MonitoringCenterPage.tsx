@@ -2,6 +2,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -55,6 +56,7 @@ import { MonitoringDataPanel } from '@/features/monitoring/components/Monitoring
 import { MonitoringActionBar } from '@/features/monitoring/components/MonitoringActionBar';
 import { MonitoringCustomRangeModal } from '@/features/monitoring/components/MonitoringCustomRangeModal';
 import { MonitoringFiltersPanel } from '@/features/monitoring/components/MonitoringFiltersPanel';
+import { UsageImportProgressModal } from '@/features/monitoring/components/UsageImportProgressModal';
 import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { IconInbox } from '@/components/ui/icons';
 import {
@@ -96,8 +98,14 @@ import {
   type FocusSnapshot,
   type StatusFilter,
 } from '@/features/monitoring/model/monitoringCenterPageModel';
+import { resolveMonitoringDimensionCounts } from '@/features/monitoring/model/monitoringAnalyticsModel';
 import { useUsageData } from '@/features/monitoring/hooks/useUsageData';
-import { monitoringAnalyticsApi, type UsageHeaderSnapshot } from '@/services/api/usageService';
+import { useHeaderSnapshotsLoader } from '@/features/monitoring/hooks/useHeaderSnapshotsLoader';
+import {
+  isUsageImportCancelledError,
+  isUsageImportPausedError,
+  type UsageImportProgress,
+} from '@/features/monitoring/services/usageImportSession';
 import {
   readMonitoringCenterUiState,
   writeMonitoringCenterUiState,
@@ -108,13 +116,19 @@ import { useInterval } from '@/hooks/useInterval';
 import { useRequestMonitoringAvailability } from '@/hooks/useRequestMonitoringAvailability';
 import { isFileLogsAvailable } from '@/features/logs/logFeatureAvailability';
 import { useAuthStore, useConfigStore, useNotificationStore } from '@/stores';
-import { formatFileSize } from '@/utils/format';
+import { useUsageHeaderSnapshotStore } from '@/stores/useUsageHeaderSnapshotStore';
 import type { StatusBarData } from '@/utils/recentRequests';
 import { downloadBlob } from '@/utils/download';
 import { sha256Hex } from '@/utils/apiKeyHash';
 import { formatCompactNumber } from '@/utils/usage';
 import {
+  buildProviderCredentialTaskPlan,
+  createKeyedSerialTaskQueue,
+  runProviderCredentialTaskPlan,
+} from '@/utils/quota/providerRefreshScheduler';
+import {
   buildUsageHeaderSnapshotLookup,
+  filterFreshUsageHeaderQuotaSnapshots,
   getHighConfidenceUsageHeaderSnapshotForAuthFile,
 } from '@/utils/usageHeaderSnapshots';
 import { buildSourceInfoMap, buildSourceProviderStateMap } from '@/utils/sourceResolver';
@@ -122,8 +136,10 @@ import styles from './MonitoringCenterPage.module.scss';
 
 export { AccountExpandedDetails, AccountOverviewCard };
 
+const MAX_CONCURRENT_ACCOUNT_QUOTA_PROVIDERS = 3;
+const MAX_CONCURRENT_ACCOUNT_QUOTA_REQUESTS_PER_PROVIDER = 1;
+
 const DEFAULT_ACCOUNT_PAGE_SIZE = ACCOUNT_OVERVIEW_TABLE_PAGE_SIZE_OPTIONS[0];
-const MAX_USAGE_IMPORT_FILE_SIZE = 64 * 1024 * 1024;
 const EMPTY_STATUS_BAR_DATA: StatusBarData = {
   blocks: [],
   blockDetails: [],
@@ -143,10 +159,20 @@ export function MonitoringCenterPage() {
   const location = useLocation();
   const config = useConfigStore((state) => state.config);
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
+  const apiBase = useAuthStore((state) => state.apiBase);
   const managementKey = useAuthStore((state) => state.managementKey);
   const showNotification = useNotificationStore((state) => state.showNotification);
   const showConfirmation = useNotificationStore((state) => state.showConfirmation);
   const requestMonitoringAvailability = useRequestMonitoringAvailability();
+  const accountQuotaContextKey = useMemo(
+    () =>
+      JSON.stringify({
+        apiBase,
+        managementKey,
+        serviceBase: requestMonitoringAvailability.serviceBase,
+      }),
+    [apiBase, managementKey, requestMonitoringAvailability.serviceBase]
+  );
   const pageTransitionLayer = usePageTransitionLayer();
   const isCurrentLayer = pageTransitionLayer ? pageTransitionLayer.status === 'current' : true;
   const initialAccountOverviewUiState = useRef(readAccountOverviewUiState());
@@ -159,6 +185,7 @@ export function MonitoringCenterPage() {
       const minLatencyMs = Number(params.get('min_latency_ms'));
       return {
         authFile: params.get('auth_file')?.trim() || '',
+        authIndex: params.get('auth_index')?.trim() || '',
         projectId: params.get('project_id')?.trim() || '',
         requestType: params.get('request_type')?.trim() || '',
         minLatencyMs: Number.isFinite(minLatencyMs) && minLatencyMs > 0 ? minLatencyMs : undefined,
@@ -190,7 +217,8 @@ export function MonitoringCenterPage() {
   const [documentVisible, setDocumentVisible] = useState(
     () => typeof document === 'undefined' || document.visibilityState !== 'hidden'
   );
-  const [headerSnapshots, setHeaderSnapshots] = useState<UsageHeaderSnapshot[]>([]);
+  const headerSnapshots = useUsageHeaderSnapshotStore((state) => state.items);
+  const headerSnapshotGeneratedAtMs = useUsageHeaderSnapshotStore((state) => state.generatedAtMs);
   const [selectedAccount, setSelectedAccount] = useState(
     () => initialMonitoringCenterUiState.current.selectedAccount
   );
@@ -215,6 +243,7 @@ export function MonitoringCenterPage() {
   const [drilldownAuthFile, setDrilldownAuthFile] = useState(
     () => initialMonitoringDrilldownFilters.current.authFile
   );
+  const [drilldownAuthIndex] = useState(() => initialMonitoringDrilldownFilters.current.authIndex);
   const [drilldownProjectId, setDrilldownProjectId] = useState(
     () => initialMonitoringDrilldownFilters.current.projectId
   );
@@ -233,6 +262,11 @@ export function MonitoringCenterPage() {
   const [isCustomRangeModalOpen, setIsCustomRangeModalOpen] = useState(false);
   const [usageExporting, setUsageExporting] = useState(false);
   const [usageImporting, setUsageImporting] = useState(false);
+  const [usageImportCancelling, setUsageImportCancelling] = useState(false);
+  const [usageImportTask, setUsageImportTask] = useState<{
+    file: File;
+    progress: UsageImportProgress;
+  } | null>(null);
   const [accountQuotaStates, setAccountQuotaStates] = useState<Record<string, AccountQuotaState>>(
     {}
   );
@@ -268,7 +302,13 @@ export function MonitoringCenterPage() {
   const previousAccountPageResetStateRef = useRef<AccountOverviewPageResetState | null>(null);
   const accountQuotaStatesRef = useRef<Record<string, AccountQuotaState>>({});
   const accountQuotaRequestIdsRef = useRef<Record<string, number>>({});
+  const accountQuotaContextGenerationRef = useRef(0);
+  const accountQuotaContextKeyRef = useRef(accountQuotaContextKey);
+  const [accountQuotaRefreshQueue] = useState(() => createKeyedSerialTaskQueue());
   const usageImportInputRef = useRef<HTMLInputElement | null>(null);
+  const usageImportAbortRef = useRef<AbortController | null>(null);
+  const usageImportCancelPendingRef = useRef(false);
+  const usageImportRunIDRef = useRef(0);
   const deferredSearch = useDeferredValue(searchInput);
   const deferredSearchApiKeyHash = useMemo(() => sha256Hex(deferredSearch), [deferredSearch]);
   const accountPage =
@@ -330,6 +370,7 @@ export function MonitoringCenterPage() {
     loadApiKeyAliases,
     exportUsage,
     importUsage,
+    cancelUsageImport,
   } = useUsageData({ loadUsageEvents: false });
 
   const monitoringScopeFilters = useMemo(
@@ -337,6 +378,7 @@ export function MonitoringCenterPage() {
       account: selectedAccount,
       provider: selectedProvider,
       authFile: drilldownAuthFile || undefined,
+      authIndex: drilldownAuthIndex || undefined,
       projectId: drilldownProjectId || undefined,
       requestType: drilldownRequestType || undefined,
       minLatencyMs: drilldownMinLatencyMs,
@@ -349,6 +391,7 @@ export function MonitoringCenterPage() {
     }),
     [
       drilldownAuthFile,
+      drilldownAuthIndex,
       drilldownCacheStatus,
       drilldownMinLatencyMs,
       drilldownProjectId,
@@ -391,24 +434,30 @@ export function MonitoringCenterPage() {
     searchQuery: deferredSearch,
     searchApiKeyHash: deferredSearchApiKeyHash,
     scopeFilters: monitoringScopeFilters,
+    activeDataTab,
   });
 
-  const loadHeaderSnapshots = useCallback(async () => {
-    if (!requestMonitoringAvailability.serviceBase) {
-      setHeaderSnapshots([]);
-      return;
-    }
-    try {
-      const response = await monitoringAnalyticsApi.getHeaderSnapshots(
-        requestMonitoringAvailability.serviceBase,
-        managementKey,
-        { days: 30, limit: 1000 }
-      );
-      setHeaderSnapshots(response.items ?? []);
-    } catch {
-      setHeaderSnapshots((current) => current);
-    }
-  }, [managementKey, requestMonitoringAvailability.serviceBase]);
+  const loadHeaderSnapshots = useHeaderSnapshotsLoader({
+    serviceBase: requestMonitoringAvailability.serviceBase,
+    managementKey,
+  });
+
+  useLayoutEffect(() => {
+    if (accountQuotaContextKeyRef.current === accountQuotaContextKey) return;
+    accountQuotaContextKeyRef.current = accountQuotaContextKey;
+    accountQuotaContextGenerationRef.current += 1;
+    accountQuotaRequestIdsRef.current = {};
+    accountQuotaStatesRef.current = {};
+    setAccountQuotaStates((current) => (Object.keys(current).length === 0 ? current : {}));
+  }, [accountQuotaContextKey]);
+
+  useEffect(
+    () => () => {
+      accountQuotaContextGenerationRef.current += 1;
+      accountQuotaRequestIdsRef.current = {};
+    },
+    []
+  );
 
   const refreshAll = useCallback(async () => {
     await Promise.all([loadApiKeyAliases(), refreshMeta(false), loadHeaderSnapshots()]);
@@ -599,6 +648,27 @@ export function MonitoringCenterPage() {
   const scopedSummary = monitoringSummary;
   const accountRows = monitoringAccountRows;
   const apiKeyRows = monitoringApiKeyRows;
+  const { accountCount, apiKeyCount } = useMemo(
+    () =>
+      resolveMonitoringDimensionCounts({
+        activeDataTab,
+        accountRowCount: accountRows.length,
+        apiKeyRowCount: apiKeyRows.length,
+        accountSelectorCount:
+          monitoringFilterOptions.accountCount ?? monitoringFilterOptions.accountRows.length,
+        apiKeySelectorCount:
+          monitoringFilterOptions.apiKeyCount ?? monitoringFilterOptions.apiKeyRows.length,
+      }),
+    [
+      accountRows.length,
+      activeDataTab,
+      apiKeyRows.length,
+      monitoringFilterOptions.accountCount,
+      monitoringFilterOptions.accountRows.length,
+      monitoringFilterOptions.apiKeyCount,
+      monitoringFilterOptions.apiKeyRows.length,
+    ]
+  );
   const accountStatusDataByRowId = useMemo(
     () => buildMonitoringAccountStatusDataMap(scopedRows, accountStatusBounds),
     [accountStatusBounds, scopedRows]
@@ -704,29 +774,36 @@ export function MonitoringCenterPage() {
     [accountAuthStateByRowId, accountRows]
   );
   const headerSnapshotLookup = useMemo(
-    () => buildUsageHeaderSnapshotLookup(headerSnapshots),
-    [headerSnapshots]
+    () =>
+      buildUsageHeaderSnapshotLookup(
+        filterFreshUsageHeaderQuotaSnapshots(headerSnapshots, headerSnapshotGeneratedAtMs)
+      ),
+    [headerSnapshotGeneratedAtMs, headerSnapshots]
   );
   const scopedFailureCount = scopedSummary.failureCalls;
   const accountQuotaStatesWithObservedHeaders = useMemo(() => {
     let changed = false;
-    const nextStates = Object.fromEntries(
-      Object.entries(accountQuotaStates).map(([account, state]) => {
-        const targets = accountQuotaTargetsByAccount.get(account) ?? [];
-        const observedEntries = targets
-          .map((target) =>
-            buildObservedCodexAccountQuotaEntry(
-              target,
-              getHighConfidenceUsageHeaderSnapshotForAuthFile(headerSnapshotLookup, target.file),
-              t
-            )
+    const nextStates: Record<string, AccountQuotaState> = {};
+    const accounts = new Set([
+      ...accountQuotaTargetsByAccount.keys(),
+      ...Object.keys(accountQuotaStates),
+    ]);
+    accounts.forEach((account) => {
+      const state = accountQuotaStates[account];
+      const targets = accountQuotaTargetsByAccount.get(account) ?? [];
+      const observedEntries = targets
+        .map((target) =>
+          buildObservedCodexAccountQuotaEntry(
+            target,
+            getHighConfidenceUsageHeaderSnapshotForAuthFile(headerSnapshotLookup, target.file),
+            t
           )
-          .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
-        const nextState = mergeObservedAccountQuotaState(state, targets, observedEntries) ?? state;
-        changed = changed || nextState !== state;
-        return [account, nextState] as const;
-      })
-    );
+        )
+        .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+      const nextState = mergeObservedAccountQuotaState(state, targets, observedEntries);
+      if (nextState) nextStates[account] = nextState;
+      changed = changed || nextState !== state;
+    });
     return changed ? nextStates : accountQuotaStates;
   }, [accountQuotaStates, accountQuotaTargetsByAccount, headerSnapshotLookup, t]);
 
@@ -747,6 +824,11 @@ export function MonitoringCenterPage() {
   const hasActiveDataFilter = hasSearchFilter || hasScopeFilter;
   const failedGroupCount = groupedRealtimeRows.filter((row) => row.failureCalls > 0).length;
   const failedOnlyActive = selectedStatus === 'failed';
+  const hasMonitoringDisplayData =
+    scopedSummary.totalCalls > 0 ||
+    accountRows.length > 0 ||
+    apiKeyRows.length > 0 ||
+    filteredRows.length > 0;
   const connectionTone: MonitoringStatusTone =
     connectionStatus === 'connected' ? 'good' : connectionStatus === 'connecting' ? 'warn' : 'bad';
   const connectionLabel =
@@ -776,13 +858,13 @@ export function MonitoringCenterPage() {
     () =>
       buildPrimarySummaryCards({
         summary: scopedSummary,
-        accountCount: accountRows.length,
+        accountCount,
         failedGroupCount,
         hasPrices,
         locale: i18n.language,
         t,
       }),
-    [accountRows.length, failedGroupCount, hasPrices, i18n.language, scopedSummary, t]
+    [accountCount, failedGroupCount, hasPrices, i18n.language, scopedSummary, t]
   );
 
   const secondarySummaryCards = useMemo(
@@ -801,16 +883,16 @@ export function MonitoringCenterPage() {
         label: shortLabel(t, 'monitoring.data_tab_accounts_short', 'monitoring.data_tab_accounts'),
         fullLabel: t('monitoring.data_tab_accounts'),
         icon: 'accounts',
-        badge: accountRows.length,
-        badgeTitle: t('monitoring.data_tab_accounts_badge_title', { count: accountRows.length }),
+        badge: accountCount,
+        badgeTitle: t('monitoring.data_tab_accounts_badge_title', { count: accountCount }),
       },
       {
         id: 'apiKeys',
         label: shortLabel(t, 'monitoring.data_tab_api_keys_short', 'monitoring.data_tab_api_keys'),
         fullLabel: t('monitoring.data_tab_api_keys'),
         icon: 'apiKeys',
-        badge: apiKeyRows.length,
-        badgeTitle: t('monitoring.data_tab_api_keys_badge_title', { count: apiKeyRows.length }),
+        badge: apiKeyCount,
+        badgeTitle: t('monitoring.data_tab_api_keys_badge_title', { count: apiKeyCount }),
       },
       {
         id: 'realtime',
@@ -825,7 +907,7 @@ export function MonitoringCenterPage() {
         }),
       },
     ];
-  }, [accountRows.length, apiKeyRows.length, scopedFailureCount, scopedSummary.totalCalls, t]);
+  }, [accountCount, apiKeyCount, scopedFailureCount, scopedSummary.totalCalls, t]);
 
   const handleDataTabChange = useCallback((tab: MonitoringDataTab) => {
     setActiveDataTab(tab);
@@ -931,11 +1013,27 @@ export function MonitoringCenterPage() {
     }));
   }, []);
 
+  const commitAccountQuotaState = useCallback((account: string, state: AccountQuotaState) => {
+    accountQuotaStatesRef.current = {
+      ...accountQuotaStatesRef.current,
+      [account]: state,
+    };
+    setAccountQuotaStates((previous) => {
+      const next = { ...previous, [account]: state };
+      accountQuotaStatesRef.current = next;
+      return next;
+    });
+  }, []);
+
   const loadAccountQuota = useCallback(
-    async (account: string, force: boolean = false) => {
+    (account: string, force: boolean = false): Promise<void> => {
       const currentState = accountQuotaStatesRef.current[account];
       const targets = accountQuotaTargetsByAccount.get(account) ?? [];
       const targetKey = targets.map((target) => target.key).join('|');
+      const requestKey = `${accountQuotaContextKey}\u0000${account}\u0000${targetKey}`;
+      if (accountQuotaRefreshQueue.isPending(requestKey)) {
+        return accountQuotaRefreshQueue.run(requestKey, async () => undefined);
+      }
       const previousEntriesByKey =
         currentState?.targetKey === targetKey
           ? new Map(currentState.entries.map((entry) => [entry.key, entry]))
@@ -949,106 +1047,129 @@ export function MonitoringCenterPage() {
           )
         )
         .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+      if (currentState?.status === 'loading' && currentState.targetKey === targetKey) {
+        return Promise.resolve();
+      }
       if (
         !force &&
         currentState &&
         currentState.status !== 'idle' &&
         currentState.targetKey === targetKey
       ) {
-        return;
+        return Promise.resolve();
       }
 
+      const contextGeneration = accountQuotaContextGenerationRef.current;
       const requestId = (accountQuotaRequestIdsRef.current[account] ?? 0) + 1;
       accountQuotaRequestIdsRef.current[account] = requestId;
+      const isCurrentRequest = () =>
+        accountQuotaContextGenerationRef.current === contextGeneration &&
+        accountQuotaRequestIdsRef.current[account] === requestId;
 
-      setAccountQuotaStates((previous) => ({
-        ...previous,
-        [account]: {
-          status: 'loading',
-          targetKey,
-          entries:
-            previous[account]?.targetKey === targetKey
-              ? (previous[account]?.entries ?? observedEntries)
-              : observedEntries,
-          lastRefreshedAt: previous[account]?.lastRefreshedAt,
-        },
-      }));
+      commitAccountQuotaState(account, {
+        status: 'loading',
+        targetKey,
+        entries: currentState?.targetKey === targetKey ? currentState.entries : observedEntries,
+        lastRefreshedAt: currentState?.lastRefreshedAt,
+      });
 
-      if (targets.length === 0) {
-        if (accountQuotaRequestIdsRef.current[account] !== requestId) return;
-        setAccountQuotaStates((previous) => ({
-          ...previous,
-          [account]: {
+      return accountQuotaRefreshQueue.run(requestKey, async () => {
+        if (!isCurrentRequest()) return;
+        if (targets.length === 0) {
+          commitAccountQuotaState(account, {
             status: 'success',
             targetKey,
             entries: [],
             lastRefreshedAt: Date.now(),
-          },
-        }));
-        return;
-      }
-
-      const settled = await Promise.allSettled(
-        targets.map((target) => requestAccountQuota(target, t))
-      );
-      if (accountQuotaRequestIdsRef.current[account] !== requestId) return;
-
-      const hasFailure = settled.some((result) => result.status === 'rejected');
-      const completedAtMs = Date.now();
-      const entries = settled.map((result, index) => {
-        const fallback = targets[index];
-        if (result.status === 'fulfilled') {
-          return result.value;
+          });
+          return;
         }
-
-        const error =
-          result.reason instanceof Error
-            ? result.reason.message
-            : String(result.reason || t('common.unknown_error'));
-        const observedEntry = buildObservedCodexAccountQuotaEntry(
-          fallback,
-          getHighConfidenceUsageHeaderSnapshotForAuthFile(headerSnapshotLookup, fallback.file),
-          t
+        const taskPlan = buildProviderCredentialTaskPlan(targets, {
+          getProviderKey: (target) => target.provider,
+          getCredentialKey: (target) => target.key,
+        });
+        const settled = await runProviderCredentialTaskPlan(
+          taskPlan,
+          {
+            perProviderConcurrency: MAX_CONCURRENT_ACCOUNT_QUOTA_REQUESTS_PER_PROVIDER,
+            maxConcurrentProviders: MAX_CONCURRENT_ACCOUNT_QUOTA_PROVIDERS,
+          },
+          async ({ item: target }) => {
+            try {
+              return {
+                target,
+                result: {
+                  status: 'fulfilled' as const,
+                  value: await requestAccountQuota(target, t),
+                },
+              };
+            } catch (reason: unknown) {
+              return {
+                target,
+                result: {
+                  status: 'rejected' as const,
+                  reason,
+                },
+              };
+            }
+          }
         );
-        return buildAccountQuotaRefreshFailureEntry(
-          fallback,
-          error,
-          t,
-          previousEntriesByKey.get(fallback.key),
-          observedEntry,
-          completedAtMs
-        );
-      });
+        if (!isCurrentRequest()) return;
 
-      const hasSuccess = entries.some((entry) => !entry.error);
-      const firstError = entries.find((entry) => entry.error)?.error;
-      setAccountQuotaStates((previous) => ({
-        ...previous,
-        [account]: {
+        const hasFailure = settled.some(({ result }) => result.status === 'rejected');
+        const completedAtMs = Date.now();
+        const entries = settled.map(({ result, target: fallback }) => {
+          if (result.status === 'fulfilled') {
+            return result.value;
+          }
+
+          const error =
+            result.reason instanceof Error
+              ? result.reason.message
+              : String(result.reason || t('common.unknown_error'));
+          const observedEntry = buildObservedCodexAccountQuotaEntry(
+            fallback,
+            getHighConfidenceUsageHeaderSnapshotForAuthFile(headerSnapshotLookup, fallback.file),
+            t
+          );
+          return buildAccountQuotaRefreshFailureEntry(
+            fallback,
+            error,
+            t,
+            previousEntriesByKey.get(fallback.key),
+            observedEntry,
+            completedAtMs
+          );
+        });
+
+        const hasSuccess = entries.some((entry) => !entry.error);
+        const firstError = entries.find((entry) => entry.error)?.error;
+        commitAccountQuotaState(account, {
           status: hasFailure ? 'error' : hasSuccess ? 'success' : 'error',
           targetKey,
           entries,
           error: hasFailure ? firstError || t('common.unknown_error') : '',
           failedAtMs: hasFailure ? completedAtMs : undefined,
-          lastRefreshedAt: hasFailure ? previous[account]?.lastRefreshedAt : completedAtMs,
-        },
-      }));
+          lastRefreshedAt: hasFailure ? currentState?.lastRefreshedAt : completedAtMs,
+        });
+      });
     },
-    [accountQuotaTargetsByAccount, headerSnapshotLookup, t]
+    [
+      accountQuotaContextKey,
+      accountQuotaRefreshQueue,
+      accountQuotaTargetsByAccount,
+      commitAccountQuotaState,
+      headerSnapshotLookup,
+      t,
+    ]
   );
 
-  const toggleAccountExpanded = useCallback(
-    (accountId: string, account: string) => {
-      if (!expandedAccounts[accountId]) {
-        void loadAccountQuota(account);
-      }
-      setExpandedAccounts((previous) => ({
-        ...previous,
-        [accountId]: !previous[accountId],
-      }));
-    },
-    [expandedAccounts, loadAccountQuota]
-  );
+  const toggleAccountExpanded = useCallback((accountId: string) => {
+    setExpandedAccounts((previous) => ({
+      ...previous,
+      [accountId]: !previous[accountId],
+    }));
+  }, []);
 
   const focusAccount = useCallback(
     (row: MonitoringAccountRow) => {
@@ -1251,11 +1372,36 @@ export function MonitoringCenterPage() {
     }
   }, [exportUsage, resolveUsageTransferError, showNotification, t]);
 
-  const importUsageFile = useCallback(
+  const runUsageImport = useCallback(
     async (file: File) => {
+      const runID = usageImportRunIDRef.current + 1;
+      usageImportRunIDRef.current = runID;
+      const controller = new AbortController();
+      usageImportAbortRef.current = controller;
       setUsageImporting(true);
+      setUsageImportTask((current) => ({
+        file,
+        progress:
+          current?.file === file
+            ? { ...current.progress, phase: 'preparing', error: undefined }
+            : {
+                sessionId: '',
+                filename: file.name,
+                phase: 'preparing',
+                uploadedBytes: 0,
+                totalBytes: file.size,
+                percent: 0,
+              },
+      }));
       try {
-        const result = await importUsage(file);
+        const result = await importUsage(file, {
+          signal: controller.signal,
+          onProgress: (progress) => {
+            if (usageImportRunIDRef.current !== runID) return;
+            setUsageImportTask({ file, progress });
+          },
+        });
+        if (usageImportRunIDRef.current !== runID) return;
         const unsupported = result.unsupported ?? 0;
         showNotification(
           `${t('usage_stats.import_success', {
@@ -1270,17 +1416,161 @@ export function MonitoringCenterPage() {
           showNotification(t('usage_stats.import_legacy_warning'), 'warning');
         }
         await refreshAll();
+        if (usageImportRunIDRef.current === runID) {
+          setUsageImportTask(null);
+        }
       } catch (error: unknown) {
+        if (usageImportRunIDRef.current !== runID) return;
+        if (isUsageImportPausedError(error)) {
+          setUsageImportTask((current) =>
+            current?.file === file
+              ? { ...current, progress: { ...current.progress, phase: 'paused', error: undefined } }
+              : current
+          );
+          return;
+        }
+        if (isUsageImportCancelledError(error)) {
+          setUsageImportTask((current) =>
+            current?.file === file
+              ? {
+                  ...current,
+                  progress: { ...current.progress, phase: 'cancelled', error: undefined },
+                }
+              : current
+          );
+          showNotification(t('usage_stats.import_cancelled'), 'success');
+          return;
+        }
         const message = resolveUsageTransferError(error);
+        setUsageImportTask((current) =>
+          current?.file === file
+            ? { ...current, progress: { ...current.progress, phase: 'failed', error: message } }
+            : current
+        );
         showNotification(
           `${t('notification.upload_failed')}${message ? `: ${message}` : ''}`,
           'error'
         );
       } finally {
-        setUsageImporting(false);
+        if (usageImportRunIDRef.current === runID) {
+          usageImportAbortRef.current = null;
+          setUsageImporting(false);
+        }
       }
     },
     [importUsage, refreshAll, resolveUsageTransferError, showNotification, t]
+  );
+
+  const handleUsageImportPause = useCallback(() => {
+    usageImportAbortRef.current?.abort();
+  }, []);
+
+  const handleUsageImportResume = useCallback(() => {
+    if (!usageImportTask || usageImporting) return;
+    void runUsageImport(usageImportTask.file);
+  }, [runUsageImport, usageImportTask, usageImporting]);
+
+  const handleUsageImportCancel = useCallback(async () => {
+    const task = usageImportTask;
+    if (!task || usageImportCancelPendingRef.current) return;
+    usageImportCancelPendingRef.current = true;
+    const runID = usageImportRunIDRef.current + 1;
+    usageImportRunIDRef.current = runID;
+    usageImportAbortRef.current?.abort();
+    usageImportAbortRef.current = null;
+    setUsageImporting(true);
+    setUsageImportCancelling(true);
+    let closeTask = false;
+    try {
+      if (task.progress.sessionId) {
+        const cancelled = await cancelUsageImport(task.progress.sessionId, task.file);
+        if (cancelled?.status === 'completed') {
+          showNotification(
+            t('usage_stats.import_completed_before_cancel', {
+              added: cancelled.result?.added ?? 0,
+              skipped: cancelled.result?.skipped ?? 0,
+            }),
+            'warning'
+          );
+          await refreshAll();
+          closeTask = true;
+        } else if (cancelled?.status === 'cancelled') {
+          const uploadedBytes = cancelled.received_bytes;
+          const totalBytes = cancelled.size_bytes || task.progress.totalBytes;
+          setUsageImportTask((current) =>
+            current?.file === task.file
+              ? {
+                  ...current,
+                  progress: {
+                    sessionId: cancelled.id,
+                    filename: cancelled.filename || task.file.name,
+                    phase: 'cancelled',
+                    status: cancelled.status,
+                    uploadedBytes,
+                    totalBytes,
+                    percent:
+                      totalBytes > 0
+                        ? uploadedBytes >= totalBytes
+                          ? 100
+                          : Math.max(0, Math.floor((uploadedBytes / totalBytes) * 100))
+                        : 0,
+                    retryable: cancelled.retryable,
+                    result: cancelled.result,
+                  },
+                }
+              : current
+          );
+          showNotification(t('usage_stats.import_cancelled'), 'success');
+        } else {
+          showNotification(t('usage_stats.import_cancelled'), 'success');
+          closeTask = true;
+        }
+      } else {
+        showNotification(t('usage_stats.import_cancelled'), 'success');
+        closeTask = true;
+      }
+    } catch (error: unknown) {
+      const message = resolveUsageTransferError(error);
+      setUsageImportTask((current) =>
+        current?.file === task.file
+          ? { ...current, progress: { ...current.progress, phase: 'paused', error: message } }
+          : current
+      );
+      showNotification(
+        `${t('usage_stats.import_cancel_failed')}${message ? `: ${message}` : ''}`,
+        'error'
+      );
+    } finally {
+      usageImportCancelPendingRef.current = false;
+      if (usageImportRunIDRef.current === runID) {
+        setUsageImporting(false);
+        setUsageImportCancelling(false);
+        if (closeTask) {
+          setUsageImportTask(null);
+        }
+      }
+    }
+  }, [
+    cancelUsageImport,
+    refreshAll,
+    resolveUsageTransferError,
+    showNotification,
+    t,
+    usageImportTask,
+  ]);
+
+  const handleUsageImportModalClose = useCallback(() => {
+    if (!usageImporting && !usageImportCancelling) {
+      setUsageImportTask(null);
+    }
+  }, [usageImportCancelling, usageImporting]);
+
+  useEffect(
+    () => () => {
+      usageImportRunIDRef.current += 1;
+      usageImportAbortRef.current?.abort();
+    },
+    []
   );
 
   const handleUsageImportClick = useCallback(() => {
@@ -1301,25 +1591,15 @@ export function MonitoringCenterPage() {
         showNotification(t('usage_stats.import_invalid'), 'error');
         return;
       }
-      if (file.size > MAX_USAGE_IMPORT_FILE_SIZE) {
-        showNotification(
-          t('usage_stats.import_file_too_large', {
-            maxSize: formatFileSize(MAX_USAGE_IMPORT_FILE_SIZE),
-          }),
-          'error'
-        );
-        return;
-      }
-
       showConfirmation({
         title: t('usage_stats.import_confirm_title'),
         message: t('usage_stats.import_confirm_body', { name: file.name }),
         confirmText: t('usage_stats.import'),
         variant: 'primary',
-        onConfirm: () => importUsageFile(file),
+        onConfirm: () => runUsageImport(file),
       });
     },
-    [importUsageFile, showConfirmation, showNotification, t]
+    [runUsageImport, showConfirmation, showNotification, t]
   );
 
   if (monitoringUnavailable) {
@@ -1341,7 +1621,7 @@ export function MonitoringCenterPage() {
       <MonitoringStatusHeader
         showLoadingOverlay={
           overallLoading &&
-          filteredRows.length === 0 &&
+          !hasMonitoringDisplayData &&
           (!monitoringScopeTransitioning || !hasMonitoringPresentationSnapshot)
         }
         monitoringUnavailable={monitoringUnavailable}
@@ -1520,6 +1800,16 @@ export function MonitoringCenterPage() {
         onApply={applyCustomTimeRange}
         onStartChange={handleCustomDraftStartChange}
         onEndChange={handleCustomDraftEndChange}
+      />
+
+      <UsageImportProgressModal
+        open={Boolean(usageImportTask)}
+        progress={usageImportTask?.progress ?? null}
+        busy={usageImportCancelling}
+        onPause={handleUsageImportPause}
+        onResume={handleUsageImportResume}
+        onCancel={() => void handleUsageImportCancel()}
+        onClose={handleUsageImportModalClose}
       />
     </div>
   );

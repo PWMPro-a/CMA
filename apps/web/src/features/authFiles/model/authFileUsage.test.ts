@@ -16,6 +16,7 @@ describe('auth file usage targets', () => {
     expect(target).toEqual({
       key: 'alice.json::auth-1',
       request: {
+        row_key: 'alice.json::auth-1',
         account_snapshot: 'alice@example.com',
         auth_label_snapshot: 'Alice',
         auth_index: 'auth-1',

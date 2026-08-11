@@ -2,18 +2,21 @@ package monitoring
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 func TestAnalyticsQueryGroupBoundsConcurrency(t *testing.T) {
@@ -577,6 +580,25 @@ func TestCacheHitRateMatchesWebClient(t *testing.T) {
 	}
 }
 
+func TestBuildTimelineIsIndependentOfPointOrder(t *testing.T) {
+	points := []store.TimelinePoint{
+		{BucketMS: 1_000, Model: "z-big", BillingModel: "z-big", Calls: 1, Success: 1, InputTokens: 10_000_000_000_000_000},
+		{BucketMS: 1_000, Model: "a-small", BillingModel: "a-small", Calls: 1, Success: 1, InputTokens: 1},
+		{BucketMS: 1_000, Model: "b-small", BillingModel: "b-small", Calls: 1, Success: 1, InputTokens: 1},
+	}
+	prices := map[string]store.ModelPrice{
+		"z-big":   {Prompt: 1_000_000},
+		"a-small": {Prompt: 1_000_000},
+		"b-small": {Prompt: 1_000_000},
+	}
+
+	forward := buildTimeline(points, nil, "hour", time.UTC, prices)
+	reverse := buildTimeline([]store.TimelinePoint{points[2], points[1], points[0]}, nil, "hour", time.UTC, prices)
+	if !reflect.DeepEqual(forward, reverse) {
+		t.Fatalf("timeline changed with point order\nforward=%#v\nreverse=%#v", forward, reverse)
+	}
+}
+
 func TestModelCacheHitRateUsesBillingModelBeforeAliasAggregation(t *testing.T) {
 	stats := []store.ModelStat{
 		{
@@ -950,6 +972,107 @@ func TestAnalyticsPricesPriorityAndDefaultServiceTiersSeparately(t *testing.T) {
 	if resp.ChannelShare[0].AvgLatencyMS == nil || math.Abs(*resp.ChannelShare[0].AvgLatencyMS-(1300.0/3.0)) > 0.000001 {
 		t.Fatalf("channel latency = %#v, want weighted 433.333333", resp.ChannelShare[0].AvgLatencyMS)
 	}
+	if len(resp.AccountStats) != 1 || len(resp.AccountStats[0].Models) != 1 {
+		t.Fatalf("account stats = %#v", resp.AccountStats)
+	}
+	assertCost("account stats", resp.AccountStats[0].Cost)
+	assertCost("account model stats", resp.AccountStats[0].Models[0].Cost)
+	if len(resp.APIKeyStats) != 1 || len(resp.APIKeyStats[0].Models) != 1 {
+		t.Fatalf("api key stats = %#v", resp.APIKeyStats)
+	}
+	assertCost("api key stats", resp.APIKeyStats[0].Cost)
+	assertCost("api key model stats", resp.APIKeyStats[0].Models[0].Cost)
+}
+
+func TestAnalyticsFilteredPricingUsesStrictHighestContextTier(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	fromMS := int64(1_800_010_000_000)
+	toMS := fromMS + time.Hour.Milliseconds()
+
+	if err := db.SaveModelPrices(ctx, map[string]store.ModelPrice{
+		"tiered-resolved": {
+			Prompt:     10,
+			Completion: 4,
+			ContextTiers: []store.ModelPriceContextTier{
+				{
+					ThresholdTokens:  100_000,
+					Prompt:           20,
+					PromptConfigured: true,
+				},
+				{
+					ThresholdTokens:      200_000,
+					Prompt:               0,
+					Completion:           8,
+					PromptConfigured:     true,
+					CompletionConfigured: true,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("save prices: %v", err)
+	}
+
+	events := []usage.Event{
+		monitoringEvent("filtered-context-exact", fromMS+1_000, "tiered-alias", "auth-tiered", "source-tiered", false, 100_000, 100_000, 0, 0, 200_000, nil),
+		monitoringEvent("filtered-context-first", fromMS+2_000, "tiered-alias", "auth-tiered", "source-tiered", false, 100_001, 100_000, 0, 0, 200_001, nil),
+		monitoringEvent("filtered-context-highest", fromMS+3_000, "tiered-alias", "auth-tiered", "source-tiered", false, 200_001, 100_000, 0, 0, 300_001, nil),
+		monitoringEvent("filtered-context-excluded", fromMS+4_000, "tiered-alias", "auth-other", "source-other", false, 1_000_000, 0, 0, 0, 1_000_000, nil),
+	}
+	for index := range events {
+		events[index].ResolvedModel = "tiered-resolved"
+		events[index].AccountSnapshot = "tier-team@example.com"
+		events[index].AuthLabelSnapshot = "Tier Team"
+		events[index].APIKeyHash = "tier-client-key"
+	}
+	if _, err := db.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	resp, err := New(db, true).Analytics(ctx, Request{
+		FromMS: fromMS,
+		ToMS:   toMS,
+		Filters: Filters{
+			AuthIndices: []string{"auth-tiered"},
+		},
+		Include: Include{
+			Summary:      true,
+			Timeline:     true,
+			ModelShare:   true,
+			ModelStats:   true,
+			ChannelShare: true,
+			AccountStats: true,
+			APIKeyStats:  true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("filtered analytics: %v", err)
+	}
+
+	const wantCost = 4.60002
+	assertCost := func(name string, got float64) {
+		t.Helper()
+		if math.Abs(got-wantCost) > 0.000001 {
+			t.Fatalf("%s cost = %v, want %v", name, got, wantCost)
+		}
+	}
+	if resp.Summary == nil || resp.Summary.TotalCalls != 3 {
+		t.Fatalf("summary = %#v", resp.Summary)
+	}
+	assertCost("summary", resp.Summary.TotalCost)
+	if len(resp.Timeline) != 1 || resp.Timeline[0].Calls != 3 {
+		t.Fatalf("timeline = %#v", resp.Timeline)
+	}
+	assertCost("timeline", resp.Timeline[0].Cost)
+	if len(resp.ModelStats) != 1 || resp.ModelStats[0].Calls != 3 || len(resp.ModelShare) != 1 {
+		t.Fatalf("model rows = %#v / %#v", resp.ModelStats, resp.ModelShare)
+	}
+	assertCost("model stats", resp.ModelStats[0].Cost)
+	assertCost("model share", resp.ModelShare[0].Cost)
+	if len(resp.ChannelShare) != 1 || resp.ChannelShare[0].AuthIndex != "auth-tiered" {
+		t.Fatalf("channel share = %#v", resp.ChannelShare)
+	}
+	assertCost("channel share", resp.ChannelShare[0].Cost)
 	if len(resp.AccountStats) != 1 || len(resp.AccountStats[0].Models) != 1 {
 		t.Fatalf("account stats = %#v", resp.AccountStats)
 	}
@@ -1469,6 +1592,67 @@ func TestAnalyticsUnfilteredFullResponseKeepsFilterOptionStatsInSync(t *testing.
 	}
 }
 
+func TestChannelModelStatsFromAccountStatsMatchesRawAggregation(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	fromMS := int64(1_778_275_000_000)
+	toMS := fromMS + 60*60*1000
+	if err := db.SaveModelPrices(ctx, map[string]store.ModelPrice{
+		"gpt-a": {Prompt: 1},
+		"gpt-b": {Prompt: 2},
+	}); err != nil {
+		t.Fatalf("save model prices: %v", err)
+	}
+
+	firstLatencyMS := int64(1)
+	secondLatencyMS := int64(2)
+	thirdLatencyMS := int64(10)
+	first := monitoringEvent("channel-account-a", fromMS+1_000, "gpt-a", "auth-shared", "source-a", false, 10, 5, 0, 0, 15, &firstLatencyMS)
+	first.AccountSnapshot = "alice@example.com"
+	first.AuthLabelSnapshot = "Alice"
+	first.Provider = "z-provider"
+	first.AuthProviderSnapshot = ""
+	second := monitoringEvent("channel-account-b", fromMS+2_000, "gpt-a", "auth-shared", "source-b", true, 20, 10, 0, 0, 30, &secondLatencyMS)
+	second.AccountSnapshot = "bob@example.com"
+	second.AuthLabelSnapshot = "Bob"
+	second.Provider = "z-provider"
+	second.AuthProviderSnapshot = "a-snapshot"
+	third := monitoringEvent("channel-model-b", fromMS+3_000, "gpt-b", "auth-shared", "source-c", false, 30, 15, 0, 0, 45, &thirdLatencyMS)
+	third.AccountSnapshot = "carol@example.com"
+	third.AuthLabelSnapshot = "Carol"
+	third.Provider = "codex"
+	third.AuthProviderSnapshot = "codex"
+	if _, err := db.InsertEvents(ctx, []usage.Event{first, second, third}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	filter := store.AnalyticsFilter{FromMS: fromMS, ToMS: toMS, IncludeFailed: true}
+	accountStats, err := db.AccountModelStatsWithFilter(ctx, filter)
+	if err != nil {
+		t.Fatalf("account stats: %v", err)
+	}
+	var channelALatencySumMS int64
+	for _, stat := range accountStats {
+		if stat.Model == "gpt-a" {
+			channelALatencySumMS += stat.LatencySumMS
+		}
+	}
+	if channelALatencySumMS != firstLatencyMS+secondLatencyMS {
+		t.Fatalf("gpt-a latency sum = %d, want %d", channelALatencySumMS, firstLatencyMS+secondLatencyMS)
+	}
+	want, err := db.ChannelModelStatsWithFilter(ctx, filter)
+	if err != nil {
+		t.Fatalf("channel stats: %v", err)
+	}
+	got := channelModelStatsFromAccountStats(accountStats)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("derived channel stats mismatch\nderived=%#v\nraw=%#v", got, want)
+	}
+	if len(got) != 2 || got[0].AuthProviderSnapshot != "a-snapshot" {
+		t.Fatalf("explicit provider snapshot should win channel metadata: %#v", got)
+	}
+}
+
 func TestAnalyticsFilterOptionsIgnoreActiveScopeFilters(t *testing.T) {
 	db := newMonitoringTestStore(t)
 	ctx := context.Background()
@@ -1525,7 +1709,7 @@ func TestAnalyticsFilterOptionsIgnoreActiveScopeFilters(t *testing.T) {
 	}
 }
 
-func TestAnalyticsFilterSelectorsReturnOnlyUsageAnalyticsOptions(t *testing.T) {
+func TestAnalyticsFilterSelectorsReturnLightweightOptions(t *testing.T) {
 	db := newMonitoringTestStore(t)
 	ctx := context.Background()
 	fromMS := int64(1_778_350_000_000)
@@ -1541,8 +1725,29 @@ func TestAnalyticsFilterSelectorsReturnOnlyUsageAnalyticsOptions(t *testing.T) {
 	bob.AuthProviderSnapshot = "gemini"
 	bob.AuthFileSnapshot = "bob.json"
 	bob.APIKeyHash = "key-bob"
+	sourceOnly := monitoringEvent("selector-source-only", fromMS+3_000, "gpt-a", "", "source-only", false, 10, 5, 0, 0, 15, nil)
+	sourceOnly.AccountSnapshot = ""
+	sourceOnly.AuthLabelSnapshot = ""
+	sourceOnly.AuthProviderSnapshot = "openai"
+	sourceOnly.AuthFileSnapshot = ""
+	sourceOnly.APIKeyHash = ""
+	sourceOnly.Source = "k:upstream-key"
+	sourceOnlyRotated := monitoringEvent("selector-source-only-rotated", fromMS+4_000, "gpt-b", "", "source-only", false, 10, 5, 0, 0, 15, nil)
+	sourceOnlyRotated.AccountSnapshot = ""
+	sourceOnlyRotated.AuthLabelSnapshot = ""
+	sourceOnlyRotated.AuthProviderSnapshot = "openai"
+	sourceOnlyRotated.AuthFileSnapshot = ""
+	sourceOnlyRotated.APIKeyHash = ""
+	sourceOnlyRotated.Source = "k:z-upstream-key"
+	sourceHashOnly := monitoringEvent("selector-source-hash-only", fromMS+5_000, "gpt-a", "", "source-hash-only", false, 10, 5, 0, 0, 15, nil)
+	sourceHashOnly.AccountSnapshot = ""
+	sourceHashOnly.AuthLabelSnapshot = ""
+	sourceHashOnly.AuthProviderSnapshot = "openai"
+	sourceHashOnly.AuthFileSnapshot = ""
+	sourceHashOnly.APIKeyHash = ""
+	sourceHashOnly.Source = ""
 
-	if _, err := db.InsertEvents(ctx, []usage.Event{alice, bob}); err != nil {
+	if _, err := db.InsertEvents(ctx, []usage.Event{alice, bob, sourceOnly, sourceOnlyRotated, sourceHashOnly}); err != nil {
 		t.Fatalf("insert events: %v", err)
 	}
 
@@ -1567,14 +1772,51 @@ func TestAnalyticsFilterSelectorsReturnOnlyUsageAnalyticsOptions(t *testing.T) {
 	if !slices.Equal(resp.FilterOptions.APIKeyHashes, []string{"key-alice", "key-bob"}) {
 		t.Fatalf("api key hashes = %#v", resp.FilterOptions.APIKeyHashes)
 	}
-	if !slices.Equal(resp.FilterOptions.Providers, []string{"codex", "gemini"}) {
+	if !slices.Equal(resp.FilterOptions.Providers, []string{"codex", "gemini", "openai"}) {
 		t.Fatalf("providers = %#v", resp.FilterOptions.Providers)
 	}
 	if !slices.Equal(resp.FilterOptions.AuthFiles, []string{"alice.json", "bob.json"}) {
 		t.Fatalf("auth files = %#v", resp.FilterOptions.AuthFiles)
 	}
-	if len(resp.FilterOptions.AccountStats) != 0 || len(resp.FilterOptions.APIKeyStats) != 0 ||
-		len(resp.FilterOptions.ChannelShare) != 0 || len(resp.FilterOptions.ModelStats) != 0 {
+	if !slices.Equal(resp.FilterOptions.Accounts, []string{"alice@example.com", "bob@example.com"}) {
+		t.Fatalf("accounts = %#v", resp.FilterOptions.Accounts)
+	}
+	if resp.FilterOptions.AccountCount != 4 || resp.FilterOptions.APIKeyCount != 4 {
+		t.Fatalf(
+			"selector counts account=%d api_key=%d",
+			resp.FilterOptions.AccountCount,
+			resp.FilterOptions.APIKeyCount,
+		)
+	}
+	if len(resp.FilterOptions.AccountStats) != 4 {
+		t.Fatalf("account identity selectors = %#v", resp.FilterOptions.AccountStats)
+	}
+	var sourceOnlySelector *AccountStatRow
+	for i := range resp.FilterOptions.AccountStats {
+		row := &resp.FilterOptions.AccountStats[i]
+		if slices.Contains(row.SourceHashes, "source-only") {
+			sourceOnlySelector = row
+			break
+		}
+	}
+	if sourceOnlySelector == nil || !slices.Equal(sourceOnlySelector.Sources, []string{"k:z-upstream-key"}) {
+		t.Fatalf("missing source-only selector: %#v", resp.FilterOptions.AccountStats)
+	}
+	if sourceOnlySelector.Calls != 0 || len(sourceOnlySelector.Models) != 0 {
+		t.Fatalf("selector unexpectedly returned aggregate metrics: %#v", sourceOnlySelector)
+	}
+	var sourceHashOnlySelector *AccountStatRow
+	for i := range resp.FilterOptions.AccountStats {
+		row := &resp.FilterOptions.AccountStats[i]
+		if slices.Contains(row.SourceHashes, "source-hash-only") {
+			sourceHashOnlySelector = row
+			break
+		}
+	}
+	if sourceHashOnlySelector == nil || len(sourceHashOnlySelector.Sources) != 0 {
+		t.Fatalf("missing source-hash-only selector: %#v", resp.FilterOptions.AccountStats)
+	}
+	if len(resp.FilterOptions.APIKeyStats) != 0 || len(resp.FilterOptions.ChannelShare) != 0 || len(resp.FilterOptions.ModelStats) != 0 {
 		t.Fatalf("filter selectors returned full stats: %#v", resp.FilterOptions)
 	}
 }
@@ -1900,21 +2142,37 @@ func TestAccountHistoryReturnsRollupTotalsAndCost(t *testing.T) {
 	first.ResolvedModel = "resolved-a"
 	first.AccountSnapshot = "hist@example.com"
 	first.Source = "hist@example.com"
+	first.AuthFileSnapshot = "history.json"
 	first.CacheReadTokens = 20_000
 	first.CacheCreationTokens = 10_000
 	second := monitoringEvent("history-a-2", baseMS+2_000, "alias-a", "auth-1", "source-a", true, 0, 0, 0, 0, 0, nil)
 	second.ResolvedModel = "resolved-a"
 	second.AccountSnapshot = "hist@example.com"
 	second.Source = "hist@example.com"
+	second.AuthFileSnapshot = "history.json"
 	if _, err := db.InsertEvents(ctx, []usage.Event{first, second}); err != nil {
 		t.Fatalf("insert events: %v", err)
 	}
 
+	historyKey := historyTestKey("history.json", "auth-1", "openai", "hist@example.com")
+	missingKey := historyTestKey("missing.json", "auth-missing", "openai", "missing@example.com")
 	resp, err := New(db).AccountHistory(ctx, AccountHistoryRequest{
 		Accounts: []AccountHistoryTarget{
-			{AccountSnapshot: "hist@example.com"},
-			{AccountSnapshot: "missing@example.com"},
-			{AccountKey: "hist@example.com"},
+			{
+				RowKey:               "row-history",
+				AuthFileSnapshot:     "history.json",
+				AuthIndex:            "auth-1",
+				AuthProviderSnapshot: "openai",
+				AccountSnapshot:      "hist@example.com",
+			},
+			{
+				RowKey:               "row-missing",
+				AuthFileSnapshot:     "missing.json",
+				AuthIndex:            "auth-missing",
+				AuthProviderSnapshot: "openai",
+				AccountSnapshot:      "missing@example.com",
+			},
+			{RowKey: "row-legacy-key", AccountKey: historyKey},
 		},
 		CatchUp: true,
 	})
@@ -1928,7 +2186,7 @@ func TestAccountHistoryReturnsRollupTotalsAndCost(t *testing.T) {
 		t.Fatalf("items = %#v", resp.Items)
 	}
 	history := resp.Items[0]
-	if history.AccountKey != "hist@example.com" || !history.Matched || history.SyncStatus != "ready" {
+	if history.RowKey != "row-history" || history.AccountKey != historyKey || !history.Matched || history.SyncStatus != "ready" {
 		t.Fatalf("history item = %#v", history)
 	}
 	if history.TotalRequests != 2 || history.SuccessCalls != 1 || history.FailureCalls != 1 || history.TotalTokens != 1_530_000 {
@@ -1943,11 +2201,131 @@ func TestAccountHistoryReturnsRollupTotalsAndCost(t *testing.T) {
 	if history.FirstSeenMS == nil || *history.FirstSeenMS != baseMS+1_000 || history.LastSeenMS == nil || *history.LastSeenMS != baseMS+2_000 {
 		t.Fatalf("seen range = %#v %#v", history.FirstSeenMS, history.LastSeenMS)
 	}
-	if resp.Items[1].Matched || resp.Items[1].SyncStatus != "empty" {
+	if resp.Items[1].RowKey != "row-missing" || resp.Items[1].AccountKey != missingKey || resp.Items[1].Matched || resp.Items[1].SyncStatus != "empty" {
 		t.Fatalf("missing item = %#v", resp.Items[1])
 	}
-	if !resp.Items[2].Matched || resp.Items[2].AccountKey != "hist@example.com" || resp.Items[2].TotalRequests != 2 {
+	if resp.Items[2].RowKey != "row-legacy-key" || !resp.Items[2].Matched || resp.Items[2].AccountKey != historyKey || resp.Items[2].TotalRequests != 2 {
 		t.Fatalf("account_key item = %#v", resp.Items[2])
+	}
+}
+
+func TestAccountHistorySeparatesSharedAccountAndStructuredIdentityOverridesLegacyKey(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_700_005_000_000)
+	first := monitoringEvent("history-shared-a", baseMS+1_000, "gpt-a", "auth-a", "shared.json", false, 10, 5, 0, 0, 15, nil)
+	first.AuthFileSnapshot = "shared.json"
+	first.AuthProviderSnapshot = "openai"
+	first.AccountSnapshot = "same@example.com"
+	second := monitoringEvent("history-shared-b", baseMS+2_000, "gpt-a", "auth-b", "shared.json", false, 20, 10, 0, 0, 30, nil)
+	second.AuthFileSnapshot = "shared.json"
+	second.AuthProviderSnapshot = "openai"
+	second.AccountSnapshot = "same@example.com"
+	if _, err := db.InsertEvents(ctx, []usage.Event{first, second}); err != nil {
+		t.Fatalf("insert shared-account events: %v", err)
+	}
+
+	firstKey := historyTestKey("shared.json", "auth-a", "openai", "same@example.com")
+	secondKey := historyTestKey("shared.json", "auth-b", "openai", "same@example.com")
+	resp, err := New(db).AccountHistory(ctx, AccountHistoryRequest{
+		Accounts: []AccountHistoryTarget{
+			{
+				RowKey:               "row-b",
+				AccountKey:           firstKey,
+				AuthFileSnapshot:     "shared.json",
+				AuthIndex:            "auth-b",
+				AuthProviderSnapshot: "openai",
+				AccountSnapshot:      "same@example.com",
+			},
+			{
+				RowKey:               "row-a",
+				AuthFileSnapshot:     "shared.json",
+				AuthIndex:            "auth-a",
+				AuthProviderSnapshot: "openai",
+				AccountSnapshot:      "same@example.com",
+			},
+		},
+		CatchUp: true,
+	})
+	if err != nil {
+		t.Fatalf("account history: %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("items = %#v", resp.Items)
+	}
+	if item := resp.Items[0]; item.RowKey != "row-b" || item.AccountKey != secondKey || !item.Matched || item.TotalRequests != 1 || item.TotalTokens != 30 {
+		t.Fatalf("second credential item = %#v", item)
+	}
+	if item := resp.Items[1]; item.RowKey != "row-a" || item.AccountKey != firstKey || !item.Matched || item.TotalRequests != 1 || item.TotalTokens != 15 {
+		t.Fatalf("first credential item = %#v", item)
+	}
+}
+
+func TestAccountHistoryPricesContextTierBands(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_700_010_000_000)
+	if err := db.SaveModelPrices(ctx, map[string]store.ModelPrice{
+		"tiered-resolved": {
+			Prompt:     10,
+			Completion: 4,
+			ContextTiers: []store.ModelPriceContextTier{
+				{
+					ThresholdTokens:  100_000,
+					Prompt:           20,
+					PromptConfigured: true,
+				},
+				{
+					ThresholdTokens:      200_000,
+					Prompt:               0,
+					Completion:           8,
+					PromptConfigured:     true,
+					CompletionConfigured: true,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("save prices: %v", err)
+	}
+
+	events := []usage.Event{
+		monitoringEvent("history-context-exact", baseMS+1_000, "tiered-alias", "auth-tiered", "source-tiered", false, 100_000, 100_000, 0, 0, 200_000, nil),
+		monitoringEvent("history-context-first", baseMS+2_000, "tiered-alias", "auth-tiered", "source-tiered", false, 100_001, 100_000, 0, 0, 200_001, nil),
+		monitoringEvent("history-context-highest", baseMS+3_000, "tiered-alias", "auth-tiered", "source-tiered", false, 200_001, 100_000, 0, 0, 300_001, nil),
+	}
+	for index := range events {
+		events[index].ResolvedModel = "tiered-resolved"
+		events[index].AccountSnapshot = "tier-history@example.com"
+		events[index].Source = "tier-history@example.com"
+		events[index].AuthFileSnapshot = "tier-history.json"
+		events[index].AuthProviderSnapshot = "openai"
+	}
+	if _, err := db.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	resp, err := New(db).AccountHistory(ctx, AccountHistoryRequest{
+		Accounts: []AccountHistoryTarget{{
+			RowKey:               "row-tier-history",
+			AuthFileSnapshot:     "tier-history.json",
+			AuthIndex:            "auth-tiered",
+			AuthProviderSnapshot: "openai",
+			AccountSnapshot:      "tier-history@example.com",
+		}},
+		CatchUp: true,
+	})
+	if err != nil {
+		t.Fatalf("account history: %v", err)
+	}
+	if resp.Checkpoint.Pending || resp.Checkpoint.LatestID != 3 || resp.Checkpoint.LastEventID != 3 || resp.Checkpoint.Processed != 3 {
+		t.Fatalf("checkpoint = %#v", resp.Checkpoint)
+	}
+	if len(resp.Items) != 1 || !resp.Items[0].Matched || resp.Items[0].TotalRequests != 3 {
+		t.Fatalf("history item = %#v", resp.Items)
+	}
+	const wantCost = 4.60002
+	if math.Abs(resp.Items[0].TotalCost-wantCost) > 0.000001 {
+		t.Fatalf("history cost = %v, want %v", resp.Items[0].TotalCost, wantCost)
 	}
 }
 
@@ -1966,7 +2344,7 @@ func TestAccountHistoryEmptyTargetDoesNotMatchAnonymousBucket(t *testing.T) {
 
 	resp, err := New(db).AccountHistory(ctx, AccountHistoryRequest{
 		Accounts: []AccountHistoryTarget{
-			{},
+			{RowKey: "row-empty"},
 		},
 		CatchUp: true,
 	})
@@ -1976,7 +2354,7 @@ func TestAccountHistoryEmptyTargetDoesNotMatchAnonymousBucket(t *testing.T) {
 	if len(resp.Items) != 1 {
 		t.Fatalf("items = %#v", resp.Items)
 	}
-	if resp.Items[0].Matched || resp.Items[0].AccountKey != "" || resp.Items[0].SyncStatus != "empty" {
+	if resp.Items[0].RowKey != "row-empty" || resp.Items[0].Matched || resp.Items[0].AccountKey != "" || resp.Items[0].SyncStatus != "empty" {
 		t.Fatalf("empty target matched anonymous bucket: %#v", resp.Items[0])
 	}
 }
@@ -2011,6 +2389,438 @@ func TestBuildAccountHistoryTotalsCanSkipCostCalculation(t *testing.T) {
 	}
 	if total.cost != 0 {
 		t.Fatalf("cost = %v, want 0 when include_cost is false", total.cost)
+	}
+}
+
+func TestAccountHistoryRejectsFileTargetWithoutProvider(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	_, err := New(db).AccountHistory(context.Background(), AccountHistoryRequest{
+		Accounts: []AccountHistoryTarget{{
+			RowKey:           "providerless-file",
+			AuthFileSnapshot: "credential.json",
+			AuthIndex:        "auth-1",
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "auth_provider_snapshot") {
+		t.Fatalf("providerless account history target error = %v", err)
+	}
+}
+
+func TestAccountHistoryIncludesLatestCredentialRequestWithoutExposingRawFailureData(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_700_000_000_000)
+	matched := monitoringEvent("history-latest-match", baseMS+1_000, "gpt-a", "auth-1", "source-match", true, 0, 0, 0, 0, 0, nil)
+	matched.AuthFileSnapshot = "credential-a.json"
+	matched.AccountSnapshot = "alice@example.com"
+	matched.FailStatusCode = 429
+	matched.FailBody = "Authorization: Bearer should-never-leak"
+	matched.HeaderErrorKind = "rate_limit"
+	matched.HeaderErrorCode = "quota_exceeded"
+	matched.HeaderTraceID = "trace-history-latest"
+	otherCredential := monitoringEvent("history-latest-other", baseMS+2_000, "gpt-a", "auth-1", "source-other", false, 0, 0, 0, 0, 0, nil)
+	otherCredential.AuthFileSnapshot = "credential-b.json"
+	otherCredential.AccountSnapshot = "alice@example.com"
+	events := []usage.Event{matched, otherCredential}
+	for index := range 11 {
+		historical := monitoringEvent(
+			fmt.Sprintf("history-recent-%02d", index),
+			baseMS-int64(index+1)*1_000,
+			"gpt-a",
+			"auth-1",
+			"source-match",
+			index%3 == 0,
+			0,
+			0,
+			0,
+			0,
+			0,
+			nil,
+		)
+		historical.AuthFileSnapshot = "credential-a.json"
+		historical.AccountSnapshot = "alice@example.com"
+		events = append(events, historical)
+	}
+
+	if _, err := db.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	resp, err := New(db).AccountHistory(ctx, AccountHistoryRequest{
+		Accounts: []AccountHistoryTarget{{
+			RowKey:               "row-credential-a",
+			AccountSnapshot:      "alice@example.com",
+			AuthFileSnapshot:     "credential-a.json",
+			AuthProviderSnapshot: "codex",
+			AuthIndex:            "auth-1",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("account history: %v", err)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].LatestRequest == nil {
+		t.Fatalf("history response = %#v", resp)
+	}
+	item := resp.Items[0]
+	if item.RowKey != "row-credential-a" {
+		t.Fatalf("history row key = %q", item.RowKey)
+	}
+	if len(item.RecentRequests) != accountRecentRequestLimit {
+		t.Fatalf("recent requests = %#v", item.RecentRequests)
+	}
+	for index := 1; index < len(item.RecentRequests); index++ {
+		if item.RecentRequests[index-1].TimestampMS <= item.RecentRequests[index].TimestampMS {
+			t.Fatalf("recent request order = %#v", item.RecentRequests)
+		}
+	}
+	if item.RecentRequests[len(item.RecentRequests)-1].TimestampMS != baseMS-9_000 {
+		t.Fatalf("recent request limit = %#v", item.RecentRequests)
+	}
+	latest := item.LatestRequest
+	if latest.TimestampMS != matched.TimestampMS || !latest.Failed || latest.FailStatusCode == nil || *latest.FailStatusCode != 429 {
+		t.Fatalf("latest request = %#v", latest)
+	}
+	if !reflect.DeepEqual(item.RecentRequests[0], *latest) {
+		t.Fatalf("latest request does not match first recent request: latest=%#v recent=%#v", latest, item.RecentRequests)
+	}
+	if latest.HeaderErrorKind != "rate_limit" || latest.HeaderErrorCode != "quota_exceeded" || latest.HeaderTraceID != "trace-history-latest" {
+		t.Fatalf("latest diagnostics = %#v", latest)
+	}
+	encoded, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("marshal history item: %v", err)
+	}
+	encodedText := string(encoded)
+	if strings.Contains(encodedText, "should-never-leak") || strings.Contains(encodedText, "fail_body") || strings.Contains(encodedText, "raw_json") {
+		t.Fatalf("history response exposed sensitive data: %s", encodedText)
+	}
+	if !strings.Contains(encodedText, "[redacted]") {
+		t.Fatalf("history response did not retain sanitized diagnostics: %s", encodedText)
+	}
+}
+
+func TestAccountWindowUsageReturnsWindowScopedTotalsAndComputedCost(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_700_000_000_000)
+	if err := db.SaveModelPrices(ctx, map[string]store.ModelPrice{
+		"resolved-a": {
+			Prompt:     1,
+			Completion: 2,
+		},
+	}); err != nil {
+		t.Fatalf("save model prices: %v", err)
+	}
+
+	first := monitoringEvent("window-usage-1", baseMS+1_000, "model-a", "auth-1", "source-a", false, 1_000_000, 500_000, 0, 0, 1_500_000, nil)
+	first.ResolvedModel = "resolved-a"
+	first.AccountSnapshot = "quota@example.com"
+	first.AuthFileSnapshot = "codex.json"
+	second := monitoringEvent("window-usage-2", baseMS+2_000, "model-a", "auth-1", "source-a", true, 0, 0, 0, 0, 0, nil)
+	second.ResolvedModel = "resolved-a"
+	second.AccountSnapshot = "quota@example.com"
+	second.AuthFileSnapshot = "codex.json"
+	outside := monitoringEvent("window-usage-outside", baseMS+9_000, "model-a", "auth-1", "source-a", false, 9, 9, 0, 0, 18, nil)
+	outside.ResolvedModel = "resolved-a"
+	outside.AccountSnapshot = "quota@example.com"
+	outside.AuthFileSnapshot = "codex.json"
+	if _, err := db.InsertEvents(ctx, []usage.Event{first, second, outside}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	resp, err := New(db).AccountWindowUsage(ctx, AccountWindowUsageRequest{
+		Windows: []AccountWindowUsageTarget{
+			{
+				RowKey:               "codex.json\x00auth-1",
+				WindowKey:            "5h",
+				FromMS:               baseMS,
+				ToMS:                 baseMS + 5_000,
+				AccountSnapshot:      "quota@example.com",
+				AuthProviderSnapshot: "codex",
+				AuthIndex:            "auth-1",
+				Source:               "codex.json",
+			},
+			{
+				RowKey:               "codex.json\x00auth-1",
+				WindowKey:            "7d",
+				FromMS:               baseMS - 10_000,
+				ToMS:                 baseMS - 5_000,
+				AccountSnapshot:      "quota@example.com",
+				AuthProviderSnapshot: "codex",
+				AuthIndex:            "auth-1",
+				Source:               "codex.json",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("account window usage: %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("items = %#v", resp.Items)
+	}
+	item := resp.Items[0]
+	if item.RowKey != "codex.json\x00auth-1" || item.WindowKey != "5h" || !item.Matched || item.SyncStatus != "ready" {
+		t.Fatalf("item identity = %#v", item)
+	}
+	if item.TotalRequests != 2 || item.SuccessCalls != 1 || item.FailureCalls != 1 || item.TotalTokens != 1_500_000 {
+		t.Fatalf("window totals = %#v", item)
+	}
+	if item.SuccessRate == nil || math.Abs(*item.SuccessRate-0.5) > 0.000001 {
+		t.Fatalf("success rate = %#v", item.SuccessRate)
+	}
+	if math.Abs(item.TotalCost-2.0) > 0.000001 {
+		t.Fatalf("total cost = %v", item.TotalCost)
+	}
+	if item.LastSeenMS == nil || *item.LastSeenMS != baseMS+2_000 {
+		t.Fatalf("last seen = %#v", item.LastSeenMS)
+	}
+	if resp.Items[1].Matched || resp.Items[1].SyncStatus != "empty" || resp.Items[1].TotalRequests != 0 {
+		t.Fatalf("empty item = %#v", resp.Items[1])
+	}
+}
+
+func TestAccountWindowUsageRejectsWeakDisplayIdentity(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	_, err := New(db).AccountWindowUsage(context.Background(), AccountWindowUsageRequest{
+		Windows: []AccountWindowUsageTarget{{
+			RowKey:          "legacy-row",
+			WindowKey:       "current",
+			FromMS:          1,
+			ToMS:            2,
+			AccountSnapshot: "legacy@example.com",
+			AuthIndex:       "auth-legacy",
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "credential identity") {
+		t.Fatalf("weak account window target error = %v", err)
+	}
+}
+
+func TestAccountWindowUsageRejectsFileIdentityWithoutProvider(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	_, err := New(db).AccountWindowUsage(context.Background(), AccountWindowUsageRequest{
+		Windows: []AccountWindowUsageTarget{{
+			RowKey:           "providerless-file",
+			WindowKey:        "current",
+			FromMS:           1,
+			ToMS:             2,
+			AuthFileSnapshot: "credential.json",
+			AuthIndex:        "auth-1",
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "auth_provider_snapshot") {
+		t.Fatalf("providerless account window target error = %v", err)
+	}
+}
+
+func TestAccountWindowUsageSeparatesCredentialsSharingEmailAndAuthIndex(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_700_050_000_000)
+	first := monitoringEvent("window-shared-first", baseMS+1_000, "gpt-a", "auth-shared", "source-a", false, 10, 5, 0, 0, 15, nil)
+	first.AccountSnapshot = "shared@example.com"
+	first.AuthFileSnapshot = "first.json"
+	first.AuthProviderSnapshot = "codex"
+	first.AuthProjectIDSnapshot = "project-shared"
+	second := monitoringEvent("window-shared-second", baseMS+2_000, "gpt-a", "auth-shared", "source-b", false, 20, 10, 0, 0, 30, nil)
+	second.AccountSnapshot = "shared@example.com"
+	second.AuthFileSnapshot = "second.json"
+	second.AuthProviderSnapshot = "codex"
+	second.AuthProjectIDSnapshot = "project-shared"
+	if _, err := db.InsertEvents(ctx, []usage.Event{first, second}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	resp, err := New(db).AccountWindowUsage(ctx, AccountWindowUsageRequest{Windows: []AccountWindowUsageTarget{
+		{
+			RowKey:                "first.json\x00auth-shared",
+			WindowKey:             "current",
+			FromMS:                baseMS,
+			ToMS:                  baseMS + 5_000,
+			AccountSnapshot:       "shared@example.com",
+			AuthFileSnapshot:      "first.json",
+			AuthProviderSnapshot:  "codex",
+			AuthProjectIDSnapshot: "project-shared",
+			AuthIndex:             "auth-shared",
+			Source:                "first.json",
+		},
+		{
+			RowKey:                "second.json\x00auth-shared",
+			WindowKey:             "current",
+			FromMS:                baseMS,
+			ToMS:                  baseMS + 5_000,
+			AccountSnapshot:       "shared@example.com",
+			AuthFileSnapshot:      "second.json",
+			AuthProviderSnapshot:  "codex",
+			AuthProjectIDSnapshot: "project-shared",
+			AuthIndex:             "auth-shared",
+			Source:                "second.json",
+		},
+	}})
+	if err != nil {
+		t.Fatalf("account window usage: %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("items = %#v", resp.Items)
+	}
+	if !resp.Items[0].Matched || resp.Items[0].TotalRequests != 1 || resp.Items[0].TotalTokens != 15 {
+		t.Fatalf("first credential usage = %#v", resp.Items[0])
+	}
+	if !resp.Items[1].Matched || resp.Items[1].TotalRequests != 1 || resp.Items[1].TotalTokens != 30 {
+		t.Fatalf("second credential usage = %#v", resp.Items[1])
+	}
+}
+
+func TestAccountWindowUsageSeparatesPeriodsAndAppliesModelScopeAcrossOverlappingWindows(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	resetMS := int64(1_700_100_000_000)
+	events := []usage.Event{
+		monitoringEvent("scope-previous", resetMS-1, "claude-sonnet", "auth-1", "source-a", false, 1, 1, 0, 0, 2, nil),
+		monitoringEvent("scope-boundary", resetMS, "claude-opus", "auth-1", "source-a", false, 1, 1, 0, 0, 2, nil),
+		monitoringEvent("scope-gemini", resetMS+1_000, "gemini-2.5-pro", "auth-1", "source-a", false, 1, 1, 0, 0, 2, nil),
+		monitoringEvent("scope-unknown", resetMS+2_000, "custom-router-model", "auth-1", "source-a", false, 1, 1, 0, 0, 2, nil),
+	}
+	for index := range events {
+		events[index].AccountSnapshot = "quota@example.com"
+		events[index].AuthFileSnapshot = "antigravity.json"
+	}
+	events[2].Model = "gemini-alias"
+	events[2].ResolvedModel = "gemini-2.5-pro"
+	if _, err := db.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	resp, err := New(db).AccountWindowUsage(ctx, AccountWindowUsageRequest{Windows: []AccountWindowUsageTarget{
+		{
+			RequestKey: "five-hour-previous", RowKey: "row-1", ProviderWindowID: "five-hour",
+			Period: "previous", FromMS: resetMS - 5_000, ToMS: resetMS,
+			ModelScope: AccountWindowModelScope{Kind: "all"}, AccountSnapshot: "quota@example.com",
+			AuthProviderSnapshot: "antigravity", AuthIndex: "auth-1", Source: "antigravity.json",
+		},
+		{
+			RequestKey: "five-hour-current", RowKey: "row-1", ProviderWindowID: "five-hour",
+			Period: "current", FromMS: resetMS, ToMS: resetMS + 5_000,
+			ModelScope:      AccountWindowModelScope{Kind: "family", Key: "claude_gpt"},
+			AccountSnapshot: "quota@example.com", AuthProviderSnapshot: "antigravity", AuthIndex: "auth-1", Source: "antigravity.json",
+		},
+		{
+			RequestKey: "weekly-current", RowKey: "row-1", ProviderWindowID: "weekly",
+			Period: "current", FromMS: resetMS - 10_000, ToMS: resetMS + 5_000,
+			ModelScope: AccountWindowModelScope{Kind: "all"}, AccountSnapshot: "quota@example.com",
+			AuthProviderSnapshot: "antigravity", AuthIndex: "auth-1", Source: "antigravity.json",
+		},
+		{
+			RequestKey: "exact-billing-model", RowKey: "row-1", ProviderWindowID: "gemini-weekly",
+			Period: "current", FromMS: resetMS, ToMS: resetMS + 5_000,
+			ModelScope:      AccountWindowModelScope{Kind: "models", Models: []string{"gemini-2.5-pro"}},
+			AccountSnapshot: "quota@example.com", AuthProviderSnapshot: "antigravity", AuthIndex: "auth-1", Source: "antigravity.json",
+		},
+		{
+			RequestKey: "exact-unmatched", RowKey: "row-1", ProviderWindowID: "missing-weekly",
+			Period: "current", FromMS: resetMS, ToMS: resetMS + 5_000,
+			ModelScope:      AccountWindowModelScope{Kind: "models", Models: []string{"missing-model"}},
+			AccountSnapshot: "quota@example.com", AuthProviderSnapshot: "antigravity", AuthIndex: "auth-1", Source: "antigravity.json",
+		},
+	}})
+	if err != nil {
+		t.Fatalf("account window usage: %v", err)
+	}
+	if len(resp.Items) != 5 {
+		t.Fatalf("items = %#v", resp.Items)
+	}
+	if resp.Items[0].RequestKey != "five-hour-previous" || resp.Items[0].TotalRequests != 1 {
+		t.Fatalf("previous period included reset boundary: %#v", resp.Items[0])
+	}
+	if resp.Items[1].RequestKey != "five-hour-current" || resp.Items[1].TotalRequests != 1 || resp.Items[1].ScopeMatchStatus != "partial" || resp.Items[1].UnmatchedRequests != 1 {
+		t.Fatalf("scoped current period = %#v", resp.Items[1])
+	}
+	if resp.Items[2].RequestKey != "weekly-current" || resp.Items[2].TotalRequests != 4 {
+		t.Fatalf("overlapping weekly period = %#v", resp.Items[2])
+	}
+	if resp.Items[3].RequestKey != "exact-billing-model" || resp.Items[3].TotalRequests != 1 || resp.Items[3].ScopeMatchStatus != "complete" {
+		t.Fatalf("exact billing-model scope = %#v", resp.Items[3])
+	}
+	if resp.Items[4].RequestKey != "exact-unmatched" || resp.Items[4].Matched || resp.Items[4].ScopeMatchStatus != "unmatched" {
+		t.Fatalf("unmatched exact scope = %#v", resp.Items[4])
+	}
+}
+
+func TestAccountWindowUsagePricesContextLongContextAndServiceTierBands(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	baseMS := int64(1_700_005_000_000)
+	if err := db.SaveModelPrices(ctx, map[string]store.ModelPrice{
+		"tiered-window": {
+			Prompt: 1,
+			ContextTiers: []store.ModelPriceContextTier{
+				{
+					ThresholdTokens:  100_000,
+					Prompt:           3,
+					PromptConfigured: true,
+				},
+			},
+		},
+		"service-window": {
+			Prompt: 1,
+			ServiceTiers: []store.ModelPriceServiceTier{
+				{
+					Mode:             "fast",
+					ServiceTier:      "priority",
+					Prompt:           6,
+					PromptConfigured: true,
+				},
+			},
+		},
+		"gpt-5.4-pro": {
+			Prompt:     2,
+			Completion: 4,
+		},
+	}); err != nil {
+		t.Fatalf("save model prices: %v", err)
+	}
+
+	contextTier := monitoringEvent("window-context-tier", baseMS+1_000, "tiered-window", "auth-1", "source-a", false, 100_001, 0, 0, 0, 100_001, nil)
+	standardTier := monitoringEvent("window-service-default", baseMS+2_000, "service-window", "auth-1", "source-a", false, 1_000_000, 0, 0, 0, 1_000_000, nil)
+	standardTier.ServiceTier = "default"
+	priorityTier := monitoringEvent("window-service-priority", baseMS+3_000, "service-window", "auth-1", "source-a", false, 1_000_000, 0, 0, 0, 1_000_000, nil)
+	priorityTier.ServiceTier = "priority"
+	longContext := monitoringEvent("window-long-context", baseMS+4_000, "gpt-5.4-pro", "auth-1", "source-a", false, 1_000_000, 1_000_000, 0, 0, 2_000_000, nil)
+	for _, event := range []*usage.Event{&contextTier, &standardTier, &priorityTier, &longContext} {
+		event.AccountSnapshot = "quota-bands@example.com"
+		event.AuthFileSnapshot = "codex.json"
+	}
+	if _, err := db.InsertEvents(ctx, []usage.Event{contextTier, standardTier, priorityTier, longContext}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	resp, err := New(db).AccountWindowUsage(ctx, AccountWindowUsageRequest{
+		Windows: []AccountWindowUsageTarget{
+			{
+				RowKey:               "codex.json\x00auth-1",
+				WindowKey:            "combined",
+				FromMS:               baseMS,
+				ToMS:                 baseMS + 5_000,
+				AccountSnapshot:      "quota-bands@example.com",
+				AuthProviderSnapshot: "codex",
+				AuthIndex:            "auth-1",
+				Source:               "codex.json",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("account window usage: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items = %#v", resp.Items)
+	}
+	item := resp.Items[0]
+	if !item.Matched || item.TotalRequests != 4 || item.SuccessCalls != 4 || item.FailureCalls != 0 || item.TotalTokens != 4_100_001 {
+		t.Fatalf("window totals = %#v", item)
+	}
+	const wantCost = 17.300003
+	if math.Abs(item.TotalCost-wantCost) > 0.000001 {
+		t.Fatalf("total cost = %v, want %v", item.TotalCost, wantCost)
 	}
 }
 
@@ -2094,6 +2904,69 @@ func TestAnalyticsHourlyRollupMatchesRawCoreComparisonAndTimeline(t *testing.T) 
 	}
 	if repricedRollup.Summary == nil || rolled.Summary == nil || repricedRollup.Summary.TotalCost != rolled.Summary.TotalCost*2 {
 		t.Fatalf("repriced summary = %#v, original = %#v", repricedRollup.Summary, rolled.Summary)
+	}
+}
+
+func TestAnalyticsHourlyRollupMatchesRawForModelAndOutcomeFilters(t *testing.T) {
+	db := newMonitoringTestStore(t)
+	ctx := context.Background()
+	fromMS := int64(1_800_000_000_000) + 15*time.Minute.Milliseconds()
+	toMS := fromMS + 4*time.Hour.Milliseconds() + 20*time.Minute.Milliseconds()
+	latency := int64(125)
+	events := []usage.Event{
+		monitoringEvent("filtered-edge-success-a", fromMS+time.Minute.Milliseconds(), "model-a", "auth-a", "source-a", false, 10, 1, 0, 0, 11, &latency),
+		monitoringEvent("filtered-full-failed-a", fromMS+time.Hour.Milliseconds(), "model-a", "auth-a", "source-a", true, 20, 2, 0, 0, 22, &latency),
+		monitoringEvent("filtered-full-success-b", fromMS+2*time.Hour.Milliseconds(), "model-b", "auth-b", "source-b", false, 30, 3, 0, 0, 33, &latency),
+		monitoringEvent("filtered-edge-failed-b", toMS-time.Minute.Milliseconds(), "model-b", "auth-b", "source-b", true, 40, 4, 0, 0, 44, &latency),
+	}
+	if _, err := db.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+	catchUpMonitoringHourlyRollup(t, ctx, db)
+	if _, err := db.InsertEvents(ctx, []usage.Event{
+		monitoringEvent("filtered-late-success-a", fromMS+90*time.Minute.Milliseconds(), "model-a", "auth-a", "source-a", false, 50, 5, 0, 0, 55, &latency),
+	}); err != nil {
+		t.Fatalf("insert late event: %v", err)
+	}
+
+	includeFailed := false
+	tests := []struct {
+		name    string
+		filters Filters
+	}{
+		{name: "model", filters: Filters{Models: []string{"model-a"}}},
+		{name: "success only", filters: Filters{IncludeFailed: &includeFailed}},
+		{name: "failed only", filters: Filters{FailedOnly: true}},
+		{name: "model and failed", filters: Filters{Models: []string{"model-b"}, FailedOnly: true}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := Request{
+				FromMS:   fromMS,
+				ToMS:     toMS,
+				NowMS:    toMS,
+				TimeZone: "UTC",
+				Filters:  test.filters,
+				Include: Include{
+					Summary:     true,
+					Timeline:    true,
+					ModelStats:  true,
+					Granularity: "hour",
+				},
+			}
+			raw, err := New(db, false).Analytics(ctx, req)
+			if err != nil {
+				t.Fatalf("raw analytics: %v", err)
+			}
+			rolled, err := New(db, true).Analytics(ctx, req)
+			if err != nil {
+				t.Fatalf("rollup analytics: %v", err)
+			}
+			raw.GeneratedAtMS = rolled.GeneratedAtMS
+			if !reflect.DeepEqual(rolled, raw) {
+				t.Fatalf("filtered analytics mismatch\nrollup=%#v\nraw=%#v", rolled, raw)
+			}
+		})
 	}
 }
 
@@ -2218,7 +3091,6 @@ func TestAnalyticsHourlyRollupEligibilityIsStrict(t *testing.T) {
 	}{
 		{name: "search", mutate: func(filter *store.AnalyticsFilter) { filter.SearchQuery = "model" }},
 		{name: "search api key", mutate: func(filter *store.AnalyticsFilter) { filter.SearchAPIKeyHash = "key" }},
-		{name: "models", mutate: func(filter *store.AnalyticsFilter) { filter.Models = []string{"model-a"} }},
 		{name: "providers", mutate: func(filter *store.AnalyticsFilter) { filter.Providers = []string{"codex"} }},
 		{name: "accounts", mutate: func(filter *store.AnalyticsFilter) { filter.Accounts = []string{"account"} }},
 		{name: "credential ids", mutate: func(filter *store.AnalyticsFilter) { filter.CredentialIDs = []string{"credential"} }},
@@ -2232,8 +3104,6 @@ func TestAnalyticsHourlyRollupEligibilityIsStrict(t *testing.T) {
 		{name: "header error codes", mutate: func(filter *store.AnalyticsFilter) { filter.HeaderErrorCodes = []string{"429"} }},
 		{name: "header quota plans", mutate: func(filter *store.AnalyticsFilter) { filter.HeaderQuotaPlans = []string{"pro"} }},
 		{name: "header trace ids", mutate: func(filter *store.AnalyticsFilter) { filter.HeaderTraceIDs = []string{"trace"} }},
-		{name: "exclude failed", mutate: func(filter *store.AnalyticsFilter) { filter.IncludeFailed = false }},
-		{name: "failed only", mutate: func(filter *store.AnalyticsFilter) { filter.FailedOnly = true }},
 		{name: "minimum latency", mutate: func(filter *store.AnalyticsFilter) { filter.MinLatencyMS = 100 }},
 		{name: "cache status", mutate: func(filter *store.AnalyticsFilter) { filter.CacheStatus = "hit" }},
 	}
@@ -2246,14 +3116,33 @@ func TestAnalyticsHourlyRollupEligibilityIsStrict(t *testing.T) {
 			}
 		})
 	}
+
+	for _, supported := range []store.AnalyticsFilter{
+		{IncludeFailed: true, Models: []string{"model-a"}},
+		{IncludeFailed: false},
+		{IncludeFailed: true, FailedOnly: true},
+	} {
+		if !analyticsHourlyRollupEligible(supported) {
+			t.Fatalf("supported filter unexpectedly ineligible: %#v", supported)
+		}
+	}
 }
 
 func catchUpMonitoringHourlyRollup(t *testing.T, ctx context.Context, db *store.Store) {
 	t.Helper()
 	for {
-		result, err := db.CatchUpDashboardHourlyRollups(ctx, 100, time.Now().UnixMilli())
+		result, err := db.CatchUpUsageHourlyAggregate(ctx, 100, time.Now().UnixMilli())
 		if err != nil {
 			t.Fatalf("catch up hourly rollup: %v", err)
+		}
+		if !result.Pending {
+			break
+		}
+	}
+	for {
+		result, err := db.CatchUpUsagePricing(ctx, 100, time.Now().UnixMilli())
+		if err != nil {
+			t.Fatalf("catch up pricing rollup: %v", err)
 		}
 		if !result.Pending {
 			return
@@ -2309,4 +3198,17 @@ func monitoringEvent(
 		Failed:          failed,
 		CreatedAtMS:     timestampMS,
 	}
+}
+
+func historyTestKey(authFileSnapshot, authIndex, provider, accountSnapshot string) string {
+	key, valid := usageidentity.AccountKey(usageidentity.Fields{
+		AuthFileSnapshot:     authFileSnapshot,
+		AuthIndex:            authIndex,
+		AuthProviderSnapshot: provider,
+		AccountSnapshot:      accountSnapshot,
+	})
+	if !valid {
+		panic("invalid account history test identity")
+	}
+	return key
 }

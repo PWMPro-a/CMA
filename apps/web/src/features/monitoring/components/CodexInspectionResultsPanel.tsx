@@ -57,6 +57,7 @@ type CodexInspectionResultsPanelProps = {
   onReauthAccount?: (item: CodexInspectionResultItem) => void;
   onDeleteReauthPlanned?: () => void;
   onDeleteReauthSingle?: (item: CodexInspectionResultItem) => void;
+  onOpenCredential?: (item: CodexInspectionResultItem) => void;
   filterLabel: (filter: ActionFilter) => string;
   handlingFilterLabel: (filter: HandlingFilter) => string;
   renderOperation?: (item: CodexInspectionResultItem) => ReactNode;
@@ -94,6 +95,7 @@ export function CodexInspectionResultsPanel({
   onReauthAccount,
   onDeleteReauthPlanned,
   onDeleteReauthSingle,
+  onOpenCredential,
   filterLabel,
   renderOperation,
 }: CodexInspectionResultsPanelProps) {
@@ -231,7 +233,9 @@ export function CodexInspectionResultsPanel({
                 const planLabel = isXai ? null : getCodexPlanLabel(item.planType, t);
                 const quotaWindows = item.quotaWindows ?? [];
                 const errorText = item.errorDetail || item.error;
-                const errorSummary = summarizeInspectionError(item, t);
+                const errorSummary = summarizeInspectionError(item, t, {
+                  xaiInferenceEnabled,
+                });
                 const conclusionReason = item.actionReason?.startsWith('monitoring.')
                   ? t(item.actionReason)
                   : item.actionReason;
@@ -247,7 +251,22 @@ export function CodexInspectionResultsPanel({
                   .filter(Boolean)
                   .join('\n');
                 const hasFailureDetails = probe.state === 'failed' && failureDetailLines.length > 0;
-                const operation = renderOperationForItem(item);
+                const actionOperation = renderOperationForItem(item);
+                const operation =
+                  onOpenCredential || actionOperation ? (
+                    <div className={styles.resultsHeaderActions}>
+                      {onOpenCredential ? (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => onOpenCredential(item)}
+                        >
+                          {t('monitoring.codex_inspection_view_credential')}
+                        </Button>
+                      ) : null}
+                      {actionOperation}
+                    </div>
+                  ) : null;
                 return (
                   <article
                     key={item.key}

@@ -61,6 +61,7 @@ export const buildAuthFileUsageTarget = (file: AuthFileItem): AuthFileUsageTarge
   return {
     key: getAuthFileUsageKey(file),
     request: {
+      row_key: getAuthFileUsageKey(file),
       account_snapshot: accountSnapshot,
       auth_label_snapshot: authLabelSnapshot,
       auth_index: authIndex,

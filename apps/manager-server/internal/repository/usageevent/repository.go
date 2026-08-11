@@ -38,6 +38,8 @@ type Repository interface {
 	ChannelModelStatsWithFilter(ctx context.Context, filter AnalyticsFilter) ([]ChannelModelStat, error)
 	FailureSourcesWithFilter(ctx context.Context, filter AnalyticsFilter) ([]FailureSourceStat, error)
 	AccountModelStatsWithFilter(ctx context.Context, filter AnalyticsFilter) ([]AccountModelStat, error)
+	AccountWindowModelStats(ctx context.Context, windows []AccountWindowUsageQuery) ([]AccountWindowModelStat, error)
+	RecentAccountRequests(ctx context.Context, targets []LatestAccountRequestQuery, limit int) ([]LatestAccountRequest, error)
 	CredentialModelStatsWithFilter(ctx context.Context, filter AnalyticsFilter) ([]CredentialModelStat, error)
 	CredentialTimelineWithFilter(ctx context.Context, filter AnalyticsFilter, granularity string, location *time.Location) ([]CredentialTimelinePoint, error)
 	APIKeyTimelineWithFilter(ctx context.Context, filter AnalyticsFilter, granularity string, location *time.Location) ([]APIKeyTimelinePoint, error)
@@ -82,6 +84,43 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 		_ = tx.Rollback()
 	}()
 
+	ledgerStmt, err := tx.PrepareContext(ctx, `insert or ignore into usage_event_identity_ledger (
+		event_hash,
+		raw_event_id,
+		timestamp_ms,
+		bucket_ms,
+		aggregate_schema_version,
+		first_seen_at_ms,
+		updated_at_ms
+	) values (?, null, ?, ?, 0, ?, ?)`)
+	if err != nil {
+		return model.InsertResult{}, err
+	}
+	defer ledgerStmt.Close()
+
+	attachLedgerStmt, err := tx.PrepareContext(ctx, `update usage_event_identity_ledger set
+		raw_event_id = ?,
+		timestamp_ms = ?,
+		bucket_ms = ?,
+		updated_at_ms = ?
+	where event_hash = ?`)
+	if err != nil {
+		return model.InsertResult{}, err
+	}
+	defer attachLedgerStmt.Close()
+
+	attachExistingLedgerStmt, err := tx.PrepareContext(ctx, `update usage_event_identity_ledger set
+		raw_event_id = (select id from usage_events where event_hash = ?),
+		timestamp_ms = (select timestamp_ms from usage_events where event_hash = ?),
+		bucket_ms = (select timestamp_ms - (timestamp_ms % 3600000) from usage_events where event_hash = ?),
+		first_seen_at_ms = coalesce((select case when created_at_ms > 0 then created_at_ms end from usage_events where event_hash = ?), first_seen_at_ms),
+		updated_at_ms = ?
+	where event_hash = ?`)
+	if err != nil {
+		return model.InsertResult{}, err
+	}
+	defer attachExistingLedgerStmt.Close()
+
 	stmt, err := tx.PrepareContext(ctx, `insert or ignore into usage_events (
 		request_id, event_hash, timestamp_ms, timestamp, provider, executor_type, model, endpoint, method, path,
 		auth_type, auth_index, source, source_hash, api_key_hash,
@@ -100,6 +139,28 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 
 	result := model.InsertResult{}
 	for _, event := range events {
+		ledgerNowMS := event.CreatedAtMS
+		if ledgerNowMS <= 0 {
+			ledgerNowMS = time.Now().UnixMilli()
+		}
+		bucketMS := event.TimestampMS - event.TimestampMS%(60*60*1000)
+		ledgerResult, err := ledgerStmt.ExecContext(
+			ctx,
+			event.EventHash,
+			event.TimestampMS,
+			bucketMS,
+			ledgerNowMS,
+			ledgerNowMS,
+		)
+		if err != nil {
+			return model.InsertResult{}, err
+		}
+		claimed, _ := ledgerResult.RowsAffected()
+		if claimed == 0 {
+			result.Skipped++
+			continue
+		}
+
 		accounting := usage.NormalizeCacheAccounting(usage.CacheInputContext{
 			ExplicitMode:     event.CacheInputMode,
 			ExecutorType:     event.ExecutorType,
@@ -200,9 +261,34 @@ func (r *repository) InsertBatch(ctx context.Context, events []model.UsageEvent)
 		}
 		affected, _ := res.RowsAffected()
 		if affected > 0 {
+			rawEventID, err := res.LastInsertId()
+			if err != nil {
+				return model.InsertResult{}, err
+			}
+			if _, err := attachLedgerStmt.ExecContext(
+				ctx,
+				rawEventID,
+				event.TimestampMS,
+				bucketMS,
+				ledgerNowMS,
+				event.EventHash,
+			); err != nil {
+				return model.InsertResult{}, err
+			}
 			result.Inserted++
 			result.InsertedEventHashes = append(result.InsertedEventHashes, event.EventHash)
 		} else {
+			if _, err := attachExistingLedgerStmt.ExecContext(
+				ctx,
+				event.EventHash,
+				event.EventHash,
+				event.EventHash,
+				event.EventHash,
+				ledgerNowMS,
+				event.EventHash,
+			); err != nil {
+				return model.InsertResult{}, err
+			}
 			result.Skipped++
 		}
 	}

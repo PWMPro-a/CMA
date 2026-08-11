@@ -2,11 +2,13 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { TFunction } from 'i18next';
 import { AccountExpandedDetails, AccountOverviewCard } from './MonitoringCenterPage';
+import monitoringCenterPageSource from './MonitoringCenterPage.tsx?raw';
 import { MonitoringSummarySection } from '@/features/monitoring/components/MonitoringSummarySection';
 import {
   buildPrimarySummaryCards,
   buildSecondarySummaryCards,
 } from '@/features/monitoring/model/monitoringCenterPageModel';
+import { resolveMonitoringDimensionCounts } from '@/features/monitoring/model/monitoringAnalyticsModel';
 import type { MonitoringSummary } from '@/features/monitoring/hooks/useMonitoringData';
 import {
   buildEmptyMonitoringStatusData,
@@ -88,6 +90,65 @@ const t = ((key: string, options?: Record<string, unknown>) => {
 
 const createAuthState = (overrides: MonitoringAccountAuthState): MonitoringAccountAuthState =>
   overrides;
+
+describe('MonitoringCenterPage dimension counts', () => {
+  it('uses scoped rows for the active aggregate tab and selector counts elsewhere', () => {
+    expect(
+      resolveMonitoringDimensionCounts({
+        activeDataTab: 'accounts',
+        accountRowCount: 2,
+        apiKeyRowCount: 3,
+        accountSelectorCount: 9,
+        apiKeySelectorCount: 8,
+      })
+    ).toEqual({ accountCount: 2, apiKeyCount: 8 });
+    expect(
+      resolveMonitoringDimensionCounts({
+        activeDataTab: 'apiKeys',
+        accountRowCount: 2,
+        apiKeyRowCount: 3,
+        accountSelectorCount: 9,
+        apiKeySelectorCount: 8,
+      })
+    ).toEqual({ accountCount: 9, apiKeyCount: 3 });
+    expect(
+      resolveMonitoringDimensionCounts({
+        activeDataTab: 'realtime',
+        accountRowCount: 2,
+        apiKeyRowCount: 3,
+        accountSelectorCount: 9,
+        apiKeySelectorCount: 8,
+      })
+    ).toEqual({ accountCount: 9, apiKeyCount: 8 });
+  });
+});
+
+describe('MonitoringCenterPage quota refresh wiring', () => {
+  it('keeps account expansion separate from manual Provider quota refresh', () => {
+    const toggleStart = monitoringCenterPageSource.indexOf('const toggleAccountExpanded');
+    const focusStart = monitoringCenterPageSource.indexOf('const focusAccount', toggleStart);
+    const toggleSource = monitoringCenterPageSource.slice(toggleStart, focusStart);
+
+    expect(toggleStart).toBeGreaterThanOrEqual(0);
+    expect(focusStart).toBeGreaterThan(toggleStart);
+    expect(toggleSource).toContain('setExpandedAccounts');
+    expect(toggleSource).not.toContain('loadAccountQuota');
+    expect(monitoringCenterPageSource).toContain('onLoadAccountQuota={loadAccountQuota}');
+    expect(monitoringCenterPageSource).toContain('createKeyedSerialTaskQueue');
+    expect(monitoringCenterPageSource).toContain('accountQuotaRefreshQueue.run');
+    expect(monitoringCenterPageSource).toContain('runProviderCredentialTaskPlan');
+    expect(monitoringCenterPageSource).toContain(
+      'perProviderConcurrency: MAX_CONCURRENT_ACCOUNT_QUOTA_REQUESTS_PER_PROVIDER'
+    );
+    expect(monitoringCenterPageSource).not.toContain(
+      'targets.map((target) => requestAccountQuota(target, t))'
+    );
+    expect(monitoringCenterPageSource).toContain('useHeaderSnapshotsLoader({');
+    expect(monitoringCenterPageSource).toContain('const accounts = new Set([');
+    expect(monitoringCenterPageSource).toContain('...accountQuotaTargetsByAccount.keys()');
+    expect(monitoringCenterPageSource).not.toContain('onResponse: (response) =>');
+  });
+});
 
 describe('MonitoringCenterPage summary cards', () => {
   it('renders all request monitoring summary metrics in one ordered grid with large values intact', () => {

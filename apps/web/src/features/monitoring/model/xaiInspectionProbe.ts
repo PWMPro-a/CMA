@@ -1,19 +1,18 @@
 import type { TFunction } from 'i18next';
 import type { XaiBillingSummary } from '@/types';
-import { probeXaiBilling, probeXaiInference, probeXaiQuota } from '@/utils/quota/providerRequests';
+import { probeXaiInference, probeXaiQuota } from '@/utils/quota/providerRequests';
 import { formatQuotaResetTime } from '@/utils/quota/formatters';
 import { XaiProbeError } from '@/utils/quota/xaiErrors';
 import { formatXaiProbeIssue } from '@/utils/quota/xaiPresentation';
 import type {
   CodexInspectionAction,
   CodexInspectionAccount,
+  CodexInspectionLogHandler,
   CodexInspectionLogLevel,
   CodexInspectionQuotaWindow,
   CodexInspectionResultItem,
   CodexInspectionSettings,
 } from '@/features/monitoring/codexInspection';
-
-type LogHandler = (level: CodexInspectionLogLevel, message: string) => void;
 
 const MAX_INSPECTION_ERROR_DETAIL_LENGTH = 2048;
 const identityT = ((key: string) => key) as TFunction;
@@ -33,6 +32,52 @@ const formatXaiInspectionAction = (action: CodexInspectionAction, t: TFunction) 
       return t('monitoring.codex_inspection_action_keep');
   }
 };
+
+const formatXaiInspectionSurface = (inferenceEnabled: boolean, t: TFunction) =>
+  t(
+    inferenceEnabled
+      ? 'monitoring.xai_inspection_surface_inference'
+      : 'monitoring.xai_inspection_surface_billing'
+  );
+
+type XaiInspectionLogDetailOptions = {
+  account: CodexInspectionAccount;
+  inspectionMode: 'billing' | 'identity' | 'inference' | 'skipped';
+  healthEvidence: string;
+  billingAvailable: boolean;
+  billingPartial: boolean;
+  inferenceEnabled: boolean;
+  action: CodexInspectionAction;
+  statusCode: number | null;
+  usedPercent: number | null;
+  inferenceHealthy?: boolean;
+};
+
+const buildXaiInspectionLogDetail = ({
+  account,
+  inspectionMode,
+  healthEvidence,
+  billingAvailable,
+  billingPartial,
+  inferenceEnabled,
+  action,
+  statusCode,
+  usedPercent,
+  inferenceHealthy,
+}: XaiInspectionLogDetailOptions) => ({
+  provider: 'xai',
+  fileName: account.fileName,
+  displayAccount: account.displayAccount,
+  inspectionMode,
+  healthEvidence,
+  billingAvailable,
+  billingPartial,
+  inferenceEnabled,
+  action,
+  ...(statusCode !== null ? { statusCode } : {}),
+  ...(usedPercent !== null ? { usedPercent } : {}),
+  ...(typeof inferenceHealthy === 'boolean' ? { inferenceHealthy } : {}),
+});
 
 const truncateDetail = (value: unknown) => {
   const text = String(value ?? '').trim();
@@ -145,7 +190,12 @@ const shouldRetryXaiBilling = (error: unknown) =>
     'protocol_changed',
   ].includes(error.decision.classification);
 
-const xaiActionReason = (classification: string, action: string, t: TFunction) => {
+const xaiActionReason = (
+  classification: string,
+  action: string,
+  inferenceEnabled: boolean,
+  t: TFunction
+) => {
   switch (classification) {
     case 'free_quota_exhausted':
       return t(
@@ -172,17 +222,31 @@ const xaiActionReason = (classification: string, action: string, t: TFunction) =
     case 'permission_unknown':
       return t('monitoring.xai_inspection_reason_permission_unknown');
     case 'quota_or_entitlement_unknown':
-      return t('monitoring.xai_inspection_reason_quota_unknown');
+      return t(
+        inferenceEnabled
+          ? 'monitoring.xai_inspection_reason_inference_quota_unknown'
+          : 'monitoring.xai_inspection_reason_quota_unknown'
+      );
     case 'rate_limited':
       return t('monitoring.xai_inspection_reason_rate_limited');
     case 'client_outdated':
       return t('monitoring.xai_inspection_reason_client_outdated');
     case 'probe_invalid':
-      return t('monitoring.xai_inspection_reason_probe_invalid');
+      return t(
+        inferenceEnabled
+          ? 'monitoring.xai_inspection_reason_inference_probe_invalid'
+          : 'monitoring.xai_inspection_reason_probe_invalid'
+      );
+    case 'model_unavailable':
+      return t('monitoring.xai_inspection_reason_model_unavailable');
     case 'upstream_error':
       return t('monitoring.xai_inspection_reason_upstream_error');
     case 'protocol_changed':
-      return t('monitoring.xai_inspection_reason_protocol_changed');
+      return t(
+        inferenceEnabled
+          ? 'monitoring.xai_inspection_reason_inference_protocol_changed'
+          : 'monitoring.xai_inspection_reason_protocol_changed'
+      );
     default:
       return t('monitoring.xai_inspection_reason_unknown');
   }
@@ -191,13 +255,24 @@ const xaiActionReason = (classification: string, action: string, t: TFunction) =
 export const inspectSingleXaiAccount = async (
   account: CodexInspectionAccount,
   settings: CodexInspectionSettings,
-  onLog?: LogHandler,
+  onLog?: CodexInspectionLogHandler,
   t: TFunction = identityT
 ): Promise<CodexInspectionResultItem> => {
   if (!account.authIndex) {
     onLog?.(
       'warning',
-      t('monitoring.xai_inspection_log_missing_auth_index', { account: account.displayAccount })
+      t('monitoring.xai_inspection_log_missing_auth_index', { account: account.displayAccount }),
+      buildXaiInspectionLogDetail({
+        account,
+        inspectionMode: 'skipped',
+        healthEvidence: 'missing_auth_index',
+        billingAvailable: false,
+        billingPartial: false,
+        inferenceEnabled: settings.xaiInferenceEnabled,
+        action: 'keep',
+        statusCode: null,
+        usedPercent: null,
+      })
     );
     return {
       ...account,
@@ -224,20 +299,17 @@ export const inspectSingleXaiAccount = async (
   try {
     const billing = await withRetry(
       settings.retries,
-      () =>
-        settings.xaiInferenceEnabled
-          ? probeXaiBilling(account.raw, t, requestConfig)
-          : probeXaiQuota(account.raw, t, requestConfig),
+      () => probeXaiQuota(account.raw, t, requestConfig),
       shouldRetryXaiBilling
     );
     billingSummary = billing.summary;
     billingStatusCode = billing.statusCode ?? null;
     billingPartial = billing.partial;
     billingError = billing.blockingFailure ?? null;
-    billingSource =
-      'source' in billing && billing.source === 'official-api' ? 'official-api' : 'billing';
+    billingSource = billing.source;
   } catch (error) {
     billingError = error;
+    billingPartial = true;
     // With inference enabled, billing remains supplementary quota evidence.
     // With inference disabled, the error is handled as the health result below.
   }
@@ -248,6 +320,12 @@ export const inspectSingleXaiAccount = async (
       if (!billingSummary) throw new Error(t('xai_quota.empty_data'));
 
       const usedPercent = resolveXaiUsedPercent(billingSummary);
+      const healthEvidence =
+        billingSource === 'official-api'
+          ? 'official_api_healthy'
+          : billingPartial
+            ? 'billing_partial'
+            : 'billing_healthy';
       const actionReason =
         billingSource === 'official-api'
           ? t(
@@ -260,12 +338,31 @@ export const inspectSingleXaiAccount = async (
                 ? 'monitoring.xai_inspection_reason_billing_partial'
                 : 'monitoring.xai_inspection_reason_billing_healthy'
             );
+      const evidence = t(
+        billingSource === 'official-api'
+          ? 'monitoring.xai_inspection_evidence_official_api_healthy'
+          : billingPartial
+            ? 'monitoring.xai_inspection_evidence_billing_partial'
+            : 'monitoring.xai_inspection_evidence_billing_healthy'
+      );
       onLog?.(
-        'info',
+        billingPartial ? 'warning' : 'info',
         t('monitoring.xai_inspection_log_result', {
           account: account.displayAccount,
           action: formatXaiInspectionAction('keep', t),
+          evidence,
           percent: usedPercent === null ? '--' : `${usedPercent.toFixed(1)}%`,
+        }),
+        buildXaiInspectionLogDetail({
+          account,
+          inspectionMode: billingSource === 'official-api' ? 'identity' : 'billing',
+          healthEvidence,
+          billingAvailable: billingSource === 'billing',
+          billingPartial,
+          inferenceEnabled: false,
+          action: 'keep',
+          statusCode: billingStatusCode,
+          usedPercent,
         })
       );
       return {
@@ -279,12 +376,7 @@ export const inspectSingleXaiAccount = async (
         error: '',
         planType: null,
         quotaWindows: buildXaiQuotaWindows(billingSummary),
-        errorKind:
-          billingSource === 'official-api'
-            ? 'official_api_healthy'
-            : billingPartial
-              ? 'billing_partial'
-              : 'billing_healthy',
+        errorKind: healthEvidence,
         errorDetail: '',
       };
     }
@@ -296,6 +388,7 @@ export const inspectSingleXaiAccount = async (
           model: settings.xaiInferenceModel,
           prompt: settings.xaiInferencePrompt,
           userAgent: settings.xaiInferenceUserAgent,
+          ...(billingSource === 'official-api' ? { routeMode: 'official' as const } : {}),
         }),
       shouldRetryXaiInference
     );
@@ -312,7 +405,20 @@ export const inspectSingleXaiAccount = async (
       t('monitoring.xai_inspection_log_result', {
         account: account.displayAccount,
         action: formatXaiInspectionAction(action, t),
+        evidence: t('monitoring.xai_inspection_evidence_inference_healthy'),
         percent: usedPercent === null ? '--' : `${usedPercent.toFixed(1)}%`,
+      }),
+      buildXaiInspectionLogDetail({
+        account,
+        inspectionMode: 'inference',
+        healthEvidence: 'inference_healthy',
+        billingAvailable: billingSummary !== null,
+        billingPartial,
+        inferenceEnabled: true,
+        action,
+        statusCode: inference.statusCode,
+        usedPercent,
+        inferenceHealthy: true,
       })
     );
     return {
@@ -332,29 +438,55 @@ export const inspectSingleXaiAccount = async (
   } catch (error) {
     if (error instanceof XaiProbeError) {
       const { decision, envelope } = error;
-      const action = decision.suggestedAction;
+      const action =
+        account.disabled && decision.suggestedAction === 'disable'
+          ? 'keep'
+          : decision.suggestedAction;
+      const issueSurface = settings.xaiInferenceEnabled ? 'inference' : 'billing';
       const detail = truncateDetail(
         [envelope.code, envelope.type, envelope.message].filter(Boolean).join(' · ') ||
           error.message
       );
       const level: CodexInspectionLogLevel =
-        action === 'disable' ? 'warning' : action === 'reauth' ? 'error' : 'warning';
+        action === 'delete' || action === 'reauth' ? 'error' : 'warning';
+      const usedPercent = billingSummary ? resolveXaiUsedPercent(billingSummary) : null;
       onLog?.(
         level,
         t('monitoring.xai_inspection_log_classified', {
           account: account.displayAccount,
           action: formatXaiInspectionAction(action, t),
+          surface: formatXaiInspectionSurface(settings.xaiInferenceEnabled, t),
           reason:
-            formatXaiProbeIssue(decision.classification, t) ?? t('xai_quota.diagnostic_unknown'),
+            formatXaiProbeIssue(decision.classification, t, issueSurface) ??
+            t('xai_quota.diagnostic_unknown'),
+        }),
+        buildXaiInspectionLogDetail({
+          account,
+          inspectionMode: settings.xaiInferenceEnabled ? 'inference' : 'billing',
+          healthEvidence: decision.classification,
+          billingAvailable: billingSummary !== null,
+          billingPartial,
+          inferenceEnabled: settings.xaiInferenceEnabled,
+          action,
+          statusCode: envelope.statusCode ?? null,
+          usedPercent,
+          ...(settings.xaiInferenceEnabled ? { inferenceHealthy: false } : {}),
         })
       );
       return {
         ...account,
         action,
-        actionReason: xaiActionReason(decision.classification, action, t),
+        actionReason: xaiActionReason(
+          decision.classification,
+          action,
+          settings.xaiInferenceEnabled,
+          t
+        ),
         statusCode: envelope.statusCode,
-        usedPercent: billingSummary ? resolveXaiUsedPercent(billingSummary) : null,
-        isQuota: ['free_quota_exhausted', 'spending_limit'].includes(decision.classification),
+        usedPercent,
+        isQuota: ['free_quota_exhausted', 'spending_limit', 'entitlement_denied'].includes(
+          decision.classification
+        ),
         autoRecoverEligible: false,
         error: error.message,
         planType: null,
@@ -366,19 +498,38 @@ export const inspectSingleXaiAccount = async (
 
     const message =
       error instanceof Error ? error.message : String(error || t('xai_quota.load_failed'));
+    const inferenceRequestFailed = settings.xaiInferenceEnabled;
+    const usedPercent = billingSummary ? resolveXaiUsedPercent(billingSummary) : null;
     onLog?.(
       'warning',
       t('monitoring.xai_inspection_log_request_error', {
         account: account.displayAccount,
+        surface: formatXaiInspectionSurface(inferenceRequestFailed, t),
         message,
+      }),
+      buildXaiInspectionLogDetail({
+        account,
+        inspectionMode: inferenceRequestFailed ? 'inference' : 'billing',
+        healthEvidence: 'request_error',
+        billingAvailable: billingSummary !== null,
+        billingPartial,
+        inferenceEnabled: inferenceRequestFailed,
+        action: 'keep',
+        statusCode: null,
+        usedPercent,
+        ...(inferenceRequestFailed ? { inferenceHealthy: false } : {}),
       })
     );
     return {
       ...account,
       action: 'keep',
-      actionReason: t('monitoring.xai_inspection_reason_request_error'),
+      actionReason: t(
+        inferenceRequestFailed
+          ? 'monitoring.xai_inspection_reason_inference_request_error'
+          : 'monitoring.xai_inspection_reason_request_error'
+      ),
       statusCode: null,
-      usedPercent: billingSummary ? resolveXaiUsedPercent(billingSummary) : null,
+      usedPercent,
       isQuota: false,
       autoRecoverEligible: false,
       error: message,

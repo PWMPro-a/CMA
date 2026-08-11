@@ -3,7 +3,10 @@ package monitoring
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,16 +25,9 @@ func BenchmarkUsageAnalyticsIncludeProfiles(b *testing.B) {
 	ctx := context.Background()
 	fromMS := int64(1_800_000_000_000)
 	toMS := fromMS + 30*24*60*60*1000
-	insertMonitoringBenchmarkEvents(b, ctx, db, fromMS, toMS, 100_000)
-	for {
-		result, err := db.CatchUpDashboardHourlyRollups(ctx, 5_000, toMS)
-		if err != nil {
-			b.Fatalf("catch up hourly rollup: %v", err)
-		}
-		if !result.Pending {
-			break
-		}
-	}
+	saveMonitoringBenchmarkPrices(b, ctx, db)
+	insertMonitoringBenchmarkEvents(b, ctx, db, fromMS, toMS, monitoringBenchmarkEventCount(100_000))
+	catchUpMonitoringBenchmarkRollups(b, ctx, db, toMS)
 	rawService := New(db, false)
 	rollupService := New(db, true)
 
@@ -73,6 +69,26 @@ func BenchmarkUsageAnalyticsIncludeProfiles(b *testing.B) {
 	monitoringFullWithoutFilterOptions.Include.FilterOptions = false
 	monitoringFullFiltered := monitoringFull
 	monitoringFullFiltered.Filters.Models = []string{"gpt-00"}
+	monitoringAccountsCompact := request(Include{
+		Summary:        true,
+		SummaryProfile: "compact",
+		AccountStats:   true,
+		EventsPage:     &EventsPage{Limit: 500},
+		Granularity:    "day",
+	})
+	monitoringAPIKeysCompact := request(Include{
+		Summary:        true,
+		SummaryProfile: "compact",
+		APIKeyStats:    true,
+		EventsPage:     &EventsPage{Limit: 500},
+		Granularity:    "day",
+	})
+	monitoringRealtimeCompact := request(Include{
+		Summary:        true,
+		SummaryProfile: "compact",
+		EventsPage:     &EventsPage{Limit: 500},
+		Granularity:    "day",
+	})
 	profiles := []struct {
 		name     string
 		service  *Service
@@ -100,6 +116,9 @@ func BenchmarkUsageAnalyticsIncludeProfiles(b *testing.B) {
 		{name: "monitoring_curl_scope", service: rollupService, requests: []Request{monitoringCurlScope}},
 		{name: "monitoring_full_without_filter_options", service: rollupService, requests: []Request{monitoringFullWithoutFilterOptions}},
 		{name: "monitoring_full_filtered", service: rollupService, requests: []Request{monitoringFullFiltered}},
+		{name: "monitoring_accounts_compact", service: rollupService, requests: []Request{monitoringAccountsCompact}},
+		{name: "monitoring_api_keys_compact", service: rollupService, requests: []Request{monitoringAPIKeysCompact}},
+		{name: "monitoring_realtime_compact", service: rollupService, requests: []Request{monitoringRealtimeCompact}},
 		{name: "filter_options_only", service: rollupService, requests: []Request{request(Include{FilterOptions: true})}},
 		{
 			name:    "overview_initial",
@@ -328,6 +347,387 @@ func BenchmarkUsageAnalyticsIncludeProfiles(b *testing.B) {
 	}
 }
 
+func BenchmarkAccountWindowUsageProjection(b *testing.B) {
+	db, err := store.Open(filepath.Join(b.TempDir(), "usage.sqlite"))
+	if err != nil {
+		b.Fatalf("open store: %v", err)
+	}
+	b.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+	fromMS := int64(1_800_000_000_000)
+	toMS := fromMS + 30*24*60*60*1000
+	eventCount := monitoringBenchmarkEventCount(100_000)
+	saveMonitoringBenchmarkPrices(b, ctx, db)
+	insertMonitoringBenchmarkEvents(b, ctx, db, fromMS, toMS, eventCount)
+	catchUpMonitoringBenchmarkDerivedRollups(b, ctx, db, toMS)
+
+	windows := make([]AccountWindowUsageTarget, 0, maxAccountWindowUsageItems)
+	for accountIndex := range 100 {
+		for overlapIndex := range 4 {
+			windowFromMS := fromMS + int64(overlapIndex)*5*24*60*60*1000
+			windows = append(windows, AccountWindowUsageTarget{
+				RowKey:                fmt.Sprintf("account-%03d.json\x00auth-%03d", accountIndex, accountIndex),
+				WindowKey:             fmt.Sprintf("overlap-%d", overlapIndex),
+				FromMS:                windowFromMS,
+				ToMS:                  windowFromMS + 15*24*60*60*1000,
+				AccountSnapshot:       fmt.Sprintf("account-%03d@example.com", accountIndex),
+				AuthFileSnapshot:      fmt.Sprintf("account-%03d.json", accountIndex),
+				AuthProviderSnapshot:  "codex",
+				AuthProjectIDSnapshot: fmt.Sprintf("project-%02d", accountIndex%10),
+				AuthIndex:             fmt.Sprintf("auth-%03d", accountIndex),
+				Source:                fmt.Sprintf("account-%03d.json", accountIndex),
+			})
+		}
+	}
+	service := New(db)
+	request := AccountWindowUsageRequest{Windows: windows}
+	response, err := service.AccountWindowUsage(ctx, request)
+	if err != nil {
+		b.Fatalf("warm account window usage: %v", err)
+	}
+	if len(response.Items) != len(windows) {
+		b.Fatalf("warm account window items = %d, want %d", len(response.Items), len(windows))
+	}
+
+	b.ReportMetric(float64(eventCount), "events")
+	b.ReportMetric(float64(len(windows)), "windows")
+	b.ResetTimer()
+	for range b.N {
+		if _, err := service.AccountWindowUsage(ctx, request); err != nil {
+			b.Fatalf("account window usage: %v", err)
+		}
+	}
+}
+
+func BenchmarkUsageMonitoringHeaderSnapshots(b *testing.B) {
+	db, err := store.Open(filepath.Join(b.TempDir(), "usage.sqlite"))
+	if err != nil {
+		b.Fatalf("open store: %v", err)
+	}
+	b.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+	fromMS := int64(1_800_000_000_000)
+	toMS := fromMS + 30*24*60*60*1000
+	saveMonitoringBenchmarkPrices(b, ctx, db)
+	insertMonitoringBenchmarkEvents(b, ctx, db, fromMS, toMS, monitoringBenchmarkEventCount(100_000))
+	catchUpMonitoringBenchmarkRollups(b, ctx, db, toMS)
+
+	b.Run("raw", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.LatestHeaderSnapshots(ctx, fromMS, 1000); err != nil {
+				b.Fatalf("raw header snapshots: %v", err)
+			}
+		}
+	})
+	b.Run("rollup", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, _, available, err := db.UsageMonitoringHeaderSnapshots(ctx, fromMS, 1000); err != nil {
+				b.Fatalf("rollup header snapshots: %v", err)
+			} else if !available {
+				b.Fatal("rollup header snapshots unavailable")
+			}
+		}
+	})
+}
+
+func BenchmarkUsageMonitoringDerivedReaders(b *testing.B) {
+	path := filepath.Join(b.TempDir(), "usage.sqlite")
+	openStore := func() *store.Store {
+		db, err := store.Open(path)
+		if err != nil {
+			b.Fatalf("open store: %v", err)
+		}
+		return db
+	}
+	ctx := context.Background()
+	fromMS := int64(1_800_000_000_000)
+	toMS := fromMS + 30*24*60*60*1000
+	eventCount := monitoringBenchmarkEventCount(100_000)
+
+	db := openStore()
+	saveMonitoringBenchmarkPrices(b, ctx, db)
+	insertMonitoringBenchmarkEvents(b, ctx, db, fromMS, toMS, eventCount)
+	if err := db.Close(); err != nil {
+		b.Fatalf("close raw benchmark store: %v", err)
+	}
+	rawBytes := monitoringBenchmarkDBBytes(path)
+
+	db = openStore()
+	catchUpMonitoringBenchmarkCoreRollups(b, ctx, db, toMS)
+	if err := db.Close(); err != nil {
+		b.Fatalf("close core-rollup benchmark store: %v", err)
+	}
+	coreBytes := monitoringBenchmarkDBBytes(path)
+
+	db = openStore()
+	catchUpMonitoringBenchmarkDerivedRollups(b, ctx, db, toMS)
+	if err := db.Close(); err != nil {
+		b.Fatalf("close monitoring-rollup benchmark store: %v", err)
+	}
+	allBytes := monitoringBenchmarkDBBytes(path)
+	b.Logf(
+		"events=%d raw_bytes=%d existing_rollup_bytes=%d monitoring_rollup_bytes=%d monitoring_growth_bytes=%d",
+		eventCount,
+		rawBytes,
+		coreBytes,
+		allBytes,
+		allBytes-coreBytes,
+	)
+
+	db = openStore()
+	b.Cleanup(func() { _ = db.Close() })
+	filter := store.AnalyticsFilter{FromMS: fromMS, ToMS: toMS, IncludeFailed: true}
+	monitoringService := New(db, true)
+
+	b.Run("aggregate_raw", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.AggregateWithFilter(ctx, filter); err != nil {
+				b.Fatalf("raw aggregate: %v", err)
+			}
+		}
+	})
+	b.Run("aggregate_projection", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, _, available, err := db.UsageMonitoringAggregate(ctx, filter); err != nil {
+				b.Fatalf("projected aggregate: %v", err)
+			} else if !available {
+				b.Fatal("projected aggregate unavailable")
+			}
+		}
+	})
+	b.Run("models_raw", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.ModelStatsWithFilter(ctx, filter, 0); err != nil {
+				b.Fatalf("raw model stats: %v", err)
+			}
+		}
+	})
+	b.Run("models_projection", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, _, available, err := db.UsageMonitoringModelStats(ctx, filter); err != nil {
+				b.Fatalf("projected model stats: %v", err)
+			} else if !available {
+				b.Fatal("projected model stats unavailable")
+			}
+		}
+	})
+	b.Run("events_count_raw", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.EventsCountWithFilter(ctx, filter); err != nil {
+				b.Fatalf("raw events count: %v", err)
+			}
+		}
+	})
+	b.Run("events_count_projection", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, _, available, err := db.UsageMonitoringEventsCount(ctx, filter); err != nil {
+				b.Fatalf("projected events count: %v", err)
+			} else if !available {
+				b.Fatal("projected events count unavailable")
+			}
+		}
+	})
+	b.Run("events_page_raw", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.EventsPageWithFilter(ctx, filter, 0, 0, 500); err != nil {
+				b.Fatalf("raw events page: %v", err)
+			}
+		}
+	})
+	b.Run("events_page_projection", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, _, available, err := db.UsageMonitoringEventsPage(ctx, filter, 0, 0, 500); err != nil {
+				b.Fatalf("projected events page: %v", err)
+			} else if !available {
+				b.Fatal("projected events page unavailable")
+			}
+		}
+	})
+	filteredEvents := filter
+	filteredEvents.Models = []string{"gpt-00"}
+	b.Run("filtered_events_count_raw", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.EventsCountWithFilter(ctx, filteredEvents); err != nil {
+				b.Fatalf("raw filtered events count: %v", err)
+			}
+		}
+	})
+	b.Run("filtered_events_count_projection", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, _, available, err := db.UsageMonitoringEventsCount(ctx, filteredEvents); err != nil {
+				b.Fatalf("projected filtered events count: %v", err)
+			} else if !available {
+				b.Fatal("projected filtered events count unavailable")
+			}
+		}
+	})
+	b.Run("filtered_events_count_service", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := monitoringService.eventsCount(ctx, filteredEvents); err != nil {
+				b.Fatalf("service filtered events count: %v", err)
+			}
+		}
+	})
+	b.Run("filtered_events_page_raw", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.EventsPageWithFilter(ctx, filteredEvents, 0, 0, 500); err != nil {
+				b.Fatalf("raw filtered events page: %v", err)
+			}
+		}
+	})
+	b.Run("filtered_events_page_projection", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, _, available, err := db.UsageMonitoringEventsPage(ctx, filteredEvents, 0, 0, 500); err != nil {
+				b.Fatalf("projected filtered events page: %v", err)
+			} else if !available {
+				b.Fatal("projected filtered events page unavailable")
+			}
+		}
+	})
+	searchedEvents := filter
+	searchedEvents.SearchQuery = "trace-099999"
+	b.Run("searched_events_count_raw", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.EventsCountWithFilter(ctx, searchedEvents); err != nil {
+				b.Fatalf("raw searched events count: %v", err)
+			}
+		}
+	})
+	b.Run("searched_events_count_service", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := monitoringService.eventsCount(ctx, searchedEvents); err != nil {
+				b.Fatalf("service searched events count: %v", err)
+			}
+		}
+	})
+	b.Run("searched_events_page_raw", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.EventsPageWithFilter(ctx, searchedEvents, 0, 0, 500); err != nil {
+				b.Fatalf("raw searched events page: %v", err)
+			}
+		}
+	})
+	b.Run("searched_events_page_service", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := monitoringService.eventsPage(ctx, searchedEvents, 0, 0, 500); err != nil {
+				b.Fatalf("service searched events page: %v", err)
+			}
+		}
+	})
+	b.Run("headers_raw", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.LatestHeaderSnapshots(ctx, fromMS, 1000); err != nil {
+				b.Fatalf("raw header snapshots: %v", err)
+			}
+		}
+	})
+	b.Run("headers_rollup", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, _, available, err := db.UsageMonitoringHeaderSnapshots(ctx, fromMS, 1000); err != nil {
+				b.Fatalf("rollup header snapshots: %v", err)
+			} else if !available {
+				b.Fatal("rollup header snapshots unavailable")
+			}
+		}
+	})
+
+	b.Run("account_raw", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.AccountModelStatsWithFilter(ctx, filter); err != nil {
+				b.Fatalf("raw account stats: %v", err)
+			}
+		}
+	})
+	b.Run("account_rollup", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, _, available, err := db.UsageMonitoringAccountStats(ctx, filter); err != nil {
+				b.Fatalf("rollup account stats: %v", err)
+			} else if !available {
+				b.Fatal("rollup account stats unavailable")
+			}
+		}
+	})
+	b.Run("api_key_raw", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.APIKeyModelStatsWithFilter(ctx, filter); err != nil {
+				b.Fatalf("raw api key stats: %v", err)
+			}
+		}
+	})
+	b.Run("api_key_rollup", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, _, available, err := db.UsageMonitoringAPIKeyStats(ctx, filter); err != nil {
+				b.Fatalf("rollup api key stats: %v", err)
+			} else if !available {
+				b.Fatal("rollup api key stats unavailable")
+			}
+		}
+	})
+	b.Run("selectors_raw", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.FilterSelectorValuesWithFilter(ctx, filter); err != nil {
+				b.Fatalf("raw selectors: %v", err)
+			}
+		}
+	})
+	b.Run("selectors_rollup", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, _, available, err := db.UsageMonitoringFilterSelectors(ctx, filter); err != nil {
+				b.Fatalf("rollup selectors: %v", err)
+			} else if !available {
+				b.Fatal("rollup selectors unavailable")
+			}
+		}
+	})
+	b.Run("filter_options_raw", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.FilterOptionValuesWithFilter(ctx, filter); err != nil {
+				b.Fatalf("raw filter options: %v", err)
+			}
+		}
+	})
+	b.Run("filter_options_projection", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, _, available, err := db.UsageMonitoringFilterOptions(ctx, filter); err != nil {
+				b.Fatalf("projected filter options: %v", err)
+			} else if !available {
+				b.Fatal("projected filter options unavailable")
+			}
+		}
+	})
+}
+
 func BenchmarkUsageAnalyticsHourlyCorePaths(b *testing.B) {
 	db, err := store.Open(filepath.Join(b.TempDir(), "usage.sqlite"))
 	if err != nil {
@@ -338,20 +738,34 @@ func BenchmarkUsageAnalyticsHourlyCorePaths(b *testing.B) {
 	ctx := context.Background()
 	fromMS := int64(1_800_000_000_000)
 	toMS := fromMS + 30*24*60*60*1000
+	saveMonitoringBenchmarkPrices(b, ctx, db)
 	insertMonitoringBenchmarkEvents(b, ctx, db, fromMS, toMS, 100_000)
-	for {
-		result, err := db.CatchUpDashboardHourlyRollups(ctx, 5_000, toMS)
-		if err != nil {
-			b.Fatalf("catch up hourly rollup: %v", err)
-		}
-		if !result.Pending {
-			break
-		}
-	}
+	catchUpMonitoringBenchmarkRollups(b, ctx, db, toMS)
 	filter := store.AnalyticsFilter{FromMS: fromMS, ToMS: toMS, IncludeFailed: true}
 	reader := usagehourly.New(db, true)
 
-	b.Run("raw", func(b *testing.B) {
+	b.Run("raw_core", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := db.AggregateWithFilter(ctx, filter); err != nil {
+				b.Fatalf("aggregate: %v", err)
+			}
+			if _, err := db.ModelStatsWithFilter(ctx, filter, 0); err != nil {
+				b.Fatalf("model stats: %v", err)
+			}
+		}
+	})
+
+	b.Run("rollup_core", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, ok := reader.LoadAnalytics(ctx, filter, "day", time.UTC, false); !ok {
+				b.Fatal("rollup unavailable")
+			}
+		}
+	})
+
+	b.Run("raw_with_timeline", func(b *testing.B) {
 		b.ReportAllocs()
 		for range b.N {
 			if _, err := db.AggregateWithFilter(ctx, filter); err != nil {
@@ -366,10 +780,10 @@ func BenchmarkUsageAnalyticsHourlyCorePaths(b *testing.B) {
 		}
 	})
 
-	b.Run("rollup", func(b *testing.B) {
+	b.Run("rollup_with_timeline", func(b *testing.B) {
 		b.ReportAllocs()
 		for range b.N {
-			snapshot, ok := reader.LoadAnalytics(ctx, fromMS, toMS, "day", time.UTC, true)
+			snapshot, ok := reader.LoadAnalytics(ctx, filter, "day", time.UTC, true)
 			if !ok {
 				b.Fatal("rollup unavailable")
 			}
@@ -380,12 +794,89 @@ func BenchmarkUsageAnalyticsHourlyCorePaths(b *testing.B) {
 	})
 }
 
+func saveMonitoringBenchmarkPrices(b *testing.B, ctx context.Context, db *store.Store) {
+	b.Helper()
+	prices := make(map[string]store.ModelPrice, 12)
+	for index := 0; index < 12; index++ {
+		prices[fmt.Sprintf("gpt-%02d", index)] = store.ModelPrice{
+			Prompt:     1,
+			Completion: 2,
+			ContextTiers: []store.ModelPriceContextTier{
+				{ThresholdTokens: 128, Prompt: 2, PromptConfigured: true},
+				{ThresholdTokens: 256, Prompt: 3, Completion: 4, PromptConfigured: true, CompletionConfigured: true},
+			},
+		}
+	}
+	if err := db.SaveModelPrices(ctx, prices); err != nil {
+		b.Fatalf("save model prices: %v", err)
+	}
+}
+
+func catchUpMonitoringBenchmarkRollups(b *testing.B, ctx context.Context, db *store.Store, nowMS int64) {
+	b.Helper()
+	catchUpMonitoringBenchmarkCoreRollups(b, ctx, db, nowMS)
+	catchUpMonitoringBenchmarkDerivedRollups(b, ctx, db, nowMS)
+}
+
+func catchUpMonitoringBenchmarkCoreRollups(b *testing.B, ctx context.Context, db *store.Store, nowMS int64) {
+	b.Helper()
+	for {
+		result, err := db.CatchUpUsageHourlyAggregate(ctx, 5_000, nowMS)
+		if err != nil {
+			b.Fatalf("catch up hourly rollup: %v", err)
+		}
+		if !result.Pending {
+			break
+		}
+	}
+	for {
+		result, err := db.CatchUpUsagePricing(ctx, 5_000, nowMS)
+		if err != nil {
+			b.Fatalf("catch up pricing rollup: %v", err)
+		}
+		if !result.Pending {
+			break
+		}
+	}
+}
+
+func catchUpMonitoringBenchmarkDerivedRollups(b *testing.B, ctx context.Context, db *store.Store, nowMS int64) {
+	b.Helper()
+	for _, catchUp := range []func(context.Context, int, int64) (store.UsageMonitoringCatchUpResult, error){
+		db.CatchUpUsageMonitoringProjection,
+		db.CatchUpUsageMonitoringMetadata,
+		db.CatchUpUsageMonitoringStats,
+	} {
+		for {
+			result, err := catchUp(ctx, 5_000, nowMS)
+			if err != nil {
+				b.Fatalf("catch up monitoring rollup: %v", err)
+			}
+			if !result.Pending {
+				break
+			}
+		}
+	}
+}
+
+func monitoringBenchmarkDBBytes(path string) int64 {
+	var total int64
+	for _, candidate := range []string{path, path + "-wal"} {
+		info, err := os.Stat(candidate)
+		if err == nil {
+			total += info.Size()
+		}
+	}
+	return total
+}
+
 func insertMonitoringBenchmarkEvents(b *testing.B, ctx context.Context, db *store.Store, fromMS, toMS int64, count int) {
 	b.Helper()
 	const batchSize = 1000
 	stepMS := max(int64(1), (toMS-fromMS)/int64(count))
 	latencyMS := int64(250)
 	ttftMS := int64(50)
+	rawPayload := monitoringBenchmarkRawPayload()
 	for offset := 0; offset < count; offset += batchSize {
 		end := min(offset+batchSize, count)
 		events := make([]usage.Event, 0, end-offset)
@@ -413,6 +904,9 @@ func insertMonitoringBenchmarkEvents(b *testing.B, ctx context.Context, db *stor
 			event.AuthProviderSnapshot = []string{"codex", "claude", "gemini"}[index%3]
 			event.AuthProjectIDSnapshot = fmt.Sprintf("project-%02d", index%10)
 			event.ServiceTier = []string{"", "default", "priority"}[index%3]
+			event.HeaderQuotaPlanType = "pro"
+			event.HeaderTraceID = fmt.Sprintf("trace-%06d", index)
+			event.RawJSON = rawPayload
 			event.TTFTMS = &ttftMS
 			events = append(events, event)
 		}
@@ -420,4 +914,28 @@ func insertMonitoringBenchmarkEvents(b *testing.B, ctx context.Context, db *stor
 			b.Fatalf("insert benchmark events: %v", err)
 		}
 	}
+}
+
+func monitoringBenchmarkEventCount(fallback int) int {
+	value := os.Getenv("CPA_MANAGER_MONITORING_BENCH_EVENTS")
+	if value == "" {
+		return fallback
+	}
+	count, err := strconv.Atoi(value)
+	if err != nil || count <= 0 {
+		return fallback
+	}
+	return count
+}
+
+func monitoringBenchmarkRawPayload() string {
+	value := os.Getenv("CPA_MANAGER_MONITORING_BENCH_RAW_BYTES")
+	if value == "" {
+		return ""
+	}
+	size, err := strconv.Atoi(value)
+	if err != nil || size <= 0 {
+		return ""
+	}
+	return strings.Repeat("x", size)
 }

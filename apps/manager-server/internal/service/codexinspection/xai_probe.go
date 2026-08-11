@@ -83,6 +83,17 @@ func (s *Service) inspectSingleXAIAccount(
 		base.Error = "missing auth_index"
 		base.ErrorKind = "missing_auth_index"
 		base.ErrorDetail = "missing auth_index"
+		logger.warning(ctx, "monitoring.xai_inspection_log_server_missing_auth_index", map[string]any{
+			"provider":         "xai",
+			"fileName":         item.FileName,
+			"displayAccount":   item.DisplayAccount,
+			"inspectionMode":   "skipped",
+			"healthEvidence":   base.ErrorKind,
+			"billingAvailable": false,
+			"billingPartial":   false,
+			"inferenceEnabled": settings.XAIInferenceEnabled,
+			"action":           base.Action,
+		})
 		return base
 	}
 
@@ -104,17 +115,11 @@ func (s *Service) inspectSingleXAIAccount(
 	}
 	if !settings.XAIInferenceEnabled {
 		base = resolveXAIBasicInspectionResult(base, billing)
-		logger.info(ctx, "monitoring.xai_inspection_log_server_complete", map[string]any{
-			"fileName":         item.FileName,
-			"billingPartial":   billing.Partial,
-			"inferenceEnabled": false,
-			"inferenceHealthy": false,
-			"action":           base.Action,
-		})
+		logXAIInspectionResult(ctx, logger, item, base, billing, nil)
 		return base
 	}
 
-	inference := s.requestXAIInferenceWithRetries(ctx, setup, settings, item)
+	inference := s.requestXAIInferenceWithRetries(ctx, setup, settings, item, billing.OfficialAPIHealthy)
 	if inference.Healthy {
 		base.Action = "keep"
 		base.ActionReason = "monitoring.xai_inspection_reason_inference_healthy"
@@ -134,7 +139,7 @@ func (s *Service) inspectSingleXAIAccount(
 	} else {
 		decision := inference.Decision
 		if decision == nil {
-			decision = xaiDecision(0, "protocol_changed", "xAI inference did not return a completion event")
+			decision = xaiInferenceDecision(0, "protocol_changed", "xAI inference did not return a completion event")
 		}
 		if base.Disabled && decision.Action == "disable" {
 			decision.Action = "keep"
@@ -149,14 +154,62 @@ func (s *Service) inspectSingleXAIAccount(
 		base.ErrorKind = decision.Classification
 		base.ErrorDetail = decision.ErrorDetail
 	}
-	logger.info(ctx, "monitoring.xai_inspection_log_server_complete", map[string]any{
-		"fileName":         item.FileName,
-		"billingPartial":   billing.Partial,
-		"inferenceEnabled": true,
-		"inferenceHealthy": inference.Healthy,
-		"action":           base.Action,
-	})
+	logXAIInspectionResult(ctx, logger, item, base, billing, &inference.Healthy)
 	return base
+}
+
+func logXAIInspectionResult(
+	ctx context.Context,
+	logger runLogger,
+	item account,
+	result model.CodexInspectionResult,
+	billing xaiBillingProbe,
+	inferenceHealthy *bool,
+) {
+	mode := "billing"
+	if inferenceHealthy != nil {
+		mode = "inference"
+	} else if result.ErrorKind == "official_api_healthy" {
+		mode = "identity"
+	}
+	detail := map[string]any{
+		"provider":         "xai",
+		"fileName":         item.FileName,
+		"displayAccount":   item.DisplayAccount,
+		"inspectionMode":   mode,
+		"healthEvidence":   result.ErrorKind,
+		"billingAvailable": billing.Summary != nil,
+		"billingPartial":   billing.Partial,
+		"inferenceEnabled": inferenceHealthy != nil,
+		"action":           result.Action,
+	}
+	if result.StatusCode != nil {
+		detail["statusCode"] = *result.StatusCode
+	}
+	if result.UsedPercent != nil {
+		detail["usedPercent"] = *result.UsedPercent
+	}
+	if inferenceHealthy != nil {
+		detail["inferenceHealthy"] = *inferenceHealthy
+	}
+	logger.log(ctx, xaiInspectionLogLevel(result), "monitoring.xai_inspection_log_server_complete", detail)
+}
+
+func xaiInspectionLogLevel(result model.CodexInspectionResult) string {
+	switch result.Action {
+	case "delete", "reauth":
+		return "error"
+	case "disable":
+		return "warning"
+	case "enable":
+		return "success"
+	}
+	switch result.ErrorKind {
+	case "", "billing_healthy", "official_api_healthy", "inference_healthy":
+		return "info"
+	default:
+		return "warning"
+	}
 }
 
 func resolveXAIBasicInspectionResult(
@@ -231,10 +284,11 @@ func (s *Service) requestXAIInferenceWithRetries(
 	setup store.Setup,
 	settings model.ManagerCodexInspectionConfig,
 	item account,
+	forceOfficialAPI bool,
 ) xaiInferenceProbe {
 	var probe xaiInferenceProbe
 	for attempt := 0; attempt <= settings.Retries; attempt++ {
-		probe = s.requestXAIInference(ctx, setup, settings, item)
+		probe = s.requestXAIInference(ctx, setup, settings, item, forceOfficialAPI)
 		if probe.Healthy || probe.Decision == nil || !xaiInferenceShouldRetry(*probe.Decision) {
 			break
 		}
@@ -247,8 +301,9 @@ func (s *Service) requestXAIInference(
 	setup store.Setup,
 	settings model.ManagerCodexInspectionConfig,
 	item account,
+	forceOfficialAPI bool,
 ) xaiInferenceProbe {
-	targetURL, usesCLIChatProxy := resolveXAIInferenceURL(item.File)
+	targetURL, usesCLIChatProxy := resolveXAIInferenceURL(item.File, forceOfficialAPI)
 	header := map[string]string{
 		"Authorization": "Bearer $TOKEN$",
 		"Accept":        "application/json",
@@ -258,9 +313,9 @@ func (s *Service) requestXAIInference(
 	if usesCLIChatProxy {
 		header["x-xai-token-auth"] = "xai-grok-cli"
 		header["x-grok-client-version"] = xaiGrokVersion
-	}
-	if userID := resolveXAIUserID(item.File); userID != "" {
-		header["x-userid"] = userID
+		if userID := resolveXAIUserID(item.File); userID != "" {
+			header["x-userid"] = userID
+		}
 	}
 
 	data, err := json.Marshal(map[string]any{
@@ -269,7 +324,7 @@ func (s *Service) requestXAIInference(
 		"stream": false,
 	})
 	if err != nil {
-		return xaiInferenceProbe{Decision: xaiDecision(0, "upstream_error", err.Error())}
+		return xaiInferenceProbe{Decision: xaiInferenceDecision(0, "upstream_error", err.Error())}
 	}
 
 	response, _, err := s.requestProviderAPICallAt(
@@ -283,13 +338,13 @@ func (s *Service) requestXAIInference(
 		string(data),
 	)
 	if err != nil {
-		return xaiInferenceProbe{Decision: xaiDecision(0, "upstream_error", err.Error())}
+		return xaiInferenceProbe{Decision: xaiInferenceDecision(0, "upstream_error", err.Error())}
 	}
 	if !response.HasStatusCode {
-		return xaiInferenceProbe{Decision: xaiDecision(0, "protocol_changed", "xAI inference response missing status_code")}
+		return xaiInferenceProbe{Decision: xaiInferenceDecision(0, "protocol_changed", "xAI inference response missing status_code")}
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return xaiInferenceProbe{Decision: xaiDecision(
+		return xaiInferenceProbe{Decision: xaiInferenceDecision(
 			response.StatusCode,
 			xaiClassification(response.StatusCode, response.Body),
 			firstNonEmpty(response.BodyText, fmt.Sprint(response.Body)),
@@ -300,7 +355,7 @@ func (s *Service) requestXAIInference(
 		if classification == "unknown" {
 			classification = "protocol_changed"
 		}
-		return xaiInferenceProbe{Decision: xaiDecision(response.StatusCode, classification, detail)}
+		return xaiInferenceProbe{Decision: xaiInferenceDecision(response.StatusCode, classification, detail)}
 	}
 	return xaiInferenceProbe{Healthy: true, StatusCode: response.StatusCode}
 }
@@ -349,7 +404,10 @@ func xaiInferenceShouldRetry(decision xaiProbeDecision) bool {
 	}
 }
 
-func resolveXAIInferenceURL(file authFile) (string, bool) {
+func resolveXAIInferenceURL(file authFile, forceOfficialAPI bool) (string, bool) {
+	if forceOfficialAPI {
+		return xaiOfficialAPIBaseURL + "/responses", false
+	}
 	baseURL := strings.TrimSuffix(strings.TrimSpace(readXAIAuthString(file, "base_url", "baseUrl")), "/")
 	usingAPI, hasUsingAPI := readXAIAuthBool(file, "using_api", "usingApi")
 	authKind := strings.ToLower(readXAIAuthString(file, "auth_kind", "authKind"))
@@ -957,6 +1015,12 @@ func xaiDecision(status int, classification string, detail string) *xaiProbeDeci
 	return &xaiProbeDecision{Classification: classification, Action: action, ReasonCode: xaiReasonCode(status, classification), Reason: xaiReason(classification), IsQuota: isQuota, StatusCode: status, ErrorDetail: truncate(detail, maxStoredBodyText)}
 }
 
+func xaiInferenceDecision(status int, classification string, detail string) *xaiProbeDecision {
+	decision := xaiDecision(status, classification, detail)
+	decision.Reason = xaiInferenceReason(classification)
+	return decision
+}
+
 func xaiClassification(status int, body any) string {
 	blob := strings.ToLower(fmt.Sprint(body))
 	switch {
@@ -1058,12 +1122,27 @@ func xaiReason(classification string) string {
 		return "monitoring.xai_inspection_reason_client_outdated"
 	case "probe_invalid":
 		return "monitoring.xai_inspection_reason_probe_invalid"
+	case "model_unavailable":
+		return "monitoring.xai_inspection_reason_model_unavailable"
 	case "upstream_error":
 		return "monitoring.xai_inspection_reason_upstream_error"
 	case "protocol_changed":
 		return "monitoring.xai_inspection_reason_protocol_changed"
 	default:
 		return "monitoring.xai_inspection_reason_unknown"
+	}
+}
+
+func xaiInferenceReason(classification string) string {
+	switch classification {
+	case "quota_or_entitlement_unknown":
+		return "monitoring.xai_inspection_reason_inference_quota_unknown"
+	case "probe_invalid":
+		return "monitoring.xai_inspection_reason_inference_probe_invalid"
+	case "protocol_changed":
+		return "monitoring.xai_inspection_reason_inference_protocol_changed"
+	default:
+		return xaiReason(classification)
 	}
 }
 

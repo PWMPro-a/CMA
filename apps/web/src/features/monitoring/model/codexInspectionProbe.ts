@@ -1,6 +1,12 @@
 import type { AxiosRequestConfig } from 'axios';
+import type { TFunction } from 'i18next';
 import { requestCodexUsageRaw } from '@/services/api/codexQuota';
 import type { AuthFileItem, CodexRateLimitInfo } from '@/types';
+import {
+  getAuthFileStatusIdentityKey,
+  readAuthFileStatusAccountId,
+  readAuthFileStatusAccountSnapshot,
+} from '@/utils/authFileStatusMutation';
 import {
   buildCodexQuotaWindowInfos,
   classifyCodexRateLimitWindows,
@@ -10,22 +16,36 @@ import {
   isDisabledAuthFile,
   normalizePlanType,
   resolveAuthProvider,
-  resolveCodexChatgptAccountId,
   resolveCodexPlanType,
 } from '@/utils/quota';
 import { normalizeAuthIndex } from '@/utils/usage';
 import {
   type CodexInspectionAccount,
-  type CodexInspectionLogLevel,
+  type CodexInspectionLogHandler,
   type CodexInspectionResultItem,
   type CodexInspectionSettings,
 } from '@/features/monitoring/codexInspection';
 import { readString } from './codexInspectionSettings';
 
-type LogHandler = (level: CodexInspectionLogLevel, message: string) => void;
-
 const QUOTA_BODY_PATTERNS = ['quota exhausted', 'limit reached', 'payment_required'];
 const MAX_INSPECTION_ERROR_DETAIL_LENGTH = 2048;
+const identityT = ((key: string) => key) as TFunction;
+
+const formatCodexInspectionAction = (action: string, t: TFunction) => {
+  switch (action) {
+    case 'delete':
+      return t('monitoring.codex_inspection_action_delete');
+    case 'disable':
+      return t('monitoring.codex_inspection_action_disable');
+    case 'enable':
+      return t('monitoring.codex_inspection_action_enable');
+    case 'reauth':
+      return t('monitoring.codex_inspection_action_reauth');
+    case 'keep':
+    default:
+      return t('monitoring.codex_inspection_action_keep');
+  }
+};
 
 const truncateInspectionDetail = (value: unknown) => {
   const text = readString(value);
@@ -44,27 +64,64 @@ const readAuthFileName = (file: AuthFileItem) => {
 };
 
 const readDisplayAccount = (file: AuthFileItem) =>
-  readString(file.account) ||
-  readString(file.email) ||
+  readAuthFileStatusAccountSnapshot(file) ||
   readString(file.label) ||
   readString(file.name) ||
   readString(file.id) ||
   normalizeAuthIndex(file['auth_index'] ?? file.authIndex) ||
   '-';
 
-export const toInspectionAccount = (file: AuthFileItem): CodexInspectionAccount => ({
-  key: `${readAuthFileName(file)}::${normalizeAuthIndex(file['auth_index'] ?? file.authIndex) || '-'}`,
-  fileName: readAuthFileName(file),
-  displayAccount: readDisplayAccount(file),
-  authIndex: normalizeAuthIndex(file['auth_index'] ?? file.authIndex),
-  accountId: resolveCodexChatgptAccountId(file),
-  provider: resolveAuthProvider(file),
-  disabled: isDisabledAuthFile(file),
-  autoRecoverOwned: false,
-  status: readString(file.status),
-  state: readString(file.state),
-  raw: file,
-});
+const buildInspectionAccountKey = ({
+  fileName,
+  runtimeId,
+  accountSnapshot,
+  authIndex,
+  accountId,
+  provider,
+}: Pick<
+  CodexInspectionAccount,
+  'fileName' | 'runtimeId' | 'accountSnapshot' | 'authIndex' | 'accountId' | 'provider'
+>): string =>
+  getAuthFileStatusIdentityKey({
+    name: fileName,
+    runtimeId,
+    authIndex,
+    provider,
+    accountId,
+    accountSnapshot,
+  });
+
+export const toInspectionAccount = (file: AuthFileItem): CodexInspectionAccount => {
+  const runtimeId = readString(file.id) || null;
+  const fileName = readAuthFileName(file);
+  const displayAccount = readDisplayAccount(file);
+  const accountSnapshot = readAuthFileStatusAccountSnapshot(file) || null;
+  const authIndex = normalizeAuthIndex(file['auth_index'] ?? file.authIndex);
+  const accountId = readAuthFileStatusAccountId(file);
+  const provider = resolveAuthProvider(file);
+  return {
+    key: buildInspectionAccountKey({
+      fileName,
+      runtimeId,
+      accountSnapshot,
+      authIndex,
+      accountId,
+      provider,
+    }),
+    runtimeId,
+    fileName,
+    displayAccount,
+    accountSnapshot,
+    authIndex,
+    accountId,
+    provider,
+    disabled: isDisabledAuthFile(file),
+    autoRecoverOwned: false,
+    status: readString(file.status),
+    state: readString(file.state),
+    raw: file,
+  };
+};
 
 const withRetry = async <T>(retries: number, task: () => Promise<T>): Promise<T> => {
   let lastError: unknown;
@@ -315,10 +372,20 @@ const resolveProbeAction = (
 export const inspectSingleAccount = async (
   account: CodexInspectionAccount,
   settings: CodexInspectionSettings,
-  onLog?: LogHandler
+  onLog?: CodexInspectionLogHandler,
+  t: TFunction = identityT
 ): Promise<CodexInspectionResultItem> => {
   if (!account.authIndex) {
-    onLog?.('warning', `${account.displayAccount} 缺少 auth_index，跳过探测`);
+    onLog?.(
+      'warning',
+      t('monitoring.codex_inspection_log_missing_auth_index', {
+        account: account.displayAccount,
+      }),
+      {
+        fileName: account.fileName,
+        displayAccount: account.displayAccount,
+      }
+    );
     return {
       ...account,
       action: 'keep',
@@ -355,7 +422,17 @@ export const inspectSingleAccount = async (
     const quotaWindows = payload ? buildCodexQuotaWindowInfos(payload, { planType }) : [];
 
     if (!result.hasStatusCode) {
-      onLog?.('warning', `${account.displayAccount} 探测未返回 status_code，保留账号`);
+      onLog?.(
+        'warning',
+        t('monitoring.codex_inspection_log_missing_status', {
+          account: account.displayAccount,
+        }),
+        {
+          fileName: account.fileName,
+          displayAccount: account.displayAccount,
+          body: truncateInspectionDetail(result.bodyText),
+        }
+      );
       const errorDetail = truncateInspectionDetail(result.bodyText) || '探测响应缺少 status_code';
       return {
         ...account,
@@ -398,7 +475,7 @@ export const inspectSingleAccount = async (
         : decision.actionReason;
 
     const successLevel =
-      decision.action === 'delete'
+      decision.action === 'delete' || decision.action === 'reauth'
         ? 'error'
         : decision.action === 'disable'
           ? 'warning'
@@ -409,7 +486,20 @@ export const inspectSingleAccount = async (
       decision.usedPercent === null ? '--' : `${decision.usedPercent.toFixed(1)}%`;
     onLog?.(
       successLevel,
-      `${account.displayAccount} -> ${decision.action} (HTTP ${result.statusCode} · 已用 ${percentText})`
+      t('monitoring.codex_inspection_log_result', {
+        account: account.displayAccount,
+        action: formatCodexInspectionAction(decision.action, t),
+        status: result.statusCode,
+        percent: percentText,
+      }),
+      {
+        fileName: account.fileName,
+        displayAccount: account.displayAccount,
+        action: decision.action,
+        statusCode: result.statusCode,
+        usedPercent: decision.usedPercent,
+        isQuota: decision.isQuota,
+      }
     );
 
     return {
@@ -432,7 +522,18 @@ export const inspectSingleAccount = async (
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error || '探测失败');
     const errorDetail = truncateInspectionDetail(errorMessage) || '探测失败';
-    onLog?.('warning', `${account.displayAccount} 探测异常，保留账号：${errorMessage}`);
+    onLog?.(
+      'warning',
+      t('monitoring.codex_inspection_log_request_error', {
+        account: account.displayAccount,
+        message: errorMessage,
+      }),
+      {
+        fileName: account.fileName,
+        displayAccount: account.displayAccount,
+        error: errorDetail,
+      }
+    );
     return {
       ...account,
       action: 'keep',

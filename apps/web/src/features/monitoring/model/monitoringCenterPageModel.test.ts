@@ -257,6 +257,7 @@ describe('monitoringCenterPageModel account quota', () => {
 
   it('maps Claude usage windows into account quota entries', async () => {
     vi.mocked(fetchClaudeQuota).mockResolvedValue({
+      quotaInventoryObserved: true,
       windows: [
         {
           id: 'five-hour',
@@ -306,6 +307,7 @@ describe('monitoringCenterPageModel account quota', () => {
 
   it('maps Codex monthly quota windows into account quota entries', async () => {
     vi.mocked(fetchCodexQuota).mockResolvedValue({
+      quotaInventoryObserved: true,
       planType: 'free',
       subscriptionActiveUntil: null,
       rateLimitResetCreditsAvailableCount: null,
@@ -813,6 +815,42 @@ describe('monitoringCenterPageModel account quota', () => {
     expect(merged?.entries[0].failedAtMs).toBeUndefined();
   });
 
+  it('creates a successful account quota state from header evidence alone', () => {
+    const target = createTarget({
+      provider: 'codex',
+      key: 'codex::2::codex.json',
+      authIndex: '2',
+      fileName: 'codex.json',
+    });
+    const observedEntry = {
+      key: target.key,
+      provider: 'codex' as const,
+      providerLabel: 'Codex Quota',
+      authLabel: 'Auth',
+      fileName: 'codex.json',
+      planType: 'plus',
+      metaLabels: ['Codex Quota', 'Observed from latest usage response headers'],
+      observedAtMs: 2_000,
+      observedFromUsageHeaders: true,
+      windows: [
+        {
+          id: 'monthly',
+          label: 'Monthly limit',
+          remainingPercent: 55,
+          resetLabel: '07/01 02:00',
+          usageLabel: '13.5d / 30d used',
+        },
+      ],
+    };
+
+    expect(mergeObservedAccountQuotaState(undefined, [target], [observedEntry])).toEqual({
+      status: 'success',
+      targetKey: target.key,
+      entries: [observedEntry],
+      error: '',
+    });
+  });
+
   it('does not merge later header entries when the account quota target set changed', () => {
     const target = createTarget({
       provider: 'codex',
@@ -850,6 +888,7 @@ describe('monitoringCenterPageModel account quota', () => {
 
   it('maps Antigravity grouped buckets into account quota entries', async () => {
     vi.mocked(fetchAntigravityQuota).mockResolvedValue({
+      quotaInventoryObserved: true,
       serverTimeOffsetMs: null,
       groups: [
         {
@@ -887,9 +926,16 @@ describe('monitoringCenterPageModel account quota', () => {
     expect(entry.metaLabels).toEqual(['Antigravity Quota']);
     expect(entry.windows).toMatchObject([
       {
-        id: 'agent',
-        label: 'Agent',
+        id: 'agent:daily',
+        label: 'Agent · Daily',
         remainingPercent: 25,
+        resetLabel: '-',
+        usageLabel: null,
+      },
+      {
+        id: 'agent:weekly',
+        label: 'Agent · Weekly',
+        remainingPercent: 50,
         resetLabel: '-',
         usageLabel: null,
       },
@@ -897,15 +943,18 @@ describe('monitoringCenterPageModel account quota', () => {
   });
 
   it('maps Kimi quota rows without amount labels in account quota entries', async () => {
-    vi.mocked(fetchKimiQuota).mockResolvedValue([
-      {
-        id: 'daily',
-        label: 'Daily',
-        used: 25,
-        limit: 100,
-        resetHint: '2026-07-31T00:00:00Z',
-      },
-    ]);
+    vi.mocked(fetchKimiQuota).mockResolvedValue({
+      quotaInventoryObserved: true,
+      rows: [
+        {
+          id: 'daily',
+          label: 'Daily',
+          used: 25,
+          limit: 100,
+          resetHint: '2026-07-31T00:00:00Z',
+        },
+      ],
+    });
 
     const entry = await requestAccountQuota(
       createTarget({

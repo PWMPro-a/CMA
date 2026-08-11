@@ -218,6 +218,7 @@ describe('buildAnalyticsFilters', () => {
     const filters = buildAnalyticsFilters(
       {
         authFile: 'codex-auth.json',
+        authIndex: 'auth-1',
         projectId: 'project-1',
         requestType: 'codex',
         minLatencyMs: 10_000,
@@ -229,6 +230,7 @@ describe('buildAnalyticsFilters', () => {
 
     expect(filters).toEqual({
       auth_files: ['codex-auth.json'],
+      auth_indices: ['auth-1'],
       project_ids: ['project-1'],
       request_types: ['codex'],
       min_latency_ms: 10_000,
@@ -412,6 +414,48 @@ describe('buildFilterOptionsFromAnalytics', () => {
     expect(options.providers).toEqual(['codex', 'gemini']);
     expect(options.models).toEqual(['gpt-a', 'gpt-b']);
     expect(options.channels).toEqual(['Primary Channel', 'gemini']);
+  });
+
+  it('maps lightweight selector values without requiring aggregate rows', () => {
+    const options = buildFilterOptionsFromAnalytics(
+      {
+        accounts: ['alice@example.com', 'bob@example.com'],
+        api_key_hashes: ['key-a'],
+        providers: ['codex'],
+        models: ['gpt-a'],
+      },
+      new Map(),
+      new Map(),
+      buildSourceInfoMap({}),
+      new Map([
+        [
+          'auth-1',
+          {
+            key: 'primary:0',
+            name: 'Primary Channel',
+            baseUrl: 'https://primary.example.com',
+            host: 'primary.example.com',
+            disabled: false,
+            authIndices: ['auth-1'],
+            modelNames: [],
+          },
+        ],
+      ]),
+      new Map([['key-a', { label: 'Key A', masked: 'sk********aa' }]])
+    );
+
+    expect(options.accountRows.map((row) => row.account)).toEqual([
+      'alice@example.com',
+      'bob@example.com',
+    ]);
+    expect(options.accountRows.map((row) => row.filterValue)).toEqual([
+      'account:alice%40example.com',
+      'account:bob%40example.com',
+    ]);
+    expect(options.apiKeyRows.map((row) => row.apiKeyLabel)).toEqual(['Key A']);
+    expect(options.providers).toEqual(['codex']);
+    expect(options.models).toEqual(['gpt-a']);
+    expect(options.channels).toEqual(['Primary Channel', 'codex']);
   });
 
   it('uses auth or source identities for OpenAI-compatible account option rows', () => {

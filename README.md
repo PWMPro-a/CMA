@@ -77,7 +77,7 @@ See [Choosing A CPA Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/gui
 
 - Break down calls, tokens, cost, latency, and failures by model, provider, account, credential, API key, project, channel, and time range.
 - Track input, output, reasoning, cache, service tier, and long-context pricing semantics.
-- Sync model prices from LiteLLM and OpenRouter, with local overrides for aliases or internal models.
+- Sync model prices from models.dev first, with LiteLLM and OpenRouter fallbacks plus local overrides for aliases or internal models.
 - Open the [Usage Analytics Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/usage-analytics).
 
 ### Account Health, Quota, And Automation
@@ -218,8 +218,17 @@ docker compose -f docker-compose.manager.yml up --build
 
 - `npm run build` creates a single-file `apps/web/dist/index.html`.
 - `bin/release/package-native.sh` embeds the panel into native packages.
-- Tag pushes such as `vX.Y.Z` trigger `.github/workflows/release.yml`.
+- Create release notes through `release/<version> -> dev -> main`, then push a
+  strict `vX.Y.Z` or prerelease tag from the verified `main` promotion merge.
+- `npm run release:validate -- --tag <tag> --content-only` checks the three
+  required release files before a tag is created.
+- `.github/workflows/release.yml` offers a `workflow_dispatch` dry-run from
+  `main`; it validates and builds without publishing a GitHub Release,
+  container image, or Telegram message.
 - Release assets include `management.html`, native packages, and Docker images for `linux/amd64` and `linux/arm64`.
+- Release publishing is serialized and has no automatic commit-log fallback;
+  missing or mismatched notes fail closed. See [`docs/release.md`](docs/release.md)
+  for recovery and required repository protections.
 
 ## Acknowledgements
 

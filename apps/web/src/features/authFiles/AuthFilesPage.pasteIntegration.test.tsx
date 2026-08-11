@@ -16,6 +16,7 @@ const { mocks } = vi.hoisted(() => {
       saveJsonObject: vi.fn(),
       uploadFiles: vi.fn(),
       deleteFiles: vi.fn(),
+      deleteFileByName: vi.fn(),
       deleteAll: vi.fn(),
       showNotification: vi.fn(),
       showConfirmation: vi.fn(),
@@ -51,7 +52,12 @@ const { mocks } = vi.hoisted(() => {
           finishedAt?: number;
           results: Array<{
             fileName: string;
+            runtimeId?: string | null;
+            provider?: string | null;
             authIndex?: string | number | null;
+            accountId?: string | null;
+            accountSnapshot?: string | null;
+            displayAccount?: string | null;
             statusCode?: number | null;
             action?: string | null;
             usedPercent?: number | null;
@@ -110,6 +116,7 @@ vi.mock('@/services/api', () => ({
     saveJsonObject: mocks.saveJsonObject,
     uploadFiles: mocks.uploadFiles,
     deleteFiles: mocks.deleteFiles,
+    deleteFileByName: mocks.deleteFileByName,
     deleteAll: mocks.deleteAll,
   },
 }));
@@ -226,7 +233,7 @@ vi.mock('@/features/authFiles/uiState', () => ({
 
 vi.mock('@/features/authFiles/components/AuthFileCard', () => ({
   AuthFileCard: (props: {
-    file: { name: string; authIndex?: unknown; auth_index?: unknown };
+    file: { name: string; account?: unknown; authIndex?: unknown; auth_index?: unknown };
     codexStatusBadges?: Array<{ kind: string }>;
   }) => {
     const authIndex = props.file.authIndex ?? props.file.auth_index ?? '-';
@@ -234,6 +241,7 @@ vi.mock('@/features/authFiles/components/AuthFileCard', () => ({
     return (
       <div
         data-auth-card={key}
+        data-auth-account={String(props.file.account ?? '')}
         data-codex-badges={props.codexStatusBadges?.map((badge) => badge.kind).join(',') ?? ''}
       />
     );
@@ -288,6 +296,7 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
     mocks.saveJsonObject.mockReset();
     mocks.uploadFiles.mockReset();
     mocks.deleteFiles.mockReset();
+    mocks.deleteFileByName.mockReset();
     mocks.deleteAll.mockReset();
     mocks.showNotification.mockReset();
     mocks.showConfirmation.mockReset();
@@ -315,6 +324,7 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
       failed: [],
     }));
     mocks.deleteFiles.mockResolvedValue({ deleted: 0, failed: [], files: [] });
+    mocks.deleteFileByName.mockResolvedValue({ deleted: 0, failed: [], files: [] });
     mocks.deleteAll.mockResolvedValue(undefined);
     mocks.loadExcluded.mockResolvedValue(undefined);
     mocks.loadModelAlias.mockResolvedValue(undefined);
@@ -420,6 +430,52 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
       expect(renderedCards.map((node) => node.props['data-auth-card'])).toEqual([
         'shared-codex.json::0',
       ]);
+    });
+
+    await act(async () => {
+      renderer!.unmount();
+    });
+  });
+
+  it('matches a no-index inspection by account snapshot instead of its mutable display label', async () => {
+    mocks.panelFeatureAvailability = {
+      checking: false,
+      managerServiceBase: '',
+      serverCodexInspectionAvailable: false,
+    };
+    mocks.list.mockResolvedValue({
+      files: [
+        { name: 'shared-codex.json', type: 'codex', account: 'first@example.com' },
+        { name: 'shared-codex.json', type: 'codex', account: 'second@example.com' },
+      ],
+    });
+    mocks.lastCodexInspectionLastRun = {
+      result: {
+        results: [
+          {
+            fileName: 'shared-codex.json',
+            provider: 'codex',
+            accountSnapshot: 'first@example.com',
+            displayAccount: 'First workspace (renamed)',
+            statusCode: 401,
+            action: 'reauth',
+            usedPercent: null,
+            isQuota: false,
+          },
+        ],
+      },
+    };
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<AuthFilesPage />);
+    });
+
+    await vi.waitFor(() => {
+      const first = renderer!.root.findByProps({ 'data-auth-account': 'first@example.com' });
+      const second = renderer!.root.findByProps({ 'data-auth-account': 'second@example.com' });
+      expect(first.props['data-codex-badges']).toContain('reauth');
+      expect(second.props['data-codex-badges']).not.toContain('reauth');
     });
 
     await act(async () => {
@@ -767,12 +823,24 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
   it('scopes delete all to the selected Codex plan filter', async () => {
     mocks.list.mockResolvedValue({
       files: [
-        { name: 'plus-codex.json', type: 'codex', authIndex: 'plus', plan_type: 'plus' },
-        { name: 'team-codex.json', type: 'codex', authIndex: 'team', plan_type: 'team' },
-        { name: 'qwen.json', type: 'qwen' },
+        {
+          id: 'plus-codex.json',
+          name: 'plus-codex.json',
+          type: 'codex',
+          authIndex: 'plus',
+          plan_type: 'plus',
+        },
+        {
+          id: 'team-codex.json',
+          name: 'team-codex.json',
+          type: 'codex',
+          authIndex: 'team',
+          plan_type: 'team',
+        },
+        { id: 'qwen.json', name: 'qwen.json', type: 'qwen' },
       ],
     });
-    mocks.deleteFiles.mockResolvedValue({
+    mocks.deleteFileByName.mockResolvedValue({
       deleted: 1,
       failed: [],
       files: ['team-codex.json'],
@@ -819,7 +887,20 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
     });
 
     expect(mocks.deleteAll).not.toHaveBeenCalled();
-    expect(mocks.deleteFiles).toHaveBeenCalledWith(['team-codex.json']);
+    expect(mocks.deleteFileByName).toHaveBeenCalledWith(
+      'team-codex.json',
+      'team-codex.json',
+      undefined,
+      [
+        {
+          name: 'team-codex.json',
+          runtimeId: 'team-codex.json',
+          authIndex: 'team',
+          provider: 'codex',
+        },
+      ]
+    );
+    expect(mocks.deleteFiles).not.toHaveBeenCalled();
 
     await act(async () => {
       renderer!.unmount();

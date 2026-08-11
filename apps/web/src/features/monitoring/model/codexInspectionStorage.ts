@@ -1,4 +1,5 @@
 import type {
+  CodexInspectionLogDetail,
   CodexInspectionLastRunState,
   CodexInspectionQuotaWindow,
   CodexInspectionResultItem,
@@ -156,6 +157,7 @@ const serializeResultItemForStorage = (
   key: item.key,
   fileName: item.fileName,
   displayAccount: item.displayAccount,
+  accountSnapshot: readNullableString(item.accountSnapshot),
   authIndex: item.authIndex,
   accountId: null,
   provider: item.provider,
@@ -173,7 +175,8 @@ const serializeResultItemForStorage = (
   planType: readNullableString(item.planType),
   quotaWindows: (item.quotaWindows ?? []).map(serializeQuotaWindow),
   errorKind: readString(item.errorKind),
-  errorDetail: readString(item.errorDetail),
+  errorDetail: sanitizeStoredText(item.errorDetail),
+  actionHandled: item.actionHandled === true,
 });
 
 const hydrateStoredResultItem = (
@@ -193,6 +196,7 @@ const hydrateStoredResultItem = (
     key,
     fileName,
     displayAccount: readString(value.displayAccount) || fileName,
+    accountSnapshot: readNullableString(value.accountSnapshot),
     authIndex,
     accountId: readNullableString(value.accountId),
     provider,
@@ -220,7 +224,8 @@ const hydrateStoredResultItem = (
           .filter((item): item is CodexInspectionQuotaWindow => item !== null)
       : [],
     errorKind: readString(value.errorKind),
-    errorDetail: readString(value.errorDetail),
+    errorDetail: sanitizeStoredText(value.errorDetail),
+    actionHandled: readBoolean(value.actionHandled, false),
   };
 };
 
@@ -258,18 +263,71 @@ const buildSummaryFromStoredResult = (
   };
 };
 
+const isSensitiveLogDetailKey = (key: string): boolean => {
+  const normalized = key.toLowerCase();
+  if (normalized === 'triggerkey') return false;
+  return (
+    normalized.includes('token') ||
+    normalized.includes('secret') ||
+    normalized.includes('authorization') ||
+    normalized.includes('key')
+  );
+};
+
+const sanitizeStringifiedJson = (value: string): string => {
+  try {
+    const sanitized = JSON.stringify(sanitizeLogDetailValue(JSON.parse(value)));
+    return sanitized ?? value;
+  } catch {
+    return value;
+  }
+};
+
+const sanitizeLogDetailValue = (value: unknown): unknown => {
+  if (typeof value === 'string') return sanitizeStringifiedJson(value);
+  if (Array.isArray(value)) return value.map(sanitizeLogDetailValue);
+  if (!isRecord(value)) return value;
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key,
+      isSensitiveLogDetailKey(key) ? '[redacted]' : sanitizeLogDetailValue(item),
+    ])
+  );
+};
+
+const sanitizeStoredText = (value: unknown): string => sanitizeStringifiedJson(readString(value));
+
+const sanitizeStoredLogDetail = (value: unknown): CodexInspectionLogDetail | undefined =>
+  isRecord(value) ? (sanitizeLogDetailValue(value) as CodexInspectionLogDetail) : undefined;
+
+const serializeStoredLogEntry = (
+  entry: CodexInspectionStoredLogEntry
+): CodexInspectionStoredLogEntry => {
+  const detail = sanitizeStoredLogDetail(entry.detail);
+  return {
+    id: entry.id,
+    level: normalizeLogLevel(entry.level),
+    message: readString(entry.message),
+    timestamp: entry.timestamp,
+    ...(detail ? { detail } : {}),
+  };
+};
+
 const hydrateStoredLogEntry = (value: unknown): CodexInspectionStoredLogEntry | null => {
   if (!isRecord(value)) return null;
   const message = readString(value.message);
   if (!message) return null;
   const timestamp = readNullableNumber(value.timestamp) ?? Date.now();
   const id = readString(value.id) || `${timestamp}-${message.slice(0, 12)}`;
+  const detail = sanitizeStoredLogDetail(value.detail);
 
   return {
     id,
     level: normalizeLogLevel(value.level),
     message,
     timestamp,
+    ...(detail ? { detail } : {}),
   };
 };
 
@@ -298,7 +356,7 @@ export const serializeCodexInspectionLastRun = ({
     startedAt: result.startedAt,
     finishedAt: result.finishedAt,
   },
-  logs: (logs ?? []).slice(-500),
+  logs: (logs ?? []).slice(-500).map(serializeStoredLogEntry),
 });
 
 export const hydrateCodexInspectionLastRun = (
@@ -348,6 +406,17 @@ export const hydrateCodexInspectionLastRun = (
   };
 };
 
+const serializeHydratedCodexInspectionLastRun = (state: CodexInspectionLastRunState) => ({
+  ...serializeCodexInspectionLastRun({
+    result: state.result,
+    logs: state.logs,
+    logsCollapsed: state.logsCollapsed,
+    actionFilter: state.actionFilter,
+    connectionFingerprint: state.connectionFingerprint,
+  }),
+  savedAt: state.savedAt,
+});
+
 export const loadCodexInspectionLastRun = (
   expectedConnectionFingerprint?: string | null
 ): CodexInspectionLastRunState | null => {
@@ -355,7 +424,18 @@ export const loadCodexInspectionLastRun = (
     if (typeof localStorage === 'undefined') return null;
     const raw = localStorage.getItem(CODEX_INSPECTION_LAST_RUN_STORAGE_KEY);
     if (!raw) return null;
-    return hydrateCodexInspectionLastRun(JSON.parse(raw), { expectedConnectionFingerprint });
+    const state = hydrateCodexInspectionLastRun(JSON.parse(raw), { expectedConnectionFingerprint });
+    if (!state) return null;
+
+    const sanitizedRaw = JSON.stringify(serializeHydratedCodexInspectionLastRun(state));
+    if (sanitizedRaw !== raw) {
+      try {
+        localStorage.setItem(CODEX_INSPECTION_LAST_RUN_STORAGE_KEY, sanitizedRaw);
+      } catch {
+        // Keep the sanitized in-memory result available when browser storage cannot be updated.
+      }
+    }
+    return state;
   } catch {
     return null;
   }

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	usagesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
@@ -53,6 +55,14 @@ func newCompatHandler(t *testing.T, cfg config.Config, setup *store.Setup) (http
 	}
 	manager := collector.NewManager(cfg, db)
 	return New(cfg, db, manager).Handler(), db
+}
+
+type staticDatabaseMaintenanceStatus struct {
+	snapshot sqliterepo.WALMaintenanceSnapshot
+}
+
+func (s staticDatabaseMaintenanceStatus) Snapshot() sqliterepo.WALMaintenanceSnapshot {
+	return s.snapshot
 }
 
 func TestServerCompatHealthInfoAndPanel(t *testing.T) {
@@ -867,6 +877,18 @@ func TestServerCompatCPAPanelKeyCannotUseManagerOnlyRoutes(t *testing.T) {
 	if !strings.Contains(usageRR.Body.String(), `"code":"invalid_admin_key"`) {
 		t.Fatalf("usage body = %s", usageRR.Body.String())
 	}
+	importSessionRR := testutil.Request(
+		t,
+		handler,
+		http.MethodPost,
+		"/v0/management/usage/import-sessions",
+		`{"filename":"history.jsonl","size_bytes":1}`,
+		"management-key",
+	)
+	testutil.RequireStatus(t, importSessionRR, http.StatusUnauthorized)
+	if !strings.Contains(importSessionRR.Body.String(), `"code":"invalid_admin_key"`) {
+		t.Fatalf("usage import session body = %s", importSessionRR.Body.String())
+	}
 
 	proxyRR := testutil.Request(t, handler, http.MethodGet, "/v0/management/config", "", "management-key")
 	testutil.RequireStatus(t, proxyRR, http.StatusUnauthorized)
@@ -925,6 +947,50 @@ func TestServerCompatStatusAuthAndCounts(t *testing.T) {
 	}
 }
 
+func TestServerCompatStatusIncludesDatabaseMaintenanceSnapshot(t *testing.T) {
+	cfg := testutil.NewConfig(t)
+	db := testutil.NewStore(t, cfg)
+	manager := collector.NewManager(cfg, db)
+	server := New(cfg, db, manager)
+	server.AppContext().DatabaseMaintenance = staticDatabaseMaintenanceStatus{
+		snapshot: sqliterepo.WALMaintenanceSnapshot{
+			DatabaseBytes:         1024,
+			WALBytes:              2048,
+			SHMBytes:              32,
+			TotalBytes:            3104,
+			JournalSizeLimitBytes: sqliterepo.WALJournalSizeLimitBytes,
+			Checkpoint: sqliterepo.WALCheckpointSnapshot{
+				Mode:               sqliterepo.WALCheckpointModePassive,
+				Busy:               1,
+				LogFrames:          20,
+				CheckpointedFrames: 12,
+				ExecutedAtMS:       1_786_000_000_000,
+				DurationMS:         250,
+				Error:              "checkpoint timed out",
+			},
+		},
+	}
+
+	rr := testutil.Request(t, server.Handler(), http.MethodGet, "/status", "", testutil.AdminKey)
+	testutil.RequireStatus(t, rr, http.StatusOK)
+	var response struct {
+		Database sqliterepo.WALMaintenanceSnapshot `json:"database"`
+	}
+	testutil.DecodeJSON(t, rr, &response)
+	if response.Database.DatabaseBytes != 1024 ||
+		response.Database.WALBytes != 2048 ||
+		response.Database.SHMBytes != 32 ||
+		response.Database.TotalBytes != 3104 ||
+		response.Database.Checkpoint.Mode != sqliterepo.WALCheckpointModePassive ||
+		response.Database.Checkpoint.Busy != 1 ||
+		response.Database.Checkpoint.LogFrames != 20 ||
+		response.Database.Checkpoint.CheckpointedFrames != 12 ||
+		response.Database.Checkpoint.DurationMS != 250 ||
+		response.Database.Checkpoint.Error != "checkpoint timed out" {
+		t.Fatalf("database maintenance status = %#v", response.Database)
+	}
+}
+
 func TestServerCompatUsageRoutes(t *testing.T) {
 	cpa := testutil.NewCPAMock(t)
 	setup := &store.Setup{CPAUpstreamURL: cpa.URL(), ManagementKey: "management-key", Queue: "usage", PopSide: "right"}
@@ -961,6 +1027,130 @@ func TestServerCompatUsageRoutes(t *testing.T) {
 		!strings.Contains(importRR.Body.String(), `"added":1`) {
 		t.Fatalf("import body = %s", importRR.Body.String())
 	}
+}
+
+func TestServerCompatUsageImportSessionRoutes(t *testing.T) {
+	cfg := testutil.NewConfig(t)
+	handler, _ := newCompatHandler(t, cfg, nil)
+	line := `{"event_hash":"usage-session-event","timestamp_ms":1778000001000,"timestamp":"2026-05-06T00:00:01Z","model":"gpt-test","endpoint":"POST /v1/chat/completions","input_tokens":2,"output_tokens":3,"total_tokens":5,"failed":false}` + "\n"
+	createBody := `{"filename":"history.jsonl","size_bytes":` + strconv.Itoa(len(line)) + `,"resume_key":"0123456789abcdef0123456789abcdef"}`
+
+	unauthorized := testutil.Request(t, handler, http.MethodPost, "/v0/management/usage/import-sessions", createBody, "wrong-key")
+	testutil.RequireStatus(t, unauthorized, http.StatusUnauthorized)
+
+	createRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/usage/import-sessions", createBody, testutil.AdminKey)
+	testutil.RequireStatus(t, createRR, http.StatusCreated)
+	var session usagesvc.ImportSession
+	testutil.DecodeJSON(t, createRR, &session)
+	if session.ID == "" || session.Status != usagesvc.ImportSessionStatusUploading {
+		t.Fatalf("created session = %#v", session)
+	}
+	duplicateRR := testutil.Request(t, handler, http.MethodPost, "/v0/management/usage/import-sessions", createBody, testutil.AdminKey)
+	testutil.RequireStatus(t, duplicateRR, http.StatusCreated)
+	var duplicate usagesvc.ImportSession
+	testutil.DecodeJSON(t, duplicateRR, &duplicate)
+	if duplicate.ID != session.ID {
+		t.Fatalf("duplicate session = %#v, want id %s", duplicate, session.ID)
+	}
+
+	uploadRR := testutil.Request(
+		t,
+		handler,
+		http.MethodPut,
+		"/v0/management/usage/import-sessions/"+session.ID+"/chunk?offset=0",
+		line,
+		testutil.AdminKey,
+	)
+	testutil.RequireStatus(t, uploadRR, http.StatusOK)
+	testutil.DecodeJSON(t, uploadRR, &session)
+	if session.Status != usagesvc.ImportSessionStatusReady || session.ReceivedBytes != int64(len(line)) {
+		t.Fatalf("uploaded session = %#v", session)
+	}
+
+	completeRR := testutil.Request(
+		t,
+		handler,
+		http.MethodPost,
+		"/v0/management/usage/import-sessions/"+session.ID+"/complete",
+		"",
+		testutil.AdminKey,
+	)
+	if completeRR.Code != http.StatusAccepted && completeRR.Code != http.StatusOK {
+		t.Fatalf("complete status = %d body = %s", completeRR.Code, completeRR.Body.String())
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		statusRR := testutil.Request(
+			t,
+			handler,
+			http.MethodGet,
+			"/v0/management/usage/import-sessions/"+session.ID,
+			"",
+			testutil.AdminKey,
+		)
+		testutil.RequireStatus(t, statusRR, http.StatusOK)
+		if err := json.Unmarshal(statusRR.Body.Bytes(), &session); err != nil {
+			t.Fatalf("decode status: %v", err)
+		}
+		if session.Status == usagesvc.ImportSessionStatusCompleted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if session.Status != usagesvc.ImportSessionStatusCompleted || session.Result == nil || session.Result.Added != 1 {
+		t.Fatalf("completed session = %#v", session)
+	}
+
+	malformedRR := testutil.Request(
+		t,
+		handler,
+		http.MethodGet,
+		"/v0/management/usage/import-sessions/"+session.ID+"/unknown",
+		"",
+		testutil.AdminKey,
+	)
+	testutil.RequireStatus(t, malformedRR, http.StatusNotFound)
+}
+
+func TestServerCompatUsageImportSessionResourceErrors(t *testing.T) {
+	cfg := testutil.NewConfig(t)
+	cfg.UsageImportChunkBytes = 4
+	cfg.UsageImportDiskQuotaBytes = 8
+	cfg.UsageImportMaxSessions = 1
+	handler, _ := newCompatHandler(t, cfg, nil)
+
+	tooLarge := testutil.Request(
+		t,
+		handler,
+		http.MethodPost,
+		"/v0/management/usage/import-sessions",
+		`{"filename":"large.jsonl","size_bytes":9}`,
+		testutil.AdminKey,
+	)
+	testutil.RequireStatus(t, tooLarge, http.StatusRequestEntityTooLarge)
+	if !strings.Contains(tooLarge.Body.String(), string(usagesvc.ImportSessionErrorTooLarge)) {
+		t.Fatalf("too large body = %s", tooLarge.Body.String())
+	}
+
+	createRR := testutil.Request(
+		t,
+		handler,
+		http.MethodPost,
+		"/v0/management/usage/import-sessions",
+		`{"filename":"first.jsonl","size_bytes":8}`,
+		testutil.AdminKey,
+	)
+	testutil.RequireStatus(t, createRR, http.StatusCreated)
+	limitRR := testutil.Request(
+		t,
+		handler,
+		http.MethodPost,
+		"/v0/management/usage/import-sessions",
+		`{"filename":"second.jsonl","size_bytes":1}`,
+		testutil.AdminKey,
+	)
+	testutil.RequireStatus(t, limitRR, http.StatusTooManyRequests)
 }
 
 func TestServerCompatDashboardSummary(t *testing.T) {
@@ -1149,7 +1339,7 @@ func TestServerCompatPluginProxyRoutes(t *testing.T) {
 		body              string
 	}
 
-	observed := make(chan observedRequest, 9)
+	observed := make(chan observedRequest, 12)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		observed <- observedRequest{
@@ -1348,7 +1538,9 @@ func TestServerCompatPluginProxyRoutes(t *testing.T) {
 	)
 	testutil.RequireStatus(t, resourceTraceRR, http.StatusMethodNotAllowed)
 
-	resourceRR := requestWithHeaders(
+	// Public plugin resources may remain reachable, but an unauthenticated
+	// caller must never be elevated to the saved CPA management key.
+	resourceNoAuthRR := requestWithHeaders(
 		http.MethodGet,
 		"/v0/resource/plugins/codex-invite/invite",
 		"",
@@ -1357,12 +1549,54 @@ func TestServerCompatPluginProxyRoutes(t *testing.T) {
 			"X-Codex-Invite-Origin": "http://localhost:18317",
 		},
 	)
-	testutil.RequireStatus(t, resourceRR, http.StatusOK)
+	testutil.RequireStatus(t, resourceNoAuthRR, http.StatusOK)
 	assertObserved("/v0/resource/plugins/codex-invite/invite", observedRequest{
 		method:            http.MethodGet,
 		path:              "/v0/resource/plugins/codex-invite/invite",
-		authorization:     "Bearer management-key",
 		codexInviteOrigin: upstream.URL,
+	})
+
+	resourceCallerAuthRR := requestWithHeaders(
+		http.MethodGet,
+		"/v0/resource/plugins/codex-invite/invite",
+		"",
+		"plugin-management-key",
+		nil,
+	)
+	testutil.RequireStatus(t, resourceCallerAuthRR, http.StatusOK)
+	assertObserved("/v0/resource/plugins/codex-invite/invite", observedRequest{
+		method:        http.MethodGet,
+		path:          "/v0/resource/plugins/codex-invite/invite",
+		authorization: "Bearer plugin-management-key",
+	})
+
+	resourceAdminAuthRR := testutil.Request(
+		t,
+		handler,
+		http.MethodGet,
+		"/v0/resource/plugins/codex-invite/invite",
+		"",
+		testutil.AdminKey,
+	)
+	testutil.RequireStatus(t, resourceAdminAuthRR, http.StatusOK)
+	assertObserved("/v0/resource/plugins/codex-invite/invite", observedRequest{
+		method:        http.MethodGet,
+		path:          "/v0/resource/plugins/codex-invite/invite",
+		authorization: "Bearer management-key",
+	})
+
+	resourceHeadNoAuthRR := testutil.Request(
+		t,
+		handler,
+		http.MethodHead,
+		"/v0/resource/plugins/codex-invite/invite",
+		"",
+		"",
+	)
+	testutil.RequireStatus(t, resourceHeadNoAuthRR, http.StatusOK)
+	assertObserved("/v0/resource/plugins/codex-invite/invite", observedRequest{
+		method: http.MethodHead,
+		path:   "/v0/resource/plugins/codex-invite/invite",
 	})
 }
 

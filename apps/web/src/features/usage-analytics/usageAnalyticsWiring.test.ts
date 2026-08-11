@@ -309,11 +309,15 @@ const usageAnalyticsKeys = [
   'usage_analytics.weekday_sat',
 ];
 
+const usageAnalyticsPageImport = `import { UsageAnalyticsPage } from '${[
+  '@',
+  'pages',
+  'UsageAnalyticsPage',
+].join('/')}';`;
+
 describe('usage analytics app wiring', () => {
   it('registers /usage-analytics behind the request monitoring gate', () => {
-    expect(routesSource).toContain(
-      "import { UsageAnalyticsPage } from '@/pages/UsageAnalyticsPage';"
-    );
+    expect(routesSource).toContain(usageAnalyticsPageImport);
     const usageRouteIndex = routesSource.indexOf("path: '/usage-analytics'");
     const usageRouteSource = routesSource.slice(
       usageRouteIndex,
@@ -358,7 +362,8 @@ describe('usage analytics app wiring', () => {
     expect(en.nav.monitoring_center).toBe('Request Monitor');
     expect(en.nav.plugins).toBe('Plugins');
     expect(en.nav.quota_management).toBe('Quota');
-    expect(en.nav.codex_inspection).toBe('Credential Health');
+    expect(en.nav.accounts).toBe('Credential Management');
+    expect(en.nav).not.toHaveProperty('codex_inspection');
   });
 
   it('escapes user-controlled chart tooltip labels before returning tooltip HTML', () => {

@@ -18,6 +18,7 @@ const { mocks } = vi.hoisted(() => {
       pageTransitionStatus: 'current' as 'current' | 'exiting' | 'stacked',
       loadExcluded: vi.fn(async () => undefined),
       loadModelAlias: vi.fn(async () => undefined),
+      loadFiles: vi.fn(async () => undefined),
       listCodexInspectionRuns: vi.fn(),
       getCodexInspectionRun: vi.fn(),
       getActiveQuotaCooldowns: vi.fn(),
@@ -178,7 +179,7 @@ vi.mock('@/features/authFiles/hooks/useAuthFilesData', () => ({
     batchRegistrationRetrying: false,
     batchFieldsUpdating: false,
     fileInputRef: { current: null },
-    loadFiles: vi.fn(async () => undefined),
+    loadFiles: mocks.loadFiles,
     handleUploadClick: vi.fn(),
     handleFileChange: vi.fn(),
     savePastedAuthJson: vi.fn(async () => undefined),
@@ -266,7 +267,13 @@ vi.mock('@/features/authFiles/uiState', () => ({
 
 vi.mock('@/features/authFiles/components/AuthFileCard', () => ({
   AuthFileCard: (props: {
-    file: { name: string; authIndex?: unknown; auth_index?: unknown };
+    file: {
+      name: string;
+      account?: unknown;
+      email?: unknown;
+      authIndex?: unknown;
+      auth_index?: unknown;
+    };
     quotaCooldown?: { authFileName: string; recoverAtMs: number } | null;
     accountActionCandidate?: {
       actionType?: string;
@@ -293,6 +300,7 @@ vi.mock('@/features/authFiles/components/AuthFileCard', () => ({
     return (
       <div
         data-auth-card={props.file.name}
+        data-auth-account={String(props.file.account ?? props.file.email ?? '')}
         data-auth-index={String(props.file.authIndex ?? props.file.auth_index ?? '')}
         data-file-disabled={String((props.file as { disabled?: boolean }).disabled === true)}
         data-quota-cooldown={cooldown}
@@ -408,6 +416,8 @@ const accountActionCandidate = (
     provider: string;
     authFileName: string;
     authIndex: string;
+    accountSnapshot: string;
+    accountIdSnapshot: string;
     reasonCode: string;
     reason: string;
     autoDisableEligible: boolean;
@@ -447,6 +457,7 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
     mocks.apiCallRequest.mockReset();
     mocks.handleDeleteAll.mockReset();
     mocks.batchDelete.mockReset();
+    mocks.loadFiles.mockClear();
     mocks.intervalCallbacks = [];
     mocks.codexQuota = {};
     mocks.setCodexQuota = vi.fn((updater: unknown) => {
@@ -580,6 +591,7 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
       {
         accounts: [
           {
+            row_key: 'codex-usage.json::auth-usage-1',
             account_snapshot: 'usage@example.com',
             auth_label_snapshot: 'Usage account',
             auth_index: 'auth-usage-1',
@@ -689,15 +701,100 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
     });
   });
 
+  it('refreshes auth files without requesting Codex quota when an xAI cooldown recovers', async () => {
+    const recoveredAtMs = Date.now() - 1_000;
+    mocks.list.mockReturnValue([
+      { name: 'xai-one.json', type: 'xai', authIndex: 'xai-1', disabled: true },
+    ]);
+    mocks.getActiveQuotaCooldowns
+      .mockResolvedValueOnce([
+        {
+          authFileName: 'xai-one.json',
+          authIndex: 'xai-1',
+          provider: 'xai',
+          owner: 'cpamp_xai_free_usage',
+          recoverAtMs: recoveredAtMs,
+        },
+      ])
+      .mockResolvedValueOnce([]);
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<AuthFilesPage />);
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        renderer!.root.findByProps({ 'data-auth-card': 'xai-one.json' }).props[
+          'data-quota-cooldown'
+        ]
+      ).toBe(`xai-one.json@${recoveredAtMs}`);
+    });
+    const loadFilesCallsBeforeRecovery = mocks.loadFiles.mock.calls.length;
+
+    const quotaInterval = mocks.intervalCallbacks.find((item) => item.delay === 60_000);
+    await act(async () => {
+      quotaInterval?.callback();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() => {
+      expect(mocks.loadFiles).toHaveBeenCalledTimes(loadFilesCallsBeforeRecovery + 1);
+    });
+    expect(mocks.apiCallRequest).not.toHaveBeenCalled();
+  });
+
+  it('maps account-scoped cooldowns to the exact same-file row without an auth index', async () => {
+    mocks.list.mockReturnValue([
+      {
+        id: 'runtime-alice',
+        name: 'shared-xai.json',
+        type: 'xai',
+        account: 'alice@example.com',
+      },
+      {
+        id: 'runtime-bob',
+        name: 'shared-xai.json',
+        type: 'xai',
+        account_id: 'account-bob',
+        account: 'bob@example.com',
+      },
+    ]);
+    mocks.getActiveQuotaCooldowns.mockResolvedValue([
+      {
+        authFileName: 'shared-xai.json',
+        accountSnapshot: 'bob@example.com',
+        provider: 'xai',
+        owner: 'cpamp_xai_free_usage',
+        recoverAtMs: 2_000_000_000_000,
+      },
+    ]);
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<AuthFilesPage />);
+    });
+
+    await vi.waitFor(() => {
+      const cards = renderer!.root.findAllByProps({ 'data-auth-card': 'shared-xai.json' });
+      const alice = cards.find((card) => card.props['data-auth-account'] === 'alice@example.com');
+      const bob = cards.find((card) => card.props['data-auth-account'] === 'bob@example.com');
+      expect(alice?.props['data-quota-cooldown']).toBe('');
+      expect(bob?.props['data-quota-cooldown']).toBe('shared-xai.json@2000000000000');
+    });
+  });
+
   it('passes observed Codex quota from usage response headers to auth file cards', async () => {
+    const observedAtMs = Date.now();
     mocks.getHeaderSnapshots.mockResolvedValue({
-      generated_at_ms: 1_700_000_000_000,
-      from_ms: 1_700_000_000_000,
-      to_ms: 1_700_000_000_000,
+      generated_at_ms: observedAtMs,
+      from_ms: observedAtMs,
+      to_ms: observedAtMs,
       items: [
         {
           event_hash: 'event-1',
-          timestamp_ms: 1_700_000_000_000,
+          timestamp_ms: observedAtMs,
           auth_file_snapshot: 'codex-one.json',
           auth_provider_snapshot: 'codex',
           response_metadata: {
@@ -706,7 +803,7 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
               active_limit: 'premium',
               primary: {
                 used_percent: 20,
-                reset_at_ms: 1_784_805_897_000,
+                reset_at_ms: observedAtMs + 30 * 24 * 60 * 60 * 1000,
                 window_minutes: 43_200,
               },
               credits_has_credits: false,
@@ -737,7 +834,7 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
     expect(card.props['data-codex-quota-window-seconds']).toBe('2592000');
   });
 
-  it('refreshes Codex quota instead of showing expired usage response headers', async () => {
+  it('does not query Codex quota when one usage-header window has expired', async () => {
     mocks.list.mockReturnValue([
       { name: 'codex-one.json', type: 'codex', authIndex: '0' },
       { name: 'codex-two.json', type: 'codex' },
@@ -774,33 +871,13 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
         },
       ],
     });
-    mocks.apiCallRequest
-      .mockResolvedValueOnce({
-        statusCode: 200,
-        body: JSON.stringify({
-          plan_type: 'plus',
-          rate_limit: {
-            primary_window: {
-              used_percent: 12,
-              reset_after_seconds: 12_000,
-              limit_window_seconds: 18_000,
-            },
-          },
-        }),
-      })
-      .mockResolvedValueOnce({
-        statusCode: 200,
-        body: JSON.stringify({ available_count: 1, credits: [] }),
-      });
-
     let renderer: ReactTestRenderer;
     await act(async () => {
       renderer = create(<AuthFilesPage />);
     });
 
-    await vi.waitFor(() => {
-      expect(mocks.apiCallRequest).toHaveBeenCalledTimes(2);
-    });
+    await vi.waitFor(() => expect(mocks.getHeaderSnapshots).toHaveBeenCalled());
+    expect(mocks.apiCallRequest).not.toHaveBeenCalled();
 
     await act(async () => {
       renderer!.update(<AuthFilesPage />);
@@ -808,12 +885,11 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
 
     const card = renderer!.root.findByProps({ 'data-auth-card': 'codex-one.json' });
     expect(card.props['data-codex-quota-status']).toBe('success');
-    expect(card.props['data-codex-quota-observed']).toBe('false');
-    expect(card.props['data-codex-quota-plan']).toBe('plus');
-    expect(card.props['data-codex-quota-window-percent']).toBe('12');
+    expect(card.props['data-codex-quota-observed']).toBe('true');
+    expect(card.props['data-codex-quota-plan']).toBe('free');
   });
 
-  it('refreshes Codex quota when a CPAMP cooldown recovers', async () => {
+  it('refreshes auth files without querying Codex quota when a CPAMP cooldown recovers', async () => {
     const recoveredAtMs = Date.now() - 1_000;
     mocks.list.mockReturnValue([
       { name: 'codex-one.json', type: 'codex', authIndex: '0' },
@@ -829,26 +905,6 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
         },
       ])
       .mockResolvedValueOnce([]);
-    mocks.apiCallRequest
-      .mockResolvedValueOnce({
-        statusCode: 200,
-        body: JSON.stringify({
-          plan_type: 'plus',
-          rate_limit: {
-            primary_window: {
-              used_percent: 12,
-              reset_after_seconds: 12_000,
-              limit_window_seconds: 18_000,
-            },
-          },
-          rate_limit_reset_credits: { available_count: 1 },
-        }),
-      })
-      .mockResolvedValueOnce({
-        statusCode: 200,
-        body: JSON.stringify({ available_count: 1, credits: [] }),
-      });
-
     let renderer: ReactTestRenderer;
     await act(async () => {
       renderer = create(<AuthFilesPage />);
@@ -862,6 +918,7 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
       ).toBe(`codex-one.json@${recoveredAtMs}`);
     });
 
+    const loadFilesCallCount = mocks.loadFiles.mock.calls.length;
     const quotaInterval = mocks.intervalCallbacks.find((item) => item.delay === 60_000);
     await act(async () => {
       quotaInterval?.callback();
@@ -870,8 +927,9 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
     });
 
     await vi.waitFor(() => {
-      expect(mocks.apiCallRequest).toHaveBeenCalledTimes(2);
+      expect(mocks.loadFiles.mock.calls.length).toBeGreaterThan(loadFilesCallCount);
     });
+    expect(mocks.apiCallRequest).not.toHaveBeenCalled();
 
     await act(async () => {
       renderer!.update(<AuthFilesPage />);
@@ -879,14 +937,12 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
 
     const card = renderer!.root.findByProps({ 'data-auth-card': 'codex-one.json' });
     expect(card.props['data-quota-cooldown']).toBe('');
-    expect(card.props['data-codex-quota-status']).toBe('success');
+    expect(card.props['data-codex-quota-status']).toBe('');
     expect(card.props['data-codex-quota-observed']).toBe('false');
-    expect(card.props['data-codex-quota-plan']).toBe('plus');
-    expect(card.props['data-codex-quota-window-percent']).toBe('12');
-    expect(card.props['data-codex-quota-window-seconds']).toBe('18000');
+    expect(card.props['data-codex-quota-plan']).toBe('');
   });
 
-  it('refreshes only the recovered auth index for shared Codex auth files', async () => {
+  it('does not query Provider quota when a shared Codex auth index recovers', async () => {
     const recoveredAtMs = Date.now() - 1_000;
     mocks.list.mockReturnValue([
       { name: 'shared-codex.json', type: 'codex', authIndex: '0' },
@@ -902,26 +958,6 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
         },
       ])
       .mockResolvedValueOnce([]);
-    mocks.apiCallRequest
-      .mockResolvedValueOnce({
-        statusCode: 200,
-        body: JSON.stringify({
-          plan_type: 'plus',
-          rate_limit: {
-            primary_window: {
-              used_percent: 12,
-              reset_after_seconds: 12_000,
-              limit_window_seconds: 18_000,
-            },
-          },
-          rate_limit_reset_credits: { available_count: 1 },
-        }),
-      })
-      .mockResolvedValueOnce({
-        statusCode: 200,
-        body: JSON.stringify({ available_count: 1, credits: [] }),
-      });
-
     let renderer: ReactTestRenderer;
     await act(async () => {
       renderer = create(<AuthFilesPage />);
@@ -942,14 +978,7 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
       await Promise.resolve();
     });
 
-    await vi.waitFor(() => {
-      expect(mocks.apiCallRequest).toHaveBeenCalledTimes(2);
-    });
-
-    expect(mocks.apiCallRequest.mock.calls.map(([payload]) => payload.authIndex)).toEqual([
-      '1',
-      '1',
-    ]);
+    expect(mocks.apiCallRequest).not.toHaveBeenCalled();
 
     await act(async () => {
       renderer!.update(<AuthFilesPage />);
@@ -960,12 +989,12 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
     const card1 = cards.find((card) => card.props['data-auth-index'] === '1');
     expect(card0?.props['data-codex-quota-status']).toBe('');
     expect(card1?.props['data-quota-cooldown']).toBe('');
-    expect(card1?.props['data-codex-quota-status']).toBe('success');
+    expect(card1?.props['data-codex-quota-status']).toBe('');
     expect(card1?.props['data-codex-quota-observed']).toBe('false');
-    expect(card1?.props['data-codex-quota-plan']).toBe('plus');
+    expect(card1?.props['data-codex-quota-plan']).toBe('');
   });
 
-  it('uses file-only cooldowns for unique Codex auth file rows', async () => {
+  it('uses file-only cooldowns without querying Provider quota for unique Codex rows', async () => {
     const recoveredAtMs = Date.now() - 1_000;
     mocks.list.mockReturnValue([
       { name: 'legacy-codex.json', type: 'codex', authIndex: '0' },
@@ -980,26 +1009,6 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
         },
       ])
       .mockResolvedValueOnce([]);
-    mocks.apiCallRequest
-      .mockResolvedValueOnce({
-        statusCode: 200,
-        body: JSON.stringify({
-          plan_type: 'plus',
-          rate_limit: {
-            primary_window: {
-              used_percent: 12,
-              reset_after_seconds: 12_000,
-              limit_window_seconds: 18_000,
-            },
-          },
-          rate_limit_reset_credits: { available_count: 1 },
-        }),
-      })
-      .mockResolvedValueOnce({
-        statusCode: 200,
-        body: JSON.stringify({ available_count: 1, credits: [] }),
-      });
-
     let renderer: ReactTestRenderer;
     await act(async () => {
       renderer = create(<AuthFilesPage />);
@@ -1020,14 +1029,7 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
       await Promise.resolve();
     });
 
-    await vi.waitFor(() => {
-      expect(mocks.apiCallRequest).toHaveBeenCalledTimes(2);
-    });
-
-    expect(mocks.apiCallRequest.mock.calls.map(([payload]) => payload.authIndex)).toEqual([
-      '0',
-      '0',
-    ]);
+    expect(mocks.apiCallRequest).not.toHaveBeenCalled();
   });
 
   it('does not apply file-only cooldowns to shared Codex auth files', async () => {
@@ -1067,7 +1069,7 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
     expect(mocks.apiCallRequest).not.toHaveBeenCalled();
   });
 
-  it('retries expired usage response header refreshes after the next header poll', async () => {
+  it('does not query Provider quota when expired response headers are polled again', async () => {
     mocks.list.mockReturnValue([{ name: 'codex-one.json', type: 'codex', authIndex: '0' }]);
     const buildExpiredHeaderResponse = () => ({
       generated_at_ms: 1_700_018_000_001,
@@ -1097,43 +1099,14 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
       ],
     });
     mocks.getHeaderSnapshots.mockImplementation(async () => buildExpiredHeaderResponse());
-    mocks.apiCallRequest
-      .mockRejectedValueOnce(new Error('temporary failure'))
-      .mockResolvedValueOnce({
-        statusCode: 200,
-        body: JSON.stringify({
-          plan_type: 'plus',
-          rate_limit: {
-            primary_window: {
-              used_percent: 12,
-              reset_after_seconds: 12_000,
-              limit_window_seconds: 18_000,
-            },
-          },
-        }),
-      })
-      .mockResolvedValueOnce({
-        statusCode: 200,
-        body: JSON.stringify({ available_count: 1, credits: [] }),
-      });
-
     let renderer: ReactTestRenderer;
     await act(async () => {
       renderer = create(<AuthFilesPage />);
     });
 
-    await vi.waitFor(() => {
-      expect(
-        Object.values(mocks.codexQuota).some(
-          (quota) =>
-            quota !== null &&
-            typeof quota === 'object' &&
-            'status' in quota &&
-            quota.status === 'error'
-        )
-      ).toBe(true);
-    });
-    expect(mocks.apiCallRequest).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(mocks.getHeaderSnapshots).toHaveBeenCalledTimes(1));
+    expect(mocks.codexQuota).toEqual({});
+    expect(mocks.apiCallRequest).not.toHaveBeenCalled();
 
     await act(async () => {
       renderer!.update(<AuthFilesPage />);
@@ -1141,7 +1114,7 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
       await Promise.resolve();
     });
 
-    expect(mocks.apiCallRequest).toHaveBeenCalledTimes(1);
+    expect(mocks.apiCallRequest).not.toHaveBeenCalled();
 
     const quotaInterval = mocks.intervalCallbacks.find((item) => item.delay === 60_000);
     await act(async () => {
@@ -1150,21 +1123,21 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
       await Promise.resolve();
     });
 
-    await vi.waitFor(() => {
-      expect(mocks.apiCallRequest).toHaveBeenCalledTimes(3);
-    });
+    await vi.waitFor(() => expect(mocks.getHeaderSnapshots.mock.calls.length).toBeGreaterThan(1));
+    expect(mocks.apiCallRequest).not.toHaveBeenCalled();
 
     await act(async () => {
       renderer!.update(<AuthFilesPage />);
     });
 
     const card = renderer!.root.findByProps({ 'data-auth-card': 'codex-one.json' });
-    expect(card.props['data-codex-quota-status']).toBe('success');
+    expect(card.props['data-codex-quota-status']).toBe('');
     expect(card.props['data-codex-quota-observed']).toBe('false');
-    expect(card.props['data-codex-quota-plan']).toBe('plus');
+    expect(card.props['data-codex-quota-plan']).toBe('');
   });
 
   it('merges observed Codex header quota without clearing stored quota-only fields', async () => {
+    const observedAtMs = Date.now();
     mocks.codexQuota = {
       'codex-one.json::-': {
         status: 'success',
@@ -1196,13 +1169,13 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
       },
     };
     mocks.getHeaderSnapshots.mockResolvedValue({
-      generated_at_ms: 1_700_000_000_000,
-      from_ms: 1_700_000_000_000,
-      to_ms: 1_700_000_000_000,
+      generated_at_ms: observedAtMs,
+      from_ms: observedAtMs,
+      to_ms: observedAtMs,
       items: [
         {
           event_hash: 'event-1',
-          timestamp_ms: 1_700_000_000_000,
+          timestamp_ms: observedAtMs,
           auth_file_snapshot: 'codex-one.json',
           auth_provider_snapshot: 'codex',
           response_metadata: {
@@ -1210,7 +1183,7 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
               plan_type: 'free',
               primary: {
                 used_percent: 20,
-                reset_at_ms: 1_700_018_000_000,
+                reset_at_ms: observedAtMs + 5 * 60 * 60 * 1000,
                 window_minutes: 300,
               },
             },
@@ -1308,6 +1281,7 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
   });
 
   it('uses newer header snapshots after manual Codex quota refresh failures', async () => {
+    const observedAtMs = Date.now();
     mocks.codexQuota = {
       'codex-one.json::-': {
         status: 'error',
@@ -1338,13 +1312,13 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
       },
     };
     mocks.getHeaderSnapshots.mockResolvedValue({
-      generated_at_ms: 1_700_000_000_000,
-      from_ms: 1_700_000_000_000,
-      to_ms: 1_700_000_000_000,
+      generated_at_ms: observedAtMs,
+      from_ms: observedAtMs,
+      to_ms: observedAtMs,
       items: [
         {
           event_hash: 'event-1',
-          timestamp_ms: 1_700_000_000_000,
+          timestamp_ms: observedAtMs,
           auth_file_snapshot: 'codex-one.json',
           auth_provider_snapshot: 'codex',
           response_metadata: {
@@ -1352,7 +1326,7 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
               plan_type: 'free',
               primary: {
                 used_percent: 20,
-                reset_at_ms: 1_700_018_000_000,
+                reset_at_ms: observedAtMs + 5 * 60 * 60 * 1000,
                 window_minutes: 300,
               },
             },
@@ -1816,6 +1790,56 @@ describe('AuthFilesPage quota cooldown derived badge', () => {
           'data-account-action'
         ]
       ).toBe('review');
+    });
+  });
+
+  it('maps account actions to the exact same-file row without an auth index', async () => {
+    mocks.list.mockReturnValue([
+      {
+        id: 'runtime-alice',
+        name: 'shared-xai.json',
+        type: 'xai',
+        account_id: 'account-alice',
+        account: 'alice@example.com',
+      },
+      {
+        id: 'runtime-bob',
+        name: 'shared-xai.json',
+        type: 'xai',
+        account: 'bob@example.com',
+      },
+    ]);
+    mocks.getActiveQuotaCooldowns.mockResolvedValue([]);
+    mocks.listAccountActionCandidates.mockResolvedValue({
+      items: [
+        accountActionCandidate({
+          id: 1,
+          actionType: 'reauth',
+          authFileName: 'shared-xai.json',
+          accountIdSnapshot: 'account-alice',
+          accountSnapshot: 'stale-alice@example.com',
+        }),
+        accountActionCandidate({
+          id: 2,
+          actionType: 'review',
+          authFileName: 'shared-xai.json',
+          accountSnapshot: 'bob@example.com',
+        }),
+      ],
+      pendingCount: 2,
+    });
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<AuthFilesPage />);
+    });
+
+    await vi.waitFor(() => {
+      const cards = renderer!.root.findAllByProps({ 'data-auth-card': 'shared-xai.json' });
+      const alice = cards.find((card) => card.props['data-auth-account'] === 'alice@example.com');
+      const bob = cards.find((card) => card.props['data-auth-account'] === 'bob@example.com');
+      expect(alice?.props['data-account-action']).toBe('reauth');
+      expect(bob?.props['data-account-action']).toBe('review');
     });
   });
 

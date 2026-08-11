@@ -18,9 +18,12 @@ const (
 	CodexInspectionAutoActionDisable = "disable"
 	CodexInspectionAutoActionDelete  = "delete"
 
-	CodexInspectionStatusRunning   = "running"
-	CodexInspectionStatusCompleted = "completed"
-	CodexInspectionStatusFailed    = "failed"
+	CodexInspectionStatusRunning     = "running"
+	CodexInspectionStatusCompleted   = "completed"
+	CodexInspectionStatusFailed      = "failed"
+	CodexInspectionStatusCancelling  = "cancelling"
+	CodexInspectionStatusCancelled   = "cancelled"
+	CodexInspectionStatusInterrupted = "interrupted"
 
 	CodexInspectionTriggerManual    = "manual"
 	CodexInspectionTriggerScheduled = "scheduled"
@@ -94,6 +97,48 @@ type CodexInspectionRun struct {
 	SettingsJSON  string                       `json:"-"`
 	CreatedAtMS   int64                        `json:"createdAtMs"`
 	UpdatedAtMS   int64                        `json:"updatedAtMs"`
+	// Active and Cancellable are derived compatibility fields. They are always
+	// emitted so clients can distinguish a truly active run from a stale row
+	// whose historical status still says running or cancelling.
+	Active      bool `json:"active"`
+	Cancellable bool `json:"cancellable"`
+}
+
+type CodexInspectionLease struct {
+	RunID            int64  `json:"runId"`
+	OwnerID          string `json:"ownerId"`
+	HeartbeatAtMS    int64  `json:"heartbeatAtMs"`
+	LeaseExpiresAtMS int64  `json:"leaseExpiresAtMs"`
+}
+
+func IsCodexInspectionRunActive(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case CodexInspectionStatusRunning, CodexInspectionStatusCancelling:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsCodexInspectionRunCancellable(status string) bool {
+	return IsCodexInspectionRunActive(status)
+}
+
+func NormalizeCodexInspectionRunStatus(status string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(status))
+	switch trimmed {
+	case CodexInspectionStatusRunning,
+		CodexInspectionStatusCompleted,
+		CodexInspectionStatusFailed,
+		CodexInspectionStatusCancelling,
+		CodexInspectionStatusCancelled,
+		CodexInspectionStatusInterrupted:
+		return trimmed
+	default:
+		// Preserve unknown values for forward compatibility instead of silently
+		// presenting them as a successful or failed run.
+		return strings.TrimSpace(status)
+	}
 }
 
 type CodexInspectionQuotaWindow struct {
@@ -102,46 +147,59 @@ type CodexInspectionQuotaWindow struct {
 	LabelParams        map[string]any `json:"labelParams,omitempty"`
 	UsedPercent        *float64       `json:"usedPercent,omitempty"`
 	ResetLabel         string         `json:"resetLabel"`
+	ResetAtMS          int64          `json:"resetAtMs,omitempty"`
+	ResetAccuracy      string         `json:"resetAccuracy,omitempty"`
 	LimitWindowSeconds *float64       `json:"limitWindowSeconds,omitempty"`
 }
 
 type CodexInspectionResult struct {
-	ID                  int64                        `json:"id"`
-	RunID               int64                        `json:"runId"`
-	AccountKey          string                       `json:"accountKey"`
-	FileName            string                       `json:"fileName"`
-	DisplayAccount      string                       `json:"displayAccount"`
-	AuthIndex           string                       `json:"authIndex,omitempty"`
-	AccountID           string                       `json:"accountId,omitempty"`
-	Provider            string                       `json:"provider"`
-	Disabled            bool                         `json:"disabled"`
-	Status              string                       `json:"status,omitempty"`
-	State               string                       `json:"state,omitempty"`
-	Action              string                       `json:"action"`
-	ActionReason        string                       `json:"actionReason"`
-	ActionStatus        string                       `json:"actionStatus,omitempty"`
-	ExecutedAction      string                       `json:"executedAction,omitempty"`
-	ActionError         string                       `json:"actionError,omitempty"`
-	StatusCode          *int                         `json:"statusCode,omitempty"`
-	UsedPercent         *float64                     `json:"usedPercent,omitempty"`
-	IsQuota             bool                         `json:"isQuota"`
-	AutoRecoverEligible bool                         `json:"autoRecoverEligible"`
-	Error               string                       `json:"error,omitempty"`
-	PlanType            string                       `json:"planType,omitempty"`
-	QuotaWindows        []CodexInspectionQuotaWindow `json:"quotaWindows,omitempty"`
-	QuotaWindowsJSON    string                       `json:"-"`
-	ErrorKind           string                       `json:"errorKind,omitempty"`
-	ErrorDetail         string                       `json:"errorDetail,omitempty"`
-	CreatedAtMS         int64                        `json:"createdAtMs"`
+	ID                     int64                        `json:"id"`
+	RunID                  int64                        `json:"runId"`
+	AccountKey             string                       `json:"accountKey"`
+	FileName               string                       `json:"fileName"`
+	DisplayAccount         string                       `json:"displayAccount"`
+	AccountSnapshot        string                       `json:"accountSnapshot,omitempty"`
+	AuthIndex              string                       `json:"authIndex,omitempty"`
+	AccountID              string                       `json:"accountId,omitempty"`
+	Provider               string                       `json:"provider"`
+	Disabled               bool                         `json:"disabled"`
+	Status                 string                       `json:"status,omitempty"`
+	State                  string                       `json:"state,omitempty"`
+	Action                 string                       `json:"action"`
+	ActionReason           string                       `json:"actionReason"`
+	ActionStatus           string                       `json:"actionStatus,omitempty"`
+	ExecutedAction         string                       `json:"executedAction,omitempty"`
+	ActionError            string                       `json:"actionError,omitempty"`
+	StatusCode             *int                         `json:"statusCode,omitempty"`
+	UsedPercent            *float64                     `json:"usedPercent,omitempty"`
+	IsQuota                bool                         `json:"isQuota"`
+	AutoRecoverEligible    bool                         `json:"autoRecoverEligible"`
+	Error                  string                       `json:"error,omitempty"`
+	PlanType               string                       `json:"planType,omitempty"`
+	QuotaWindows           []CodexInspectionQuotaWindow `json:"quotaWindows,omitempty"`
+	QuotaWindowsJSON       string                       `json:"-"`
+	QuotaInventoryObserved bool                         `json:"-"`
+	ErrorKind              string                       `json:"errorKind,omitempty"`
+	ErrorDetail            string                       `json:"errorDetail,omitempty"`
+	CreatedAtMS            int64                        `json:"createdAtMs"`
 }
 
 type CodexInspectionDisableOwnership struct {
-	FileName     string
-	Provider     string
-	AuthIndex    string
-	AccountID    string
-	DisabledAtMS int64
-	UpdatedAtMS  int64
+	FileName        string
+	Provider        string
+	AuthIndex       string
+	AccountID       string
+	AccountSnapshot string
+	DisabledAtMS    int64
+	UpdatedAtMS     int64
+}
+
+type CodexInspectionDisableOwnershipTarget struct {
+	FileName        string
+	Provider        *string
+	AuthIndex       *string
+	AccountID       *string
+	AccountSnapshot *string
 }
 
 type CodexInspectionLog struct {

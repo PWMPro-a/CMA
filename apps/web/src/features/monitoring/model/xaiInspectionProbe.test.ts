@@ -1,16 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { probeXaiBilling, probeXaiInference, probeXaiQuota } from '@/utils/quota/providerRequests';
+import type { TFunction } from 'i18next';
+import en from '@/i18n/locales/en.json';
+import { probeXaiInference, probeXaiQuota } from '@/utils/quota/providerRequests';
 import { XaiProbeError, classifyXaiProbe, parseXaiErrorEnvelope } from '@/utils/quota/xaiErrors';
+import type {
+  CodexInspectionLogDetail,
+  CodexInspectionLogLevel,
+} from '@/features/monitoring/codexInspection';
 import { DEFAULT_CODEX_INSPECTION_SETTINGS } from './codexInspectionSettings';
 import { inspectSingleXaiAccount } from './xaiInspectionProbe';
 
 vi.mock('@/utils/quota/providerRequests', () => ({
-  probeXaiBilling: vi.fn(),
   probeXaiInference: vi.fn(),
   probeXaiQuota: vi.fn(),
 }));
 
-const mockProbeXaiBilling = vi.mocked(probeXaiBilling);
 const mockProbeXaiInference = vi.mocked(probeXaiInference);
 const mockProbeXaiQuota = vi.mocked(probeXaiQuota);
 const settings = {
@@ -21,6 +25,29 @@ const settings = {
   targetType: 'xai',
   xaiInferenceEnabled: true,
   usedPercentThreshold: 100,
+};
+
+const inspectionT = ((key: string, values?: Record<string, unknown>) => {
+  const template = key.split('.').reduce<unknown>((current, segment) => {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined;
+    return (current as Record<string, unknown>)[segment];
+  }, en);
+  return String(template ?? key).replace(/{{\s*([^}\s]+)\s*}}/g, (_, name: string) =>
+    String(values?.[name] ?? `{{${name}}}`)
+  );
+}) as TFunction;
+
+const captureLogs = () => {
+  const logs: Array<{
+    level: string;
+    message: string;
+    detail?: CodexInspectionLogDetail;
+  }> = [];
+  return {
+    logs,
+    onLog: (level: CodexInspectionLogLevel, message: string, detail?: CodexInspectionLogDetail) =>
+      logs.push({ level, message, detail }),
+  };
 };
 const rawAccount = {
   name: 'xai-auth.json',
@@ -57,6 +84,23 @@ const healthySummary = {
   usedPercent: 40,
 };
 
+const officialApiSummary = {
+  ...healthySummary,
+  periodType: 'unknown' as const,
+  usagePercent: null,
+  productUsage: [],
+  monthlyLimitCents: null,
+  usedCents: null,
+  billingPeriodEnd: undefined,
+  usedPercent: null,
+  officialApiHealth: {
+    source: 'api.x.ai/v1/me' as const,
+    userId: 'user-1',
+    teamId: 'team-1',
+    teamBlocked: false,
+  },
+};
+
 const inferenceError = (statusCode: number, body: unknown) => {
   const envelope = parseXaiErrorEnvelope({ statusCode, body });
   return new XaiProbeError(
@@ -77,15 +121,8 @@ const billingError = (statusCode: number, body: unknown) => {
 
 describe('inspectSingleXaiAccount', () => {
   beforeEach(() => {
-    mockProbeXaiBilling.mockReset();
     mockProbeXaiInference.mockReset();
     mockProbeXaiQuota.mockReset();
-    mockProbeXaiBilling.mockResolvedValue({
-      summary: healthySummary,
-      failures: [],
-      partial: false,
-      statusCode: 200,
-    });
     mockProbeXaiInference.mockResolvedValue({ statusCode: 200 });
     mockProbeXaiQuota.mockResolvedValue({
       summary: healthySummary,
@@ -94,6 +131,100 @@ describe('inspectSingleXaiAccount', () => {
       source: 'billing',
       statusCode: 200,
     });
+  });
+
+  it('labels billing-only health as billing evidence rather than real inference', async () => {
+    const { logs, onLog } = captureLogs();
+
+    await inspectSingleXaiAccount(
+      baseAccount,
+      { ...settings, xaiInferenceEnabled: false },
+      onLog,
+      inspectionT
+    );
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ level: 'info' });
+    expect(logs[0].message).toContain('billing healthy');
+    expect(logs[0].message).not.toContain('real inference healthy');
+    expect(logs[0].detail).toMatchObject({
+      provider: 'xai',
+      fileName: 'xai-auth.json',
+      displayAccount: 'xai-user@example.test',
+      inspectionMode: 'billing',
+      healthEvidence: 'billing_healthy',
+      billingAvailable: true,
+      inferenceEnabled: false,
+      action: 'keep',
+      statusCode: 200,
+      usedPercent: 40,
+    });
+  });
+
+  it('labels partial billing as a warning and states that inference was not verified', async () => {
+    mockProbeXaiQuota.mockResolvedValue({
+      summary: healthySummary,
+      failures: [billingError(503, { error: 'monthly billing unavailable' })],
+      partial: true,
+      source: 'billing',
+      statusCode: 200,
+    });
+    const { logs, onLog } = captureLogs();
+
+    await inspectSingleXaiAccount(
+      baseAccount,
+      { ...settings, xaiInferenceEnabled: false },
+      onLog,
+      inspectionT
+    );
+
+    expect(logs[0]).toMatchObject({ level: 'warning' });
+    expect(logs[0].message).toContain('billing partially available');
+    expect(logs[0].message).not.toContain('real inference healthy');
+  });
+
+  it('uses real inference evidence only when the inference request completes', async () => {
+    const { logs, onLog } = captureLogs();
+
+    await inspectSingleXaiAccount(baseAccount, settings, onLog, inspectionT);
+
+    expect(logs[0]).toMatchObject({ level: 'info' });
+    expect(logs[0].message).toContain('real inference healthy');
+    expect(logs[0].detail).toMatchObject({
+      inspectionMode: 'inference',
+      healthEvidence: 'inference_healthy',
+      billingAvailable: true,
+      inferenceEnabled: true,
+      inferenceHealthy: true,
+      action: 'keep',
+      statusCode: 200,
+      usedPercent: 40,
+    });
+  });
+
+  it('uses inference wording for transport and protocol failures', async () => {
+    const transportLogs = captureLogs();
+    mockProbeXaiInference.mockRejectedValue(new Error('inference network down'));
+
+    await inspectSingleXaiAccount(baseAccount, settings, transportLogs.onLog, inspectionT);
+
+    expect(transportLogs.logs[0].message).toContain('Real inference check');
+    expect(transportLogs.logs[0].message).toContain('inference network down');
+    expect(transportLogs.logs[0].message).not.toContain('Billing check');
+    expect(transportLogs.logs[0].detail).toMatchObject({
+      inspectionMode: 'inference',
+      healthEvidence: 'request_error',
+      inferenceEnabled: true,
+      inferenceHealthy: false,
+      action: 'keep',
+    });
+
+    const protocolLogs = captureLogs();
+    mockProbeXaiInference.mockRejectedValue(inferenceError(200, { type: 'response.in_progress' }));
+    await inspectSingleXaiAccount(baseAccount, settings, protocolLogs.onLog, inspectionT);
+
+    expect(protocolLogs.logs[0].message).toContain('inference endpoint');
+    expect(protocolLogs.logs[0].message).not.toContain('billing endpoint');
   });
 
   it('uses billing or identity probes only when real inference is disabled', async () => {
@@ -119,37 +250,32 @@ describe('inspectSingleXaiAccount', () => {
 
   it('normalizes official API identity health to the shared healthy classification', async () => {
     mockProbeXaiQuota.mockResolvedValue({
-      summary: {
-        ...healthySummary,
-        periodType: 'unknown',
-        usagePercent: null,
-        productUsage: [],
-        monthlyLimitCents: null,
-        usedCents: null,
-        billingPeriodEnd: undefined,
-        usedPercent: null,
-        officialApiHealth: {
-          source: 'api.x.ai/v1/me',
-          userId: 'user-1',
-          teamId: 'team-1',
-          teamBlocked: false,
-        },
-      },
+      summary: officialApiSummary,
       failures: [],
       partial: false,
       source: 'official-api',
       statusCode: 200,
     });
 
-    const result = await inspectSingleXaiAccount(baseAccount, {
-      ...settings,
-      xaiInferenceEnabled: false,
-    });
+    const { logs, onLog } = captureLogs();
+    const result = await inspectSingleXaiAccount(
+      baseAccount,
+      { ...settings, xaiInferenceEnabled: false },
+      onLog,
+      inspectionT
+    );
 
     expect(result).toMatchObject({
       action: 'keep',
       errorKind: 'official_api_healthy',
-      actionReason: 'monitoring.xai_inspection_reason_official_api_healthy',
+      actionReason: en.monitoring.xai_inspection_reason_official_api_healthy,
+    });
+    expect(logs[0].detail).toMatchObject({
+      inspectionMode: 'identity',
+      healthEvidence: 'official_api_healthy',
+      billingAvailable: false,
+      billingPartial: false,
+      inferenceEnabled: false,
     });
   });
 
@@ -251,7 +377,7 @@ describe('inspectSingleXaiAccount', () => {
   it('uses a real inference request as the health authority and keeps billing quota display', async () => {
     const result = await inspectSingleXaiAccount(baseAccount, settings);
 
-    expect(mockProbeXaiBilling).toHaveBeenCalledWith(rawAccount, expect.any(Function), {
+    expect(mockProbeXaiQuota).toHaveBeenCalledWith(rawAccount, expect.any(Function), {
       timeout: settings.timeout,
     });
     expect(mockProbeXaiInference).toHaveBeenCalledWith(
@@ -279,8 +405,39 @@ describe('inspectSingleXaiAccount', () => {
     ]);
   });
 
+  it('routes real inference through the official API after verified identity fallback', async () => {
+    mockProbeXaiQuota.mockResolvedValue({
+      summary: officialApiSummary,
+      failures: [],
+      partial: false,
+      source: 'official-api',
+      statusCode: 200,
+    });
+
+    const result = await inspectSingleXaiAccount(baseAccount, settings);
+
+    expect(mockProbeXaiInference).toHaveBeenCalledWith(
+      rawAccount,
+      expect.any(Function),
+      { timeout: settings.timeout },
+      {
+        model: settings.xaiInferenceModel,
+        prompt: settings.xaiInferencePrompt,
+        userAgent: settings.xaiInferenceUserAgent,
+        routeMode: 'official',
+      }
+    );
+    expect(result).toMatchObject({
+      action: 'keep',
+      statusCode: 200,
+      usedPercent: null,
+      errorKind: 'inference_healthy',
+    });
+    expect(result.quotaWindows).toEqual([]);
+  });
+
   it('does not render a zero-cap on-demand window without usage evidence', async () => {
-    mockProbeXaiBilling.mockResolvedValue({
+    mockProbeXaiQuota.mockResolvedValue({
       summary: {
         ...healthySummary,
         onDemandCapCents: 0,
@@ -289,6 +446,7 @@ describe('inspectSingleXaiAccount', () => {
       },
       failures: [],
       partial: false,
+      source: 'billing',
     });
 
     const result = await inspectSingleXaiAccount(baseAccount, settings);
@@ -297,15 +455,33 @@ describe('inspectSingleXaiAccount', () => {
   });
 
   it('does not treat unavailable billing as an unhealthy credential when inference succeeds', async () => {
-    mockProbeXaiBilling.mockRejectedValue(new Error('billing endpoint unavailable'));
+    mockProbeXaiQuota.mockRejectedValue(new Error('billing endpoint unavailable'));
+    const { logs, onLog } = captureLogs();
 
-    const result = await inspectSingleXaiAccount(baseAccount, settings);
+    const result = await inspectSingleXaiAccount(baseAccount, settings, onLog, inspectionT);
 
+    expect(mockProbeXaiInference).toHaveBeenCalledWith(
+      rawAccount,
+      expect.any(Function),
+      { timeout: settings.timeout },
+      {
+        model: settings.xaiInferenceModel,
+        prompt: settings.xaiInferencePrompt,
+        userAgent: settings.xaiInferenceUserAgent,
+      }
+    );
     expect(result).toMatchObject({
       action: 'keep',
       statusCode: 200,
       usedPercent: null,
       errorKind: 'inference_healthy',
+    });
+    expect(logs[0].detail).toMatchObject({
+      inspectionMode: 'inference',
+      healthEvidence: 'inference_healthy',
+      billingAvailable: false,
+      billingPartial: true,
+      inferenceHealthy: true,
     });
   });
 
@@ -334,6 +510,8 @@ describe('inspectSingleXaiAccount', () => {
       body: { code: 'unauthenticated:bad-credentials' },
       action: 'reauth',
       errorKind: 'auth_invalid',
+      actionReason: 'monitoring.xai_inspection_reason_auth_invalid',
+      isQuota: false,
     },
     {
       name: 'ambiguous quota response',
@@ -341,6 +519,8 @@ describe('inspectSingleXaiAccount', () => {
       body: { error: 'Payment required' },
       action: 'keep',
       errorKind: 'quota_or_entitlement_unknown',
+      actionReason: 'monitoring.xai_inspection_reason_inference_quota_unknown',
+      isQuota: false,
     },
     {
       name: 'rate limiting',
@@ -348,13 +528,74 @@ describe('inspectSingleXaiAccount', () => {
       body: { error: 'Too many requests' },
       action: 'keep',
       errorKind: 'rate_limited',
+      actionReason: 'monitoring.xai_inspection_reason_rate_limited',
+      isQuota: false,
     },
-  ])('uses inference status for $name', async ({ action, body, errorKind, statusCode }) => {
-    mockProbeXaiInference.mockRejectedValue(inferenceError(statusCode, body));
+    {
+      name: 'unavailable model',
+      statusCode: 404,
+      body: { error: 'Model not found' },
+      action: 'keep',
+      errorKind: 'model_unavailable',
+      actionReason: 'monitoring.xai_inspection_reason_model_unavailable',
+      isQuota: false,
+    },
+    {
+      name: 'missing entitlement',
+      statusCode: 403,
+      body: { error: 'Need a Grok subscription' },
+      action: 'disable',
+      errorKind: 'entitlement_denied',
+      actionReason: 'monitoring.xai_inspection_reason_entitlement_disable',
+      isQuota: true,
+    },
+  ])(
+    'uses inference status for $name',
+    async ({ action, actionReason, body, errorKind, isQuota, statusCode }) => {
+      mockProbeXaiInference.mockRejectedValue(inferenceError(statusCode, body));
 
-    const result = await inspectSingleXaiAccount(baseAccount, settings);
+      const result = await inspectSingleXaiAccount(baseAccount, settings);
 
-    expect(result).toMatchObject({ action, errorKind, statusCode });
+      expect(result).toMatchObject({ action, actionReason, errorKind, isQuota, statusCode });
+    }
+  );
+
+  it('keeps an already-disabled xAI credential disabled when inference finds a blocking issue', async () => {
+    mockProbeXaiInference.mockRejectedValue(
+      inferenceError(402, { code: 'personal-team-blocked:spending-limit' })
+    );
+
+    const result = await inspectSingleXaiAccount({ ...baseAccount, disabled: true }, settings);
+
+    expect(result).toMatchObject({
+      action: 'keep',
+      actionReason: 'monitoring.xai_inspection_reason_spending_limit_disabled',
+      errorKind: 'spending_limit',
+      isQuota: true,
+    });
+  });
+
+  it('logs destructive delete suggestions with error severity', async () => {
+    const envelope = parseXaiErrorEnvelope({
+      statusCode: 410,
+      body: { code: 'credential_removed', error: 'credential no longer exists' },
+    });
+    mockProbeXaiInference.mockRejectedValue(
+      new XaiProbeError('credential removed', envelope, {
+        classification: 'unknown',
+        suggestedAction: 'delete',
+        reasonCode: 'xai_credential_removed',
+        confidence: 'verified',
+        needsReview: false,
+        retryAfterSeconds: null,
+      })
+    );
+    const { logs, onLog } = captureLogs();
+
+    const result = await inspectSingleXaiAccount(baseAccount, settings, onLog, inspectionT);
+
+    expect(result.action).toBe('delete');
+    expect(logs[0]).toMatchObject({ level: 'error' });
   });
 
   it('keeps the credential unchanged when inference completes without a completion event', async () => {
@@ -364,6 +605,7 @@ describe('inspectSingleXaiAccount', () => {
 
     expect(result).toMatchObject({
       action: 'keep',
+      actionReason: 'monitoring.xai_inspection_reason_inference_protocol_changed',
       statusCode: 200,
       errorKind: 'protocol_changed',
     });

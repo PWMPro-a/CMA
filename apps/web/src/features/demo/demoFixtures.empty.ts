@@ -12,6 +12,20 @@ export const getDemoPluginStore = () => ({ sources: [], plugins: [] });
 export const getDemoManagerConfig = () => emptyObject;
 export const getDemoDashboardSummary = () => emptyObject;
 export const getDemoMonitoringAnalytics = () => emptyObject;
+export const getDemoAccountHistory = () => ({
+  generated_at_ms: Date.now(),
+  checkpoint: {
+    last_event_id: 0,
+    latest_id: 0,
+    pending: false,
+    processed: 0,
+  },
+  items: [],
+});
+export const getDemoAccountWindowUsage = () => ({
+  generated_at_ms: Date.now(),
+  items: [],
+});
 export const getDemoModelPrices = () => ({ prices: {} });
 export const getDemoModelPriceUsageSummary = () => ({
   sampled_events: 0,
@@ -23,6 +37,7 @@ export const getDemoUsagePayload = () => emptyObject;
 export const getDemoUsageServiceInfo = () => emptyObject;
 export const getDemoUsageServiceStatus = () => emptyObject;
 export const getDemoAccountProcessingPolicy = () => emptyObject;
+export const getDemoQuotaStoreState = () => emptyObject;
 export const getDemoQuotaCooldowns = () => emptyArray;
 export const getDemoHeaderSnapshots = () => emptyObject;
 export const getDemoCodexInspectionRuns = () => ({ items: [] });
@@ -35,7 +50,7 @@ export const getDemoCodexInspectionLocalRun = () => ({
   startedAt: 0,
   finishedAt: 0,
 });
-export const getDemoCodexInspectionLocalLogs = () => [];
+export const getDemoCodexInspectionLocalLogs = (_baseNow?: number, _t?: unknown) => [];
 export const getDemoAccountActionCandidates = () => ({ items: [], pendingCount: 0 });
 export const getDemoApiKeyAliases = () => ({ items: [] });
 export const getDemoLogsResponse = () => ({

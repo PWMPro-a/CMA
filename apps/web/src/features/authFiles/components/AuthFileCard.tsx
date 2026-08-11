@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/icons';
 import { ProviderStatusBar } from '@/components/providers/ProviderStatusBar';
 import type { AgentIdentityRegistrationStatus, AuthFileItem, CodexQuotaState } from '@/types';
+import { getAuthFileSelectionKey } from '@/features/authFiles/model/authFilesPageModel';
 import { resolveAuthProvider } from '@/utils/quota';
 import {
   normalizeRecentRequestAuthIndex,
@@ -28,6 +29,7 @@ import {
   getTypeColor,
   getTypeLabel,
   isRuntimeOnlyAuthFile,
+  isHealthyAuthFileStatusMessage,
   normalizeProviderKey,
   parsePriorityValue,
   readAuthFileIntegerField,
@@ -43,8 +45,6 @@ import type { AuthFileUsageSummary } from '@/features/authFiles/model/authFileUs
 import type { AccountActionCandidate, QuotaCooldownInfo } from '@/services/api/usageService';
 import { AuthFileQuotaSection } from '@/features/authFiles/components/AuthFileQuotaSection';
 import styles from '@/features/authFiles/AuthFilesPage.module.scss';
-
-const HEALTHY_STATUS_MESSAGES = new Set(['ok', 'healthy', 'ready', 'success', 'available']);
 
 export type AuthFileCardProps = {
   file: AuthFileItem;
@@ -68,7 +68,7 @@ export type AuthFileCardProps = {
   onReauth?: (file: AuthFileItem) => void;
   onDownload: (name: string) => void;
   onOpenPrefixProxyEditor: (file: AuthFileItem) => void;
-  onDelete: (name: string) => void;
+  onDelete: (file: AuthFileItem) => void;
   onToggleStatus: (file: AuthFileItem, enabled: boolean) => void;
   onRetryAgentIdentityRegistration: (name: string) => void;
   onRebuildAgentIdentityRegistration: (name: string) => void;
@@ -209,7 +209,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
     statusBarDataFromRecentRequests(recentBuckets);
   const rawStatusMessage = getAuthFileStatusMessage(file);
   const hasStatusWarning =
-    Boolean(rawStatusMessage) && !HEALTHY_STATUS_MESSAGES.has(rawStatusMessage.toLowerCase());
+    Boolean(rawStatusMessage) && !isHealthyAuthFileStatusMessage(rawStatusMessage);
 
   const priorityValue = parsePriorityValue(file.priority ?? file['priority']);
   const maxConcurrency = readAuthFileIntegerField(file, 'max_concurrency', 'maxConcurrency');
@@ -720,7 +720,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
                       <Button
                         variant="danger"
                         size="sm"
-                        onClick={() => onDelete(file.name)}
+                        onClick={() => onDelete(file)}
                         className={styles.iconButton}
                         title={t('auth_files.delete_button')}
                         disabled={disableControls || deleting === file.name}
@@ -744,7 +744,9 @@ export function AuthFileCard(props: AuthFileCardProps) {
                 <ToggleSwitch
                   ariaLabel={t('auth_files.status_toggle_label')}
                   checked={!file.disabled}
-                  disabled={disableControls || statusUpdating[file.name] === true}
+                  disabled={
+                    disableControls || statusUpdating[getAuthFileSelectionKey(file)] === true
+                  }
                   onChange={(value) => onToggleStatus(file, value)}
                 />
               </div>

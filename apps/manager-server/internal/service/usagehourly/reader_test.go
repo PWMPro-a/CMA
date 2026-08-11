@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
@@ -72,7 +73,7 @@ func TestReaderMatchesRawCoreAndTimelines(t *testing.T) {
 		t.Fatalf("analytics timeline mismatch\nrollup=%#v\nraw=%#v", analyticsTimeline, rawAnalyticsTimeline)
 	}
 
-	projected, ok := reader.LoadAnalytics(ctx, fromMS, toMS, "day", time.UTC, true)
+	projected, ok := reader.LoadAnalytics(ctx, filter, "day", time.UTC, true)
 	if !ok {
 		t.Fatal("analytics reader did not use daily projection")
 	}
@@ -87,9 +88,14 @@ func TestReaderMatchesRawCoreAndTimelines(t *testing.T) {
 		t.Fatal("daily analytics projection unexpectedly exposed dashboard timeline")
 	}
 
-	modelOnly, ok := reader.LoadAnalytics(ctx, fromMS, toMS, "day", time.UTC, false)
+	modelOnly, ok := reader.LoadAnalytics(ctx, filter, "day", time.UTC, false)
 	if !ok || !reflect.DeepEqual(modelOnly.Aggregate, rawAggregate) || !reflect.DeepEqual(modelOnly.ModelStats, rawModels) {
 		t.Fatalf("model-only projection mismatch\nrollup=%#v %#v\nraw=%#v %#v", modelOnly.Aggregate, modelOnly.ModelStats, rawAggregate, rawModels)
+	}
+	for _, row := range modelOnly.rows {
+		if row.BucketMS != 0 {
+			t.Fatalf("model-only projection retained hourly bucket: %#v", row)
+		}
 	}
 	if _, ok := reader.AnalyticsTimeline(ctx, modelOnly, "day", time.UTC); ok {
 		t.Fatal("model-only projection unexpectedly exposed analytics timeline")
@@ -124,6 +130,51 @@ func TestReaderAnalyticsTimelineFallsBackForHalfHourBuckets(t *testing.T) {
 	}
 }
 
+func TestReaderAnalyticsTimelineRejectsPartialHourAcrossFractionalDayBoundary(t *testing.T) {
+	db := newReaderTestStore(t)
+	ctx := context.Background()
+	location, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	fromMS := time.Date(2027, time.January, 2, 0, 0, 0, 0, location).UnixMilli()
+	toMS := fromMS + 2*hourMS
+	if _, err := db.InsertEvents(ctx, []usage.Event{
+		readerEvent("fractional-day-edge", fromMS+time.Minute.Milliseconds(), "model-a", false, 1, 2, nil),
+	}); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+	catchUpReaderRollup(t, ctx, db)
+
+	reader := New(db, true)
+	snapshot, ok := reader.Load(ctx, fromMS, toMS)
+	if !ok {
+		t.Fatal("reader did not load aggregate snapshot")
+	}
+	if reader.CanRepresentAnalyticsTimeline(fromMS, toMS, "day", location) {
+		t.Fatal("fractional day boundary unexpectedly reported as representable")
+	}
+	if _, ok := reader.AnalyticsTimeline(ctx, snapshot, "day", location); ok {
+		t.Fatal("partial UTC hour crossing local midnight used hourly aggregate")
+	}
+}
+
+func TestReaderRejectsUnsupportedAnalyticsFilters(t *testing.T) {
+	db := newReaderTestStore(t)
+	filter := store.AnalyticsFilter{
+		FromMS:        int64(1_800_000_000_000),
+		ToMS:          int64(1_800_000_000_000) + 2*hourMS,
+		Providers:     []string{"codex"},
+		IncludeFailed: true,
+	}
+	if SupportsAnalyticsFilter(filter) {
+		t.Fatalf("unsupported filter reported as supported: %#v", filter)
+	}
+	if _, ok := New(db, true).LoadAnalytics(context.Background(), filter, "hour", time.UTC, false); ok {
+		t.Fatal("reader silently ignored unsupported analytics filter")
+	}
+}
+
 func TestReaderPreservesEmptyLiteralDashAndWhitespaceModels(t *testing.T) {
 	db := newReaderTestStore(t)
 	ctx := context.Background()
@@ -152,14 +203,14 @@ func TestReaderPreservesEmptyLiteralDashAndWhitespaceModels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("raw timeline: %v", err)
 	}
-	snapshot, ok := New(db, true).LoadAnalytics(ctx, fromMS, toMS, "day", time.UTC, false)
+	snapshot, ok := New(db, true).LoadAnalytics(ctx, filter, "day", time.UTC, false)
 	if !ok {
 		t.Fatal("dimension-preserving rollup was unavailable")
 	}
 	if !reflect.DeepEqual(snapshot.Aggregate, rawAggregate) || !reflect.DeepEqual(snapshot.ModelStats, rawModels) {
 		t.Fatalf("dimension-preserving rollup mismatch\nrollup=%#v %#v\nraw=%#v %#v", snapshot.Aggregate, snapshot.ModelStats, rawAggregate, rawModels)
 	}
-	timelineSnapshot, ok := New(db, true).LoadAnalytics(ctx, fromMS, toMS, "day", time.UTC, true)
+	timelineSnapshot, ok := New(db, true).LoadAnalytics(ctx, filter, "day", time.UTC, true)
 	if !ok {
 		t.Fatal("dimension-preserving timeline rollup was unavailable")
 	}
@@ -168,6 +219,37 @@ func TestReaderPreservesEmptyLiteralDashAndWhitespaceModels(t *testing.T) {
 	sortTimelinePoints(rolledTimeline)
 	if !ok || !reflect.DeepEqual(rolledTimeline, rawTimeline) {
 		t.Fatalf("dimension-preserving timeline mismatch\nrollup=%#v\nraw=%#v", rolledTimeline, rawTimeline)
+	}
+}
+
+func TestAnalyticsTimelineAccumulatesLatencyBeforeAveraging(t *testing.T) {
+	rows := []store.UsagePricingHourlyRow{
+		{
+			PricingBand:    usage.PricingBand{PricingModel: "model-a", ContextThresholdTokens: model.ModelPriceBaseContextThreshold},
+			BucketMS:       0,
+			Model:          "model-a",
+			BillingModel:   "model-a",
+			Calls:          1,
+			LatencySumMS:   1,
+			LatencySamples: 1,
+		},
+		{
+			PricingBand:    usage.PricingBand{PricingModel: "model-a", ContextThresholdTokens: model.ModelPriceBaseContextThreshold},
+			BucketMS:       hourMS,
+			Model:          "model-a",
+			BillingModel:   "model-a",
+			Calls:          7,
+			LatencySumMS:   29,
+			LatencySamples: 7,
+		},
+	}
+
+	points := analyticsTimelineFromPricingRows(rows, "day", time.UTC)
+	if len(points) != 1 {
+		t.Fatalf("timeline points = %#v, want one point", points)
+	}
+	if !points[0].AvgLatencyMS.Valid || points[0].AvgLatencyMS.Float64 != 3.75 {
+		t.Fatalf("average latency = %#v, want 3.75", points[0].AvgLatencyMS)
 	}
 }
 
@@ -182,11 +264,17 @@ func sortTimelinePoints(points []store.TimelinePoint) {
 		if points[i].BillingModel != points[j].BillingModel {
 			return points[i].BillingModel < points[j].BillingModel
 		}
-		return points[i].ServiceTier < points[j].ServiceTier
+		if points[i].PricingModel != points[j].PricingModel {
+			return points[i].PricingModel < points[j].PricingModel
+		}
+		if points[i].ServiceTier != points[j].ServiceTier {
+			return points[i].ServiceTier < points[j].ServiceTier
+		}
+		return points[i].ContextThresholdTokens < points[j].ContextThresholdTokens
 	})
 }
 
-func TestReaderFallsBackWhenDisabledOrPending(t *testing.T) {
+func TestReaderUsesRawDeltaWhileAggregateIsPending(t *testing.T) {
 	db := newReaderTestStore(t)
 	ctx := context.Background()
 	fromMS := int64(1_800_000_000_000)
@@ -199,8 +287,9 @@ func TestReaderFallsBackWhenDisabledOrPending(t *testing.T) {
 	if _, ok := New(db, false).Load(ctx, fromMS, toMS); ok {
 		t.Fatal("disabled reader used rollup")
 	}
-	if _, ok := New(db, true).Load(ctx, fromMS, toMS); ok {
-		t.Fatal("pending checkpoint used rollup")
+	snapshot, ok := New(db, true).Load(ctx, fromMS, toMS)
+	if !ok || snapshot.Aggregate.TotalCalls != 1 {
+		t.Fatalf("pending aggregate did not serve raw delta: ok=%v snapshot=%#v", ok, snapshot)
 	}
 }
 
@@ -220,9 +309,18 @@ func TestReaderFallbackLogIsRateLimited(t *testing.T) {
 func catchUpReaderRollup(t *testing.T, ctx context.Context, db *store.Store) {
 	t.Helper()
 	for {
-		result, err := db.CatchUpDashboardHourlyRollups(ctx, 100, time.Now().UnixMilli())
+		result, err := db.CatchUpUsageHourlyAggregate(ctx, 100, time.Now().UnixMilli())
 		if err != nil {
 			t.Fatalf("catch up rollup: %v", err)
+		}
+		if !result.Pending {
+			break
+		}
+	}
+	for {
+		result, err := db.CatchUpUsagePricing(ctx, 100, time.Now().UnixMilli())
+		if err != nil {
+			t.Fatalf("catch up pricing rollup: %v", err)
 		}
 		if !result.Pending {
 			return
