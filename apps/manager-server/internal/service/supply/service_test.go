@@ -1223,25 +1223,138 @@ func TestNormalizeSub2AccountPayloadForCPA(t *testing.T) {
 		result["expired"] != "2026-07-30T00:00:00Z" || result["max_concurrency"] != float64(8) {
 		t.Fatalf("normalized metadata = %#v", result)
 	}
-	if len(key) != 64 || fileName != "codex-team-user.json" {
+	if len(key) != 64 || fileName != "codex-user@example.com.json" {
 		t.Fatalf("stable identity outputs key=%q file=%q", key, fileName)
 	}
 }
 
 func TestSupplyFileNameStaysStableWhenCredentialsChange(t *testing.T) {
-	first, err := normalizeAccountPayloads([]byte(`{"name":"Stable Team / Main","type":"oauth","platform":"openai","credentials":{"access_token":"access-one","refresh_token":"refresh-one","chatgpt_account_id":"account-one","email":"one@example.com"}}`))
+	first, err := normalizeAccountPayloads([]byte(`{"name":"普通 Team · 7D · 有效期 51 分钟","type":"oauth","platform":"openai","credentials":{"access_token":"access-one","refresh_token":"refresh-one","chatgpt_account_id":"account-one","email":"stable@example.com"}}`))
 	if err != nil || len(first) != 1 {
 		t.Fatalf("normalize first account: %#v err=%v", first, err)
 	}
-	second, err := normalizeAccountPayloads([]byte(`{"name":"Stable Team / Main","type":"oauth","platform":"openai","credentials":{"access_token":"access-two","refresh_token":"refresh-two","chatgpt_account_id":"account-two","email":"two@example.com"}}`))
+	second, err := normalizeAccountPayloads([]byte(`{"name":"普通 Team · 7D · 有效期 2 分钟","type":"oauth","platform":"openai","credentials":{"access_token":"access-two","refresh_token":"refresh-two","chatgpt_account_id":"account-two","email":"stable@example.com"}}`))
 	if err != nil || len(second) != 1 {
 		t.Fatalf("normalize replacement account: %#v err=%v", second, err)
 	}
-	if first[0].fileName != "codex-stable-team-main.json" || second[0].fileName != first[0].fileName {
+	if first[0].accountName != "stable@example.com" || second[0].accountName != first[0].accountName ||
+		first[0].fileName != "codex-stable@example.com.json" || second[0].fileName != first[0].fileName {
 		t.Fatalf("stable account filenames first=%q second=%q", first[0].fileName, second[0].fileName)
 	}
 	if first[0].itemKey == second[0].itemKey {
 		t.Fatal("credential identity should still distinguish different underlying accounts")
+	}
+}
+
+func TestBackfillSupplyAccountMetadataRenamesLegacySupplierLabelFile(t *testing.T) {
+	const oldFileName = "codex-普通-team-7d-有效期-51-分钟.json"
+	files := map[string]map[string]any{
+		oldFileName: {
+			"name":       oldFileName,
+			"provider":   "codex",
+			"account":    "stable@example.com",
+			"account_id": "account-stable",
+		},
+	}
+	var uploadedName string
+	var deletedName string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/auth-files" {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			name := r.URL.Query().Get("name")
+			listed := make([]map[string]any, 0, len(files))
+			for fileName, file := range files {
+				if name == "" || name == fileName {
+					listed = append(listed, file)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"files": listed})
+		case http.MethodPost:
+			file, header, err := r.FormFile("file")
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			defer file.Close()
+			payload, err := io.ReadAll(file)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			var account map[string]any
+			if err := json.Unmarshal(payload, &account); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			uploadedName = header.Filename
+			files[uploadedName] = map[string]any{
+				"name":       uploadedName,
+				"provider":   "codex",
+				"account":    account["email"],
+				"account_id": account["account_id"],
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case http.MethodDelete:
+			deletedName = r.URL.Query().Get("name")
+			delete(files, deletedName)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-name-backfill.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{OrderID: "legacy-name-order", Product: "oauth_7d", Status: "completed"}); err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	if _, err := st.InsertSupplyImportItems(ctx, "legacy-name-order", []store.SupplyImportItem{{
+		ItemKey: "legacy-name-key", AccountName: "普通 Team · 7D · 有效期 51 分钟", NameKey: "普通-team-7d-有效期-51-分钟",
+		FileName: oldFileName, ImportAction: "add",
+		PayloadJSON: `{"type":"codex","name":"普通 Team · 7D · 有效期 51 分钟","email":"stable@example.com","account_id":"account-stable","access_token":"access"}`,
+	}}); err != nil {
+		t.Fatalf("insert import item: %v", err)
+	}
+	items, err := st.ListSupplyImportItems(ctx, 10, "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("list import items: %#v err=%v", items, err)
+	}
+	if err := st.MarkSupplyImportItemImported(ctx, items[0].ID, time.Now().UnixMilli()); err != nil {
+		t.Fatalf("mark imported: %v", err)
+	}
+
+	service := New(st, nil, server.Client())
+	cfg := store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+	}
+	if err := service.backfillSupplyAccountMetadata(ctx, cfg); err != nil {
+		t.Fatalf("backfill supply account metadata: %v", err)
+	}
+	items, err = st.ListSupplyImportItems(ctx, 10, "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("reload import items: %#v err=%v", items, err)
+	}
+	const expectedFileName = "codex-stable@example.com.json"
+	if uploadedName != expectedFileName || deletedName != oldFileName {
+		t.Fatalf("migration uploaded=%q deleted=%q", uploadedName, deletedName)
+	}
+	if items[0].AccountName != "stable@example.com" || items[0].NameKey != "stable@example.com" || items[0].FileName != expectedFileName {
+		t.Fatalf("migrated import item = %#v", items[0])
+	}
+	if _, exists := files[oldFileName]; exists {
+		t.Fatalf("legacy file still exists: %#v", files)
+	}
+	if _, exists := files[expectedFileName]; !exists {
+		t.Fatalf("canonical file missing: %#v", files)
 	}
 }
 
@@ -1352,7 +1465,7 @@ func TestRecoveryWithoutOriginalFileReusesUniqueAccountNameBinding(t *testing.T)
 		t.Fatalf("create original order: %v", err)
 	}
 	if _, err := st.InsertSupplyImportItems(ctx, "original", []store.SupplyImportItem{{
-		ItemKey: "old-key", AccountName: "Stable Team", NameKey: "stable-team", FileName: "legacy-stable-file.json",
+		ItemKey: "old-key", AccountName: "old@example.com", NameKey: "old@example.com", FileName: "legacy-stable-file.json",
 		ImportAction: "add", PayloadJSON: `{"type":"codex","name":"Stable Team","email":"old@example.com","account_id":"old-account"}`,
 	}}); err != nil {
 		t.Fatalf("insert original item: %v", err)
@@ -1369,7 +1482,7 @@ func TestRecoveryWithoutOriginalFileReusesUniqueAccountNameBinding(t *testing.T)
 	}}); err != nil {
 		t.Fatalf("insert recovery: %v", err)
 	}
-	account, err := normalizeAccountForImport(`{"type":"codex","name":"Stable Team","email":"new@example.com","account_id":"new-account","access_token":"new-token"}`)
+	account, err := normalizeAccountForImport(`{"type":"codex","name":"Stable Team","email":"old@example.com","account_id":"new-account","access_token":"new-token"}`)
 	if err != nil {
 		t.Fatalf("normalize replacement: %v", err)
 	}
@@ -1393,7 +1506,7 @@ func TestRecoveryWithoutOriginalFileReusesUniqueAccountNameBinding(t *testing.T)
 	if err != nil {
 		t.Fatalf("resolve second recovery plan: %v", err)
 	}
-	if secondPlan.action != "add" || secondPlan.fileName != "codex-second-team.json" {
+	if secondPlan.action != "add" || secondPlan.fileName != "codex-second@example.com.json" {
 		t.Fatalf("second recovery plan reused original file: %#v", secondPlan)
 	}
 }
@@ -2062,7 +2175,7 @@ func TestLegacySupplyImportRepairConvertsAndVerifiesCPAFile(t *testing.T) {
 	if err != nil || !found || repaired.Status != "completed" || repaired.ImportedCount != 1 {
 		t.Fatalf("repaired order=%#v found=%v err=%v", repaired, found, err)
 	}
-	if uploadCalls.Load() != 1 || uploadedName != "codex-legacy.json" {
+	if uploadCalls.Load() != 1 || uploadedName != "codex-legacy@example.com.json" {
 		t.Fatalf("upload calls=%d uploaded name=%q", uploadCalls.Load(), uploadedName)
 	}
 }

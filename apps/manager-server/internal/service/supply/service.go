@@ -3457,7 +3457,7 @@ func (s *Service) fetchSupplyOverview(ctx context.Context, cfg store.ManagerSupp
 func (s *Service) syncRecoveriesOnce(ctx context.Context, cfg store.ManagerConfig, autoClaim bool, limit int, recoveryID string) (RecoverySyncResult, error) {
 	var result RecoverySyncResult
 	var firstErr error
-	if err := s.backfillSupplyAccountMetadata(ctx); err != nil {
+	if err := s.backfillSupplyAccountMetadata(ctx, cfg); err != nil {
 		firstErr = err
 	}
 	mergePendingResult := func(imported int, failed int, err error) {
@@ -5047,21 +5047,146 @@ func safeSupplyAuthFileName(fileName string) bool {
 		!strings.ContainsAny(fileName, `/\\`) && fileName != "." && fileName != ".."
 }
 
-func (s *Service) backfillSupplyAccountMetadata(ctx context.Context) error {
-	items, err := s.store.ListSupplyImportItemsMissingAccountMetadata(ctx, 5000)
+const supplyFileNameReconcileBatchSize = 200
+
+func (s *Service) backfillSupplyAccountMetadata(ctx context.Context, cfg store.ManagerConfig) error {
+	items, err := s.store.ListSupplyImportItems(ctx, 5000, "imported")
 	if err != nil {
 		return err
 	}
+	currentFileUsers := make(map[string]int)
 	for _, item := range items {
+		if item.SupersededAtMS > 0 {
+			continue
+		}
+		if fileName := strings.TrimSpace(item.FileName); fileName != "" {
+			currentFileUsers[fileName]++
+		}
+	}
+
+	reconciled := 0
+	changed := false
+	var reconcileErrors []error
+	for _, item := range items {
+		if item.SupersededAtMS > 0 {
+			continue
+		}
 		account, err := normalizeAccountForImport(item.PayloadJSON)
 		if err != nil {
 			continue
 		}
-		if err := s.store.UpdateSupplyImportItemAccountMetadata(ctx, item.ID, account.accountName, account.nameKey); err != nil {
+
+		fileName := strings.TrimSpace(item.FileName)
+		legacyFileName := ""
+		if fileName != account.fileName && reconciled < supplyFileNameReconcileBatchSize {
+			migratedFileName, migrated, migrateErr := s.reconcileSupplyAuthFileName(ctx, cfg, item, account, currentFileUsers)
+			if migrateErr != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("reconcile supply import %d: %w", item.ID, migrateErr))
+			} else if migrated {
+				legacyFileName = fileName
+				fileName = migratedFileName
+				reconciled++
+				changed = true
+			}
+		}
+
+		if account.accountName == item.AccountName && account.nameKey == item.NameKey && fileName == item.FileName {
+			continue
+		}
+		importAction := strings.ToLower(strings.TrimSpace(item.ImportAction))
+		if importAction != "add" && importAction != "replace" {
+			importAction = "add"
+		}
+		if err := s.store.UpdateSupplyImportItemPlan(ctx, item.ID, account.accountName, account.nameKey, fileName, importAction, item.ReplacedFileName); err != nil {
 			return err
 		}
+		if legacyFileName != "" {
+			if err := s.authFiles.Delete(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, legacyFileName); err != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("delete migrated supply auth file %q: %w", legacyFileName, err))
+			}
+		}
+		changed = true
+	}
+	if changed {
+		s.invalidateAuthFilesCache()
+	}
+	if len(reconcileErrors) > 0 {
+		return errors.Join(reconcileErrors...)
 	}
 	return nil
+}
+
+// reconcileSupplyAuthFileName migrates a legacy supplier-labelled auth file to
+// the canonical account-labelled filename. The old file is deleted only after
+// the new file is uploaded and verified against the account identity.
+func (s *Service) reconcileSupplyAuthFileName(ctx context.Context, cfg store.ManagerConfig, item store.SupplyImportItem, account normalizedSupplyAccount, currentFileUsers map[string]int) (string, bool, error) {
+	oldFileName := strings.TrimSpace(item.FileName)
+	if oldFileName == "" || !safeSupplyAuthFileName(oldFileName) || !strings.HasPrefix(strings.ToLower(oldFileName), "codex-") {
+		return oldFileName, false, nil
+	}
+	if strings.TrimSpace(cfg.CPAConnection.CPABaseURL) == "" || strings.TrimSpace(cfg.CPAConnection.ManagementKey) == "" {
+		return oldFileName, false, nil
+	}
+	oldFile, found, err := s.findCPAAuthFile(ctx, cfg, oldFileName, "")
+	if err != nil {
+		return oldFileName, false, err
+	}
+	if !found || !supplyCPAFileMatchesAccount(oldFile, account) {
+		return oldFileName, false, nil
+	}
+	if currentFileUsers[oldFileName] > 1 {
+		return oldFileName, false, fmt.Errorf("legacy auth file %q is referenced by %d current imports", oldFileName, currentFileUsers[oldFileName])
+	}
+
+	targetFileName, targetFile, targetFound, err := s.findCanonicalSupplyAuthFile(ctx, cfg, account)
+	if err != nil {
+		return oldFileName, false, err
+	}
+	if targetFileName == oldFileName {
+		return oldFileName, false, nil
+	}
+	if !targetFound {
+		if err := s.authFiles.Upload(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey,
+			targetFileName, []byte(account.payload), cfg.Supply.DefaultWebsockets); err != nil {
+			return oldFileName, false, err
+		}
+		verified, verifiedFound, verifyErr := s.findCPAAuthFile(ctx, cfg, targetFileName, "")
+		if verifyErr != nil {
+			return oldFileName, false, verifyErr
+		}
+		if !verifiedFound || !supplyCPAFileMatchesAccount(verified, account) {
+			return oldFileName, false, fmt.Errorf("uploaded auth file %q failed identity verification", targetFileName)
+		}
+		targetFile = verified
+	}
+	if oldFile.Disabled && !targetFile.Disabled {
+		if err := s.authFiles.PatchDisabled(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, targetFileName, true, targetFile.AuthIndex); err != nil {
+			return oldFileName, false, err
+		}
+	}
+	return targetFileName, true, nil
+}
+
+func (s *Service) findCanonicalSupplyAuthFile(ctx context.Context, cfg store.ManagerConfig, account normalizedSupplyAccount) (string, cpaauthfiles.File, bool, error) {
+	baseName := stableSupplyAccountFileName(account.accountName)
+	candidates := []string{baseName, supplyAccountFileNameWithIdentity(account.accountName, account.itemKey)}
+	for attempt := 2; attempt < 100; attempt++ {
+		base := strings.TrimSuffix(candidates[1], ".json")
+		candidates = append(candidates, fmt.Sprintf("%s-%d.json", base, attempt))
+	}
+	for _, candidate := range candidates {
+		file, found, err := s.findCPAAuthFile(ctx, cfg, candidate, "")
+		if err != nil {
+			return "", cpaauthfiles.File{}, false, err
+		}
+		if !found {
+			return candidate, cpaauthfiles.File{}, false, nil
+		}
+		if supplyCPAFileMatchesAccount(file, account) {
+			return file.Name, file, true, nil
+		}
+	}
+	return "", cpaauthfiles.File{}, false, errors.New("could not allocate a canonical CPA auth file name")
 }
 
 func (s *Service) invalidateAuthFilesCache() {
@@ -5540,7 +5665,16 @@ func normalizeSupplyAccountObject(object map[string]any, exportedAt any) (normal
 	}
 	sum := sha256.Sum256([]byte(identity))
 	digest := hex.EncodeToString(sum[:])
-	accountName := firstNonEmptyString(stringFromMap(metadata, "name"), stringFromMap(metadata, "email"), stringFromMap(metadata, "account_id"), "OpenAI OAuth Account")
+	// The supplier's `name` is a product label such as "普通 Team · 7D ·
+	// 有效期 51 分钟", not the account identity. Prefer the stable customer
+	// identity shown by CPA so filenames remain useful to operators and stable
+	// when the supplier changes its product/TTL description.
+	accountName := firstNonEmptyString(
+		stringFromMap(metadata, "email", "email_address", "emailAddress"),
+		stringFromMap(metadata, "account_id", "chatgpt_account_id"),
+		stringFromMap(metadata, "name"),
+		"OpenAI OAuth Account",
+	)
 	nameKey := supplyAccountNameKey(accountName)
 	return normalizedSupplyAccount{
 		payload:          normalized,

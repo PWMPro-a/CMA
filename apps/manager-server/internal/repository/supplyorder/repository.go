@@ -409,8 +409,10 @@ func (r *repository) InsertItems(ctx context.Context, orderID string, items []mo
 }
 
 func (r *repository) ListItems(ctx context.Context, limit int, status string) ([]model.SupplyImportItem, error) {
-	if limit <= 0 || limit > 1000 {
+	if limit <= 0 {
 		limit = 200
+	} else if limit > 5000 {
+		limit = 5000
 	}
 	status = strings.ToLower(strings.TrimSpace(status))
 	query := importItemSelect + ` from supply_import_items`
