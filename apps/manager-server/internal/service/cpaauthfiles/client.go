@@ -538,7 +538,7 @@ func FromMap(file map[string]any) File {
 			file,
 			"account_id", "accountId", "chatgpt_account_id", "chatgptAccountId",
 			"project_id", "projectId", "gemini_virtual_project", "geminiVirtualProject",
-			"sub", "id",
+			"sub",
 		),
 		Disabled: disabledField(file),
 		Raw:      file,

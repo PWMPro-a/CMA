@@ -83,6 +83,19 @@ func TestParseAndVerifyIdentity(t *testing.T) {
 	}
 }
 
+func TestParseDoesNotTreatAuthFileIDAsAccountID(t *testing.T) {
+	files, err := Parse([]byte(`{"files":[{"name":"codex-user.json","id":"codex-user.json","account":"user@example.com","provider":"codex"}]}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("files = %#v", files)
+	}
+	if files[0].AccountID != "" || files[0].AccountSnapshot != "user@example.com" {
+		t.Fatalf("parsed file identity = %#v", files[0])
+	}
+}
+
 func TestClientPatchDisabledAndDelete(t *testing.T) {
 	var patched bool
 	var deleted bool

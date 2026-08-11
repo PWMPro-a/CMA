@@ -1250,10 +1250,10 @@ func TestBackfillSupplyAccountMetadataRenamesLegacySupplierLabelFile(t *testing.
 	const oldFileName = "codex-普通-team-7d-有效期-51-分钟.json"
 	files := map[string]map[string]any{
 		oldFileName: {
-			"name":       oldFileName,
-			"provider":   "codex",
-			"account":    "stable@example.com",
-			"account_id": "account-stable",
+			"name":     oldFileName,
+			"id":       oldFileName,
+			"provider": "codex",
+			"account":  "stable@example.com",
 		},
 	}
 	var uploadedName string
@@ -1292,10 +1292,10 @@ func TestBackfillSupplyAccountMetadataRenamesLegacySupplierLabelFile(t *testing.
 			}
 			uploadedName = header.Filename
 			files[uploadedName] = map[string]any{
-				"name":       uploadedName,
-				"provider":   "codex",
-				"account":    account["email"],
-				"account_id": account["account_id"],
+				"name":     uploadedName,
+				"id":       uploadedName,
+				"provider": "codex",
+				"account":  account["email"],
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		case http.MethodDelete:
