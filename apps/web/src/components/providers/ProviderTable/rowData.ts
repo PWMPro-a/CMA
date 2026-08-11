@@ -89,7 +89,7 @@ const buildHaystack = (parts: Array<string | undefined>): string =>
     .join('\n');
 
 const getKeyConfigSortName = (config: GeminiKeyConfig | ProviderKeyConfig): string =>
-  [config.prefix, config.baseUrl, config.proxyUrl, config.authIndex]
+  [config.prefix, config.baseUrl, config.proxyUrl, config.sourceIp, config.authIndex]
     .map((value) => String(value ?? '').trim())
     .find(Boolean) ?? '';
 
@@ -125,6 +125,7 @@ function buildKeyConfigRow(
       config.prefix,
       config.baseUrl,
       config.proxyUrl,
+      config.sourceIp,
       config.authIndex,
     ]),
     raw: config,
@@ -158,7 +159,7 @@ function buildOpenAIRow(
       provider.prefix,
       provider.baseUrl,
       provider.authIndex,
-      ...apiKeyEntries.flatMap((entry) => [entry.apiKey, entry.proxyUrl]),
+      ...apiKeyEntries.flatMap((entry) => [entry.apiKey, entry.proxyUrl, entry.sourceIp]),
     ]),
     raw: provider,
   };

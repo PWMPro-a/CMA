@@ -189,6 +189,7 @@ export function ProviderDetailDrawer({
                 <span className={styles.keyEntryIndex}>{entryIndex + 1}</span>
                 <span className={styles.keyEntryKey}>{maskApiKey(entry.apiKey)}</span>
                 {entry.proxyUrl && <span className={styles.keyEntryProxy}>{entry.proxyUrl}</span>}
+                {entry.sourceIp && <span className={styles.keyEntryProxy}>{entry.sourceIp}</span>}
                 <span className={styles.keyEntryStats}>
                   <span className={styles.statSuccess}>
                     <IconCheck size={12} /> {entryStats.success}
@@ -227,6 +228,9 @@ export function ProviderDetailDrawer({
           <FieldRow label={t('common.prefix')} value={row.raw.prefix} />
           {row.kind !== 'openai' && (
             <FieldRow label={t('common.proxy_url')} value={row.raw.proxyUrl} />
+          )}
+          {row.kind !== 'openai' && (
+            <FieldRow label={t('common.source_ip')} value={row.raw.sourceIp} />
           )}
           {row.kind === 'openai' && (
             <FieldRow label={t('ai_providers.openai_test_model')} value={row.raw.testModel} />

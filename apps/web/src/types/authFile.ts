@@ -113,6 +113,8 @@ export interface AuthFileItem {
   failed?: unknown;
   project_id?: string;
   projectId?: string;
+  source_ip?: string;
+  sourceIp?: string;
   gemini_virtual_project?: string;
   geminiVirtualProject?: string;
   recent_requests?: RecentRequestBucket[];

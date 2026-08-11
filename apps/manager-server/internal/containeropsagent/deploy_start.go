@@ -38,10 +38,14 @@ type deployServiceSpec struct {
 	Name         string
 	Image        string
 	Env          []string
+	Entrypoint   []string
 	Cmd          []string
 	Ports        map[string]string
 	VolumeMounts map[string]string
 	Binds        []string
+	ExtraHosts   []string
+	CapAdd       []string
+	HostNetwork  bool
 	StartOrder   int
 }
 
@@ -226,8 +230,8 @@ func deployStartSpecs(manifest model.ContainerOpsStackManifest, env map[string]s
 			Role:         "cpa",
 			Name:         "cli-proxy-api",
 			Image:        deployManifestImage(manifest, "cpa"),
-			Ports:        map[string]string{"8317/tcp": "8317"},
 			VolumeMounts: map[string]string{deployVolumeName(manifest.ComposeProject, "cpa-data"): "/app/data"},
+			HostNetwork:  true,
 			StartOrder:   1,
 		},
 		{
@@ -239,18 +243,21 @@ func deployStartSpecs(manifest model.ContainerOpsStackManifest, env map[string]s
 				"CPA_UPSTREAM_URL=" + networkBaseURL,
 				"CPA_MANAGEMENT_KEY=" + env["CPA_MANAGEMENT_KEY"],
 				"CPA_MANAGER_ADMIN_KEY=" + env["CPA_MANAGER_ADMIN_KEY"],
-				"CPAMP_AGENT_URL=http://cpamp-agent:18417",
+				"CPAMP_AGENT_URL=http://host.docker.internal:18417",
 				"CPAMP_AGENT_TOKEN=" + env["CPAMP_AGENT_TOKEN"],
 			},
 			Ports:        map[string]string{"18317/tcp": "18317"},
 			VolumeMounts: map[string]string{deployVolumeName(manifest.ComposeProject, "cpa-manager-plus-data"): "/data"},
+			ExtraHosts:   []string{"host.docker.internal:host-gateway"},
 			StartOrder:   3,
 		},
 		{
 			Role:  "agent",
 			Name:  "cpamp-agent",
 			Image: deployManifestImage(manifest, "agent"),
-			Cmd:   []string{"cpamp-agent"},
+			Entrypoint: []string{
+				"cpamp-agent",
+			},
 			Env: []string{
 				"CPAMP_AGENT_ADDR=0.0.0.0:18417",
 				"CPAMP_STACK_ROOT=" + stackRoot,
@@ -263,7 +270,9 @@ func deployStartSpecs(manifest model.ContainerOpsStackManifest, env map[string]s
 				stackRoot + ":" + stackRoot,
 				backupRoot + ":" + backupRoot,
 			},
-			StartOrder: 2,
+			CapAdd:      []string{"NET_ADMIN", "NET_RAW"},
+			HostNetwork: true,
+			StartOrder:  2,
 		},
 	}
 }
@@ -358,22 +367,36 @@ func (c *DockerClient) createDeployContainer(ctx context.Context, spec deploySer
 	if len(spec.Binds) > 0 {
 		hostConfig["Binds"] = spec.Binds
 	}
+	if len(spec.ExtraHosts) > 0 {
+		hostConfig["ExtraHosts"] = spec.ExtraHosts
+	}
+	if len(spec.CapAdd) > 0 {
+		hostConfig["CapAdd"] = spec.CapAdd
+	}
+	if spec.HostNetwork {
+		hostConfig["NetworkMode"] = "host"
+	}
 	payload := map[string]any{
 		"Image":        spec.Image,
 		"Labels":       deployServiceLabels(spec),
 		"Env":          spec.Env,
 		"ExposedPorts": exposedPorts,
 		"HostConfig":   hostConfig,
-		"NetworkingConfig": map[string]any{
+	}
+	if !spec.HostNetwork {
+		payload["NetworkingConfig"] = map[string]any{
 			"EndpointsConfig": map[string]any{
 				standardCPANetworkName: map[string]any{
 					"Aliases": []string{spec.Name},
 				},
 			},
-		},
+		}
 	}
 	if len(spec.Cmd) > 0 {
 		payload["Cmd"] = spec.Cmd
+	}
+	if len(spec.Entrypoint) > 0 {
+		payload["Entrypoint"] = spec.Entrypoint
 	}
 	endpoint := "/containers/create?name=" + url.QueryEscape(spec.Name)
 	return c.post(ctx, endpoint, payload, nil)

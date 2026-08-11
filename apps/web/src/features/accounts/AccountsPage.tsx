@@ -224,6 +224,7 @@ import {
 } from '@/stores';
 import { useUsageHeaderSnapshotStore } from '@/stores/useUsageHeaderSnapshotStore';
 import { copyToClipboard } from '@/utils/clipboard';
+import { collectSourceIpUsageCounts } from '@/utils/sourceIp';
 import {
   buildUsageHeaderSnapshotLookup,
   getHighConfidenceUsageHeaderSnapshotForAuthFile,
@@ -1115,6 +1116,10 @@ export function AccountsPage() {
     () => buildAccountRows(files, baseQuotaStores, inspectionResults, accountQuotaOverrides),
     [accountQuotaOverrides, baseQuotaStores, files, inspectionResults]
   );
+  const accountSourceIpContext = useMemo(() => {
+    const values = rows.map((row) => row.raw.sourceIp ?? row.raw.source_ip ?? '');
+    return { values, usageCounts: collectSourceIpUsageCounts(values) };
+  }, [rows]);
   const codexStatusBySelectionKey = useMemo(() => {
     const statusMap = new Map<string, ReturnType<typeof getAuthFileCodexStatus>>();
     rows.forEach((row) => {
@@ -4308,6 +4313,8 @@ export function AccountsPage() {
             row={selectedRow}
             disableControls={disableControls}
             editor={configurationEditor}
+            sourceIpUsageCounts={accountSourceIpContext.usageCounts}
+            sourceIpFallbackValues={accountSourceIpContext.values}
             onCopyText={copyTextWithNotification}
           />
         );

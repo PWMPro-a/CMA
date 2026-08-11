@@ -55,6 +55,7 @@ export type AuthFileFieldsPatch = {
   base_url?: string;
   baseUrl?: null;
   'base-url'?: null;
+  source_ip?: string;
   websockets?: boolean;
   using_api?: boolean;
   usingApi?: null;
@@ -706,6 +707,15 @@ export const applyAuthFileFieldsPatchToRecord = (
   applyTrimmedString('base_url', fields.base_url);
   if (fields.baseUrl === null) delete next.baseUrl;
   if (fields['base-url'] === null) delete next['base-url'];
+
+  if (fields.source_ip !== undefined) {
+    const value = fields.source_ip.trim();
+    if (value) {
+      next.source_ip = value;
+    } else {
+      delete next.source_ip;
+    }
+  }
 
   if (fields.priority !== undefined) {
     if (fields.priority === 0) {

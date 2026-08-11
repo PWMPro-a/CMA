@@ -30,7 +30,7 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Select } from '@/components/ui/Select';
-import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
+import { useHeaderRefresh, useKnownSourceIpOptions } from '@/hooks';
 import { providersApi } from '@/services/api';
 import { useAuthStore, useConfigStore, useNotificationStore, useThemeStore } from '@/stores';
 import type {
@@ -39,8 +39,10 @@ import type {
   OpenAIProviderConfig,
   ProviderKeyConfig,
 } from '@/types';
+import { collectSourceIpUsageCounts } from '@/utils/sourceIp';
 import { createConfigMutationLock } from './model/configMutationLock';
 import { buildProviderDeleteSecondConfirmation } from './model/deleteConfirmation';
+import { EgressIpWizardModal } from './EgressIpWizardModal';
 import styles from './AiProvidersPage.module.scss';
 
 const PROVIDER_TABLE_DEFAULT_PAGE_SIZE = 10;
@@ -108,6 +110,7 @@ export function AiProvidersPage() {
   const [sortDirection, setSortDirection] = useState<ProviderSortDirection>('desc');
   const [detailRowKey, setDetailRowKey] = useState<string | null>(null);
   const [healthCheckOpen, setHealthCheckOpen] = useState(false);
+  const [egressWizardOpen, setEgressWizardOpen] = useState(false);
   const [editDrawerKind, setEditDrawerKind] = useState<ProviderKind | null>(null);
   const [editDrawerIndex, setEditDrawerIndex] = useState<number | null>(null);
   const [page, setPage] = useState(1);
@@ -224,6 +227,38 @@ export function AiProvidersPage() {
   const handleDrawerSaved = useCallback(() => {
     void loadConfigs();
   }, [loadConfigs]);
+
+  const sourceIpValues = useMemo(
+    () => [
+      ...geminiKeys.map((config) => config.sourceIp),
+      ...interactionsKeys.map((config) => config.sourceIp),
+      ...codexConfigs.map((config) => config.sourceIp),
+      ...xaiConfigs.map((config) => config.sourceIp),
+      ...claudeConfigs.map((config) => config.sourceIp),
+      ...vertexConfigs.map((config) => config.sourceIp),
+      ...openaiProviders.flatMap((provider) =>
+        (provider.apiKeyEntries ?? []).map((entry) => entry.sourceIp)
+      ),
+    ],
+    [
+      claudeConfigs,
+      codexConfigs,
+      geminiKeys,
+      interactionsKeys,
+      openaiProviders,
+      vertexConfigs,
+      xaiConfigs,
+    ]
+  );
+  const sourceIpUsageCounts = useMemo(
+    () => collectSourceIpUsageCounts(sourceIpValues),
+    [sourceIpValues]
+  );
+  const { options: sourceIpOptions, loading: sourceIpOptionsLoading } = useKnownSourceIpOptions({
+    usageCounts: sourceIpUsageCounts,
+    fallbackValues: sourceIpValues,
+    enabled: !disableControls,
+  });
 
   // 统一行集合与派生数据
   const rows = useMemo(
@@ -1459,6 +1494,23 @@ export function AiProvidersPage() {
         {error && <div className="error-box">{error}</div>}
 
         <div>
+          <Card className={styles.egressCard}>
+            <div className={styles.egressCardBody}>
+              <div>
+                <div className={styles.egressEyebrow}>{t('egress_ip.card_eyebrow')}</div>
+                <h2>{t('egress_ip.card_title')}</h2>
+                <p>{t('egress_ip.card_desc')}</p>
+              </div>
+              <Button
+                onClick={() => setEgressWizardOpen(true)}
+                disabled={actionsDisabled}
+                className={styles.egressCardButton}
+              >
+                {t('egress_ip.open_wizard')}
+              </Button>
+            </div>
+          </Card>
+
           <ProviderToolbar
             kind={kindFilter}
             kindCounts={kindCounts}
@@ -1569,10 +1621,25 @@ export function AiProvidersPage() {
         onApplyResultActions={applyProviderEnabledActions}
         onSetProviderEnabled={setHealthCheckProviderEnabled}
       />
+      <EgressIpWizardModal
+        open={egressWizardOpen}
+        disabled={actionsDisabled}
+        geminiKeys={geminiKeys}
+        interactionsKeys={interactionsKeys}
+        codexConfigs={codexConfigs}
+        xaiConfigs={xaiConfigs}
+        claudeConfigs={claudeConfigs}
+        vertexConfigs={vertexConfigs}
+        openaiProviders={openaiProviders}
+        onClose={() => setEgressWizardOpen(false)}
+        onApplied={loadConfigs}
+      />
       <GeminiEditDrawer
         open={editDrawerKind === 'gemini'}
         editIndex={editDrawerIndex}
         disabled={actionsDisabled}
+        sourceIpOptions={sourceIpOptions}
+        sourceIpOptionsLoading={sourceIpOptionsLoading}
         onClose={closeEditorDrawer}
         onSaved={handleDrawerSaved}
       />
@@ -1580,6 +1647,8 @@ export function AiProvidersPage() {
         open={editDrawerKind === 'interactions'}
         editIndex={editDrawerIndex}
         disabled={actionsDisabled}
+        sourceIpOptions={sourceIpOptions}
+        sourceIpOptionsLoading={sourceIpOptionsLoading}
         onClose={closeEditorDrawer}
         onSaved={handleDrawerSaved}
         providerKind="interactions"
@@ -1588,6 +1657,8 @@ export function AiProvidersPage() {
         open={editDrawerKind === 'codex'}
         editIndex={editDrawerIndex}
         disabled={actionsDisabled}
+        sourceIpOptions={sourceIpOptions}
+        sourceIpOptionsLoading={sourceIpOptionsLoading}
         onClose={closeEditorDrawer}
         onSaved={handleDrawerSaved}
       />
@@ -1595,6 +1666,8 @@ export function AiProvidersPage() {
         open={editDrawerKind === 'xai'}
         editIndex={editDrawerIndex}
         disabled={actionsDisabled}
+        sourceIpOptions={sourceIpOptions}
+        sourceIpOptionsLoading={sourceIpOptionsLoading}
         onClose={closeEditorDrawer}
         onSaved={handleDrawerSaved}
         providerKind="xai"
@@ -1603,6 +1676,8 @@ export function AiProvidersPage() {
         open={editDrawerKind === 'vertex'}
         editIndex={editDrawerIndex}
         disabled={actionsDisabled}
+        sourceIpOptions={sourceIpOptions}
+        sourceIpOptionsLoading={sourceIpOptionsLoading}
         onClose={closeEditorDrawer}
         onSaved={handleDrawerSaved}
       />
@@ -1610,6 +1685,8 @@ export function AiProvidersPage() {
         open={editDrawerKind === 'claude'}
         editIndex={editDrawerIndex}
         disabled={actionsDisabled}
+        sourceIpOptions={sourceIpOptions}
+        sourceIpOptionsLoading={sourceIpOptionsLoading}
         onClose={closeEditorDrawer}
         onSaved={handleDrawerSaved}
       />
@@ -1617,6 +1694,8 @@ export function AiProvidersPage() {
         open={editDrawerKind === 'openai'}
         editIndex={editDrawerIndex}
         disabled={actionsDisabled}
+        sourceIpOptions={sourceIpOptions}
+        sourceIpOptionsLoading={sourceIpOptionsLoading}
         onClose={closeEditorDrawer}
         onSaved={handleDrawerSaved}
       />

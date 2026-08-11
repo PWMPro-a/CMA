@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
+import { SourceIpSelect } from '@/components/ui/SourceIpSelect';
 import { HeaderInputList } from '@/components/ui/HeaderInputList';
 import { ModelInputList } from '@/components/ui/ModelInputList';
 import { Modal } from '@/components/ui/Modal';
@@ -32,6 +33,7 @@ import {
 } from '@/components/providers/utils';
 import type { ProviderFormState } from '@/components/providers';
 import type { ModelInfo } from '@/utils/models';
+import type { SelectOption } from '@/components/ui/Select';
 import styles from '@/features/aiProviders/AiProvidersPage.module.scss';
 
 interface CodexEditDrawerProps {
@@ -41,6 +43,8 @@ interface CodexEditDrawerProps {
   onClose: () => void;
   onSaved: () => void;
   providerKind?: 'codex' | 'xai';
+  sourceIpOptions?: ReadonlyArray<SelectOption>;
+  sourceIpOptionsLoading?: boolean;
 }
 
 type CodexFormBaseline = ReturnType<typeof buildCodexBaseline>;
@@ -56,6 +60,7 @@ const buildEmptyForm = (baseUrl = ''): ProviderFormState => ({
   baseUrl,
   websockets: false,
   proxyUrl: '',
+  sourceIp: '',
   headers: [],
   models: [],
   excludedModels: [],
@@ -85,6 +90,7 @@ const buildCodexBaseline = (form: ProviderFormState) => ({
   websockets: Boolean(form.websockets),
   disableCooling: Boolean(form.disableCooling),
   proxyUrl: String(form.proxyUrl ?? '').trim(),
+  sourceIp: String(form.sourceIp ?? '').trim(),
   headers: normalizeHeaderEntries(form.headers),
   models: normalizeModelEntries(form.modelEntries),
   excludedModels: parseExcludedModels(form.excludedText ?? ''),
@@ -103,6 +109,8 @@ export function CodexEditDrawer({
   onClose,
   onSaved,
   providerKind = 'codex',
+  sourceIpOptions,
+  sourceIpOptionsLoading = false,
 }: CodexEditDrawerProps) {
   const { t } = useTranslation();
   const { showNotification } = useNotificationStore();
@@ -112,6 +120,13 @@ export function CodexEditDrawer({
   const isXAI = providerKind === 'xai';
   const providerSection = isXAI ? 'xai-api-key' : 'codex-api-key';
   const defaultBaseUrl = isXAI ? XAI_API_BASE_URL : '';
+  const resolvedSourceIpOptions = useMemo(
+    () =>
+      sourceIpOptions?.length
+        ? sourceIpOptions
+        : [{ value: '', label: t('common.not_set') }],
+    [sourceIpOptions, t]
+  );
 
   const [configs, setConfigs] = useState<ProviderKeyConfig[]>([]);
   const [loading, setLoading] = useState(false);
@@ -219,6 +234,7 @@ export function CodexEditDrawer({
       baseline.websockets !== Boolean(form.websockets) ||
       baseline.disableCooling !== Boolean(form.disableCooling) ||
       baseline.proxyUrl !== String(form.proxyUrl ?? '').trim() ||
+      baseline.sourceIp !== String(form.sourceIp ?? '').trim() ||
       !areKeyValueEntriesEqual(baseline.headers, normalizeHeaderEntries(form.headers)) ||
       !areModelEntriesEqual(baseline.models, normalizeModelEntries(form.modelEntries)) ||
       !areStringArraysEqual(baseline.excludedModels, parseExcludedModels(form.excludedText ?? ''))
@@ -491,6 +507,7 @@ export function CodexEditDrawer({
         baseUrl: trimmedBaseUrl,
         websockets: Boolean(form.websockets),
         proxyUrl: form.proxyUrl?.trim() || undefined,
+        sourceIp: form.sourceIp?.trim() || undefined,
         headers: buildHeaderObject(form.headers),
         models: entriesToModels(form.modelEntries),
         excludedModels: parseExcludedModels(form.excludedText),
@@ -674,6 +691,15 @@ export function CodexEditDrawer({
               label={t('ai_providers.codex_add_modal_proxy_label')}
               value={form.proxyUrl ?? ''}
               onChange={(e) => setForm((prev) => ({ ...prev, proxyUrl: e.target.value }))}
+              disabled={disabled || saving}
+            />
+            <SourceIpSelect
+              label={t('ai_providers.source_ip_label')}
+              hint={t('ai_providers.source_ip_hint')}
+              value={form.sourceIp ?? ''}
+              onChange={(value) => setForm((prev) => ({ ...prev, sourceIp: value }))}
+              options={resolvedSourceIpOptions}
+              loading={sourceIpOptionsLoading}
               disabled={disabled || saving}
             />
             <HeaderInputList

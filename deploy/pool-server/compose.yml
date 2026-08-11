@@ -11,10 +11,7 @@ services:
       com.cpamp.managed: "true"
       com.cpamp.stack: "cpa"
       com.cpamp.role: "cpa"
-    networks:
-      - cpamp-cpa_default
-    ports:
-      - "8317:8317"
+    network_mode: host
     volumes:
       - /opt/cpamp/data/cpa:/app/data
     healthcheck:
@@ -30,6 +27,10 @@ services:
     container_name: cpamp-agent
     entrypoint: ["cpamp-agent"]
     restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     labels:
       com.cpamp.managed: "true"
       com.cpamp.stack: "cpa"
@@ -41,8 +42,6 @@ services:
       CPAMP_BACKUP_ROOT: "/opt/cpamp/backups"
       CPAMP_AGENT_TOKEN: "${CPAMP_AGENT_TOKEN:?set CPAMP_AGENT_TOKEN}"
       DOCKER_HOST: "unix:///var/run/docker.sock"
-    networks:
-      - cpamp-cpa_default
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /opt/cpamp/stacks/cpa:/opt/cpamp/stacks/cpa
@@ -73,10 +72,10 @@ services:
       HTTP_ADDR: "0.0.0.0:18317"
       USAGE_DB_PATH: "/data/usage.sqlite"
       CPA_MANAGER_DATA_KEY_PATH: "/data/data.key"
-      CPA_UPSTREAM_URL: "http://cli-proxy-api:8317"
+      CPA_UPSTREAM_URL: "http://host.docker.internal:8317"
       CPA_MANAGEMENT_KEY: "${CPA_MANAGEMENT_KEY:?set CPA_MANAGEMENT_KEY}"
       CPA_MANAGER_ADMIN_KEY: "${CPA_MANAGER_ADMIN_KEY:?set CPA_MANAGER_ADMIN_KEY}"
-      CPAMP_AGENT_URL: "http://cpamp-agent:18417"
+      CPAMP_AGENT_URL: "http://host.docker.internal:18417"
       CPAMP_AGENT_TOKEN: "${CPAMP_AGENT_TOKEN:?set CPAMP_AGENT_TOKEN}"
       USAGE_COLLECTOR_MODE: "http"
       USAGE_BATCH_SIZE: "100"
@@ -85,6 +84,8 @@ services:
       USAGE_CORS_ORIGINS: "*"
     networks:
       - cpamp-cpa_default
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "18317:18317"
     volumes:

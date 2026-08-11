@@ -84,6 +84,8 @@ func (s *Service) Info(ctx context.Context) (model.ContainerOpsInfo, error) {
 			"cpa-stack-upgrade-prepare",
 			"cpa-stack-upgrade-state",
 			"cpa-stack-upgrade-runner",
+			"source-ip-egress-one-click",
+			"source-ip-account-binding",
 		},
 		UnsupportedScopes: []string{
 			"multi-host-scheduling",
@@ -254,6 +256,68 @@ func (s *Service) StandardizeNetwork(ctx context.Context, request model.Containe
 	return result, nil
 }
 
+func (s *Service) EgressIPs(ctx context.Context) (model.ContainerOpsEgressIPInventory, error) {
+	agent := s.agentInfo(ctx)
+	if !agent.Configured {
+		return model.ContainerOpsEgressIPInventory{}, errors.New("container ops agent is not configured")
+	}
+	if !agent.Reachable {
+		return model.ContainerOpsEgressIPInventory{}, fmt.Errorf("container ops agent is not reachable: %s", firstNonEmpty(agent.Error, "unknown error"))
+	}
+	var inventory model.ContainerOpsEgressIPInventory
+	if err := s.getAgentJSON(ctx, "/egress/ips", &inventory); err != nil {
+		return model.ContainerOpsEgressIPInventory{}, fmt.Errorf("inspect egress IPs: %w", err)
+	}
+	inventory.Agent = agent
+	return inventory, nil
+}
+
+func (s *Service) EnsureSourceIP(ctx context.Context, request model.ContainerOpsSourceIPRequest) (model.ContainerOpsSourceIPResult, error) {
+	return s.sourceIPAction(ctx, "source_ip_ensure", "ensure", "/egress/source-ip/ensure", request)
+}
+
+func (s *Service) CheckSourceIP(ctx context.Context, request model.ContainerOpsSourceIPRequest) (model.ContainerOpsSourceIPResult, error) {
+	agent := s.agentInfo(ctx)
+	if !agent.Configured {
+		return model.ContainerOpsSourceIPResult{}, errors.New("container ops agent is not configured")
+	}
+	if !agent.Reachable {
+		return model.ContainerOpsSourceIPResult{}, fmt.Errorf("container ops agent is not reachable: %s", firstNonEmpty(agent.Error, "unknown error"))
+	}
+	var result model.ContainerOpsSourceIPResult
+	if err := s.postAgentJSON(ctx, "/egress/source-ip/check", request, &result); err != nil {
+		return model.ContainerOpsSourceIPResult{}, fmt.Errorf("check source IP: %w", err)
+	}
+	result.Agent = agent
+	return result, nil
+}
+
+func (s *Service) RemoveSourceIP(ctx context.Context, request model.ContainerOpsSourceIPRequest) (model.ContainerOpsSourceIPResult, error) {
+	return s.sourceIPAction(ctx, "source_ip_remove", "remove", "/egress/source-ip/remove", request)
+}
+
+func (s *Service) sourceIPAction(ctx context.Context, operation string, phase string, endpoint string, request model.ContainerOpsSourceIPRequest) (model.ContainerOpsSourceIPResult, error) {
+	agent := s.agentInfo(ctx)
+	if !agent.Configured {
+		return model.ContainerOpsSourceIPResult{}, errors.New("container ops agent is not configured")
+	}
+	if !agent.Reachable {
+		return model.ContainerOpsSourceIPResult{}, fmt.Errorf("container ops agent is not reachable: %s", firstNonEmpty(agent.Error, "unknown error"))
+	}
+	_, finish, err := s.beginLifecycle(ctx, operation, phase, agent, request)
+	if err != nil {
+		return model.ContainerOpsSourceIPResult{}, err
+	}
+	var result model.ContainerOpsSourceIPResult
+	if err := s.postAgentJSON(ctx, endpoint, request, &result); err != nil {
+		finish(lifecycleStatusFailed, "agent_request_failed", err.Error(), map[string]any{"error": err.Error()})
+		return model.ContainerOpsSourceIPResult{}, fmt.Errorf("%s source IP: %w", phase, err)
+	}
+	result.Agent = agent
+	result.Lifecycle = attachLifecycle(finish(lifecycleStatusForResult(result.Status), result.Status, "Source IP operation finished with status "+result.Status+".", result))
+	return result, nil
+}
+
 func (s *Service) agentInfo(ctx context.Context) model.ContainerOpsAgentInfo {
 	if s.agentURL == "" {
 		return model.ContainerOpsAgentInfo{Configured: false, Reachable: false}
@@ -302,7 +366,7 @@ func standardResources() model.ContainerOpsStandardResource {
 
 func newAPIInfo() model.ContainerOpsNewAPIInfo {
 	return model.ContainerOpsNewAPIInfo{
-		RecommendedBaseURL: "http://cli-proxy-api:8317/v1",
+		RecommendedBaseURL: "http://host.docker.internal:8317/v1",
 	}
 }
 

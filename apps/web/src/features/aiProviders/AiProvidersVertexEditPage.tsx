@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
+import { SourceIpSelect } from '@/components/ui/SourceIpSelect';
 import { HeaderInputList } from '@/components/ui/HeaderInputList';
 import { ModelInputList } from '@/components/ui/ModelInputList';
 import { modelsToEntries } from '@/components/ui/modelInputListUtils';
@@ -15,9 +16,15 @@ import { useAuthStore, useConfigStore, useNotificationStore } from '@/stores';
 import type { ProviderKeyConfig } from '@/types';
 import { excludedModelsToText, parseExcludedModels } from '@/components/providers/utils';
 import { buildHeaderObject, headersToEntries, normalizeHeaderEntries } from '@/utils/headers';
-import { areKeyValueEntriesEqual, areModelEntriesEqual, areStringArraysEqual } from '@/utils/compare';
+import {
+  areKeyValueEntriesEqual,
+  areModelEntriesEqual,
+  areStringArraysEqual,
+} from '@/utils/compare';
 import type { VertexFormState } from '@/components/providers';
 import { parseProviderIndexParam } from '@/features/aiProviders/model/routeParams';
+import { useKnownSourceIpOptions } from '@/hooks';
+import { collectSourceIpUsageCounts } from '@/utils/sourceIp';
 import layoutStyles from './AiProvidersEditLayout.module.scss';
 
 type LocationState = { fromAiProviders?: boolean } | null;
@@ -27,6 +34,7 @@ const buildEmptyForm = (): VertexFormState => ({
   prefix: '',
   baseUrl: '',
   proxyUrl: '',
+  sourceIp: '',
   headers: [],
   models: [],
   excludedModels: [],
@@ -49,6 +57,7 @@ type VertexFormBaseline = {
   prefix: string;
   baseUrl: string;
   proxyUrl: string;
+  sourceIp: string;
   headers: ReturnType<typeof normalizeHeaderEntries>;
   models: ReturnType<typeof normalizeModelEntries>;
   excludedModels: string[];
@@ -57,10 +66,13 @@ type VertexFormBaseline = {
 const buildVertexBaseline = (form: VertexFormState): VertexFormBaseline => ({
   apiKey: String(form.apiKey ?? '').trim(),
   priority:
-    form.priority !== undefined && Number.isFinite(form.priority) ? Math.trunc(form.priority) : null,
+    form.priority !== undefined && Number.isFinite(form.priority)
+      ? Math.trunc(form.priority)
+      : null,
   prefix: String(form.prefix ?? '').trim(),
   baseUrl: String(form.baseUrl ?? '').trim(),
   proxyUrl: String(form.proxyUrl ?? '').trim(),
+  sourceIp: String(form.sourceIp ?? '').trim(),
   headers: normalizeHeaderEntries(form.headers),
   models: normalizeModelEntries(form.modelEntries),
   excludedModels: parseExcludedModels(form.excludedText ?? ''),
@@ -97,9 +109,24 @@ export function AiProvidersVertexEditPage() {
   }, [configs, editIndex]);
 
   const invalidIndex = editIndex !== null && !initialData;
+  const sourceIpUsageCounts = useMemo(
+    () => collectSourceIpUsageCounts(configs.map((config) => config.sourceIp)),
+    [configs]
+  );
+  const sourceIpFallbackValues = useMemo(() => [String(form.sourceIp ?? '').trim()], [form.sourceIp]);
+  const {
+    options: sourceIpOptions,
+    loading: sourceIpOptionsLoading,
+  } = useKnownSourceIpOptions({
+    usageCounts: sourceIpUsageCounts,
+    fallbackValues: sourceIpFallbackValues,
+    enabled: !disableControls,
+  });
 
   const title =
-    editIndex !== null ? t('ai_providers.vertex_edit_modal_title') : t('ai_providers.vertex_add_modal_title');
+    editIndex !== null
+      ? t('ai_providers.vertex_edit_modal_title')
+      : t('ai_providers.vertex_add_modal_title');
 
   const handleBack = useCallback(() => {
     const state = location.state as LocationState;
@@ -208,6 +235,7 @@ export function AiProvidersVertexEditPage() {
     baseline.prefix !== String(form.prefix ?? '').trim() ||
     baseline.baseUrl !== String(form.baseUrl ?? '').trim() ||
     baseline.proxyUrl !== String(form.proxyUrl ?? '').trim() ||
+    baseline.sourceIp !== String(form.sourceIp ?? '').trim() ||
     isHeadersDirty ||
     isModelsDirty ||
     isExcludedModelsDirty;
@@ -244,6 +272,7 @@ export function AiProvidersVertexEditPage() {
         prefix: form.prefix?.trim() || undefined,
         baseUrl,
         proxyUrl: form.proxyUrl?.trim() || undefined,
+        sourceIp: form.sourceIp?.trim() || undefined,
         headers: buildHeaderObject(form.headers),
         models: form.modelEntries
           .map((entry) => {
@@ -261,15 +290,19 @@ export function AiProvidersVertexEditPage() {
       } else {
         await providersApi.createVertexConfig(payload);
       }
-      const syncedList = await providersApi.getVertexConfigs().catch(() =>
-        editIndex !== null
-          ? configs.map((item, index) => (index === editIndex ? payload : item))
-          : [...configs, payload]
-      );
+      const syncedList = await providersApi
+        .getVertexConfigs()
+        .catch(() =>
+          editIndex !== null
+            ? configs.map((item, index) => (index === editIndex ? payload : item))
+            : [...configs, payload]
+        );
       updateConfigValue('vertex-api-key', syncedList);
       clearCache('vertex-api-key');
       showNotification(
-        editIndex !== null ? t('notification.vertex_config_updated') : t('notification.vertex_config_added'),
+        editIndex !== null
+          ? t('notification.vertex_config_updated')
+          : t('notification.vertex_config_added'),
         'success'
       );
       allowNextNavigation();
@@ -362,6 +395,15 @@ export function AiProvidersVertexEditPage() {
               placeholder={t('ai_providers.vertex_add_modal_proxy_placeholder')}
               value={form.proxyUrl ?? ''}
               onChange={(e) => setForm((prev) => ({ ...prev, proxyUrl: e.target.value }))}
+              disabled={disableControls || saving}
+            />
+            <SourceIpSelect
+              label={t('ai_providers.source_ip_label')}
+              hint={t('ai_providers.source_ip_hint')}
+              value={form.sourceIp ?? ''}
+              onChange={(value) => setForm((prev) => ({ ...prev, sourceIp: value }))}
+              options={sourceIpOptions}
+              loading={sourceIpOptionsLoading}
               disabled={disableControls || saving}
             />
             <HeaderInputList

@@ -1359,6 +1359,21 @@ describe('authFilesApi patchFieldsForAuthIndexes', () => {
 });
 
 describe('applyAuthFileFieldsPatchToRecord', () => {
+  it('writes and clears the canonical source IP field', () => {
+    expect(
+      applyAuthFileFieldsPatchToRecord(
+        { type: 'codex', source_ip: '144.172.117.178' },
+        { source_ip: ' 144.172.117.179 ' }
+      )
+    ).toEqual({ type: 'codex', source_ip: '144.172.117.179' });
+    expect(
+      applyAuthFileFieldsPatchToRecord(
+        { type: 'codex', source_ip: '144.172.117.179' },
+        { source_ip: '' }
+      )
+    ).toEqual({ type: 'codex' });
+  });
+
   it('applies extended credential configuration fields with source-file cleanup semantics', () => {
     expect(
       applyAuthFileFieldsPatchToRecord(

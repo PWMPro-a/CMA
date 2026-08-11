@@ -165,12 +165,18 @@ const normalizeApiKeyEntry = (entry: unknown): ApiKeyEntry | null => {
   );
   if (!trimmed && !authIndex) return null;
 
-  const proxyUrl = record ? (record['proxy-url'] ?? record.proxyUrl) : undefined;
+  const proxyUrl = record
+    ? (record['proxy-url'] ?? record.proxyUrl ?? record['proxy_url'])
+    : undefined;
+  const sourceIp = record
+    ? (record['source-ip'] ?? record.sourceIp ?? record['source_ip'])
+    : undefined;
   const headers = record ? normalizeHeaders(record.headers) : undefined;
 
   const result: ApiKeyEntry = {
     apiKey: trimmed,
     proxyUrl: proxyUrl ? String(proxyUrl) : undefined,
+    sourceIp: sourceIp ? String(sourceIp) : undefined,
     headers,
   };
   if (authIndex) result.authIndex = authIndex;
@@ -198,7 +204,12 @@ const normalizeProviderKeyConfig = (item: unknown): ProviderKeyConfig | null => 
   const prefix = normalizePrefix(record?.prefix ?? record?.['prefix']);
   if (prefix) config.prefix = prefix;
   const baseUrl = record ? (record['base-url'] ?? record.baseUrl) : undefined;
-  const proxyUrl = record ? (record['proxy-url'] ?? record.proxyUrl) : undefined;
+  const proxyUrl = record
+    ? (record['proxy-url'] ?? record.proxyUrl ?? record['proxy_url'])
+    : undefined;
+  const sourceIp = record
+    ? (record['source-ip'] ?? record.sourceIp ?? record['source_ip'])
+    : undefined;
   if (baseUrl) config.baseUrl = String(baseUrl);
   const websockets = normalizeBoolean(record?.websockets ?? record?.['websockets']);
   if (websockets !== undefined) config.websockets = websockets;
@@ -221,6 +232,7 @@ const normalizeProviderKeyConfig = (item: unknown): ProviderKeyConfig | null => 
     config.rebuildMidSystemMessage = rebuildMidSystemMessage;
   }
   if (proxyUrl) config.proxyUrl = String(proxyUrl);
+  if (sourceIp) config.sourceIp = String(sourceIp);
   const headers = normalizeHeaders(record?.headers);
   if (headers) config.headers = headers;
   const models = normalizeModelAliases(record?.models);
@@ -296,6 +308,10 @@ const normalizeGeminiKeyConfig = (item: unknown): GeminiKeyConfig | null => {
     ? (record['proxy-url'] ?? record.proxyUrl ?? record['proxy_url'])
     : undefined;
   if (proxyUrl) config.proxyUrl = String(proxyUrl);
+  const sourceIp = record
+    ? (record['source-ip'] ?? record.sourceIp ?? record['source_ip'])
+    : undefined;
+  if (sourceIp) config.sourceIp = String(sourceIp);
   const disableCooling = normalizeBoolean(
     record?.['disable-cooling'] ?? record?.disableCooling ?? record?.disable_cooling
   );

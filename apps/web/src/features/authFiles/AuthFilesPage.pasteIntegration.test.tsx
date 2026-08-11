@@ -111,6 +111,9 @@ vi.mock('@/utils/clipboard', () => ({
 }));
 
 vi.mock('@/services/api', () => ({
+  containerOpsApi: {
+    egressIPs: vi.fn(async () => ({ addresses: [] })),
+  },
   authFilesApi: {
     list: mocks.list,
     saveJsonObject: mocks.saveJsonObject,

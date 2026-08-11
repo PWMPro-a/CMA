@@ -64,7 +64,8 @@
     "invalid_provider_index": "Invalid provider index.",
     "unsaved_changes_title": "Unsaved changes",
     "unsaved_changes_message": "You have unsaved changes. Leaving now will discard them. Do you want to leave?",
-    "copied": "Copied"
+    "copied": "Copied",
+    "source_ip": "Source IP"
   },
   "title": {
     "main": "CPA Manager Plus",
@@ -765,7 +766,10 @@
     "health_check_error_missing_credential": "Missing API key or auth-index",
     "health_check_error_empty_models": "No models returned",
     "health_check_error_vertex_standard_models": "The standard model list address did not respond{{reason}}",
-    "health_check_error_provider_missing": "Provider configuration no longer exists"
+    "health_check_error_provider_missing": "Provider configuration no longer exists",
+    "source_ip_label": "Source IP (Optional)",
+    "source_ip_placeholder": "e.g. 144.172.117.179",
+    "source_ip_hint": "Local outbound IP used when this account connects directly upstream; it bypasses the global proxy."
   },
   "accounts": {
     "title": "Credential Management",
@@ -1734,7 +1738,14 @@
     "runtime_current_concurrency": "Active {{count}}",
     "runtime_frozen_until": "Frozen until {{value}}",
     "runtime_rate_limited_until": "Limited until {{value}}",
-    "runtime_last_skip_reason": "Skipped: {{value}}"
+    "runtime_last_skip_reason": "Skipped: {{value}}",
+    "source_ip_label": "Source IP (source_ip)",
+    "source_ip_placeholder": "e.g. 144.172.117.179",
+    "source_ip_hint": "Choose the server egress IP this account uses when calling upstream; leave empty to use the default egress.",
+    "source_ip_bound_accounts": "Bound to {{count}} account(s)",
+    "source_ip_current_option": "Currently selected",
+    "source_ip_card_label": "Bound IP",
+    "source_ip_card_title": "Source IP bound to this account: {{ip}}"
   },
   "antigravity_quota": {
     "title": "Antigravity Quota",
@@ -5836,5 +5847,44 @@
     "smart_reason_critical_available_accounts": "Available accounts reached the critical waterline",
     "smart_reason_emergency_pool_vacuum": "Emergency refill for an empty account pool",
     "smart_reason_virtual_demand_memory": "Refill from remembered demand"
+  },
+  "egress_ip": {
+    "card_eyebrow": "One-click egress IP",
+    "card_title": "No-config account egress IP setup",
+    "card_desc": "No YAML, Compose, or auth JSON edits: enter the new IP, mount it on the server, verify outbound traffic, then bind accounts in bulk.",
+    "open_wizard": "Open one-click setup",
+    "modal_title": "Egress IP one-click setup wizard",
+    "hero_eyebrow": "Source IP Wizard",
+    "hero_title": "Three steps: detect server, mount IP, bind accounts",
+    "hero_desc": "Built for Pro pool servers: after adding a Floating IP, accounts can choose an egress IP like a proxy while staying on the native host path.",
+    "detect_server_ip": "Detect server IP",
+    "step_server": "1. Server network check",
+    "native_ip": "Native outbound IP",
+    "default_interface": "Default interface",
+    "no_local_ips": "No local IPv4 address detected yet",
+    "step_source_ip": "2. Mount and verify new IP",
+    "source_ip_label": "New Floating IP",
+    "source_ip_hint": "Enter the IP assigned by the cloud panel. The system mounts it as /32 and verifies outbound traffic.",
+    "mount_and_verify": "Mount and verify",
+    "one_click_finish": "Finish in one click",
+    "remove_source_ip": "Remove from server",
+    "latest_result": "Latest result",
+    "result_mounted": "Mounted",
+    "result_interface": "Interface",
+    "result_outbound": "Verified outbound",
+    "step_accounts": "3. Select accounts to bind",
+    "accounts_desc": "API keys and OAuth/Auth file accounts are selected by default. One click writes source-ip/source_ip automatically.",
+    "select_all": "Select all",
+    "clear_selection": "Clear",
+    "bind_selected": "Bind selected",
+    "default_account_subtitle": "Default account config",
+    "auth_file_subtitle_with_index": "Auth file · auth_index {{authIndex}}",
+    "auth_file_subtitle": "Auth file",
+    "invalid_source_ip": "Enter a valid IPv4 address",
+    "no_targets_selected": "Select at least one account",
+    "bind_partial_failed": "{{count}} accounts failed to bind. Review the current configuration and retry.",
+    "mount_before_bind_failed": "IP mount or outbound verification is not complete, so account binding was paused.",
+    "unbound": "Unbound",
+    "no_accounts": "No bindable accounts found"
   }
 }

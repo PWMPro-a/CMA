@@ -544,6 +544,7 @@ vi.mock('@/features/authFiles/hooks/useAuthFileConfigurationEditor', () => ({
     const draft = {
       prefix: '',
       proxyUrl: '',
+      sourceIp: '',
       priority: '',
       weight: '',
       note: '',
@@ -669,6 +670,9 @@ vi.mock('@/features/oauth/CodexReauthDialog', () => ({
 }));
 
 vi.mock('@/services/api', () => ({
+  containerOpsApi: {
+    egressIPs: vi.fn(async () => ({ addresses: [] })),
+  },
   accountQuotaSnapshotApi: {
     write: vi.fn(async (_base, _managementKey, entries: unknown[]) => ({
       observed_at_ms: Date.now(),

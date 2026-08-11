@@ -205,6 +205,8 @@ func auditRequestSummary(request any) any {
 		return map[string]any{"apply": value.Apply, "cpaImage": value.CPAImage, "cpampImage": value.CPAMPImage}
 	case model.ContainerOpsUpgradeTaskStartRequest:
 		return map[string]any{"taskId": value.TaskID}
+	case model.ContainerOpsSourceIPRequest:
+		return map[string]any{"sourceIp": value.SourceIP, "interface": value.Interface}
 	case map[string]any:
 		return value
 	default:
@@ -252,6 +254,17 @@ func auditResultSummary(result any) any {
 			"applied":        value.Applied,
 			"actionCount":    len(value.Actions),
 			"blockingChecks": networkBlockingCount(value.Checks),
+		}
+	case model.ContainerOpsSourceIPResult:
+		return map[string]any{
+			"sourceIp":       value.SourceIP,
+			"interface":      value.Interface,
+			"status":         value.Status,
+			"mounted":        value.Mounted,
+			"alreadyPresent": value.AlreadyPresent,
+			"removed":        value.Removed,
+			"outboundIp":     value.OutboundIP,
+			"blockingChecks": egressBlockingCount(value.Checks),
 		}
 	case model.ContainerOpsUpgradePlan:
 		rollbackBackupID := ""
@@ -348,6 +361,16 @@ func restoreBlockingCount(checks []model.ContainerOpsRestoreCheck) int {
 }
 
 func networkBlockingCount(checks []model.ContainerOpsNetworkCheck) int {
+	count := 0
+	for _, check := range checks {
+		if check.Blocking {
+			count++
+		}
+	}
+	return count
+}
+
+func egressBlockingCount(checks []model.ContainerOpsEgressCheck) int {
 	count := 0
 	for _, check := range checks {
 		if check.Blocking {

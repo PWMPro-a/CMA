@@ -178,6 +178,7 @@ describe('providersApi auth-index preservation', () => {
         apiKey: '',
         authIndex: 'auth-1',
         baseUrl: 'https://new.example.com/v1',
+        sourceIp: '127.0.0.2',
         models: [{ name: 'new-model', alias: 'alias' }],
       },
     ]);
@@ -187,6 +188,7 @@ describe('providersApi auth-index preservation', () => {
         'raw-field': 'keep',
         'auth-index': 'auth-1',
         'base-url': 'https://new.example.com/v1',
+        'source-ip': '127.0.0.2',
         models: [{ name: 'new-model', alias: 'alias', 'raw-model-field': true }],
       },
     ]);

@@ -116,7 +116,9 @@ const EMPTY_RECENT_USAGE_ENTRY: RecentRequestUsageEntry = {
 };
 
 const normalizeProviderRecentKey = (value: unknown): string =>
-  String(value ?? '').trim().toLowerCase();
+  String(value ?? '')
+    .trim()
+    .toLowerCase();
 
 export function getProviderRecentUsageEntry(
   usageByProvider: ProviderRecentUsageMap,
@@ -139,12 +141,7 @@ export function getProviderRecentBuckets(
   apiKey?: string,
   baseUrl?: string
 ): RecentRequestBucket[] {
-  return getProviderRecentUsageEntry(
-    usageByProvider,
-    provider,
-    apiKey,
-    baseUrl
-  ).recentRequests;
+  return getProviderRecentUsageEntry(usageByProvider, provider, apiKey, baseUrl).recentRequests;
 }
 
 export function getProviderTotalStats(
@@ -252,6 +249,7 @@ export const getProviderConfigKey = (
     apiKey?: string;
     baseUrl?: string;
     proxyUrl?: string;
+    sourceIp?: string;
   },
   index: number
 ): string => {
@@ -259,7 +257,7 @@ export const getProviderConfigKey = (
   if (authIndexKey) {
     return authIndexKey;
   }
-  return `${config.apiKey ?? ''}::${config.baseUrl ?? ''}::${config.proxyUrl ?? ''}::${index}`;
+  return `${config.apiKey ?? ''}::${config.baseUrl ?? ''}::${config.proxyUrl ?? ''}::${config.sourceIp ?? ''}::${index}`;
 };
 
 export const getOpenAIProviderKey = (provider: OpenAIProviderConfig, index: number): string => {
@@ -275,12 +273,13 @@ export const getOpenAIEntryKey = (entry: ApiKeyEntry, index: number): string => 
   if (authIndexKey) {
     return authIndexKey;
   }
-  return `${entry.apiKey}::${entry.proxyUrl ?? ''}::${index}`;
+  return `${entry.apiKey}::${entry.proxyUrl ?? ''}::${entry.sourceIp ?? ''}::${index}`;
 };
 
 export const buildApiKeyEntry = (input?: Partial<ApiKeyEntry>): ApiKeyEntry => ({
   apiKey: input?.apiKey ?? '',
   proxyUrl: input?.proxyUrl ?? '',
+  sourceIp: input?.sourceIp ?? '',
   authIndex: input?.authIndex ?? '',
   headers: input?.headers ?? {},
 });

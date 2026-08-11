@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
+import { useKnownSourceIpOptions } from '@/hooks';
 import { providersApi } from '@/services/api';
 import {
   useAuthStore,
@@ -16,6 +17,8 @@ import type { ModelInfo } from '@/utils/models';
 import { normalizeAuthIndex } from '@/utils/authIndex';
 import { buildHeaderObject, headersToEntries, normalizeHeaderEntries } from '@/utils/headers';
 import { areKeyValueEntriesEqual, areModelEntriesEqual } from '@/utils/compare';
+import type { SelectOption } from '@/components/ui/Select';
+import { collectSourceIpUsageCounts } from '@/utils/sourceIp';
 import { buildApiKeyEntry } from '@/components/providers/utils';
 import {
   buildProviderDraftKey,
@@ -47,6 +50,8 @@ export type OpenAIEditOutletContext = {
   setDraftKeyTestStatuses: (statuses: KeyTestStatus[]) => void;
   resetDraftKeyTestStatuses: (count: number) => void;
   availableModels: string[];
+  sourceIpOptions: ReadonlyArray<SelectOption>;
+  sourceIpOptionsLoading: boolean;
   handleBack: () => void;
   handleSave: () => Promise<void>;
   mergeDiscoveredModels: (selectedModels: ModelInfo[]) => void;
@@ -98,16 +103,18 @@ const normalizeApiKeyEntries = (entries: ApiKeyEntry[]) =>
     Array<{
       apiKey: string;
       proxyUrl: string;
+      sourceIp: string;
       authIndex: string;
       headers: Array<{ key: string; value: string }>;
     }>
   >((acc, entry) => {
     const apiKey = String(entry?.apiKey ?? '').trim();
     const proxyUrl = String(entry?.proxyUrl ?? '').trim();
+    const sourceIp = String(entry?.sourceIp ?? '').trim();
     const authIndex = normalizeAuthIndex(entry?.authIndex) ?? '';
     const headers = normalizeKeyHeaders(entry?.headers);
-    if (!apiKey && !proxyUrl && !authIndex && headers.length === 0) return acc;
-    acc.push({ apiKey, proxyUrl, authIndex, headers });
+    if (!apiKey && !proxyUrl && !sourceIp && !authIndex && headers.length === 0) return acc;
+    acc.push({ apiKey, proxyUrl, sourceIp, authIndex, headers });
     return acc;
   }, []);
 
@@ -139,6 +146,7 @@ const areNormalizedApiKeyEntriesEqual = (
     if (
       left.apiKey !== right.apiKey ||
       left.proxyUrl !== right.proxyUrl ||
+      left.sourceIp !== right.sourceIp ||
       left.authIndex !== right.authIndex
     ) {
       return false;
@@ -259,6 +267,25 @@ export function AiProvidersOpenAIEditLayout() {
     () => form.modelEntries.map((entry) => entry.name.trim()).filter(Boolean),
     [form.modelEntries]
   );
+  const sourceIpUsageCounts = useMemo(
+    () =>
+      collectSourceIpUsageCounts(
+        providers.flatMap((provider) => (provider.apiKeyEntries ?? []).map((entry) => entry.sourceIp))
+      ),
+    [providers]
+  );
+  const sourceIpFallbackValues = useMemo(
+    () => (form.apiKeyEntries ?? []).map((entry) => entry.sourceIp),
+    [form.apiKeyEntries]
+  );
+  const {
+    options: sourceIpOptions,
+    loading: sourceIpOptionsLoading,
+  } = useKnownSourceIpOptions({
+    usageCounts: sourceIpUsageCounts,
+    fallbackValues: sourceIpFallbackValues,
+    enabled: !disableControls,
+  });
 
   useEffect(() => {
     acquireDraft(draftKey);
@@ -503,6 +530,7 @@ export function AiProvidersOpenAIEditLayout() {
         apiKeyEntries: form.apiKeyEntries.map((entry: ApiKeyEntry) => ({
           apiKey: entry.apiKey.trim(),
           proxyUrl: entry.proxyUrl?.trim() || undefined,
+          sourceIp: entry.sourceIp?.trim() || undefined,
           authIndex: normalizeAuthIndex(entry.authIndex) ?? undefined,
           headers: entry.headers,
         })),
@@ -594,6 +622,8 @@ export function AiProvidersOpenAIEditLayout() {
           setDraftKeyTestStatuses: handleSetDraftKeyTestStatuses,
           resetDraftKeyTestStatuses: handleResetDraftKeyTestStatuses,
           availableModels,
+          sourceIpOptions,
+          sourceIpOptionsLoading,
           handleBack,
           handleSave,
           mergeDiscoveredModels,

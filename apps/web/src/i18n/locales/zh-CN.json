@@ -64,7 +64,8 @@
     "invalid_provider_index": "无效的提供商索引。",
     "unsaved_changes_title": "未保存的更改",
     "unsaved_changes_message": "你有未保存的更改，离开后将丢失这些更改。确定要离开吗？",
-    "copied": "已复制"
+    "copied": "已复制",
+    "source_ip": "源 IP"
   },
   "title": {
     "main": "CPA Manager Plus",
@@ -765,7 +766,10 @@
     "health_check_error_missing_credential": "缺少 API 密钥或 auth-index",
     "health_check_error_empty_models": "未返回模型列表",
     "health_check_error_vertex_standard_models": "未发现可用的标准模型发现接口{{reason}}",
-    "health_check_error_provider_missing": "提供商配置已不存在"
+    "health_check_error_provider_missing": "提供商配置已不存在",
+    "source_ip_label": "源 IP（可选）",
+    "source_ip_placeholder": "例如: 144.172.117.179",
+    "source_ip_hint": "绑定该账号直连上游时使用的本机出口 IP；配置后会绕过全局代理。"
   },
   "accounts": {
     "title": "凭证管理",
@@ -1734,7 +1738,14 @@
     "runtime_current_concurrency": "当前并发 {{count}}",
     "runtime_frozen_until": "冷冻至 {{value}}",
     "runtime_rate_limited_until": "限流至 {{value}}",
-    "runtime_last_skip_reason": "跳过：{{value}}"
+    "runtime_last_skip_reason": "跳过：{{value}}",
+    "source_ip_label": "源 IP（source_ip）",
+    "source_ip_placeholder": "例如: 144.172.117.179",
+    "source_ip_hint": "选择该账号访问上游时使用的服务器出口 IP；留空则使用默认出口。",
+    "source_ip_bound_accounts": "已绑定 {{count}} 个账号",
+    "source_ip_current_option": "当前已选",
+    "source_ip_card_label": "绑定 IP",
+    "source_ip_card_title": "该账号绑定的源 IP：{{ip}}"
   },
   "antigravity_quota": {
     "title": "Antigravity 额度",
@@ -5836,5 +5847,44 @@
     "smart_reason_critical_available_accounts": "可用账号达到临界水位",
     "smart_reason_emergency_pool_vacuum": "账号池真空紧急补货",
     "smart_reason_virtual_demand_memory": "历史需求记忆补货"
+  },
+  "egress_ip": {
+    "card_eyebrow": "一键出口 IP",
+    "card_title": "账号出口 IP 傻瓜式配置",
+    "card_desc": "不用改 YAML、Compose 或 auth JSON：输入新增 IP，自动挂载到服务器、验证出口，再批量绑定账号。",
+    "open_wizard": "打开一键配置",
+    "modal_title": "出口 IP 一键配置向导",
+    "hero_eyebrow": "Source IP Wizard",
+    "hero_title": "三步完成：检测服务器 → 挂载 IP → 绑定账号",
+    "hero_desc": "适合 Pro 池子服务器：新增 Floating IP 后，账号可以像代理一样指定出口，但仍走本机原生链路。",
+    "detect_server_ip": "检测服务器 IP",
+    "step_server": "1. 服务器网络检测",
+    "native_ip": "原生出口 IP",
+    "default_interface": "默认网卡",
+    "no_local_ips": "还没有检测到本机 IPv4 地址",
+    "step_source_ip": "2. 新增 IP 挂载与验证",
+    "source_ip_label": "新增 Floating IP",
+    "source_ip_hint": "填写云厂商面板分配的新 IP，系统会自动挂载 /32 并验证出口。",
+    "mount_and_verify": "挂载并验证",
+    "one_click_finish": "一键完成",
+    "remove_source_ip": "从服务器移除",
+    "latest_result": "最新执行结果",
+    "result_mounted": "已挂载",
+    "result_interface": "网卡",
+    "result_outbound": "验证出口",
+    "step_accounts": "3. 选择需要绑定的账号",
+    "accounts_desc": "默认全选当前 API Key 与 OAuth/Auth 文件账号；点击“一键完成”会自动写入 source-ip/source_ip。",
+    "select_all": "全选",
+    "clear_selection": "清空",
+    "bind_selected": "绑定选中账号",
+    "default_account_subtitle": "默认账号配置",
+    "auth_file_subtitle_with_index": "Auth 文件 · auth_index {{authIndex}}",
+    "auth_file_subtitle": "Auth 文件",
+    "invalid_source_ip": "请输入有效的 IPv4 地址",
+    "no_targets_selected": "请选择至少一个账号",
+    "bind_partial_failed": "{{count}} 个账号绑定失败，请查看当前配置后重试。",
+    "mount_before_bind_failed": "IP 挂载或出口验证未完成，账号绑定已暂停。",
+    "unbound": "未绑定",
+    "no_accounts": "当前没有可绑定的账号"
   }
 }

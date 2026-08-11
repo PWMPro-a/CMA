@@ -145,6 +145,49 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		response.JSON(w, http.StatusOK, result)
+	case path == "/v0/management/container-ops/egress-ips" && r.Method == http.MethodGet:
+		result, err := h.App.ContainerOpsService.EgressIPs(r.Context())
+		if err != nil {
+			response.Error(w, containerOpsErrorStatus(http.StatusBadGateway, err), err)
+			return
+		}
+		response.JSON(w, http.StatusOK, result)
+	case path == "/v0/management/container-ops/source-ip/ensure" && r.Method == http.MethodPost:
+		var request model.ContainerOpsSourceIPRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			response.Error(w, http.StatusBadRequest, err)
+			return
+		}
+		result, err := h.App.ContainerOpsService.EnsureSourceIP(r.Context(), request)
+		if err != nil {
+			response.Error(w, containerOpsErrorStatus(http.StatusBadGateway, err), err)
+			return
+		}
+		response.JSON(w, http.StatusOK, result)
+	case path == "/v0/management/container-ops/source-ip/check" && r.Method == http.MethodPost:
+		var request model.ContainerOpsSourceIPRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			response.Error(w, http.StatusBadRequest, err)
+			return
+		}
+		result, err := h.App.ContainerOpsService.CheckSourceIP(r.Context(), request)
+		if err != nil {
+			response.Error(w, containerOpsErrorStatus(http.StatusBadGateway, err), err)
+			return
+		}
+		response.JSON(w, http.StatusOK, result)
+	case path == "/v0/management/container-ops/source-ip/remove" && r.Method == http.MethodPost:
+		var request model.ContainerOpsSourceIPRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			response.Error(w, http.StatusBadRequest, err)
+			return
+		}
+		result, err := h.App.ContainerOpsService.RemoveSourceIP(r.Context(), request)
+		if err != nil {
+			response.Error(w, containerOpsErrorStatus(http.StatusBadGateway, err), err)
+			return
+		}
+		response.JSON(w, http.StatusOK, result)
 	case path == "/v0/management/container-ops/upgrade" && r.Method == http.MethodPost:
 		var request model.ContainerOpsUpgradeRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {

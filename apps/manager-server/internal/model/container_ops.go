@@ -94,6 +94,60 @@ type ContainerOpsNewAPIInfo struct {
 	RecommendedBaseURL string `json:"recommendedBaseUrl"`
 }
 
+type ContainerOpsEgressIPInventory struct {
+	Agent            ContainerOpsAgentInfo       `json:"agent,omitempty"`
+	DefaultInterface string                      `json:"defaultInterface,omitempty"`
+	Route            string                      `json:"route,omitempty"`
+	NativeOutboundIP string                      `json:"nativeOutboundIp,omitempty"`
+	Addresses        []ContainerOpsEgressAddress `json:"addresses"`
+	Checks           []ContainerOpsEgressCheck   `json:"checks,omitempty"`
+}
+
+type ContainerOpsEgressAddress struct {
+	Interface string `json:"interface"`
+	Address   string `json:"address"`
+	CIDR      string `json:"cidr"`
+	Scope     string `json:"scope,omitempty"`
+}
+
+type ContainerOpsSourceIPRequest struct {
+	SourceIP  string `json:"sourceIp"`
+	Interface string `json:"interface,omitempty"`
+	VerifyURL string `json:"verifyUrl,omitempty"`
+}
+
+type ContainerOpsSourceIPResult struct {
+	Agent            ContainerOpsAgentInfo       `json:"agent,omitempty"`
+	SourceIP         string                      `json:"sourceIp"`
+	Interface        string                      `json:"interface,omitempty"`
+	Status           string                      `json:"status"`
+	Mounted          bool                        `json:"mounted"`
+	AlreadyPresent   bool                        `json:"alreadyPresent"`
+	Removed          bool                        `json:"removed,omitempty"`
+	OutboundIP       string                      `json:"outboundIp,omitempty"`
+	NativeOutboundIP string                      `json:"nativeOutboundIp,omitempty"`
+	Checks           []ContainerOpsEgressCheck   `json:"checks"`
+	Actions          []ContainerOpsEgressAction  `json:"actions,omitempty"`
+	Lifecycle        *ContainerOpsLifecycleState `json:"lifecycle,omitempty"`
+}
+
+type ContainerOpsEgressCheck struct {
+	Severity string `json:"severity"`
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+	Resource string `json:"resource,omitempty"`
+	Blocking bool   `json:"blocking"`
+}
+
+type ContainerOpsEgressAction struct {
+	Order   int    `json:"order"`
+	Code    string `json:"code"`
+	Target  string `json:"target,omitempty"`
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+	Output  string `json:"output,omitempty"`
+}
+
 type ContainerOpsDiscovery struct {
 	Agent             ContainerOpsAgentInfo      `json:"agent"`
 	Docker            ContainerOpsDockerOverview `json:"docker"`

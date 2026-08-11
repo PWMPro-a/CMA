@@ -1227,8 +1227,11 @@ func TestStartCPADeployServicesCreatesAndStartsStandardStack(t *testing.T) {
 					Image      string            `json:"Image"`
 					Labels     map[string]string `json:"Labels"`
 					Env        []string          `json:"Env"`
+					Entrypoint []string          `json:"Entrypoint"`
 					HostConfig struct {
-						Binds []string `json:"Binds"`
+						Binds       []string `json:"Binds"`
+						CapAdd      []string `json:"CapAdd"`
+						NetworkMode string   `json:"NetworkMode"`
 					} `json:"HostConfig"`
 				}
 				if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
@@ -1239,17 +1242,22 @@ func TestStartCPADeployServicesCreatesAndStartsStandardStack(t *testing.T) {
 				}
 				switch name {
 				case "cli-proxy-api":
-					if payload.Labels["com.cpamp.role"] != "cpa" || payload.Image != "seakee/cli-proxy-api:latest" {
+					if payload.Labels["com.cpamp.role"] != "cpa" ||
+						payload.Image != "seakee/cli-proxy-api:latest" ||
+						payload.HostConfig.NetworkMode != "host" {
 						t.Fatalf("cpa payload = %#v", payload)
 					}
 				case "cpa-manager-plus":
 					if payload.Labels["com.cpamp.role"] != "cpamp" ||
 						!containsString(payload.Env, "CPA_MANAGER_ADMIN_KEY=admin-secret") ||
-						!containsString(payload.Env, "CPAMP_AGENT_URL=http://cpamp-agent:18417") {
+						!containsString(payload.Env, "CPAMP_AGENT_URL=http://host.docker.internal:18417") {
 						t.Fatalf("cpamp payload = %#v", payload)
 					}
 				case "cpamp-agent":
 					if payload.Labels["com.cpamp.role"] != "agent" ||
+						!containsString(payload.Entrypoint, "cpamp-agent") ||
+						payload.HostConfig.NetworkMode != "host" ||
+						!containsString(payload.HostConfig.CapAdd, "NET_ADMIN") ||
 						!containsString(payload.Env, "CPAMP_STACK_ROOT="+stackRoot) ||
 						!containsString(payload.Env, "CPAMP_BACKUP_ROOT="+backupRoot) ||
 						!containsString(payload.HostConfig.Binds, stackRoot+":"+stackRoot) ||

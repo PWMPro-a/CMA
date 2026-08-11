@@ -39,6 +39,7 @@ const makeDraft = (
 ): AuthFileConfigurationDraft => ({
   prefix: '',
   proxyUrl: '',
+  sourceIp: '',
   priority: '',
   weight: '',
   note: '',

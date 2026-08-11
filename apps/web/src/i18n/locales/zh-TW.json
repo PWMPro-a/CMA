@@ -64,7 +64,8 @@
     "invalid_provider_index": "無效的供應商索引。",
     "unsaved_changes_title": "未儲存的變更",
     "unsaved_changes_message": "你有未儲存的變更，離開後將遺失這些變更。確定要離開嗎？",
-    "copied": "已複製"
+    "copied": "已複製",
+    "source_ip": "來源 IP"
   },
   "title": {
     "main": "CPA Manager Plus",
@@ -765,7 +766,10 @@
     "health_check_error_missing_credential": "缺少 API 金鑰或 auth-index",
     "health_check_error_empty_models": "未返回模型列表",
     "health_check_error_vertex_standard_models": "未發現可用的標準模型發現介面{{reason}}",
-    "health_check_error_provider_missing": "提供商設定已不存在"
+    "health_check_error_provider_missing": "提供商設定已不存在",
+    "source_ip_label": "來源 IP（選填）",
+    "source_ip_placeholder": "例如: 144.172.117.179",
+    "source_ip_hint": "綁定該帳號直連上游時使用的本機出口 IP；設定後會繞過全域代理。"
   },
   "accounts": {
     "title": "憑證管理",
@@ -1734,7 +1738,14 @@
     "runtime_current_concurrency": "目前並發 {{count}}",
     "runtime_frozen_until": "冷凍至 {{value}}",
     "runtime_rate_limited_until": "限流至 {{value}}",
-    "runtime_last_skip_reason": "跳過：{{value}}"
+    "runtime_last_skip_reason": "跳過：{{value}}",
+    "source_ip_label": "來源 IP（source_ip）",
+    "source_ip_placeholder": "例如: 144.172.117.179",
+    "source_ip_hint": "選擇該帳號存取上游時使用的伺服器出口 IP；留空則使用預設出口。",
+    "source_ip_bound_accounts": "已綁定 {{count}} 個帳號",
+    "source_ip_current_option": "目前已選",
+    "source_ip_card_label": "綁定 IP",
+    "source_ip_card_title": "該帳號綁定的來源 IP：{{ip}}"
   },
   "antigravity_quota": {
     "title": "Antigravity 配額",
@@ -5836,5 +5847,44 @@
     "smart_reason_critical_available_accounts": "可用帳號達到臨界水位",
     "smart_reason_emergency_pool_vacuum": "帳號池真空緊急補貨",
     "smart_reason_virtual_demand_memory": "歷史需求記憶補貨"
+  },
+  "egress_ip": {
+    "card_eyebrow": "一鍵出口 IP",
+    "card_title": "帳號出口 IP 傻瓜式設定",
+    "card_desc": "不用改 YAML、Compose 或 auth JSON：輸入新增 IP，自動掛載到伺服器、驗證出口，再批次綁定帳號。",
+    "open_wizard": "開啟一鍵設定",
+    "modal_title": "出口 IP 一鍵設定精靈",
+    "hero_eyebrow": "Source IP Wizard",
+    "hero_title": "三步完成：偵測伺服器 → 掛載 IP → 綁定帳號",
+    "hero_desc": "適合 Pro 池子伺服器：新增 Floating IP 後，帳號可以像代理一樣指定出口，但仍走本機原生鏈路。",
+    "detect_server_ip": "偵測伺服器 IP",
+    "step_server": "1. 伺服器網路偵測",
+    "native_ip": "原生出口 IP",
+    "default_interface": "預設網卡",
+    "no_local_ips": "尚未偵測到本機 IPv4 位址",
+    "step_source_ip": "2. 新增 IP 掛載與驗證",
+    "source_ip_label": "新增 Floating IP",
+    "source_ip_hint": "填寫雲廠商面板分配的新 IP，系統會自動掛載 /32 並驗證出口。",
+    "mount_and_verify": "掛載並驗證",
+    "one_click_finish": "一鍵完成",
+    "remove_source_ip": "從伺服器移除",
+    "latest_result": "最新執行結果",
+    "result_mounted": "已掛載",
+    "result_interface": "網卡",
+    "result_outbound": "驗證出口",
+    "step_accounts": "3. 選擇需要綁定的帳號",
+    "accounts_desc": "預設全選目前 API Key 與 OAuth/Auth 文件帳號；點擊「一鍵完成」會自動寫入 source-ip/source_ip。",
+    "select_all": "全選",
+    "clear_selection": "清空",
+    "bind_selected": "綁定選取帳號",
+    "default_account_subtitle": "預設帳號設定",
+    "auth_file_subtitle_with_index": "Auth 文件 · auth_index {{authIndex}}",
+    "auth_file_subtitle": "Auth 文件",
+    "invalid_source_ip": "請輸入有效的 IPv4 位址",
+    "no_targets_selected": "請至少選擇一個帳號",
+    "bind_partial_failed": "{{count}} 個帳號綁定失敗，請查看目前設定後重試。",
+    "mount_before_bind_failed": "IP 掛載或出口驗證未完成，帳號綁定已暫停。",
+    "unbound": "未綁定",
+    "no_accounts": "目前沒有可綁定的帳號"
   }
 }

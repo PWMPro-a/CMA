@@ -1286,11 +1286,26 @@ func TestNormalizeSub2AccountPayloadForCPA(t *testing.T) {
 		result["email"] != "user@example.com" || result["plan_type"] != "team" ||
 		result["chatgpt_plan_type"] != "team" || result["organization_id"] != "org-extra" ||
 		result["workspace_id"] != "workspace-1" ||
-		result["expired"] != "2026-07-30T00:00:00Z" || result["max_concurrency"] != float64(8) {
+		result["expired"] != "2026-07-30T00:00:00Z" || result["max_concurrency"] != float64(8) ||
+		result["selection_error_freeze_seconds"] != float64(0) {
 		t.Fatalf("normalized metadata = %#v", result)
 	}
 	if len(key) != 64 || fileName != "codex-user@example.com.json" {
 		t.Fatalf("stable identity outputs key=%q file=%q", key, fileName)
+	}
+}
+
+func TestNormalizeDirectCPAAccountPayloadDisablesSelectionErrorFreeze(t *testing.T) {
+	payload, _, _, err := normalizeAccountPayload([]byte(`{"type":"codex","email":"direct@example.com","account_id":"direct-account","access_token":"access","max_concurrency":8,"selection_error_freeze_seconds":45}`))
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(payload, &result); err != nil {
+		t.Fatalf("decode normalized payload: %v", err)
+	}
+	if result["max_concurrency"] != float64(8) || result["selection_error_freeze_seconds"] != float64(0) {
+		t.Fatalf("normalized runtime limits = %#v", result)
 	}
 }
 
@@ -1596,6 +1611,9 @@ func TestNormalizeSub2BundlePayloadForCPA(t *testing.T) {
 	if first["type"] != "codex" || first["import_format"] != "sub2api" || first["access_token"] != "access-one" || first["refresh_token"] != "refresh-one" {
 		t.Fatalf("first normalized payload = %#v", first)
 	}
+	if first["selection_error_freeze_seconds"] != float64(0) {
+		t.Fatalf("first normalized payload freeze setting = %#v", first)
+	}
 	if _, nested := first["credentials"]; nested {
 		t.Fatalf("credentials wrapper was not removed: %#v", first)
 	}
@@ -1611,6 +1629,9 @@ func TestNormalizeSub2BundlePayloadForCPA(t *testing.T) {
 	}
 	if second["access_token"] != "access-two" || second["account_id"] != "account-shared" || second["email"] != "two@example.com" {
 		t.Fatalf("session access token account was not normalized: %#v", second)
+	}
+	if second["selection_error_freeze_seconds"] != float64(0) {
+		t.Fatalf("second normalized payload freeze setting = %#v", second)
 	}
 }
 

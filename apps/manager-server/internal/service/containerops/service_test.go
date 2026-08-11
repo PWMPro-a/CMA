@@ -32,7 +32,7 @@ func TestInfoDefaultsToReadOnlyWithoutAgent(t *testing.T) {
 	if info.DestructiveActions {
 		t.Fatalf("destructive actions should be disabled without agent")
 	}
-	if info.NewAPI.RecommendedBaseURL != "http://cli-proxy-api:8317/v1" {
+	if info.NewAPI.RecommendedBaseURL != "http://host.docker.internal:8317/v1" {
 		t.Fatalf("recommended base url = %q", info.NewAPI.RecommendedBaseURL)
 	}
 	if info.Lifecycle.Status != lifecycleStatusIdle || info.Lifecycle.Active {
@@ -168,7 +168,7 @@ func TestDiscoverUsesAgentOverviewAndToken(t *testing.T) {
 	if discovery.RecommendedAction != "verify_newapi_internal_route" {
 		t.Fatalf("recommended action = %q", discovery.RecommendedAction)
 	}
-	if discovery.NewAPI.RecommendedBaseURL != "http://cli-proxy-api:8317/v1" {
+	if discovery.NewAPI.RecommendedBaseURL != "http://host.docker.internal:8317/v1" {
 		t.Fatalf("recommended base url = %q", discovery.NewAPI.RecommendedBaseURL)
 	}
 }
@@ -251,11 +251,11 @@ func TestImportPlanBuildsManifestRisksAndComposeDraft(t *testing.T) {
 	if plan.Manifest.ComposeProject != "cpamp-cpa" || plan.Manifest.Network != "cpamp-cpa_default" {
 		t.Fatalf("manifest = %#v", plan.Manifest)
 	}
-	if len(plan.Manifest.Services) != 4 || plan.Manifest.Services[0].InternalBaseURL != "http://cli-proxy-api:8317/v1" {
+	if len(plan.Manifest.Services) != 4 || plan.Manifest.Services[0].InternalBaseURL != "http://host.docker.internal:8317/v1" {
 		t.Fatalf("services = %#v", plan.Manifest.Services)
 	}
 	if !strings.Contains(plan.Compose.Content, "image: seakee/cli-proxy-api:v1") ||
-		!strings.Contains(plan.Compose.Content, "command: [\"cpamp-agent\"]") ||
+		!strings.Contains(plan.Compose.Content, "entrypoint: [\"cpamp-agent\"]") ||
 		!strings.Contains(plan.Compose.Content, "/opt/cpamp/stacks/cpa:/opt/cpamp/stacks/cpa") ||
 		!strings.Contains(plan.Compose.Content, "cpa-data:") {
 		t.Fatalf("compose draft =\n%s", plan.Compose.Content)

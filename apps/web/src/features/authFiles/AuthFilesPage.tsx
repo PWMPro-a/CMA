@@ -86,6 +86,7 @@ import { useAuthFilesOauth } from '@/features/authFiles/hooks/useAuthFilesOauth'
 import { useAuthFilesPrefixProxyEditor } from '@/features/authFiles/hooks/useAuthFilesPrefixProxyEditor';
 import { useAuthFilesStatusBarCache } from '@/features/authFiles/hooks/useAuthFilesStatusBarCache';
 import { useAntigravitySubscriptions } from '@/features/authFiles/hooks/useAntigravitySubscriptions';
+import { useKnownSourceIpOptions } from '@/hooks';
 import {
   BATCH_BAR_BASE_TRANSFORM,
   BATCH_BAR_HIDDEN_TRANSFORM,
@@ -151,6 +152,7 @@ import {
   readAuthFileStatusProvider,
 } from '@/utils/authFileStatusMutation';
 import { useAuthStore, useNotificationStore, useQuotaStore, useThemeStore } from '@/stores';
+import { collectSourceIpUsageCounts } from '@/utils/sourceIp';
 import styles from './AuthFilesPage.module.scss';
 
 const hasInlineQuotaLayout = (file: AuthFileItem): boolean => {
@@ -437,6 +439,7 @@ export function AuthFilesPage() {
     batchPatchFields,
     batchDelete,
   } = useAuthFilesData({ importDefaults, connectionFingerprint });
+  const disableControls = connectionStatus !== 'connected';
 
   const handleDefaultWebsocketsChange = useCallback((websockets: boolean) => {
     setImportDefaults((current) => {
@@ -597,8 +600,27 @@ export function AuthFilesPage() {
     disableControls: connectionStatus !== 'connected',
     loadFiles,
   });
+  const prefixProxySourceIp = String(prefixProxyEditor?.sourceIp ?? '').trim();
+  const sourceIpUsageCounts = useMemo(
+    () =>
+      collectSourceIpUsageCounts(
+        files.map((file) => String(file.sourceIp ?? file.source_ip ?? '').trim())
+      ),
+    [files]
+  );
+  const sourceIpFallbackValues = useMemo(
+    () => [
+      ...files.map((file) => String(file.sourceIp ?? file.source_ip ?? '').trim()),
+      prefixProxySourceIp,
+    ],
+    [files, prefixProxySourceIp]
+  );
+  const { options: sourceIpOptions, loading: sourceIpOptionsLoading } = useKnownSourceIpOptions({
+    usageCounts: sourceIpUsageCounts,
+    fallbackValues: sourceIpFallbackValues,
+    enabled: !disableControls,
+  });
 
-  const disableControls = connectionStatus !== 'connected';
   const normalizedFilter = normalizeProviderKey(String(filter));
   const pageSize = compactMode ? pageSizeByMode.compact : pageSizeByMode.regular;
   useEffect(() => {
@@ -2302,6 +2324,8 @@ export function AuthFilesPage() {
         onSave={handlePrefixProxySave}
         onRefreshCredential={handleCredentialRefresh}
         onChange={handlePrefixProxyChange}
+        sourceIpOptions={sourceIpOptions}
+        sourceIpOptionsLoading={sourceIpOptionsLoading}
       />
 
       <AuthJsonPasteModal

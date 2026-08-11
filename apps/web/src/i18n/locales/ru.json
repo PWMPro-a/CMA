@@ -64,7 +64,8 @@
     "invalid_provider_index": "Неверный индекс провайдера.",
     "unsaved_changes_title": "Несохранённые изменения",
     "unsaved_changes_message": "У вас есть несохранённые изменения. Если вы уйдёте, они будут потеряны. Выйти?",
-    "copied": "Скопировано"
+    "copied": "Скопировано",
+    "source_ip": "Исходный IP"
   },
   "title": {
     "main": "CPA Manager Plus",
@@ -765,7 +766,10 @@
     "health_check_error_missing_credential": "Отсутствует API-ключ или выбранный аккаунт",
     "health_check_error_empty_models": "Список моделей не возвращён",
     "health_check_error_vertex_standard_models": "Стандартный адрес получения моделей не ответил{{reason}}",
-    "health_check_error_provider_missing": "Конфигурация провайдера больше не существует"
+    "health_check_error_provider_missing": "Конфигурация провайдера больше не существует",
+    "source_ip_label": "Исходный IP (необязательно)",
+    "source_ip_placeholder": "например: 144.172.117.179",
+    "source_ip_hint": "Локальный исходящий IP для прямого подключения этой учетной записи к провайдеру; глобальный прокси обходится."
   },
   "accounts": {
     "title": "Управление учётными данными",
@@ -1734,7 +1738,14 @@
     "runtime_current_concurrency": "Активно {{count}}",
     "runtime_frozen_until": "Заморожено до {{value}}",
     "runtime_rate_limited_until": "Лимит до {{value}}",
-    "runtime_last_skip_reason": "Пропуск: {{value}}"
+    "runtime_last_skip_reason": "Пропуск: {{value}}",
+    "source_ip_label": "Исходный IP (source_ip)",
+    "source_ip_placeholder": "например: 144.172.117.179",
+    "source_ip_hint": "Выберите исходящий IP сервера для обращений этого аккаунта к upstream; оставьте пустым для исходящего IP по умолчанию.",
+    "source_ip_bound_accounts": "Привязано аккаунтов: {{count}}",
+    "source_ip_current_option": "Текущий выбор",
+    "source_ip_card_label": "Привязанный IP",
+    "source_ip_card_title": "Исходный IP, привязанный к этому аккаунту: {{ip}}"
   },
   "antigravity_quota": {
     "title": "Квота Antigravity",
@@ -5836,5 +5847,44 @@
     "smart_reason_critical_available_accounts": "Достигнут критический уровень доступных аккаунтов",
     "smart_reason_emergency_pool_vacuum": "Экстренное пополнение пустого пула",
     "smart_reason_virtual_demand_memory": "Пополнение по сохранённому спросу"
+  },
+  "egress_ip": {
+    "card_eyebrow": "Выходной IP в один клик",
+    "card_title": "Простая настройка выходного IP для аккаунтов",
+    "card_desc": "Без правки YAML, Compose или auth JSON: введите новый IP, система смонтирует его на сервере, проверит исходящий адрес и массово привяжет аккаунты.",
+    "open_wizard": "Открыть мастер",
+    "modal_title": "Мастер настройки выходного IP",
+    "hero_eyebrow": "Source IP Wizard",
+    "hero_title": "Три шага: проверить сервер → смонтировать IP → привязать аккаунты",
+    "hero_desc": "Для серверов Pro-пула: после добавления Floating IP аккаунты выбирают выход как через прокси, оставаясь на нативном маршруте хоста.",
+    "detect_server_ip": "Проверить IP сервера",
+    "step_server": "1. Проверка сети сервера",
+    "native_ip": "Нативный выходной IP",
+    "default_interface": "Интерфейс по умолчанию",
+    "no_local_ips": "Локальные IPv4 адреса пока не обнаружены",
+    "step_source_ip": "2. Монтаж и проверка нового IP",
+    "source_ip_label": "Новый Floating IP",
+    "source_ip_hint": "Введите IP из панели провайдера. Система смонтирует его как /32 и проверит исходящий адрес.",
+    "mount_and_verify": "Смонтировать и проверить",
+    "one_click_finish": "Завершить в один клик",
+    "remove_source_ip": "Удалить с сервера",
+    "latest_result": "Последний результат",
+    "result_mounted": "Смонтирован",
+    "result_interface": "Интерфейс",
+    "result_outbound": "Проверенный выход",
+    "step_accounts": "3. Выберите аккаунты для привязки",
+    "accounts_desc": "API-ключи и OAuth/Auth-файлы выбраны по умолчанию. Один клик автоматически запишет source-ip/source_ip.",
+    "select_all": "Выбрать все",
+    "clear_selection": "Очистить",
+    "bind_selected": "Привязать выбранные",
+    "default_account_subtitle": "Конфигурация аккаунта по умолчанию",
+    "auth_file_subtitle_with_index": "Auth-файл · auth_index {{authIndex}}",
+    "auth_file_subtitle": "Auth-файл",
+    "invalid_source_ip": "Введите корректный IPv4 адрес",
+    "no_targets_selected": "Выберите хотя бы один аккаунт",
+    "bind_partial_failed": "Не удалось привязать {{count}} аккаунтов. Проверьте текущую конфигурацию и повторите.",
+    "mount_before_bind_failed": "Монтаж IP или проверка выхода не завершены, поэтому привязка аккаунтов приостановлена.",
+    "unbound": "Не привязан",
+    "no_accounts": "Нет аккаунтов для привязки"
   }
 }

@@ -300,7 +300,7 @@ func standardDeployRenderRequest() model.ContainerOpsDeployRenderRequest {
 			Network:        "cpamp-cpa_default",
 			StackRoot:      "/opt/cpamp/stacks/cpa",
 			BackupRoot:     "/opt/cpamp/backups",
-			NewAPIBaseURL:  "http://cli-proxy-api:8317/v1",
+			NewAPIBaseURL:  "http://host.docker.internal:8317/v1",
 			Services: []model.ContainerOpsManifestService{
 				{Role: "cpa", Service: "cli-proxy-api", Image: "seakee/cli-proxy-api:latest", Managed: true, IncludeInCompose: true},
 				{Role: "cpamp", Service: "cpa-manager-plus", Image: "seakee/cpa-manager-plus:latest", Managed: true, IncludeInCompose: true},
@@ -320,7 +320,7 @@ func standardDeployRenderRequest() model.ContainerOpsDeployRenderRequest {
 				"  cpa-manager-plus:",
 				"    image: seakee/cpa-manager-plus:latest",
 				"  cpamp-agent:",
-				"    command: [\"cpamp-agent\"]",
+				"    entrypoint: [\"cpamp-agent\"]",
 				"networks:",
 				"  cpamp-cpa_default:",
 				"    driver: bridge",

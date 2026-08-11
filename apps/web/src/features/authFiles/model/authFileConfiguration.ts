@@ -23,6 +23,7 @@ export type XaiRoutingMode = 'grok-build' | 'official-api';
 export type AuthFileConfigurationDraft = {
   prefix: string;
   proxyUrl: string;
+  sourceIp: string;
   priority: string;
   weight: string;
   note: string;
@@ -336,6 +337,7 @@ export const buildAuthFileConfigurationDraft = (
   return {
     prefix: readTrimmedString(record.prefix),
     proxyUrl: readTrimmedString(record.proxy_url ?? record.proxyUrl ?? record['proxy-url']),
+    sourceIp: readTrimmedString(record.source_ip ?? record.sourceIp ?? record['source-ip']),
     priority: readPriorityText(record.priority),
     weight: readIntegerText(record.weight),
     note: readTrimmedString(record.note),
@@ -431,6 +433,10 @@ export const buildAuthFileConfigurationPatch = (
     patch.proxy_url = nextProxyUrl;
     tombstoneLegacyAliases(patch, record, ['proxyUrl', 'proxy-url']);
   }
+
+  const originalSourceIp = originalDraft.sourceIp.trim();
+  const nextSourceIp = draft.sourceIp.trim();
+  if (nextSourceIp !== originalSourceIp) patch.source_ip = nextSourceIp;
 
   if (draft.priority.trim() !== originalDraft.priority.trim()) {
     const trimmed = draft.priority.trim();

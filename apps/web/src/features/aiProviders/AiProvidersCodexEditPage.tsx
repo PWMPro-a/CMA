@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
+import { SourceIpSelect } from '@/components/ui/SourceIpSelect';
 import { HeaderInputList } from '@/components/ui/HeaderInputList';
 import { ModelInputList } from '@/components/ui/ModelInputList';
 import { Modal } from '@/components/ui/Modal';
@@ -36,6 +37,8 @@ import {
 import type { ProviderFormState } from '@/components/providers';
 import type { ModelInfo } from '@/utils/models';
 import { parseProviderIndexParam } from '@/features/aiProviders/model/routeParams';
+import { useKnownSourceIpOptions } from '@/hooks';
+import { collectSourceIpUsageCounts } from '@/utils/sourceIp';
 import layoutStyles from './AiProvidersEditLayout.module.scss';
 import styles from './AiProvidersPage.module.scss';
 
@@ -51,6 +54,7 @@ const buildEmptyForm = (): ProviderFormState => ({
   baseUrl: '',
   websockets: false,
   proxyUrl: '',
+  sourceIp: '',
   headers: [],
   models: [],
   excludedModels: [],
@@ -85,6 +89,7 @@ type CodexFormBaseline = {
   websockets: boolean;
   disableCooling: boolean;
   proxyUrl: string;
+  sourceIp: string;
   headers: ReturnType<typeof normalizeHeaderEntries>;
   models: ReturnType<typeof normalizeModelEntries>;
   excludedModels: string[];
@@ -102,6 +107,7 @@ const buildCodexBaseline = (form: ProviderFormState): CodexFormBaseline => ({
   websockets: Boolean(form.websockets),
   disableCooling: Boolean(form.disableCooling),
   proxyUrl: String(form.proxyUrl ?? '').trim(),
+  sourceIp: String(form.sourceIp ?? '').trim(),
   headers: normalizeHeaderEntries(form.headers),
   models: normalizeModelEntries(form.modelEntries),
   excludedModels: parseExcludedModels(form.excludedText ?? ''),
@@ -152,6 +158,19 @@ export function AiProvidersCodexEditPage() {
   }, [configs, editIndex]);
 
   const invalidIndex = editIndex !== null && !initialData;
+  const sourceIpUsageCounts = useMemo(
+    () => collectSourceIpUsageCounts(configs.map((config) => config.sourceIp)),
+    [configs]
+  );
+  const sourceIpFallbackValues = useMemo(() => [String(form.sourceIp ?? '').trim()], [form.sourceIp]);
+  const {
+    options: sourceIpOptions,
+    loading: sourceIpOptionsLoading,
+  } = useKnownSourceIpOptions({
+    usageCounts: sourceIpUsageCounts,
+    fallbackValues: sourceIpFallbackValues,
+    enabled: !disableControls,
+  });
 
   const title =
     editIndex !== null
@@ -277,6 +296,7 @@ export function AiProvidersCodexEditPage() {
     baseline.websockets !== Boolean(form.websockets) ||
     baseline.disableCooling !== Boolean(form.disableCooling) ||
     baseline.proxyUrl !== String(form.proxyUrl ?? '').trim() ||
+    baseline.sourceIp !== String(form.sourceIp ?? '').trim() ||
     isHeadersDirty ||
     isModelsDirty ||
     isExcludedModelsDirty;
@@ -627,6 +647,7 @@ export function AiProvidersCodexEditPage() {
         baseUrl,
         websockets: Boolean(form.websockets),
         proxyUrl: form.proxyUrl?.trim() || undefined,
+        sourceIp: form.sourceIp?.trim() || undefined,
         headers: buildHeaderObject(form.headers),
         models: entriesToModels(form.modelEntries),
         excludedModels: parseExcludedModels(form.excludedText),
@@ -640,11 +661,13 @@ export function AiProvidersCodexEditPage() {
       } else {
         await providersApi.createCodexConfig(payload);
       }
-      const syncedList = await providersApi.getCodexConfigs().catch(() =>
-        editIndex !== null
-          ? configs.map((item, index) => (index === editIndex ? payload : item))
-          : [...configs, payload]
-      );
+      const syncedList = await providersApi
+        .getCodexConfigs()
+        .catch(() =>
+          editIndex !== null
+            ? configs.map((item, index) => (index === editIndex ? payload : item))
+            : [...configs, payload]
+        );
       updateConfigValue('codex-api-key', syncedList);
       clearCache('codex-api-key');
       showNotification(
@@ -786,6 +809,15 @@ export function AiProvidersCodexEditPage() {
               label={t('ai_providers.codex_add_modal_proxy_label')}
               value={form.proxyUrl ?? ''}
               onChange={(e) => setForm((prev) => ({ ...prev, proxyUrl: e.target.value }))}
+              disabled={disableControls || saving}
+            />
+            <SourceIpSelect
+              label={t('ai_providers.source_ip_label')}
+              hint={t('ai_providers.source_ip_hint')}
+              value={form.sourceIp ?? ''}
+              onChange={(value) => setForm((prev) => ({ ...prev, sourceIp: value }))}
+              options={sourceIpOptions}
+              loading={sourceIpOptionsLoading}
               disabled={disableControls || saving}
             />
             <HeaderInputList

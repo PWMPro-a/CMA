@@ -1,6 +1,7 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
 import { Input } from '@/components/ui/Input';
+import { SourceIpSelect } from '@/components/ui/SourceIpSelect';
 import type { AccountRow } from '@/features/accounts/model/accountRows';
 import type { UseAuthFileConfigurationEditorResult } from '@/features/authFiles/hooks/useAuthFileConfigurationEditor';
 import type { AuthFileConfigurationDraft } from '@/features/authFiles/model/authFileConfiguration';
@@ -17,6 +18,17 @@ vi.mock('react-i18next', async (importOriginal) => {
     }),
   };
 });
+
+vi.mock('@/hooks/useKnownSourceIpOptions', () => ({
+  useKnownSourceIpOptions: () => ({
+    inventory: null,
+    loading: false,
+    options: [
+      { value: '', label: 'common.not_set' },
+      { value: '144.172.117.178', label: '144.172.117.178' },
+    ],
+  }),
+}));
 
 const readText = (value: unknown): string => {
   if (typeof value === 'string' || typeof value === 'number') return String(value);
@@ -39,6 +51,7 @@ const makeDraft = (
 ): AuthFileConfigurationDraft => ({
   prefix: '',
   proxyUrl: '',
+  sourceIp: '',
   priority: '',
   weight: '',
   note: '',
@@ -163,6 +176,16 @@ describe('AccountConfigurationTab', () => {
     ).toBe(true);
     expect(text).toContain('auth_files.websockets_label');
     expect(text).not.toContain('ai_providers.claude_cloak_mode_label');
+  });
+
+  it('exposes account source IP selection in the primary configuration drawer', () => {
+    const editor = makeEditor('codex', makeDraft({ sourceIp: '144.172.117.178' }));
+    const renderer = renderTab(makeRow('codex'), editor);
+    const select = renderer.root.findByType(SourceIpSelect);
+
+    expect(select.props.value).toBe('144.172.117.178');
+    act(() => select.props.onChange('144.172.117.179'));
+    expect(editor.updateField).toHaveBeenCalledWith('sourceIp', '144.172.117.179');
   });
 
   it('shows Claude cloak controls without xAI or websocket fields', () => {

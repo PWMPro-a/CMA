@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
+import { useKnownSourceIpOptions } from '@/hooks';
 import { providersApi } from '@/services/api';
 import {
   useAuthStore,
@@ -22,6 +23,8 @@ import {
 } from '@/utils/compare';
 import { excludedModelsToText, parseExcludedModels } from '@/components/providers/utils';
 import { modelsToEntries } from '@/components/ui/modelInputListUtils';
+import type { SelectOption } from '@/components/ui/Select';
+import { collectSourceIpUsageCounts } from '@/utils/sourceIp';
 import {
   buildProviderDraftKey,
   parseProviderIndexParam,
@@ -49,6 +52,8 @@ export type ClaudeEditOutletContext = {
   testMessage: string;
   setTestMessage: Dispatch<SetStateAction<string>>;
   availableModels: string[];
+  sourceIpOptions: ReadonlyArray<SelectOption>;
+  sourceIpOptionsLoading: boolean;
   handleBack: () => void;
   handleSave: () => Promise<void>;
   mergeDiscoveredModels: (selectedModels: ModelInfo[]) => void;
@@ -61,6 +66,7 @@ const buildEmptyForm = (): ProviderFormState => ({
   prefix: '',
   baseUrl: '',
   proxyUrl: '',
+  sourceIp: '',
   headers: [],
   models: [],
   excludedModels: [],
@@ -113,6 +119,7 @@ const buildClaudeBaseline = (form: ProviderFormState): ClaudeEditBaseline => ({
   prefix: String(form.prefix ?? '').trim(),
   baseUrl: String(form.baseUrl ?? '').trim(),
   proxyUrl: String(form.proxyUrl ?? '').trim(),
+  sourceIp: String(form.sourceIp ?? '').trim(),
   disableCooling: Boolean(form.disableCooling),
   rebuildMidSystemMessage: Boolean(form.rebuildMidSystemMessage),
   headers: normalizeHeaderEntries(form.headers),
@@ -216,6 +223,19 @@ export function AiProvidersClaudeEditLayout() {
     () => form.modelEntries.map((entry) => entry.name.trim()).filter(Boolean),
     [form.modelEntries]
   );
+  const sourceIpUsageCounts = useMemo(
+    () => collectSourceIpUsageCounts(configs.map((config) => config.sourceIp)),
+    [configs]
+  );
+  const sourceIpFallbackValues = useMemo(() => [String(form.sourceIp ?? '').trim()], [form.sourceIp]);
+  const {
+    options: sourceIpOptions,
+    loading: sourceIpOptionsLoading,
+  } = useKnownSourceIpOptions({
+    usageCounts: sourceIpUsageCounts,
+    fallbackValues: sourceIpFallbackValues,
+    enabled: !disableControls,
+  });
 
   useEffect(() => {
     acquireDraft(draftKey);
@@ -333,6 +353,7 @@ export function AiProvidersClaudeEditLayout() {
       baseline.prefix !== String(form.prefix ?? '').trim() ||
       baseline.baseUrl !== String(form.baseUrl ?? '').trim() ||
       baseline.proxyUrl !== String(form.proxyUrl ?? '').trim() ||
+      baseline.sourceIp !== String(form.sourceIp ?? '').trim() ||
       baseline.disableCooling !== Boolean(form.disableCooling) ||
       baseline.rebuildMidSystemMessage !== Boolean(form.rebuildMidSystemMessage) ||
       isHeadersDirty ||
@@ -432,6 +453,7 @@ export function AiProvidersClaudeEditLayout() {
         prefix: form.prefix?.trim() || undefined,
         baseUrl: (form.baseUrl ?? '').trim() || undefined,
         proxyUrl: form.proxyUrl?.trim() || undefined,
+        sourceIp: form.sourceIp?.trim() || undefined,
         headers: buildHeaderObject(form.headers),
         models: form.modelEntries
           .map((entry) => {
@@ -454,11 +476,13 @@ export function AiProvidersClaudeEditLayout() {
       } else {
         await providersApi.createClaudeConfig(payload);
       }
-      const syncedList = await providersApi.getClaudeConfigs().catch(() =>
-        editIndex !== null
-          ? configs.map((item, index) => (index === editIndex ? payload : item))
-          : [...configs, payload]
-      );
+      const syncedList = await providersApi
+        .getClaudeConfigs()
+        .catch(() =>
+          editIndex !== null
+            ? configs.map((item, index) => (index === editIndex ? payload : item))
+            : [...configs, payload]
+        );
       setConfigs(syncedList);
       updateConfigValue('claude-api-key', syncedList);
       clearCache('claude-api-key');
@@ -515,6 +539,8 @@ export function AiProvidersClaudeEditLayout() {
           testMessage,
           setTestMessage,
           availableModels,
+          sourceIpOptions,
+          sourceIpOptionsLoading,
           handleBack,
           handleSave,
           mergeDiscoveredModels,

@@ -18,6 +18,7 @@ export interface ModelAlias {
 export interface ApiKeyEntry {
   apiKey: string;
   proxyUrl?: string;
+  sourceIp?: string;
   headers?: Record<string, string>;
   authIndex?: string;
 }
@@ -35,6 +36,7 @@ export interface GeminiKeyConfig {
   prefix?: string;
   baseUrl?: string;
   proxyUrl?: string;
+  sourceIp?: string;
   models?: ModelAlias[];
   headers?: Record<string, string>;
   excludedModels?: string[];
@@ -49,6 +51,7 @@ export interface ProviderKeyConfig {
   baseUrl?: string;
   websockets?: boolean;
   proxyUrl?: string;
+  sourceIp?: string;
   headers?: Record<string, string>;
   models?: ModelAlias[];
   excludedModels?: string[];

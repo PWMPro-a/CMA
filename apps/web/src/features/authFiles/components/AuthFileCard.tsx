@@ -263,6 +263,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
           : styles.agentRegistrationActive;
   const agentRegistrationNextRetry = formatRegistrationTime(agentRegistration?.next_retry_at);
   const projectIdValue = getProjectIdValue(file);
+  const sourceIpValue = readRuntimeText(file, 'source_ip', 'sourceIp');
   const noteValue = typeof file.note === 'string' ? file.note.trim() : '';
   const subscription = isAntigravity && !isRuntimeOnly ? antigravitySubscription : undefined;
   const subscriptionData = subscription?.status === 'success' ? subscription.data : undefined;
@@ -462,6 +463,17 @@ export function AuthFileCard(props: AuthFileCardProps) {
               <span className={styles.fileName} title={file.name}>
                 {file.name}
               </span>
+              {sourceIpValue && (
+                <div
+                  className={styles.sourceIpText}
+                  title={t('auth_files.source_ip_card_title', { ip: sourceIpValue })}
+                >
+                  <span className={styles.sourceIpLabel}>
+                    {t('auth_files.source_ip_card_label')}
+                  </span>
+                  <span className={styles.sourceIpValue}>{sourceIpValue}</span>
+                </div>
+              )}
               {!compact && noteValue && (
                 <div className={styles.noteText} title={noteValue}>
                   <span className={styles.noteLabel}>{t('auth_files.note_display')}</span>

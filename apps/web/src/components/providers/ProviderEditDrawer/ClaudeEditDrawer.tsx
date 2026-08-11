@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
+import { SourceIpSelect } from '@/components/ui/SourceIpSelect';
 import { HeaderInputList } from '@/components/ui/HeaderInputList';
 import { ModelInputList } from '@/components/ui/ModelInputList';
 import { Modal } from '@/components/ui/Modal';
@@ -28,6 +29,7 @@ import {
 import { modelsToEntries } from '@/components/ui/modelInputListUtils';
 import type { ProviderFormState } from '@/components/providers';
 import type { ModelInfo } from '@/utils/models';
+import type { SelectOption } from '@/components/ui/Select';
 import styles from '@/features/aiProviders/AiProvidersPage.module.scss';
 
 interface ClaudeEditDrawerProps {
@@ -36,6 +38,8 @@ interface ClaudeEditDrawerProps {
   disabled: boolean;
   onClose: () => void;
   onSaved: () => void;
+  sourceIpOptions?: ReadonlyArray<SelectOption>;
+  sourceIpOptionsLoading?: boolean;
 }
 
 type ClaudeFormBaseline = ReturnType<typeof buildClaudeBaseline>;
@@ -50,6 +54,7 @@ const buildEmptyForm = (): ProviderFormState => ({
   prefix: '',
   baseUrl: '',
   proxyUrl: '',
+  sourceIp: '',
   headers: [],
   models: [],
   excludedModels: [],
@@ -102,6 +107,7 @@ const buildClaudeBaseline = (form: ProviderFormState) => ({
   prefix: String(form.prefix ?? '').trim(),
   baseUrl: String(form.baseUrl ?? '').trim(),
   proxyUrl: String(form.proxyUrl ?? '').trim(),
+  sourceIp: String(form.sourceIp ?? '').trim(),
   disableCooling: Boolean(form.disableCooling),
   rebuildMidSystemMessage: Boolean(form.rebuildMidSystemMessage),
   headers: normalizeHeaderEntries(form.headers),
@@ -136,6 +142,8 @@ export function ClaudeEditDrawer({
   disabled,
   onClose,
   onSaved,
+  sourceIpOptions,
+  sourceIpOptionsLoading = false,
 }: ClaudeEditDrawerProps) {
   const { t } = useTranslation();
   const { showNotification } = useNotificationStore();
@@ -149,6 +157,13 @@ export function ClaudeEditDrawer({
   const [form, setForm] = useState<ProviderFormState>(buildEmptyForm);
   const [baseline, setBaseline] = useState<ClaudeFormBaseline>(
     buildClaudeBaseline(buildEmptyForm())
+  );
+  const resolvedSourceIpOptions = useMemo(
+    () =>
+      sourceIpOptions?.length
+        ? sourceIpOptions
+        : [{ value: '', label: t('common.not_set') }],
+    [sourceIpOptions, t]
   );
   const [loaded, setLoaded] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
@@ -244,6 +259,7 @@ export function ClaudeEditDrawer({
       baseline.prefix !== String(form.prefix ?? '').trim() ||
       baseline.baseUrl !== String(form.baseUrl ?? '').trim() ||
       baseline.proxyUrl !== String(form.proxyUrl ?? '').trim() ||
+      baseline.sourceIp !== String(form.sourceIp ?? '').trim() ||
       baseline.disableCooling !== Boolean(form.disableCooling) ||
       baseline.rebuildMidSystemMessage !== Boolean(form.rebuildMidSystemMessage) ||
       !areKeyValueEntriesEqual(baseline.headers, normalizeHeaderEntries(form.headers)) ||
@@ -286,11 +302,7 @@ export function ClaudeEditDrawer({
 
   const configuredModelNames = useMemo(
     () =>
-      new Set(
-        form.modelEntries
-          .map((entry) => entry.name.trim().toLowerCase())
-          .filter(Boolean)
-      ),
+      new Set(form.modelEntries.map((entry) => entry.name.trim().toLowerCase()).filter(Boolean)),
     [form.modelEntries]
   );
 
@@ -394,9 +406,7 @@ export function ClaudeEditDrawer({
             hasCustomXApiKey ? 'yes' : 'no'
           }, customAuthorization=${hasAuthorization ? 'yes' : 'no'}]`
         : '';
-      setModelDiscoveryError(
-        `${t('ai_providers.claude_models_fetch_error')}: ${message}${diag}`
-      );
+      setModelDiscoveryError(`${t('ai_providers.claude_models_fetch_error')}: ${message}${diag}`);
     } finally {
       setModelDiscoveryFetching(false);
     }
@@ -427,15 +437,18 @@ export function ClaudeEditDrawer({
     });
   }, [configuredModelNames, discoveredModels]);
 
-  const toggleModelDiscoverySelection = useCallback((name: string) => {
-    if (configuredModelNames.has(name.toLowerCase())) return;
-    setModelDiscoverySelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
-  }, [configuredModelNames]);
+  const toggleModelDiscoverySelection = useCallback(
+    (name: string) => {
+      if (configuredModelNames.has(name.toLowerCase())) return;
+      setModelDiscoverySelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(name)) next.delete(name);
+        else next.add(name);
+        return next;
+      });
+    },
+    [configuredModelNames]
+  );
 
   const handleSelectVisibleModels = useCallback(() => {
     setModelDiscoverySelected((prev) => {
@@ -568,6 +581,7 @@ export function ClaudeEditDrawer({
         prefix: form.prefix?.trim() || undefined,
         baseUrl: (form.baseUrl ?? '').trim() || undefined,
         proxyUrl: form.proxyUrl?.trim() || undefined,
+        sourceIp: form.sourceIp?.trim() || undefined,
         headers: buildHeaderObject(form.headers),
         models: form.modelEntries
           .map((entry) => {
@@ -589,11 +603,13 @@ export function ClaudeEditDrawer({
       } else {
         await providersApi.createClaudeConfig(payload);
       }
-      const syncedList = await providersApi.getClaudeConfigs().catch(() =>
-        editIndex !== null
-          ? configs.map((item, index) => (index === editIndex ? payload : item))
-          : [...configs, payload]
-      );
+      const syncedList = await providersApi
+        .getClaudeConfigs()
+        .catch(() =>
+          editIndex !== null
+            ? configs.map((item, index) => (index === editIndex ? payload : item))
+            : [...configs, payload]
+        );
       updateConfigValue('claude-api-key', syncedList);
       clearCache('claude-api-key');
       showNotification(
@@ -693,6 +709,15 @@ export function ClaudeEditDrawer({
               onChange={(e) => setForm((prev) => ({ ...prev, proxyUrl: e.target.value }))}
               disabled={saving || disabled || isTesting}
             />
+            <SourceIpSelect
+              label={t('ai_providers.source_ip_label')}
+              hint={t('ai_providers.source_ip_hint')}
+              value={form.sourceIp ?? ''}
+              onChange={(value) => setForm((prev) => ({ ...prev, sourceIp: value }))}
+              options={resolvedSourceIpOptions}
+              loading={sourceIpOptionsLoading}
+              disabled={saving || disabled || isTesting}
+            />
             <div className="form-group">
               <label>{t('ai_providers.disable_cooling_label')}</label>
               <ToggleSwitch
@@ -713,9 +738,7 @@ export function ClaudeEditDrawer({
                 disabled={saving || disabled || isTesting}
                 ariaLabel={t('ai_providers.rebuild_mid_system_message_label')}
               />
-              <div className="hint">
-                {t('ai_providers.rebuild_mid_system_message_hint')}
-              </div>
+              <div className="hint">{t('ai_providers.rebuild_mid_system_message_hint')}</div>
             </div>
             <HeaderInputList
               entries={form.headers}
@@ -998,9 +1021,7 @@ export function ClaudeEditDrawer({
                                 )}
                               </div>
                               {model.description && (
-                                <div className={styles.modelDiscoveryDesc}>
-                                  {model.description}
-                                </div>
+                                <div className={styles.modelDiscoveryDesc}>{model.description}</div>
                               )}
                             </div>
                           }

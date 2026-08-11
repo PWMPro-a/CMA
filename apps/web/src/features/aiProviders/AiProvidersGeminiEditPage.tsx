@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
+import { SourceIpSelect } from '@/components/ui/SourceIpSelect';
 import { HeaderInputList } from '@/components/ui/HeaderInputList';
 import { ModelInputList } from '@/components/ui/ModelInputList';
 import { Modal } from '@/components/ui/Modal';
@@ -27,6 +28,8 @@ import { entriesToModels, modelsToEntries } from '@/components/ui/modelInputList
 import { excludedModelsToText, parseExcludedModels } from '@/components/providers/utils';
 import type { GeminiFormState } from '@/components/providers';
 import { parseProviderIndexParam } from '@/features/aiProviders/model/routeParams';
+import { useKnownSourceIpOptions } from '@/hooks';
+import { collectSourceIpUsageCounts } from '@/utils/sourceIp';
 import layoutStyles from './AiProvidersEditLayout.module.scss';
 import styles from './AiProvidersPage.module.scss';
 
@@ -38,6 +41,7 @@ const buildEmptyForm = (): GeminiFormState => ({
   prefix: '',
   baseUrl: '',
   proxyUrl: '',
+  sourceIp: '',
   headers: [],
   modelEntries: [{ name: '', alias: '' }],
   excludedModels: [],
@@ -69,6 +73,7 @@ type GeminiFormBaseline = {
   prefix: string;
   baseUrl: string;
   proxyUrl: string;
+  sourceIp: string;
   disableCooling: boolean;
   headers: ReturnType<typeof normalizeHeaderEntries>;
   models: ReturnType<typeof normalizeModelEntries>;
@@ -85,6 +90,7 @@ const buildGeminiBaseline = (form: GeminiFormState): GeminiFormBaseline => ({
   prefix: String(form.prefix ?? '').trim(),
   baseUrl: String(form.baseUrl ?? '').trim(),
   proxyUrl: String(form.proxyUrl ?? '').trim(),
+  sourceIp: String(form.sourceIp ?? '').trim(),
   disableCooling: Boolean(form.disableCooling),
   headers: normalizeHeaderEntries(form.headers),
   models: normalizeModelEntries(form.modelEntries),
@@ -132,6 +138,19 @@ export function AiProvidersGeminiEditPage() {
   }, [configs, editIndex]);
 
   const invalidIndex = editIndex !== null && !initialData;
+  const sourceIpUsageCounts = useMemo(
+    () => collectSourceIpUsageCounts(configs.map((config) => config.sourceIp)),
+    [configs]
+  );
+  const sourceIpFallbackValues = useMemo(() => [String(form.sourceIp ?? '').trim()], [form.sourceIp]);
+  const {
+    options: sourceIpOptions,
+    loading: sourceIpOptionsLoading,
+  } = useKnownSourceIpOptions({
+    usageCounts: sourceIpUsageCounts,
+    fallbackValues: sourceIpFallbackValues,
+    enabled: !disableControls,
+  });
 
   const title =
     editIndex !== null
@@ -234,10 +253,7 @@ export function AiProvidersGeminiEditPage() {
     });
   }, [discoveredModels, modelDiscoverySearch]);
   const configuredModelNames = useMemo(
-    () =>
-      new Set(
-        normalizedModels.map((entry) => entry.name.trim().toLowerCase()).filter(Boolean)
-      ),
+    () => new Set(normalizedModels.map((entry) => entry.name.trim().toLowerCase()).filter(Boolean)),
     [normalizedModels]
   );
   const visibleDiscoveredModelNames = useMemo(
@@ -448,6 +464,7 @@ export function AiProvidersGeminiEditPage() {
     baseline.prefix !== String(form.prefix ?? '').trim() ||
     baseline.baseUrl !== String(form.baseUrl ?? '').trim() ||
     baseline.proxyUrl !== String(form.proxyUrl ?? '').trim() ||
+    baseline.sourceIp !== String(form.sourceIp ?? '').trim() ||
     baseline.disableCooling !== Boolean(form.disableCooling) ||
     isHeadersDirty ||
     isModelsDirty ||
@@ -484,6 +501,7 @@ export function AiProvidersGeminiEditPage() {
         prefix: form.prefix?.trim() || undefined,
         baseUrl: form.baseUrl?.trim() || undefined,
         proxyUrl: form.proxyUrl?.trim() || undefined,
+        sourceIp: form.sourceIp?.trim() || undefined,
         headers: buildHeaderObject(form.headers),
         models: entriesToModels(normalizedModelEntries),
         excludedModels: parseExcludedModels(form.excludedText),
@@ -496,11 +514,13 @@ export function AiProvidersGeminiEditPage() {
       } else {
         await providersApi.createGeminiKey(payload);
       }
-      const syncedList = await providersApi.getGeminiKeys().catch(() =>
-        editIndex !== null
-          ? configs.map((item, index) => (index === editIndex ? payload : item))
-          : [...configs, payload]
-      );
+      const syncedList = await providersApi
+        .getGeminiKeys()
+        .catch(() =>
+          editIndex !== null
+            ? configs.map((item, index) => (index === editIndex ? payload : item))
+            : [...configs, payload]
+        );
       updateConfigValue('gemini-api-key', syncedList);
       clearCache('gemini-api-key');
       showNotification(
@@ -620,6 +640,15 @@ export function AiProvidersGeminiEditPage() {
               placeholder={t('ai_providers.gemini_add_modal_proxy_placeholder')}
               value={form.proxyUrl ?? ''}
               onChange={(e) => setForm((prev) => ({ ...prev, proxyUrl: e.target.value }))}
+              disabled={disableControls || saving}
+            />
+            <SourceIpSelect
+              label={t('ai_providers.source_ip_label')}
+              hint={t('ai_providers.source_ip_hint')}
+              value={form.sourceIp ?? ''}
+              onChange={(value) => setForm((prev) => ({ ...prev, sourceIp: value }))}
+              options={sourceIpOptions}
+              loading={sourceIpOptionsLoading}
               disabled={disableControls || saving}
             />
             <HeaderInputList

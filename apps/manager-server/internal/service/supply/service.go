@@ -5825,6 +5825,11 @@ func normalizeSupplyAccountObject(object map[string]any, exportedAt any) (normal
 	} else {
 		return normalizedSupplyAccount{}, errors.New("account does not contain OAuth token data")
 	}
+	// Supplier-managed pool accounts must remain immediately selectable after
+	// account-level or model-selection errors. An explicit zero is required:
+	// CPA otherwise applies its implicit 30-second freeze whenever another
+	// runtime-limit field (for example max_concurrency) is present.
+	metadata["selection_error_freeze_seconds"] = 0
 
 	identity := supplyAccountIdentity(metadata)
 	if identity == "" {

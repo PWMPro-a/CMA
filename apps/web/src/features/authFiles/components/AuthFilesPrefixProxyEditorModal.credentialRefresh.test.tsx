@@ -44,6 +44,7 @@ const createEditor = (
   providerKey,
   prefix: '',
   proxyUrl: '',
+  sourceIp: '',
   priority: '',
   maxConcurrency: '',
   rateLimitMaxRequests: '',

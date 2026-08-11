@@ -5,6 +5,7 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
+import { SourceIpSelect } from '@/components/ui/SourceIpSelect';
 import { HeaderInputList } from '@/components/ui/HeaderInputList';
 import { ModelInputList } from '@/components/ui/ModelInputList';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
@@ -62,6 +63,8 @@ export function AiProvidersClaudeEditPage() {
     testMessage,
     setTestMessage,
     availableModels,
+    sourceIpOptions,
+    sourceIpOptionsLoading,
     handleBack,
     handleSave,
   } = useOutletContext<ClaudeEditOutletContext>();
@@ -352,6 +355,15 @@ export function AiProvidersClaudeEditPage() {
               onChange={(e) => setForm((prev) => ({ ...prev, proxyUrl: e.target.value }))}
               disabled={saving || disableControls || isTesting}
             />
+            <SourceIpSelect
+              label={t('ai_providers.source_ip_label')}
+              hint={t('ai_providers.source_ip_hint')}
+              value={form.sourceIp ?? ''}
+              onChange={(value) => setForm((prev) => ({ ...prev, sourceIp: value }))}
+              options={sourceIpOptions}
+              loading={sourceIpOptionsLoading}
+              disabled={saving || disableControls || isTesting}
+            />
             <HeaderInputList
               entries={form.headers}
               onChange={(entries) => setForm((prev) => ({ ...prev, headers: entries }))}
@@ -511,9 +523,7 @@ export function AiProvidersClaudeEditPage() {
                 disabled={saving || disableControls || isTesting}
                 ariaLabel={t('ai_providers.rebuild_mid_system_message_label')}
               />
-              <div className="hint">
-                {t('ai_providers.rebuild_mid_system_message_hint')}
-              </div>
+              <div className="hint">{t('ai_providers.rebuild_mid_system_message_hint')}</div>
             </div>
 
             <div className={styles.modelConfigSection}>

@@ -1522,6 +1522,43 @@
   word-break: break-word;
 }
 
+.sourceIpText {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 24%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--surface-subtle));
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.sourceIpLabel {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-weight: 700;
+  white-space: nowrap;
+
+  &::after {
+    content: ':';
+  }
+}
+
+.sourceIpValue {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sortSelect {
   width: 100%;
   min-width: 0;

@@ -121,7 +121,7 @@ describe('installer script', () => {
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('Install scope: CPA + CPAMP stack');
-    expect(result.stdout).toContain('CPA URL for CPAMP: http://cli-proxy-api:8317');
+    expect(result.stdout).toContain('CPA URL for CPAMP: http://host.docker.internal:8317');
     expect(result.stdout).toContain('docker compose pull');
     expect(result.stdout).toContain('Dry-run plan completed');
   });

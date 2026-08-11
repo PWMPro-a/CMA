@@ -38,6 +38,7 @@ type AuthFileContentErrorKey =
 export type PrefixProxyEditorField =
   | 'prefix'
   | 'proxyUrl'
+  | 'sourceIp'
   | 'priority'
   | 'maxConcurrency'
   | 'rateLimitMaxRequests'
@@ -63,6 +64,7 @@ export type PrefixProxyEditorState = {
   providerKey: string;
   prefix: string;
   proxyUrl: string;
+  sourceIp: string;
   priority: string;
   maxConcurrency: string;
   rateLimitMaxRequests: string;
@@ -274,6 +276,14 @@ const buildAuthFileFieldsPatch = (
     patch.proxy_url = nextProxyURL;
   }
 
+  const originalSourceIP = normalizeTextField(
+    original.source_ip ?? original['source-ip'] ?? original.sourceIp
+  );
+  const nextSourceIP = editor.sourceIp.trim();
+  if (nextSourceIP !== originalSourceIP) {
+    patch.source_ip = nextSourceIP;
+  }
+
   const originalPriority = parsePriorityValue(original.priority);
   const priorityText = editor.priority.trim();
   const nextPriority = parsePriorityValue(priorityText);
@@ -409,6 +419,13 @@ const buildPrefixProxyUpdatedText = (
       delete next.proxy_url;
     }
   }
+  if (patch.source_ip !== undefined) {
+    if (patch.source_ip) {
+      next.source_ip = patch.source_ip;
+    } else {
+      delete next.source_ip;
+    }
+  }
 
   if (patch.priority !== undefined) {
     if (patch.priority === 0) {
@@ -513,6 +530,7 @@ export function useAuthFilesPrefixProxyEditor(
       providerKey: fileProviderKey,
       prefix: '',
       proxyUrl: '',
+      sourceIp: '',
       priority: '',
       maxConcurrency: '',
       rateLimitMaxRequests: '',
@@ -563,6 +581,14 @@ export function useAuthFilesPrefixProxyEditor(
       const json = pickEditableAuthFileFields(content);
       const prefix = typeof json.prefix === 'string' ? json.prefix : '';
       const proxyUrl = typeof json.proxy_url === 'string' ? json.proxy_url : '';
+      const sourceIp =
+        typeof json.source_ip === 'string'
+          ? json.source_ip
+          : typeof json['source-ip'] === 'string'
+            ? json['source-ip']
+            : typeof json.sourceIp === 'string'
+              ? json.sourceIp
+              : '';
       const priority = parsePriorityValue(json.priority);
       const maxConcurrency = readAuthFileIntegerField(json, 'max_concurrency', 'maxConcurrency');
       const rateLimitMaxRequests = readAuthFileIntegerField(
@@ -617,6 +643,7 @@ export function useAuthFilesPrefixProxyEditor(
           providerKey,
           prefix,
           proxyUrl,
+          sourceIp,
           priority: priority !== undefined ? String(priority) : '',
           maxConcurrency: maxConcurrency !== undefined ? String(maxConcurrency) : '',
           rateLimitMaxRequests:
@@ -663,6 +690,7 @@ export function useAuthFilesPrefixProxyEditor(
       if (!prev) return prev;
       if (field === 'prefix') return { ...prev, prefix: String(value) };
       if (field === 'proxyUrl') return { ...prev, proxyUrl: String(value) };
+      if (field === 'sourceIp') return { ...prev, sourceIp: String(value) };
       if (field === 'priority') return { ...prev, priority: String(value) };
       if (field === 'maxConcurrency') return { ...prev, maxConcurrency: String(value) };
       if (field === 'rateLimitMaxRequests') {

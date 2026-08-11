@@ -2,6 +2,7 @@ import { useId, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
+import { SourceIpSelect } from '@/components/ui/SourceIpSelect';
 import { SegmentedTabs } from '@/components/ui/SegmentedTabs';
 import { Select } from '@/components/ui/Select';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
@@ -9,6 +10,8 @@ import { IconCode, IconCopy, IconRefreshCw } from '@/components/ui/icons';
 import type { AccountRow } from '@/features/accounts/model/accountRows';
 import { getProviderLabel } from '@/features/accounts/model/accountsPagePresentation';
 import type { UseAuthFileConfigurationEditorResult } from '@/features/authFiles/hooks/useAuthFileConfigurationEditor';
+import { useKnownSourceIpOptions } from '@/hooks/useKnownSourceIpOptions';
+import type { SourceIpUsageCounts } from '@/utils/sourceIp';
 import {
   AUTH_FILE_WEIGHT_MAX,
   XAI_OFFICIAL_API_BASE_URL,
@@ -22,6 +25,8 @@ type AccountConfigurationTabProps = {
   row: AccountRow;
   disableControls: boolean;
   editor: UseAuthFileConfigurationEditorResult;
+  sourceIpUsageCounts?: SourceIpUsageCounts;
+  sourceIpFallbackValues?: ReadonlyArray<unknown>;
   onCopyText: (text: string) => void | Promise<void>;
 };
 
@@ -29,6 +34,8 @@ export function AccountConfigurationTab({
   row,
   disableControls,
   editor,
+  sourceIpUsageCounts,
+  sourceIpFallbackValues = [],
   onCopyText,
 }: AccountConfigurationTabProps) {
   const { t } = useTranslation();
@@ -44,6 +51,16 @@ export function AccountConfigurationTab({
     sourceMemberCount,
   } = editor;
   const capabilities = getAuthFileConfigurationCapabilities(state?.providerKey || row.provider);
+  const { options: sourceIpOptions, loading: sourceIpOptionsLoading } = useKnownSourceIpOptions({
+    usageCounts: sourceIpUsageCounts,
+    fallbackValues: [
+      ...sourceIpFallbackValues,
+      draft?.sourceIp,
+      row.raw.sourceIp,
+      row.raw.source_ip,
+    ],
+    enabled: !row.runtimeOnly,
+  });
   const providerLabel = getProviderLabel(state?.providerKey || row.provider, t);
   const disabled =
     disableControls || row.disabled || sharedSourceReadOnly || state?.saving === true;
@@ -185,6 +202,18 @@ export function AccountConfigurationTab({
               hint={t('accounts.config_proxy_hint')}
               disabled={disabled}
               onChange={(event) => editor.updateField('proxyUrl', event.target.value)}
+            />
+          </div>
+          <div className={styles.configurationFieldFull}>
+            <SourceIpSelect
+              label={t('auth_files.source_ip_label')}
+              value={draft.sourceIp}
+              options={sourceIpOptions}
+              loading={sourceIpOptionsLoading}
+              hint={t('auth_files.source_ip_hint')}
+              disabled={disabled}
+              ariaLabel={t('auth_files.source_ip_label')}
+              onChange={(value) => editor.updateField('sourceIp', value)}
             />
           </div>
         </div>

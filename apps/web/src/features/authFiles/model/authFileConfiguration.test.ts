@@ -148,6 +148,19 @@ describe('buildAuthFileConfigurationPatch', () => {
     expect(buildAuthFileConfigurationDraft({ priority: -1 }, 'codex').priority).toBe('-1');
   });
 
+  it('loads and patches the canonical account source IP', () => {
+    const record = { type: 'codex', source_ip: '144.172.117.178' };
+    const original = buildAuthFileConfigurationDraft(record, 'codex');
+
+    expect(original.sourceIp).toBe('144.172.117.178');
+    expect(
+      buildAuthFileConfigurationPatch(record, 'codex', original, {
+        ...original,
+        sourceIp: '144.172.117.179',
+      })
+    ).toEqual({ errors: {}, patch: { source_ip: '144.172.117.179' } });
+  });
+
   it('builds a minimal common patch while preserving explicit zero values', () => {
     const record = {
       type: 'gemini',

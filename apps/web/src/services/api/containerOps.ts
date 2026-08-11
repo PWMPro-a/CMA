@@ -98,6 +98,60 @@ export interface ContainerOpsInfo {
   lifecycle: ContainerOpsLifecycleState;
 }
 
+export interface ContainerOpsEgressAddress {
+  interface: string;
+  address: string;
+  cidr: string;
+  scope?: string;
+}
+
+export interface ContainerOpsEgressCheck {
+  severity: 'info' | 'warning' | 'error' | string;
+  code: string;
+  message: string;
+  resource?: string;
+  blocking: boolean;
+}
+
+export interface ContainerOpsEgressAction {
+  order: number;
+  code: string;
+  target?: string;
+  status: string;
+  message?: string;
+  output?: string;
+}
+
+export interface ContainerOpsEgressIPInventory {
+  agent?: ContainerOpsAgentInfo;
+  defaultInterface?: string;
+  route?: string;
+  nativeOutboundIp?: string;
+  addresses: ContainerOpsEgressAddress[];
+  checks?: ContainerOpsEgressCheck[];
+}
+
+export interface ContainerOpsSourceIPRequest {
+  sourceIp: string;
+  interface?: string;
+  verifyUrl?: string;
+}
+
+export interface ContainerOpsSourceIPResult {
+  agent?: ContainerOpsAgentInfo;
+  sourceIp: string;
+  interface?: string;
+  status: string;
+  mounted: boolean;
+  alreadyPresent: boolean;
+  removed?: boolean;
+  outboundIp?: string;
+  nativeOutboundIp?: string;
+  checks: ContainerOpsEgressCheck[];
+  actions?: ContainerOpsEgressAction[];
+  lifecycle?: ContainerOpsLifecycleState;
+}
+
 export interface ContainerOpsDockerSummary {
   containerCount: number;
   runningCount: number;
@@ -492,7 +546,9 @@ export const containerOpsApi = {
   audits: (limit = 20) =>
     apiClient.get<ContainerOpsAuditResponse>(`${basePath}/audits`, { params: { limit } }),
   upgradeTasks: (limit = 20) =>
-    apiClient.get<ContainerOpsUpgradeTaskResponse>(`${basePath}/upgrade-tasks`, { params: { limit } }),
+    apiClient.get<ContainerOpsUpgradeTaskResponse>(`${basePath}/upgrade-tasks`, {
+      params: { limit },
+    }),
   startUpgradeTask: (taskId: string) =>
     apiClient.post<ContainerOpsUpgradeTask>(`${basePath}/upgrade-tasks/start`, { taskId }),
   agent: () => apiClient.get<ContainerOpsAgentInfo>(`${basePath}/agent`),
@@ -506,7 +562,17 @@ export const containerOpsApi = {
   rollback: (request: ContainerOpsRollbackRequest) =>
     apiClient.post<ContainerOpsRestorePlan>(`${basePath}/rollback`, request),
   standardizeNetwork: (request: ContainerOpsNetworkStandardizeRequest) =>
-    apiClient.post<ContainerOpsNetworkStandardizeResult>(`${basePath}/network-standardize`, request),
+    apiClient.post<ContainerOpsNetworkStandardizeResult>(
+      `${basePath}/network-standardize`,
+      request
+    ),
+  egressIPs: () => apiClient.get<ContainerOpsEgressIPInventory>(`${basePath}/egress-ips`),
+  ensureSourceIP: (request: ContainerOpsSourceIPRequest) =>
+    apiClient.post<ContainerOpsSourceIPResult>(`${basePath}/source-ip/ensure`, request),
+  checkSourceIP: (request: ContainerOpsSourceIPRequest) =>
+    apiClient.post<ContainerOpsSourceIPResult>(`${basePath}/source-ip/check`, request),
+  removeSourceIP: (request: ContainerOpsSourceIPRequest) =>
+    apiClient.post<ContainerOpsSourceIPResult>(`${basePath}/source-ip/remove`, request),
   upgrade: (request: ContainerOpsUpgradeRequest = { apply: false }) =>
     apiClient.post<ContainerOpsUpgradePlan>(`${basePath}/upgrade`, request),
 };

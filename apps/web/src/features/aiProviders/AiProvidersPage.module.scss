@@ -23,6 +23,48 @@
   padding-bottom: calc(env(safe-area-inset-bottom) + #{$spacing-md});
 }
 
+.egressCard {
+  margin-bottom: $spacing-md;
+  overflow: hidden;
+  border-color: rgba(20, 184, 166, 0.22);
+  background:
+    radial-gradient(circle at top left, rgba(45, 212, 191, 0.14), transparent 34%),
+    var(--surface-card);
+}
+
+.egressCardBody {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-lg;
+  padding: $spacing-lg;
+
+  h2 {
+    margin: 4px 0 6px;
+    color: var(--text-primary);
+    font-size: 18px;
+  }
+
+  p {
+    margin: 0;
+    max-width: 760px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+  }
+}
+
+.egressEyebrow {
+  color: var(--primary-color);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.egressCardButton {
+  flex-shrink: 0;
+}
+
 .paginationBar {
   display: flex;
   align-items: center;
@@ -65,6 +107,11 @@
 }
 
 @include mobile {
+  .egressCardBody {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .paginationBar {
     align-items: stretch;
     flex-direction: column;
@@ -741,9 +788,11 @@
 // 表头
 .keyTableHeader {
   display: grid;
-  grid-template-columns: 46px 56px minmax(220px, 1.4fr) minmax(200px, 1.1fr) 180px;
+  grid-template-columns:
+    46px 56px minmax(220px, 1.4fr) minmax(200px, 1fr) minmax(160px, 0.9fr)
+    180px;
   gap: $spacing-sm;
-  min-width: 760px;
+  min-width: 940px;
   padding: 10px $spacing-md;
   background: var(--surface-subtle-strong);
   border: 1px solid var(--border-subtle);
@@ -760,9 +809,11 @@
 // 数据行
 .keyTableRow {
   display: grid;
-  grid-template-columns: 46px 56px minmax(220px, 1.4fr) minmax(200px, 1.1fr) 180px;
+  grid-template-columns:
+    46px 56px minmax(220px, 1.4fr) minmax(200px, 1fr) minmax(160px, 0.9fr)
+    180px;
   gap: $spacing-sm;
-  min-width: 760px;
+  min-width: 940px;
   padding: 10px $spacing-md;
   background: var(--surface-subtle);
   border: 1px solid var(--border-subtle);
@@ -868,6 +919,17 @@
   font-size: 14px;
   min-height: 38px;
   text-align: center;
+}
+
+.keyTableSelect {
+  width: 100%;
+  min-width: 0;
+}
+
+.keyTableSelectTrigger {
+  height: 38px;
+  padding: 0 10px;
+  font-size: 14px;
 }
 
 .addKeyButton {

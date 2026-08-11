@@ -1,11 +1,13 @@
 import { useTranslation } from 'react-i18next';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
-import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { Input } from '@/components/ui/Input';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
+import { SourceIpSelect } from '@/components/ui/SourceIpSelect';
 import { IconRefreshCw } from '@/components/ui/icons';
 import type { AuthFileItem } from '@/types';
+import type { SelectOption } from '@/components/ui/Select';
 import type {
   PrefixProxyEditorField,
   PrefixProxyEditorFieldValue,
@@ -100,6 +102,8 @@ export type AuthFilesPrefixProxyEditorModalProps = {
   onSave: () => void;
   onRefreshCredential: (file: AuthFileItem) => void | Promise<void>;
   onChange: (field: PrefixProxyEditorField, value: PrefixProxyEditorFieldValue) => void;
+  sourceIpOptions?: ReadonlyArray<SelectOption>;
+  sourceIpOptionsLoading?: boolean;
 };
 
 export function AuthFilesPrefixProxyEditorModal(props: AuthFilesPrefixProxyEditorModalProps) {
@@ -115,6 +119,8 @@ export function AuthFilesPrefixProxyEditorModal(props: AuthFilesPrefixProxyEdito
     onSave,
     onRefreshCredential,
     onChange,
+    sourceIpOptions,
+    sourceIpOptionsLoading = false,
   } = props;
   const previewText = formatJsonText(updatedText, true);
   const fileInfoPreviewText = formatJsonText(editor?.fileInfoText ?? '', true);
@@ -229,6 +235,19 @@ export function AuthFilesPrefixProxyEditorModal(props: AuthFilesPrefixProxyEdito
                     placeholder={t('auth_files.proxy_url_placeholder')}
                     disabled={disableControls || editor.saving || !editor.json}
                     onChange={(e) => onChange('proxyUrl', e.target.value)}
+                  />
+                  <SourceIpSelect
+                    label={t('auth_files.source_ip_label')}
+                    hint={t('auth_files.source_ip_hint')}
+                    value={editor.sourceIp}
+                    options={
+                      sourceIpOptions?.length
+                        ? sourceIpOptions
+                        : [{ value: '', label: t('common.not_set') }]
+                    }
+                    loading={sourceIpOptionsLoading}
+                    disabled={disableControls || editor.saving || !editor.json}
+                    onChange={(value) => onChange('sourceIp', value)}
                   />
                   <Input
                     label={t('auth_files.priority_label')}

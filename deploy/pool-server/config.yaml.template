@@ -23,6 +23,7 @@ logging-to-file: false
 usage-statistics-enabled: true
 redis-usage-queue-retention-seconds: 3600
 proxy-url: ""
+source-ip: ""
 request-retry: 3
 max-retry-credentials: 0
 max-retry-interval: 30

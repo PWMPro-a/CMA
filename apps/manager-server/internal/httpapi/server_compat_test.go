@@ -156,7 +156,7 @@ func TestServerCompatContainerOpsInfoRequiresPanelAuth(t *testing.T) {
 	if !info.Enabled || info.Mode != "read_only" || info.Agent.Configured || info.Agent.Reachable {
 		t.Fatalf("container ops info = %#v", info)
 	}
-	if info.NewAPI.RecommendedBaseURL != "http://cli-proxy-api:8317/v1" {
+	if info.NewAPI.RecommendedBaseURL != "http://host.docker.internal:8317/v1" {
 		t.Fatalf("recommended base url = %q", info.NewAPI.RecommendedBaseURL)
 	}
 }

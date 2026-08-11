@@ -29,11 +29,13 @@ cpamp_version=""
 cpa_connection_mode=""
 cpa_url=""
 cpa_management_key=""
+cpamp_agent_token=""
 admin_key=""
 demo_client_key=""
 generated_admin_key=""
 generated_cpa_management_key=""
 generated_demo_client_key=""
+generated_cpamp_agent_token=""
 compose_project_name="${CPAMP_PROJECT_NAME:-cpamp}"
 existing_install_state="fresh"
 existing_volume_name=""
@@ -580,8 +582,9 @@ load_existing_docker_config() {
     validate_image_ref "$(text cpa_image)" "$cpa_image"
     cpa_port="$(read_env_value "$install_dir/.env" CPA_PORT 2>/dev/null || printf '8317')"
     normalize_port "$cpa_port" || die "Invalid CPA port in existing .env: $cpa_port"
-    cpa_url="http://cli-proxy-api:8317"
+    cpa_url="http://host.docker.internal:8317"
     cpa_connection_mode="env"
+    cpamp_agent_token="$(read_env_value "$install_dir/.env" CPAMP_AGENT_TOKEN 2>/dev/null || true)"
   else
     install_mode="cpamp"
     if grep -q 'CPA_MANAGEMENT_KEY_FILE:' "$install_dir/compose.yaml"; then
@@ -740,7 +743,7 @@ collect_choices() {
       normalize_port "$cpa_port" || die "Invalid CPA port: $cpa_port"
       cpa_image="$(prompt_line "$(text cpa_image)" "${CPAMP_CPA_IMAGE:-${cpa_image:-$default_cpa_image}}")"
       validate_image_ref "$(text cpa_image)" "$cpa_image"
-      cpa_url="http://cli-proxy-api:8317"
+      cpa_url="http://host.docker.internal:8317"
       cpa_connection_mode="env"
     fi
   else
@@ -1044,6 +1047,7 @@ write_env_file() {
     if [ "$install_mode" = "stack" ]; then
       printf 'CPA_IMAGE=%s\n' "$cpa_image"
       printf 'CPA_PORT=%s\n' "$cpa_port"
+      printf 'CPAMP_AGENT_TOKEN=%s\n' "$cpamp_agent_token"
     elif [ "$cpa_connection_mode" = "env" ]; then
       printf 'CPA_UPSTREAM_URL=%s\n' "$cpa_url"
     fi
@@ -1076,6 +1080,7 @@ remote-management:
 
 usage-statistics-enabled: true
 redis-usage-queue-retention-seconds: 60
+source-ip: ""
 
 auth-dir: "/root/.cli-proxy-api"
 
@@ -1087,8 +1092,7 @@ EOF
 
 docker_needs_host_gateway() {
   [ "$deploy_method" = "docker" ] &&
-    [ "$install_mode" = "cpamp" ] &&
-    [ "$cpa_connection_mode" = "env" ] &&
+    { [ "$install_mode" = "stack" ] || { [ "$install_mode" = "cpamp" ] && [ "$cpa_connection_mode" = "env" ]; }; } &&
     [ "$normalized_os" = "linux" ] &&
     case "$cpa_url" in
       *host.docker.internal*) true ;;
@@ -1111,8 +1115,7 @@ services:
   cli-proxy-api:
     image: ${CPA_IMAGE}
     restart: unless-stopped
-    ports:
-      - "${CPA_PORT}:8317"
+    network_mode: host
     volumes:
       - ./cliproxyapi/config.yaml:/CLIProxyAPI/config.yaml
       - ./cliproxyapi/auths:/root/.cli-proxy-api
@@ -1128,8 +1131,10 @@ services:
       USAGE_DB_PATH: "/data/usage.sqlite"
       CPA_MANAGER_DATA_KEY_PATH: "/data/data.key"
       CPA_MANAGER_ADMIN_KEY_FILE: "/run/secrets/cpamp_admin_key"
-      CPA_UPSTREAM_URL: "http://cli-proxy-api:8317"
+      CPA_UPSTREAM_URL: "http://host.docker.internal:8317"
       CPA_MANAGEMENT_KEY_FILE: "/run/secrets/cpa_management_key"
+      CPAMP_AGENT_URL: "http://host.docker.internal:18417"
+      CPAMP_AGENT_TOKEN: "${CPAMP_AGENT_TOKEN:?set CPAMP_AGENT_TOKEN}"
       USAGE_COLLECTOR_MODE: "auto"
       USAGE_RESP_QUEUE: "usage"
       USAGE_RESP_POP_SIDE: "right"
@@ -1142,10 +1147,43 @@ services:
     secrets:
       - cpamp_admin_key
       - cpa_management_key
+EOF
+    if docker_needs_host_gateway; then
+      cat >> "$tmp" <<'EOF'
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+EOF
+    fi
+    cat >> "$tmp" <<'EOF'
     depends_on:
       - cli-proxy-api
+      - cpamp-agent
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18317/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  cpamp-agent:
+    image: ${CPAMP_IMAGE}
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    entrypoint: ["cpamp-agent"]
+    environment:
+      CPAMP_AGENT_ADDR: "0.0.0.0:18417"
+      CPAMP_STACK_ROOT: "${PWD}"
+      CPAMP_BACKUP_ROOT: "${PWD}/backups"
+      CPAMP_AGENT_TOKEN: "${CPAMP_AGENT_TOKEN:?set CPAMP_AGENT_TOKEN}"
+      DOCKER_HOST: "unix:///var/run/docker.sock"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./:${PWD}
+      - ./backups:${PWD}/backups
+    healthcheck:
+      test: ["CMD-SHELL", "wget --header='Authorization: Bearer '$$CPAMP_AGENT_TOKEN -qO- http://127.0.0.1:18417/agent/info >/dev/null"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -1265,9 +1303,20 @@ generate_docker_files() {
   ensure_dir "$install_dir/secrets"
   ensure_dir "$install_dir/cliproxyapi/auths"
   ensure_dir "$install_dir/cliproxyapi/logs"
+  ensure_dir "$install_dir/backups"
 
   generated_admin_key="cpamp_$(random_alnum 32)"
   admin_key="$(ensure_secret_file "$install_dir/secrets/cpamp-admin-key" "$generated_admin_key")"
+
+  if [ "$install_mode" = "stack" ]; then
+    if [ -n "${CPAMP_AGENT_TOKEN:-}" ]; then
+      cpamp_agent_token="$CPAMP_AGENT_TOKEN"
+    elif [ -z "$cpamp_agent_token" ]; then
+      generated_cpamp_agent_token="cpamp_agent_$(random_alnum 32)"
+      cpamp_agent_token="$generated_cpamp_agent_token"
+    fi
+    validate_secret_value "CPAMP_AGENT_TOKEN" "$cpamp_agent_token"
+  fi
 
   write_env_file
 

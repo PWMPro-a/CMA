@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
+import { SourceIpSelect } from '@/components/ui/SourceIpSelect';
 import { HeaderInputList } from '@/components/ui/HeaderInputList';
 import { ModelInputList } from '@/components/ui/ModelInputList';
 import { Modal } from '@/components/ui/Modal';
@@ -24,6 +25,7 @@ import {
 } from '@/features/aiProviders/model/keyTestStatuses';
 import type { ModelInfo } from '@/utils/models';
 import type { OpenAIFormState } from '@/components/providers';
+import type { SelectOption } from '@/components/ui/Select';
 import styles from '@/features/aiProviders/AiProvidersPage.module.scss';
 
 interface OpenAIEditDrawerProps {
@@ -32,6 +34,8 @@ interface OpenAIEditDrawerProps {
   disabled: boolean;
   onClose: () => void;
   onSaved: () => void;
+  sourceIpOptions?: ReadonlyArray<SelectOption>;
+  sourceIpOptionsLoading?: boolean;
 }
 
 type OpenAIFormBaseline = ReturnType<typeof buildOpenAIBaseline>;
@@ -75,16 +79,18 @@ const normalizeApiKeyEntries = (entries: ApiKeyEntry[]) =>
     Array<{
       apiKey: string;
       proxyUrl: string;
+      sourceIp: string;
       authIndex: string;
       headers: ReturnType<typeof normalizeKeyHeaders>;
     }>
   >((acc, entry) => {
     const apiKey = String(entry?.apiKey ?? '').trim();
     const proxyUrl = String(entry?.proxyUrl ?? '').trim();
+    const sourceIp = String(entry?.sourceIp ?? '').trim();
     const authIndex = normalizeAuthIndex(entry?.authIndex) ?? '';
     const headers = normalizeKeyHeaders(entry?.headers);
-    if (!apiKey && !proxyUrl && !authIndex && headers.length === 0) return acc;
-    acc.push({ apiKey, proxyUrl, authIndex, headers });
+    if (!apiKey && !proxyUrl && !sourceIp && !authIndex && headers.length === 0) return acc;
+    acc.push({ apiKey, proxyUrl, sourceIp, authIndex, headers });
     return acc;
   }, []);
 
@@ -115,6 +121,7 @@ const areNormalizedApiKeyEntriesEqual = (
     if (
       left.apiKey !== right.apiKey ||
       left.proxyUrl !== right.proxyUrl ||
+      left.sourceIp !== right.sourceIp ||
       left.authIndex !== right.authIndex
     )
       return false;
@@ -140,6 +147,8 @@ export function OpenAIEditDrawer({
   disabled,
   onClose,
   onSaved,
+  sourceIpOptions,
+  sourceIpOptionsLoading = false,
 }: OpenAIEditDrawerProps) {
   const { t } = useTranslation();
   const { showNotification } = useNotificationStore();
@@ -164,6 +173,13 @@ export function OpenAIEditDrawer({
   const [keyTestStatuses, setKeyTestStatuses] = useState<
     Array<{ status: string; message: string }>
   >([]);
+  const resolvedSourceIpOptions = useMemo(
+    () =>
+      sourceIpOptions?.length
+        ? sourceIpOptions
+        : [{ value: '', label: t('common.not_set') }],
+    [sourceIpOptions, t]
+  );
 
   const [modelDiscoveryOpen, setModelDiscoveryOpen] = useState(false);
   const [modelDiscoveryFetching, setModelDiscoveryFetching] = useState(false);
@@ -340,11 +356,7 @@ export function OpenAIEditDrawer({
 
   const configuredModelNames = useMemo(
     () =>
-      new Set(
-        form.modelEntries
-          .map((entry) => entry.name.trim().toLowerCase())
-          .filter(Boolean)
-      ),
+      new Set(form.modelEntries.map((entry) => entry.name.trim().toLowerCase()).filter(Boolean)),
     [form.modelEntries]
   );
 
@@ -401,7 +413,9 @@ export function OpenAIEditDrawer({
   );
 
   useEffect(() => {
-    const availableNames = new Set(discoveredModels.map((model) => String(model.name ?? '').trim()));
+    const availableNames = new Set(
+      discoveredModels.map((model) => String(model.name ?? '').trim())
+    );
     setModelDiscoverySelected((prev) => {
       let changed = false;
       const next = new Set<string>();
@@ -635,6 +649,7 @@ export function OpenAIEditDrawer({
         apiKeyEntries: form.apiKeyEntries.map((entry: ApiKeyEntry) => ({
           apiKey: entry.apiKey.trim(),
           proxyUrl: entry.proxyUrl?.trim() || undefined,
+          sourceIp: entry.sourceIp?.trim() || undefined,
           authIndex: normalizeAuthIndex(entry.authIndex) ?? undefined,
           headers: entry.headers,
         })),
@@ -746,6 +761,7 @@ export function OpenAIEditDrawer({
             <div className={styles.keyTableColStatus}>{t('common.status')}</div>
             <div className={styles.keyTableColKey}>{t('common.api_key')}</div>
             <div className={styles.keyTableColProxy}>{t('common.proxy_url')}</div>
+            <div className={styles.keyTableColProxy}>{t('common.source_ip')}</div>
             <div className={styles.keyTableColAction}>{t('common.action')}</div>
           </div>
           {list.map((entry, index) => {
@@ -780,6 +796,18 @@ export function OpenAIEditDrawer({
                     disabled={saving || disabled || isTestingKeys}
                     className={`input ${styles.keyTableInput}`}
                     placeholder={t('ai_providers.openai_proxy_placeholder')}
+                  />
+                </div>
+                <div className={styles.keyTableColProxy}>
+                  <SourceIpSelect
+                    value={entry.sourceIp ?? ''}
+                    onChange={(value) => updateEntry(index, 'sourceIp', value)}
+                    options={resolvedSourceIpOptions}
+                    loading={sourceIpOptionsLoading}
+                    disabled={saving || disabled || isTestingKeys}
+                    ariaLabel={t('ai_providers.source_ip_label')}
+                    className={styles.keyTableSelect}
+                    triggerClassName={styles.keyTableSelectTrigger}
                   />
                 </div>
                 <div className={styles.keyTableColAction}>

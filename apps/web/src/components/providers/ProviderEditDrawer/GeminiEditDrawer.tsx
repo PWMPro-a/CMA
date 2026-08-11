@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
 import { Input } from '@/components/ui/Input';
+import { SourceIpSelect } from '@/components/ui/SourceIpSelect';
 import { HeaderInputList } from '@/components/ui/HeaderInputList';
 import { ModelInputList } from '@/components/ui/ModelInputList';
 import { Modal } from '@/components/ui/Modal';
@@ -22,6 +23,7 @@ import type { ModelInfo } from '@/utils/models';
 import { entriesToModels, modelsToEntries } from '@/components/ui/modelInputListUtils';
 import { excludedModelsToText, parseExcludedModels } from '@/components/providers/utils';
 import type { GeminiFormState } from '@/components/providers';
+import type { SelectOption } from '@/components/ui/Select';
 import styles from '@/features/aiProviders/AiProvidersPage.module.scss';
 
 interface GeminiEditDrawerProps {
@@ -31,6 +33,8 @@ interface GeminiEditDrawerProps {
   onClose: () => void;
   onSaved: () => void;
   providerKind?: 'gemini' | 'interactions';
+  sourceIpOptions?: ReadonlyArray<SelectOption>;
+  sourceIpOptionsLoading?: boolean;
 }
 
 type GeminiFormBaseline = ReturnType<typeof buildGeminiBaseline>;
@@ -41,6 +45,7 @@ const buildEmptyForm = (): GeminiFormState => ({
   prefix: '',
   baseUrl: '',
   proxyUrl: '',
+  sourceIp: '',
   headers: [],
   modelEntries: [{ name: '', alias: '' }],
   excludedModels: [],
@@ -72,6 +77,7 @@ const buildGeminiBaseline = (form: GeminiFormState) => ({
   prefix: String(form.prefix ?? '').trim(),
   baseUrl: String(form.baseUrl ?? '').trim(),
   proxyUrl: String(form.proxyUrl ?? '').trim(),
+  sourceIp: String(form.sourceIp ?? '').trim(),
   disableCooling: Boolean(form.disableCooling),
   headers: normalizeHeaderEntries(form.headers),
   models: normalizeModelEntries(form.modelEntries),
@@ -91,6 +97,8 @@ export function GeminiEditDrawer({
   onClose,
   onSaved,
   providerKind = 'gemini',
+  sourceIpOptions,
+  sourceIpOptionsLoading = false,
 }: GeminiEditDrawerProps) {
   const { t } = useTranslation();
   const { showNotification } = useNotificationStore();
@@ -105,6 +113,13 @@ export function GeminiEditDrawer({
   const [form, setForm] = useState<GeminiFormState>(buildEmptyForm);
   const [baseline, setBaseline] = useState<GeminiFormBaseline>(
     buildGeminiBaseline(buildEmptyForm())
+  );
+  const resolvedSourceIpOptions = useMemo(
+    () =>
+      sourceIpOptions?.length
+        ? sourceIpOptions
+        : [{ value: '', label: t('common.not_set') }],
+    [sourceIpOptions, t]
   );
   const [loaded, setLoaded] = useState(false);
 
@@ -197,6 +212,7 @@ export function GeminiEditDrawer({
       baseline.prefix !== String(form.prefix ?? '').trim() ||
       baseline.baseUrl !== String(form.baseUrl ?? '').trim() ||
       baseline.proxyUrl !== String(form.proxyUrl ?? '').trim() ||
+      baseline.sourceIp !== String(form.sourceIp ?? '').trim() ||
       baseline.disableCooling !== Boolean(form.disableCooling) ||
       !areKeyValueEntriesEqual(baseline.headers, normalizeHeaderEntries(form.headers)) ||
       !areModelEntriesEqual(baseline.models, normalizeModelEntries(form.modelEntries)) ||
@@ -324,6 +340,7 @@ export function GeminiEditDrawer({
         prefix: form.prefix?.trim() || undefined,
         baseUrl: form.baseUrl?.trim() || undefined,
         proxyUrl: form.proxyUrl?.trim() || undefined,
+        sourceIp: form.sourceIp?.trim() || undefined,
         headers: buildHeaderObject(form.headers),
         models: entriesToModels(normalizedModelEntries),
         excludedModels: parseExcludedModels(form.excludedText),
@@ -344,16 +361,20 @@ export function GeminiEditDrawer({
         }
       }
       const syncedList = isInteractions
-        ? await providersApi.getInteractionsKeys().catch(() =>
-            editIndex !== null
-              ? configs.map((item, index) => (index === editIndex ? payload : item))
-              : [...configs, payload]
-          )
-        : await providersApi.getGeminiKeys().catch(() =>
-            editIndex !== null
-              ? configs.map((item, index) => (index === editIndex ? payload : item))
-              : [...configs, payload]
-          );
+        ? await providersApi
+            .getInteractionsKeys()
+            .catch(() =>
+              editIndex !== null
+                ? configs.map((item, index) => (index === editIndex ? payload : item))
+                : [...configs, payload]
+            )
+        : await providersApi
+            .getGeminiKeys()
+            .catch(() =>
+              editIndex !== null
+                ? configs.map((item, index) => (index === editIndex ? payload : item))
+                : [...configs, payload]
+            );
       updateConfigValue(configSection, syncedList);
       clearCache(configSection);
       showNotification(
@@ -525,6 +546,15 @@ export function GeminiEditDrawer({
               placeholder={t('ai_providers.gemini_add_modal_proxy_placeholder')}
               value={form.proxyUrl ?? ''}
               onChange={(e) => setForm((prev) => ({ ...prev, proxyUrl: e.target.value }))}
+              disabled={disabled || saving}
+            />
+            <SourceIpSelect
+              label={t('ai_providers.source_ip_label')}
+              hint={t('ai_providers.source_ip_hint')}
+              value={form.sourceIp ?? ''}
+              onChange={(value) => setForm((prev) => ({ ...prev, sourceIp: value }))}
+              options={resolvedSourceIpOptions}
+              loading={sourceIpOptionsLoading}
               disabled={disabled || saving}
             />
             <HeaderInputList

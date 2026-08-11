@@ -38,6 +38,9 @@ const COMMON_PROVIDER_KEY_FIELDS = [
   'proxy-url',
   'proxyUrl',
   'proxy_url',
+  'source-ip',
+  'sourceIp',
+  'source_ip',
   'headers',
   'models',
   'excluded-models',
@@ -121,6 +124,9 @@ const API_KEY_ENTRY_FIELDS = [
   'proxy-url',
   'proxyUrl',
   'proxy_url',
+  'source-ip',
+  'sourceIp',
+  'source_ip',
   'headers',
 ] as const;
 
@@ -552,7 +558,8 @@ const serializeApiKeyEntry = (entry: ApiKeyEntry) => {
   if (apiKey) payload['api-key'] = apiKey;
   const authIndex = serializeAuthIndex(entry.authIndex);
   if (authIndex) payload['auth-index'] = authIndex;
-  if (entry.proxyUrl) payload['proxy-url'] = entry.proxyUrl;
+  if (entry.proxyUrl?.trim()) payload['proxy-url'] = entry.proxyUrl.trim();
+  if (entry.sourceIp?.trim()) payload['source-ip'] = entry.sourceIp.trim();
   const headers = serializeHeaders(entry.headers);
   if (headers) payload.headers = headers;
   return payload;
@@ -575,7 +582,8 @@ const serializeProviderKey = (config: ProviderKeyConfig) => {
   if (config.rebuildMidSystemMessage !== undefined) {
     payload['rebuild-mid-system-message'] = config.rebuildMidSystemMessage;
   }
-  if (config.proxyUrl) payload['proxy-url'] = config.proxyUrl;
+  if (config.proxyUrl?.trim()) payload['proxy-url'] = config.proxyUrl.trim();
+  if (config.sourceIp?.trim()) payload['source-ip'] = config.sourceIp.trim();
   const headers = serializeHeaders(config.headers);
   if (headers) payload.headers = headers;
   const models = serializeModelAliases(config.models);
@@ -623,7 +631,8 @@ const serializeVertexKey = (config: ProviderKeyConfig) => {
   if (config.priority !== undefined) payload.priority = config.priority;
   if (config.prefix?.trim()) payload.prefix = config.prefix.trim();
   if (config.baseUrl) payload['base-url'] = config.baseUrl;
-  if (config.proxyUrl) payload['proxy-url'] = config.proxyUrl;
+  if (config.proxyUrl?.trim()) payload['proxy-url'] = config.proxyUrl.trim();
+  if (config.sourceIp?.trim()) payload['source-ip'] = config.sourceIp.trim();
   const headers = serializeHeaders(config.headers);
   if (headers) payload.headers = headers;
   const models = serializeVertexModelAliases(config.models);
@@ -644,7 +653,8 @@ const serializeGeminiKey = (config: GeminiKeyConfig) => {
   if (config.priority !== undefined) payload.priority = config.priority;
   if (config.prefix?.trim()) payload.prefix = config.prefix.trim();
   if (config.baseUrl) payload['base-url'] = config.baseUrl;
-  if (config.proxyUrl) payload['proxy-url'] = config.proxyUrl;
+  if (config.proxyUrl?.trim()) payload['proxy-url'] = config.proxyUrl.trim();
+  if (config.sourceIp?.trim()) payload['source-ip'] = config.sourceIp.trim();
   if (config.disableCooling !== undefined) payload['disable-cooling'] = config.disableCooling;
   const headers = serializeHeaders(config.headers);
   if (headers) payload.headers = headers;

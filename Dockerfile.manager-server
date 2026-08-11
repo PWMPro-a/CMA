@@ -20,7 +20,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/cpa-manager
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/cpamp-agent ./cmd/cpamp-agent
 
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates wget tzdata
+RUN apk add --no-cache ca-certificates iproute2 wget tzdata
 WORKDIR /app
 COPY --from=service-build /out/cpa-manager-plus /usr/local/bin/cpa-manager-plus
 COPY --from=service-build /out/cpamp-agent /usr/local/bin/cpamp-agent
