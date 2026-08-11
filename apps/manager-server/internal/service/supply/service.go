@@ -5064,7 +5064,7 @@ func (s *Service) backfillSupplyAccountMetadata(ctx context.Context, cfg store.M
 		}
 	}
 
-	reconciled := 0
+	inspected := 0
 	changed := false
 	var reconcileErrors []error
 	for _, item := range items {
@@ -5075,17 +5075,21 @@ func (s *Service) backfillSupplyAccountMetadata(ctx context.Context, cfg store.M
 		if err != nil {
 			continue
 		}
+		if looksLikeSupplyAccountEmail(item.AccountName) && !looksLikeSupplyAccountEmail(account.accountName) {
+			account = withSupplyAccountName(account, item.AccountName)
+		}
 
 		fileName := strings.TrimSpace(item.FileName)
 		legacyFileName := ""
-		if fileName != account.fileName && reconciled < supplyFileNameReconcileBatchSize {
-			migratedFileName, migrated, migrateErr := s.reconcileSupplyAuthFileName(ctx, cfg, item, account, currentFileUsers)
+		if (fileName != account.fileName || !looksLikeSupplyAccountEmail(account.accountName)) && inspected < supplyFileNameReconcileBatchSize {
+			inspected++
+			migratedFileName, reconciledAccount, migrated, migrateErr := s.reconcileSupplyAuthFileName(ctx, cfg, item, account, currentFileUsers)
+			account = reconciledAccount
 			if migrateErr != nil {
 				reconcileErrors = append(reconcileErrors, fmt.Errorf("reconcile supply import %d: %w", item.ID, migrateErr))
 			} else if migrated {
 				legacyFileName = fileName
 				fileName = migratedFileName
-				reconciled++
 				changed = true
 			}
 		}
@@ -5119,52 +5123,89 @@ func (s *Service) backfillSupplyAccountMetadata(ctx context.Context, cfg store.M
 // reconcileSupplyAuthFileName migrates a legacy supplier-labelled auth file to
 // the canonical account-labelled filename. The old file is deleted only after
 // the new file is uploaded and verified against the account identity.
-func (s *Service) reconcileSupplyAuthFileName(ctx context.Context, cfg store.ManagerConfig, item store.SupplyImportItem, account normalizedSupplyAccount, currentFileUsers map[string]int) (string, bool, error) {
+func (s *Service) reconcileSupplyAuthFileName(ctx context.Context, cfg store.ManagerConfig, item store.SupplyImportItem, account normalizedSupplyAccount, currentFileUsers map[string]int) (string, normalizedSupplyAccount, bool, error) {
 	oldFileName := strings.TrimSpace(item.FileName)
 	if oldFileName == "" || !safeSupplyAuthFileName(oldFileName) || !strings.HasPrefix(strings.ToLower(oldFileName), "codex-") {
-		return oldFileName, false, nil
+		return oldFileName, account, false, nil
 	}
 	if strings.TrimSpace(cfg.CPAConnection.CPABaseURL) == "" || strings.TrimSpace(cfg.CPAConnection.ManagementKey) == "" {
-		return oldFileName, false, nil
+		return oldFileName, account, false, nil
 	}
 	oldFile, found, err := s.findCPAAuthFile(ctx, cfg, oldFileName, "")
 	if err != nil {
-		return oldFileName, false, err
+		return oldFileName, account, false, err
 	}
-	if !found || !supplyCPAFileMatchesAccount(oldFile, account) {
-		return oldFileName, false, nil
+	if !found {
+		return oldFileName, account, false, nil
+	}
+	account = supplyAccountWithCPAIdentity(account, oldFile)
+	if !supplyCPAFileMatchesAccount(oldFile, account) {
+		return oldFileName, account, false, nil
 	}
 	if currentFileUsers[oldFileName] > 1 {
-		return oldFileName, false, fmt.Errorf("legacy auth file %q is referenced by %d current imports", oldFileName, currentFileUsers[oldFileName])
+		return oldFileName, account, false, fmt.Errorf("legacy auth file %q is referenced by %d current imports", oldFileName, currentFileUsers[oldFileName])
 	}
 
 	targetFileName, targetFile, targetFound, err := s.findCanonicalSupplyAuthFile(ctx, cfg, account)
 	if err != nil {
-		return oldFileName, false, err
+		return oldFileName, account, false, err
 	}
 	if targetFileName == oldFileName {
-		return oldFileName, false, nil
+		return oldFileName, account, false, nil
 	}
 	if !targetFound {
 		if err := s.authFiles.Upload(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey,
 			targetFileName, []byte(account.payload), cfg.Supply.DefaultWebsockets); err != nil {
-			return oldFileName, false, err
+			return oldFileName, account, false, err
 		}
 		verified, verifiedFound, verifyErr := s.findCPAAuthFile(ctx, cfg, targetFileName, "")
 		if verifyErr != nil {
-			return oldFileName, false, verifyErr
+			return oldFileName, account, false, verifyErr
 		}
 		if !verifiedFound || !supplyCPAFileMatchesAccount(verified, account) {
-			return oldFileName, false, fmt.Errorf("uploaded auth file %q failed identity verification", targetFileName)
+			return oldFileName, account, false, fmt.Errorf("uploaded auth file %q failed identity verification", targetFileName)
 		}
 		targetFile = verified
 	}
 	if oldFile.Disabled && !targetFile.Disabled {
 		if err := s.authFiles.PatchDisabled(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, targetFileName, true, targetFile.AuthIndex); err != nil {
-			return oldFileName, false, err
+			return oldFileName, account, false, err
 		}
 	}
-	return targetFileName, true, nil
+	return targetFileName, account, true, nil
+}
+
+func supplyAccountWithCPAIdentity(account normalizedSupplyAccount, file cpaauthfiles.File) normalizedSupplyAccount {
+	identity := firstNonEmptyString(
+		textField(file.Raw, "email", "account", "username", "display_account", "displayAccount"),
+		file.AccountSnapshot,
+	)
+	if !looksLikeSupplyAccountEmail(identity) {
+		return account
+	}
+	account = withSupplyAccountName(account, identity)
+	var metadata map[string]any
+	if json.Unmarshal(account.payload, &metadata) == nil {
+		setString(metadata, "email", identity)
+		setString(metadata, "account", identity)
+		if normalized, err := json.Marshal(metadata); err == nil {
+			account.payload = normalized
+		}
+	}
+	return account
+}
+
+func withSupplyAccountName(account normalizedSupplyAccount, accountName string) normalizedSupplyAccount {
+	account.accountName = strings.TrimSpace(accountName)
+	account.nameKey = supplyAccountNameKey(account.accountName)
+	account.fileName = stableSupplyAccountFileName(account.accountName)
+	return account
+}
+
+func looksLikeSupplyAccountEmail(value string) bool {
+	value = strings.TrimSpace(value)
+	at := strings.LastIndexByte(value, '@')
+	return at > 0 && at < len(value)-1 && strings.Contains(value[at+1:], ".")
 }
 
 func (s *Service) findCanonicalSupplyAuthFile(ctx context.Context, cfg store.ManagerConfig, account normalizedSupplyAccount) (string, cpaauthfiles.File, bool, error) {

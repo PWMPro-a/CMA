@@ -1320,7 +1320,7 @@ func TestBackfillSupplyAccountMetadataRenamesLegacySupplierLabelFile(t *testing.
 	if _, err := st.InsertSupplyImportItems(ctx, "legacy-name-order", []store.SupplyImportItem{{
 		ItemKey: "legacy-name-key", AccountName: "普通 Team · 7D · 有效期 51 分钟", NameKey: "普通-team-7d-有效期-51-分钟",
 		FileName: oldFileName, ImportAction: "add",
-		PayloadJSON: `{"type":"codex","name":"普通 Team · 7D · 有效期 51 分钟","email":"stable@example.com","account_id":"account-stable","access_token":"access"}`,
+		PayloadJSON: `{"type":"codex","name":"普通 Team · 7D · 有效期 51 分钟","account":"stable@example.com","account_id":"account-stable","access_token":"access"}`,
 	}}); err != nil {
 		t.Fatalf("insert import item: %v", err)
 	}
