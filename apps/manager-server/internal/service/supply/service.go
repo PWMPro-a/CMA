@@ -5175,7 +5175,10 @@ func (s *Service) findCanonicalSupplyAuthFile(ctx context.Context, cfg store.Man
 		candidates = append(candidates, fmt.Sprintf("%s-%d.json", base, attempt))
 	}
 	for _, candidate := range candidates {
-		file, found, err := s.findCPAAuthFile(ctx, cfg, candidate, "")
+		// Canonical candidates are exact filenames. Avoid the compatibility
+		// fallback that scans the entire auth-file collection for every missing
+		// candidate during a bulk migration.
+		file, found, err := s.authFiles.Find(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, candidate, "")
 		if err != nil {
 			return "", cpaauthfiles.File{}, false, err
 		}
