@@ -2485,6 +2485,72 @@ func TestRunAutoActionDisableExecutesDeleteSuggestionAsDisable(t *testing.T) {
 	}
 }
 
+func TestRunAutoActionDisableExecutesReauthSuggestionAsDisable(t *testing.T) {
+	var deleteCalled bool
+	var patchCalled bool
+	var patchedDisabled bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"files":[{"id":"runtime-auth-1","name":"auth-a.json","auth_index":"auth-1","provider":"codex","account":"alice@example.com","status":"ok","state":"ready"}]}`))
+		case r.URL.Path == "/v0/management/api-call" && r.Method == http.MethodPost:
+			_, _ = w.Write([]byte(`{"status_code":401,"body":{"message":"Provided authentication token is expired. Please try signing in again."}}`))
+		case r.URL.Path == "/v0/management/auth-files/status" && r.Method == http.MethodPatch:
+			patchCalled = true
+			var payload struct {
+				Name      string `json:"name"`
+				AuthIndex string `json:"auth_index"`
+				Disabled  bool   `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode patch payload: %v", err)
+			}
+			if payload.Name != "runtime-auth-1" || payload.AuthIndex != "auth-1" {
+				t.Fatalf("patch target name=%q authIndex=%q, want runtime-auth-1/auth-1", payload.Name, payload.AuthIndex)
+			}
+			patchedDisabled = payload.Disabled
+			_, _ = w.Write([]byte(`{"status":"ok","disabled":true}`))
+		case strings.HasPrefix(r.URL.Path, "/v0/management/auth-files") && r.Method == http.MethodDelete:
+			deleteCalled = true
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	db := newCodexInspectionTestStore(t)
+	managerCfg := newCodexInspectionManagerConfig(upstream.URL)
+	managerCfg.CodexInspection.AutoActionMode = model.CodexInspectionAutoActionDisable
+	if err := db.SaveManagerConfig(context.Background(), managerCfg); err != nil {
+		t.Fatalf("save manager config: %v", err)
+	}
+
+	result, err := newCodexInspectionTestService(t, db).Run(context.Background(), RunRequest{
+		TriggerType: "manual",
+		TriggerKey:  "manual",
+	})
+	if err != nil {
+		t.Fatalf("run inspection: %v", err)
+	}
+	if deleteCalled {
+		t.Fatal("auto disable mode deleted a reauth suggestion")
+	}
+	if !patchCalled || !patchedDisabled {
+		t.Fatalf("auto disable patch called=%v disabled=%v, want true/true", patchCalled, patchedDisabled)
+	}
+	if result.Run.ReauthCount != 1 || result.Run.DeleteCount != 0 || result.Run.KeepCount != 0 {
+		t.Fatalf("run counts reauth=%d delete=%d keep=%d, want 1/0/0", result.Run.ReauthCount, result.Run.DeleteCount, result.Run.KeepCount)
+	}
+	if len(result.Results) != 1 ||
+		result.Results[0].Action != "reauth" ||
+		result.Results[0].ActionStatus != model.CodexInspectionActionStatusSuccess ||
+		result.Results[0].ExecutedAction != "disable" ||
+		!result.Results[0].Disabled {
+		t.Fatalf("result after auto disable = %#v", result.Results)
+	}
+}
+
 func TestRunAutoActionSkipsDuplicateFileNameResults(t *testing.T) {
 	var deleteCalls int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

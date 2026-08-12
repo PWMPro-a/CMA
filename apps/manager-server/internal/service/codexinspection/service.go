@@ -3030,8 +3030,11 @@ func resolveAutoActionResults(mode string, results []model.CodexInspectionResult
 }
 
 func resolveExecutableAction(mode string, action string) string {
-	if mode == model.CodexInspectionAutoActionDisable && action == "delete" {
-		return "disable"
+	if mode == model.CodexInspectionAutoActionDisable {
+		switch action {
+		case "reauth", "delete":
+			return "disable"
+		}
 	}
 	return action
 }
@@ -3206,7 +3209,7 @@ func allowAutoAction(mode string, autoRecoverEnabled bool, result model.CodexIns
 	case model.CodexInspectionAutoActionEnable:
 		return false
 	case model.CodexInspectionAutoActionDisable:
-		return result.Action == "disable" || result.Action == "delete"
+		return result.Action == "reauth" || result.Action == "disable" || result.Action == "delete"
 	case model.CodexInspectionAutoActionDelete:
 		return result.Action == "disable" || result.Action == "delete"
 	default:
