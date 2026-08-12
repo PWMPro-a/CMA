@@ -510,7 +510,7 @@ func TestEmptyNonSupplyInspectionDoesNotBecomeCapacityBaseline(t *testing.T) {
 	}
 }
 
-func TestSmartQuotaLowWaterUsesStagedBatchAndShortCooldown(t *testing.T) {
+func TestSmartQuotaLowWaterRefillsToHealthyAndKeepsShortCooldown(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		ReplenishBatchSize:        15,
 		PrelockMinQuantity:        1,
@@ -522,31 +522,36 @@ func TestSmartQuotaLowWaterUsesStagedBatchAndShortCooldown(t *testing.T) {
 		HealthLevel:             smartHealthCritical,
 		WarningMinutes:          25,
 		CriticalMinutes:         15,
+		EffectiveHealthyMinutes: 40,
 		EstimatedSustainMinutes: 8,
 		ConsumeRCUPerMinute:     2_000,
 		CapacityGapRCU:          61_250,
 		UnitCapacityRCU:         40,
 		SuggestedQuantity:       20,
 	}
-	if got := smartAutomaticOrderQuantityLimit(cfg, critical); got != 3 {
-		t.Fatalf("critical quota batch limit=%d, want 3", got)
+	critical.SnapshotFresh = true
+	if got := smartAutomaticOrderQuantityLimit(cfg, critical); got != 7 {
+		t.Fatalf("critical quota batch limit=%d, want 7", got)
 	}
-	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, critical); got != 3 {
-		t.Fatalf("critical suggested quantity=%d, want 3", got)
+	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, critical); got != 7 {
+		t.Fatalf("critical suggested quantity=%d, want 7", got)
 	}
-	if got, reason := smartPrelockQuantityForSupplyPressure(cfg, critical, smartSupplyPressure{level: smartSupplyPressurePlenty}, 20); got != 3 || reason != "low_water_staged_batch" {
-		t.Fatalf("critical pressure adjustment=%d/%q, want 3/staged", got, reason)
+	if got, reason := smartPrelockQuantityForSupplyPressure(cfg, critical, smartSupplyPressure{level: smartSupplyPressurePlenty}, 20); got != 7 || reason != "emergency_refill_to_healthy" {
+		t.Fatalf("critical pressure adjustment=%d/%q, want 7/healthy", got, reason)
 	}
-	if got := smartCreateCooldownForResource(cfg, critical); got != 15 {
-		t.Fatalf("critical cooldown=%d, want 15", got)
+	if got := smartCreateCooldownForResource(cfg, critical); got != 60 {
+		t.Fatalf("critical cooldown=%d, want 60", got)
 	}
-	if got := smartAutomaticCheckIntervalSeconds(cfg, critical); got != 15 {
-		t.Fatalf("critical worker interval=%d, want 15", got)
+	if got := smartAutomaticCheckIntervalSeconds(cfg, critical); got != 60 {
+		t.Fatalf("critical worker interval=%d, want 60", got)
 	}
 
 	warning := critical
+	warning.SnapshotFresh = false
 	warning.HealthLevel = smartHealthWarning
 	warning.EstimatedSustainMinutes = 20
+	warning.CapacityGapRCU = 0
+	warning.EffectiveHealthyMinutes = 0
 	if got := smartCreateCooldownForResource(cfg, warning); got != 45 {
 		t.Fatalf("warning cooldown=%d, want 45", got)
 	}
@@ -555,6 +560,7 @@ func TestSmartQuotaLowWaterUsesStagedBatchAndShortCooldown(t *testing.T) {
 	}
 	healthy := warning
 	healthy.EstimatedSustainMinutes = 30
+	healthy.CapacityGapRCU = 1
 	if got := smartAutomaticOrderQuantityLimit(cfg, healthy); got != 3 {
 		t.Fatalf("ordinary capacity-deficit batch limit=%d, want 3", got)
 	}
@@ -563,11 +569,90 @@ func TestSmartQuotaLowWaterUsesStagedBatchAndShortCooldown(t *testing.T) {
 	}
 	hardEmergency := critical
 	hardEmergency.EmergencyReason = "critical_available_accounts"
-	if got := smartAutomaticOrderQuantityLimit(cfg, hardEmergency); got != 15 {
-		t.Fatalf("account-count emergency batch limit=%d, want 15", got)
+	if got := smartAutomaticOrderQuantityLimit(cfg, hardEmergency); got != 7 {
+		t.Fatalf("account-count emergency batch limit=%d, want 7", got)
 	}
-	if got, reason := smartPrelockQuantityForSupplyPressure(cfg, hardEmergency, smartSupplyPressure{level: smartSupplyPressurePlenty}, 10); got != 10 || reason != "critical_available_accounts" {
-		t.Fatalf("account-count emergency pressure adjustment=%d/%q, want 10/full", got, reason)
+	if got, reason := smartPrelockQuantityForSupplyPressure(cfg, hardEmergency, smartSupplyPressure{level: smartSupplyPressurePlenty}, 10); got != 7 || reason != "critical_available_accounts" {
+		t.Fatalf("account-count emergency pressure adjustment=%d/%q, want 7/full", got, reason)
+	}
+}
+
+func TestEmergencyCapacityGapRefillsToHealthyWaterline(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Product:              "oauth_30d",
+		Strategy:             managerconfigsvc.SupplyStrategyStrongSupply,
+		HealthyMinutesTarget: 60,
+		WarningMinutes:       30,
+		CriticalMinutes:      20,
+		ReplenishBatchSize:   50,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   20,
+		NewAccountConfidence: 0.7,
+	}
+	resource := defaultSmartResource(cfg)
+	resource.SnapshotFresh = true
+	resource.CurrentCapacityRCU = 23_342
+	resource.ConsumeRCUPerMinute = 1_291.27
+	resource.DemandTrend = smartDemandTrendStable
+
+	recalculateSmartResourceCapacityPlan(cfg, &resource)
+
+	if !resource.EmergencyShortage || resource.SuggestedQuantity != 16 {
+		t.Fatalf("emergency healthy-water refill = %#v, want 16 accounts", resource)
+	}
+	if resource.CapacityGapRCU < 47_670 || resource.CapacityGapRCU > 47_690 {
+		t.Fatalf("capacity gap = %.2f, want about 47678 RCU", resource.CapacityGapRCU)
+	}
+	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); got != 16 {
+		t.Fatalf("create quantity = %d, want 16", got)
+	}
+	if got, reason := smartPrelockQuantityForSupplyPressure(cfg, resource, smartSupplyPressure{level: smartSupplyPressurePlenty}, 16); got != 16 || reason != "emergency_refill_to_healthy" {
+		t.Fatalf("pressure adjustment = %d/%q, want 16/healthy", got, reason)
+	}
+	if resource.ProjectedSustainAfterRefillMin < 55 {
+		t.Fatalf("projected runway = %.1f minutes, want healthy waterline", resource.ProjectedSustainAfterRefillMin)
+	}
+}
+
+func TestEmergencyRetryUsesSmallBatchOnlyAfterDefiniteZeroDeliveryFailure(t *testing.T) {
+	now := time.Now()
+	cfg := store.ManagerSupplyConfig{Product: "oauth_30d"}
+	resource := SmartResource{
+		EmergencyShortage:       true,
+		EffectiveHealthyMinutes: 55,
+		EstimatedSustainMinutes: 18,
+		ConsumeRCUPerMinute:     1_000,
+		CapacityGapRCU:          40_000,
+	}
+	cancelled := store.SupplyOrder{
+		OrderID: "cancelled-purchase", Product: cfg.Product, Automatic: true,
+		Status: "cancelled", CompletedAtMS: now.Add(-20 * time.Second).UnixMilli(),
+	}
+	plan := smartEmergencyRetryPlanForOrder(cfg, resource, cancelled, now)
+	if !plan.active || plan.quantityLimit != 3 || plan.reason != "emergency_retry_after_cancelled" || plan.cooldown != 10*time.Second {
+		t.Fatalf("cancelled retry plan = %#v", plan)
+	}
+
+	retried := cancelled
+	retried.Status = "failed"
+	retried.TriggerReason = "emergency_retry_after_cancelled"
+	retried.LastError = "inventory unavailable"
+	plan = smartEmergencyRetryPlanForOrder(cfg, resource, retried, now)
+	if !plan.active || plan.quantityLimit != 1 || plan.reason != "emergency_retry_inventory_shortage" {
+		t.Fatalf("repeated retry plan = %#v", plan)
+	}
+
+	blocked := []store.SupplyOrder{
+		{OrderID: "uncertain", Product: cfg.Product, Automatic: true, Status: "create_uncertain", CreatedAtMS: now.UnixMilli()},
+		{OrderID: "paid", Product: cfg.Product, Automatic: true, Status: "cancelled", ChargedFen: 100, CompletedAtMS: now.UnixMilli()},
+		{OrderID: "delivered", Product: cfg.Product, Automatic: true, Status: "failed", ImportedCount: 1, CompletedAtMS: now.UnixMilli()},
+		{OrderID: "auth-error", Product: cfg.Product, Automatic: true, Status: "failed", LastError: "supply API returned HTTP 401", CompletedAtMS: now.UnixMilli()},
+		{OrderID: "recovery-1", Product: cfg.Product, Automatic: true, Strategy: "recovery", Status: "failed", CompletedAtMS: now.UnixMilli()},
+	}
+	for _, order := range blocked {
+		if got := smartEmergencyRetryPlanForOrder(cfg, resource, order, now); got.active {
+			t.Fatalf("order %s must not enter fast retry: %#v", order.OrderID, got)
+		}
 	}
 }
 
@@ -1769,14 +1854,14 @@ func TestLowQuotaRunwayStagesSmallRefillInsteadOfReportingTwoMinuteHealthy(t *te
 	if resource.EstimatedSustainMinutes != 5 || resource.TargetCapacityRCU != 55_000 || resource.CapacityGapRCU != 50_000 {
 		t.Fatalf("capacity plan = %#v", resource)
 	}
-	if resource.HealthLevel != smartHealthCritical || !resource.EmergencyShortage || resource.SuggestedQuantity != 3 {
-		t.Fatalf("low quota must produce a staged three-account refill: %#v", resource)
+	if resource.HealthLevel != smartHealthCritical || !resource.EmergencyShortage || resource.SuggestedQuantity != 20 {
+		t.Fatalf("low quota must fill the configured emergency batch toward healthy: %#v", resource)
 	}
 	if smartAccountAvailabilityEmergency(resource) {
 		t.Fatalf("nine available accounts must not be treated as account-count emergency: %#v", resource)
 	}
-	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); got != 3 {
-		t.Fatalf("staged create quantity=%d, want 3", got)
+	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); got != 20 {
+		t.Fatalf("healthy refill create quantity=%d, want 20", got)
 	}
 }
 
@@ -1854,11 +1939,11 @@ func TestStrongSupplyUsesQuotaCapacityForPlanning(t *testing.T) {
 	resource.HealthyAccounts = 5
 	resource.CurrentCapacityRCU = 5 * unit
 	recalculateSmartResourceCapacityPlan(cfg, &resource)
-	if resource.HealthLevel != smartHealthCritical || resource.AccountQuantityDeficit != 9 || resource.SuggestedQuantity != 3 {
+	if resource.HealthLevel != smartHealthCritical || resource.AccountQuantityDeficit != 9 || resource.SuggestedQuantity != 9 {
 		t.Fatalf("five-account quota capacity plan = %#v", resource)
 	}
-	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 3 {
-		t.Fatalf("five-account quota shortage should trigger a staged order, got %d", quantity)
+	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 9 {
+		t.Fatalf("five-account quota shortage should refill to healthy, got %d", quantity)
 	}
 }
 
@@ -2035,7 +2120,7 @@ func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *t
 		status.SmartResource.DecisionReason != "emergency_capacity_shortage" {
 		t.Fatalf("smart resource = %#v", status.SmartResource)
 	}
-	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "low_water_staged_batch" || status.Orders[0].RequestedQuantity != 3 {
+	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "emergency_refill_to_healthy" || status.Orders[0].RequestedQuantity != 3 {
 		t.Fatalf("staged order = %#v", status.Orders)
 	}
 }
@@ -2113,7 +2198,7 @@ func TestSmartAutomaticUsesQuotaSizedBatchWhenSupplyIsScarce(t *testing.T) {
 		status.SmartResource.DecisionReason != "emergency_capacity_shortage" {
 		t.Fatalf("smart resource = %#v", status.SmartResource)
 	}
-	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "low_water_staged_batch" || status.Orders[0].RequestedQuantity != 3 {
+	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "emergency_refill_to_healthy" || status.Orders[0].RequestedQuantity != 3 {
 		t.Fatalf("staged scarce order = %#v", status.Orders)
 	}
 }
@@ -2688,8 +2773,8 @@ func TestSmartEmergencyShortageOverridesTrendObservation(t *testing.T) {
 	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, falling); got != 1 {
 		t.Fatalf("falling emergency quantity=%d, want 1", got)
 	}
-	if got, reason := smartPrelockQuantityForSupplyPressure(cfg, falling, smartSupplyPressure{level: smartSupplyPressurePlenty}, 10); got != 3 || reason != "low_water_staged_batch" {
-		t.Fatalf("capacity emergency pressure adjustment=%d/%q, want staged batch", got, reason)
+	if got, reason := smartPrelockQuantityForSupplyPressure(cfg, falling, smartSupplyPressure{level: smartSupplyPressurePlenty}, 10); got != 3 || reason != "emergency_refill_to_healthy" {
+		t.Fatalf("capacity emergency pressure adjustment=%d/%q, want healthy refill", got, reason)
 	}
 
 	rising := falling

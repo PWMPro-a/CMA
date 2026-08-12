@@ -126,6 +126,13 @@ type RecoverySyncResult struct {
 	Failed    int `json:"failed"`
 }
 
+type smartEmergencyRetryPlan struct {
+	active        bool
+	reason        string
+	quantityLimit int
+	cooldown      time.Duration
+}
+
 type ReportRequest struct {
 	FromMS int64 `json:"fromMs,omitempty"`
 	ToMS   int64 `json:"toMs,omitempty"`
@@ -635,6 +642,20 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 			applySmartAccountQuantityEstimate(cfg.Supply, &resource)
 		}
 	}
+	retryPlan, err := s.applySmartEmergencyRetryPlan(ctx, cfg.Supply, &resource)
+	if err != nil {
+		return Status{}, err
+	}
+	if retryPlan.active {
+		cooldownActive, cooldownErr := s.automaticCreateCooldownActive(ctx, cfg.Supply, resource)
+		if cooldownErr != nil {
+			return Status{}, cooldownErr
+		}
+		if cooldownActive {
+			resource.SuggestedAction = smartActionObserveDemand
+			resource.DecisionReason = "emergency_retry_cooldown"
+		}
+	}
 	// smartResource() publishes the inspection-derived state before the live CPA
 	// account list is reconciled above. Persist the final reconciled result too;
 	// otherwise dashboard polling can leave the worker scheduled from stale
@@ -655,6 +676,17 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
+	if found {
+		resource.PrelockedCapacityRCU = estimatedSupplyOrderCapacityRCU(cfg.Supply, active.RequestedQuantity)
+		resource.LockedOrderID = active.OrderID
+	} else {
+		resource.PrelockedCapacityRCU = 0
+		resource.LockedOrderID = ""
+		resource.LockedOrderAgeSeconds = 0
+		resource.LockedConfirmRounds = 0
+	}
+	applySmartRefillProjection(cfg.Supply, &resource)
+	s.setSmartResource(resource)
 	s.stateMu.RLock()
 	overview := s.overview
 	running := s.running
@@ -1267,6 +1299,19 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 		return s.withRecoveryInterval(time.Minute, cfg.Supply)
 	}
 	resource := s.currentSmartResource(cfg.Supply)
+	if plan, err := s.applySmartEmergencyRetryPlan(ctx, cfg.Supply, &resource); err == nil {
+		s.setSmartResource(resource)
+		if plan.active {
+			latest, found, latestErr := s.store.GetLatestAutomaticSupplyOrder(ctx)
+			if latestErr == nil && found {
+				retryAt := time.UnixMilli(smartSupplyOrderTerminalAtMS(latest)).Add(plan.cooldown)
+				if wait := time.Until(retryAt); wait > 0 {
+					return s.withRecoveryInterval(wait, cfg.Supply)
+				}
+				return s.withRecoveryInterval(time.Second, cfg.Supply)
+			}
+		}
+	}
 	seconds := smartAutomaticCheckIntervalSeconds(cfg.Supply, resource)
 	return s.withRecoveryInterval(time.Duration(seconds)*time.Second, cfg.Supply)
 }
@@ -1350,11 +1395,12 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 				s.markAutomaticAccountSnapshot()
 			}
 			if emergencyQuantity > 0 {
-				resource.SuggestedQuantity = emergencyQuantity
+				resource.SuggestedQuantity = max(resource.SuggestedQuantity, emergencyQuantity)
 				resource.DecisionReason = emergencyReason
 				resource.EmergencyReason = emergencyReason
 			}
 			applySmartAccountQuantityEstimate(supplyCfg, &resource)
+			applySmartRefillProjection(supplyCfg, &resource)
 			s.setSmartResource(resource)
 		}
 	} else {
@@ -1390,15 +1436,23 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			return nil
 		}
 		if useSmart {
+			if _, err := s.applySmartEmergencyRetryPlan(ctx, supplyCfg, &resource); err != nil {
+				return err
+			}
 			cooldownActive, err := s.automaticCreateCooldownActive(ctx, supplyCfg, resource)
 			if err != nil {
 				return err
 			}
 			if cooldownActive {
-				resource.EmergencyShortage = false
 				resource.SuggestedAction = smartActionObserveDemand
-				resource.SuggestedQuantity = 0
-				resource.DecisionReason = "automatic_create_cooldown"
+				if isSmartEmergencyRetryReason(resource.DecisionReason) {
+					resource.DecisionReason = "emergency_retry_cooldown"
+				} else {
+					resource.EmergencyShortage = false
+					resource.SuggestedQuantity = 0
+					resource.DecisionReason = "automatic_create_cooldown"
+				}
+				applySmartRefillProjection(supplyCfg, &resource)
 				s.setSmartResource(resource)
 				s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
 				return nil
@@ -1472,6 +1526,9 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		if pressureReason != "" {
 			resource.DecisionReason = pressureReason
 		}
+		if smartResourceEmergency(resource) && !isSmartEmergencyRetryReason(resource.DecisionReason) {
+			resource.DecisionReason = "emergency_refill_to_healthy"
+		}
 	}
 	s.setOverview(Overview{
 		CheckedAtMS:  time.Now().UnixMilli(),
@@ -1510,6 +1567,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		}
 		resource.SuggestedQuantity = quantity
 		resource.PrelockedCapacityRCU = estimatedSupplyOrderCapacityRCU(supplyCfg, quantity)
+		applySmartRefillProjection(supplyCfg, &resource)
 		s.setSmartResource(resource)
 	}
 
@@ -4412,12 +4470,15 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 	if smartResourceEmergency(resource) {
 		limit := smartAutomaticOrderQuantityLimit(cfg, resource)
 		minimum := min(smartPrelockMinQuantity(cfg), limit)
+		if isSmartEmergencyRetryReason(resource.DecisionReason) {
+			return clampInt(quantity, minimum, min(limit, 3)), resource.DecisionReason
+		}
 		reason := firstNonEmptyString(resource.EmergencyReason, resource.DecisionReason)
 		if reason == "" {
-			reason = "emergency_capacity_shortage"
+			reason = "emergency_refill_to_healthy"
 		}
 		if !smartAccountAvailabilityEmergency(resource) {
-			reason = "low_water_staged_batch"
+			reason = "emergency_refill_to_healthy"
 		}
 		return clampInt(quantity, minimum, limit), reason
 	}
@@ -4569,6 +4630,9 @@ func supplyOrderTriggerReason(resource SmartResource, automatic bool) string {
 	if !automatic {
 		return "manual"
 	}
+	if isSmartEmergencyRetryReason(resource.DecisionReason) {
+		return resource.DecisionReason
+	}
 	if resource.EmergencyReason != "" {
 		return resource.EmergencyReason
 	}
@@ -4635,11 +4699,111 @@ func (s *Service) automaticCreateCooldownActive(ctx context.Context, cfg store.M
 	}
 	if found {
 		last = maxInt64(last, latest.CreatedAtMS)
+		if retry := smartEmergencyRetryPlanForOrder(cfg, resource, latest, time.Now()); retry.active {
+			seconds = max(1, int(retry.cooldown/time.Second))
+			last = maxInt64(last, smartSupplyOrderTerminalAtMS(latest))
+		}
 	}
 	if seconds <= 0 || last <= 0 {
 		return false, nil
 	}
 	return time.Since(time.UnixMilli(last)) < time.Duration(seconds)*time.Second, nil
+}
+
+func (s *Service) applySmartEmergencyRetryPlan(ctx context.Context, cfg store.ManagerSupplyConfig, resource *SmartResource) (smartEmergencyRetryPlan, error) {
+	if s == nil || s.store == nil || resource == nil || !smartResourceEmergency(*resource) {
+		return smartEmergencyRetryPlan{}, nil
+	}
+	latest, found, err := s.store.GetLatestAutomaticSupplyOrder(ctx)
+	if err != nil || !found {
+		return smartEmergencyRetryPlan{}, err
+	}
+	plan := smartEmergencyRetryPlanForOrder(cfg, *resource, latest, time.Now())
+	if !plan.active {
+		return plan, nil
+	}
+	quantity := s.smartSuggestedCreateQuantity(cfg, *resource)
+	if quantity <= 0 {
+		quantity = resource.SuggestedQuantity
+	}
+	resource.SuggestedQuantity = clampInt(quantity, 1, plan.quantityLimit)
+	resource.DecisionReason = plan.reason
+	applySmartRefillProjection(cfg, resource)
+	return plan, nil
+}
+
+func smartEmergencyRetryPlanForOrder(cfg store.ManagerSupplyConfig, resource SmartResource, order store.SupplyOrder, now time.Time) smartEmergencyRetryPlan {
+	if !smartResourceEmergency(resource) || !order.Automatic ||
+		(strings.TrimSpace(cfg.Product) != "" && !sameSupplyProduct(order.Product, cfg.Product)) ||
+		strings.EqualFold(strings.TrimSpace(order.Strategy), "recovery") ||
+		strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.OrderID)), "recovery-") ||
+		order.ChargedFen > 0 || order.ItemCount > 0 || order.ImportedCount > 0 || order.ReadyQuantity > 0 {
+		return smartEmergencyRetryPlan{}
+	}
+	terminalAtMS := smartSupplyOrderTerminalAtMS(order)
+	if terminalAtMS <= 0 {
+		return smartEmergencyRetryPlan{}
+	}
+	age := now.Sub(time.UnixMilli(terminalAtMS))
+	if age < 0 || age > 10*time.Minute {
+		return smartEmergencyRetryPlan{}
+	}
+
+	reason := ""
+	switch strings.ToLower(strings.TrimSpace(order.Status)) {
+	case "cancelled":
+		reason = "emergency_retry_after_cancelled"
+	case "dismissed":
+		reason = "emergency_retry_after_failed"
+	case "failed":
+		if smartAutomaticFailureBlocksFastRetry(order.LastError) {
+			return smartEmergencyRetryPlan{}
+		}
+		reason = "emergency_retry_after_failed"
+		failure := strings.ToLower(strings.TrimSpace(order.RemoteStatus + " " + order.LastError))
+		if strings.Contains(failure, "inventory") || strings.Contains(failure, "stock") ||
+			strings.Contains(failure, "production") || strings.Contains(failure, "expired") ||
+			strings.Contains(failure, "库存") || strings.Contains(failure, "缺货") {
+			reason = "emergency_retry_inventory_shortage"
+		}
+	default:
+		return smartEmergencyRetryPlan{}
+	}
+
+	limit := 3
+	if isSmartEmergencyRetryReason(order.TriggerReason) {
+		limit = 1
+	}
+	return smartEmergencyRetryPlan{active: true, reason: reason, quantityLimit: limit, cooldown: 10 * time.Second}
+}
+
+func smartAutomaticFailureBlocksFastRetry(lastError string) bool {
+	value := strings.ToLower(strings.TrimSpace(lastError))
+	if value == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"http 400", "http 401", "http 402", "http 403", "http 404", "http 409", "http 422",
+		"balance", "余额", "unauthorized", "forbidden", "password", "username", "credential",
+		"invalid product", "invalid quantity", "token missing", "token expired",
+	} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func smartSupplyOrderTerminalAtMS(order store.SupplyOrder) int64 {
+	if order.CompletedAtMS > 0 {
+		return order.CompletedAtMS
+	}
+	return maxInt64(order.UpdatedAtMS, order.CreatedAtMS)
+}
+
+func isSmartEmergencyRetryReason(reason string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(reason)), "emergency_retry_") &&
+		!strings.EqualFold(strings.TrimSpace(reason), "emergency_retry_cooldown")
 }
 
 // smartAutomaticCheckIntervalSeconds keeps the worker responsive while the

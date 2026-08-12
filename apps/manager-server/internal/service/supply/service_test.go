@@ -193,6 +193,118 @@ func TestAutomaticCreateCooldownIgnoresRecentRecoveryImport(t *testing.T) {
 	}
 }
 
+func TestEmergencyRetryNextIntervalHonorsShortCooldown(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name    string
+		order   store.SupplyOrder
+		wantMin time.Duration
+		wantMax time.Duration
+	}{
+		{
+			name: "cancelled order waits for remaining retry cooldown",
+			order: store.SupplyOrder{
+				OrderID: "cancelled-recent", Product: "oauth_30d", Automatic: true,
+				Status: "cancelled", CompletedAtMS: now.Add(-4 * time.Second).UnixMilli(),
+			},
+			wantMin: 5 * time.Second,
+			wantMax: 7 * time.Second,
+		},
+		{
+			name: "cancelled order retries promptly after cooldown",
+			order: store.SupplyOrder{
+				OrderID: "cancelled-ready", Product: "oauth_30d", Automatic: true,
+				Status: "cancelled", CompletedAtMS: now.Add(-11 * time.Second).UnixMilli(),
+			},
+			wantMin: 500 * time.Millisecond,
+			wantMax: 1500 * time.Millisecond,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, err := store.Open(filepath.Join(t.TempDir(), "supply-retry-interval.sqlite"))
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			enabled := true
+			cfg := store.ManagerSupplyConfig{
+				Enabled: &enabled, Product: "oauth_30d", CheckIntervalSeconds: 60,
+				HealthyMinutesTarget: 60, WarningMinutes: 30, CriticalMinutes: 20,
+				ReplenishBatchSize: 20, PrelockMaxQuantity: 20,
+			}
+			if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{Supply: cfg}); err != nil {
+				t.Fatalf("save config: %v", err)
+			}
+			if _, err := st.CreateSupplyOrder(context.Background(), tt.order); err != nil {
+				t.Fatalf("create order: %v", err)
+			}
+			service := New(st, managerconfigsvc.New(config.Config{}, st, nil), nil)
+			service.setSmartResource(SmartResource{
+				GeneratedAtMS: time.Now().UnixMilli(), Enabled: true, SnapshotFresh: true,
+				EmergencyShortage: true, EffectiveHealthyMinutes: 60, CriticalMinutes: 20,
+				EstimatedSustainMinutes: 10, ConsumeRCUPerMinute: 1_000,
+				CapacityGapRCU: 40_000, SuggestedQuantity: 13,
+			})
+
+			interval := service.NextInterval(context.Background())
+			if interval < tt.wantMin || interval > tt.wantMax {
+				t.Fatalf("next interval = %s, want [%s, %s]", interval, tt.wantMin, tt.wantMax)
+			}
+		})
+	}
+}
+
+func TestEmergencyRetryNextIntervalExcludesUnsafeFailures(t *testing.T) {
+	now := time.Now()
+	tests := []store.SupplyOrder{
+		{OrderID: "uncertain", Product: "oauth_30d", Automatic: true, Status: "create_uncertain", CreatedAtMS: now.Add(-20 * time.Second).UnixMilli()},
+		{OrderID: "paid", Product: "oauth_30d", Automatic: true, Status: "cancelled", ChargedFen: 100, CompletedAtMS: now.Add(-20 * time.Second).UnixMilli()},
+		{OrderID: "auth-failed", Product: "oauth_30d", Automatic: true, Status: "failed", LastError: "supply API returned HTTP 401", CompletedAtMS: now.Add(-20 * time.Second).UnixMilli()},
+		{OrderID: "recovery-recent", Product: "oauth_30d", Automatic: true, Strategy: "recovery", Status: "failed", CompletedAtMS: now.Add(-20 * time.Second).UnixMilli()},
+	}
+	for _, order := range tests {
+		t.Run(order.OrderID, func(t *testing.T) {
+			st, err := store.Open(filepath.Join(t.TempDir(), "supply-retry-exclusion.sqlite"))
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			enabled := true
+			cfg := store.ManagerSupplyConfig{
+				Enabled: &enabled, Product: "oauth_30d", CheckIntervalSeconds: 60,
+				HealthyMinutesTarget: 60, WarningMinutes: 30, CriticalMinutes: 20,
+				ReplenishBatchSize: 20, PrelockMaxQuantity: 20,
+			}
+			if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{Supply: cfg}); err != nil {
+				t.Fatalf("save config: %v", err)
+			}
+			if _, err := st.CreateSupplyOrder(context.Background(), order); err != nil {
+				t.Fatalf("create order: %v", err)
+			}
+			service := New(st, managerconfigsvc.New(config.Config{}, st, nil), nil)
+			service.setSmartResource(SmartResource{
+				GeneratedAtMS: time.Now().UnixMilli(), Enabled: true, SnapshotFresh: true,
+				EmergencyShortage: true, EffectiveHealthyMinutes: 60, CriticalMinutes: 20,
+				EstimatedSustainMinutes: 10, ConsumeRCUPerMinute: 1_000,
+				CapacityGapRCU: 40_000, SuggestedQuantity: 13,
+			})
+
+			interval := service.NextInterval(context.Background())
+			if order.Status == "create_uncertain" {
+				if interval < 59*time.Second || interval > 61*time.Second {
+					t.Fatalf("create_uncertain interval = %s, want normal open-order pacing", interval)
+				}
+				return
+			}
+			if interval < 59*time.Second || interval > 61*time.Second {
+				t.Fatalf("unsafe failure interval = %s, want normal configured pacing", interval)
+			}
+		})
+	}
+}
+
 func TestAutomaticSupplyGuardRequiresFreshBaselineAndSettledImports(t *testing.T) {
 	service := New(nil, nil)
 	nowMS := time.Now().UnixMilli()
@@ -293,11 +405,11 @@ func TestLiveAccountPoolCapsStaleInspectionCapacityAndRecalculatesShortage(t *te
 
 	recalculateSmartResourceCapacityPlan(cfg, &resource)
 	if resource.HealthLevel != smartHealthCritical || resource.EstimatedRequiredAccounts != 109 ||
-		resource.AccountQuantityDeficit != 104 || resource.SuggestedQuantity != 3 {
+		resource.AccountQuantityDeficit != 104 || resource.SuggestedQuantity != 20 {
 		t.Fatalf("live five-account shortage plan = %#v", resource)
 	}
-	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 3 {
-		t.Fatalf("live five-account quota shortage should request a staged batch of three, got %d", quantity)
+	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 20 {
+		t.Fatalf("live five-account quota shortage should fill the configured batch, got %d", quantity)
 	}
 }
 

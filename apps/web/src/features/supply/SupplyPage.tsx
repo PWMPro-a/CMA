@@ -1494,6 +1494,14 @@ export function SupplyPage() {
                     <strong>{smart?.suggestedQuantity ?? '-'}</strong>
                   </div>
                   <div>
+                    <span>{t('supply.projected_sustain_after_refill')}</span>
+                    <strong>
+                      {smart?.projectedSustainAfterRefillMinutes != null
+                        ? formatMinutes(smart.projectedSustainAfterRefillMinutes)
+                        : '-'}
+                    </strong>
+                  </div>
+                  <div>
                     <span>{t('supply.confidence')}</span>
                     <strong>
                       {t(`supply.smart_confidence_${confidence}`, {

@@ -167,6 +167,8 @@ export interface SupplySmartResource {
   unitCapacityRcu: number;
   recommendedCapacityRcu: number;
   prelockedCapacityRcu?: number;
+  projectedCapacityAfterRefillRcu?: number;
+  projectedSustainAfterRefillMinutes?: number;
   supplyPressureLevel?: 'plenty' | 'normal' | 'tight' | 'scarce' | 'unknown' | string;
   supplyPressureReason?: string;
   supplyInventoryAvailable?: number;
