@@ -1,0 +1,373 @@
+package codexquota
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+)
+
+var verificationBackoff = []time.Duration{0, 300 * time.Millisecond, time.Second, 2 * time.Second}
+
+func (s *Service) consume(
+	ctx context.Context,
+	setup store.Setup,
+	file cpaauthfiles.File,
+	operation model.CodexQuotaOperation,
+	result ResetResult,
+	warnings []string,
+) (OperationResponse, error) {
+	if len(result.UsageBefore) == 0 || len(result.ResetCreditsBefore) == 0 {
+		usage, credits := s.fetchBefore(ctx, setup, file)
+		if len(result.UsageBefore) == 0 {
+			if usage.err != nil || !successfulStatus(usage.response.StatusCode) {
+				warnings = addWarning(warnings, "usage_before_unavailable")
+			} else {
+				result.UsageBefore = usage.response.Body
+				observed, needsReset := codexUsageLimitState(usage.response.Body)
+				if observed && !needsReset {
+					return s.finishAlreadyAvailable(ctx, operation, result, addWarning(warnings, "quota_already_available"))
+				}
+			}
+		}
+		if len(result.ResetCreditsBefore) == 0 {
+			if credits.err != nil || !successfulStatus(credits.response.StatusCode) {
+				warnings = addWarning(warnings, "reset_credits_before_unavailable")
+			} else {
+				result.ResetCreditsBefore = credits.response.Body
+			}
+		}
+	}
+	operation.State = model.CodexQuotaOperationStateConsuming
+	operation.LastError = ""
+	var err error
+	operation, claimed, err := s.persistIfState(ctx, operation, result, warnings, model.CodexQuotaOperationStateCreated)
+	if err != nil {
+		return OperationResponse{}, err
+	}
+	if !claimed {
+		return operationResponse(operation), nil
+	}
+
+	consumeResponse, err := s.gateway.consumeResetCredit(
+		ctx,
+		setup,
+		operation.AuthIndex,
+		file.AccountID,
+		operation.OperationID,
+	)
+	if err != nil {
+		operation.State = model.CodexQuotaOperationStateConsumeStatusUnknown
+		operation.Consumed = nil
+		operation.LastError = truncate(err.Error(), 2048)
+		operation, _ = s.persist(ctx, operation, result, addWarning(warnings, "consume_status_unknown"))
+		return operationResponse(operation), nil
+	}
+	status := consumeResponse.StatusCode
+	operation.UpstreamStatus = &status
+	result.ConsumeResponse = consumeResponse.Body
+	if !successfulStatus(status) {
+		if status >= 500 || status == 408 {
+			operation.State = model.CodexQuotaOperationStateConsumeStatusUnknown
+			operation.Consumed = nil
+			operation.LastError = fmt.Sprintf("reset-credit consume returned HTTP %d", status)
+			operation, _ = s.persist(ctx, operation, result, addWarning(warnings, "consume_status_unknown"))
+			return operationResponse(operation), nil
+		}
+		consumed := false
+		operation.Consumed = &consumed
+		operation.State = model.CodexQuotaOperationStateFailed
+		operation.LastError = fmt.Sprintf("reset-credit consume returned HTTP %d", status)
+		operation, _ = s.persist(ctx, operation, result, warnings)
+		return operationResponse(operation), nil
+	}
+	consumed := true
+	operation.Consumed = &consumed
+	operation.State = model.CodexQuotaOperationStateUpstreamAccepted
+	operation.LastError = ""
+	operation, err = s.persist(ctx, operation, result, warnings)
+	if err != nil {
+		operation.State = model.CodexQuotaOperationStateConsumeStatusUnknown
+		operation.LastError = "upstream accepted reset-credit consumption but operation persistence failed"
+		return operationResponse(operation), nil
+	}
+	return s.completePostConsume(ctx, setup, file, operation, result, warnings)
+}
+
+func (s *Service) finishAlreadyAvailable(
+	ctx context.Context,
+	operation model.CodexQuotaOperation,
+	result ResetResult,
+	warnings []string,
+) (OperationResponse, error) {
+	consumed := false
+	operation.Consumed = &consumed
+	result.Verified = true
+	result.UsageAfter = result.UsageBefore
+	operation.State = model.CodexQuotaOperationStateCompleted
+	operation.LastError = ""
+	operation, _ = s.persist(ctx, operation, result, warnings)
+	return operationResponse(operation), nil
+}
+
+func (s *Service) resumeUnknownConsume(
+	ctx context.Context,
+	setup store.Setup,
+	file cpaauthfiles.File,
+	operation model.CodexQuotaOperation,
+	result ResetResult,
+	warnings []string,
+) (OperationResponse, error) {
+	verified, attempts, usageAfter, verificationWarning := s.verifyUsage(ctx, setup, file)
+	result.VerificationAttempts += attempts
+	if len(usageAfter) > 0 {
+		result.UsageAfter = usageAfter
+	}
+	if !verified {
+		operation.State = model.CodexQuotaOperationStateConsumeStatusUnknown
+		operation.Consumed = nil
+		operation.LastError = "reset-credit consumption remains unconfirmed"
+		warnings = addWarning(warnings, "consume_status_unknown")
+		if verificationWarning != "" {
+			warnings = addWarning(warnings, verificationWarning)
+		}
+		operation, _ = s.persist(ctx, operation, result, warnings)
+		return operationResponse(operation), nil
+	}
+	consumed := true
+	operation.Consumed = &consumed
+	operation.State = model.CodexQuotaOperationStateUpstreamAccepted
+	operation.LastError = ""
+	warnings = addWarning(warnings, "consume_confirmed_by_usage")
+	operation, _ = s.persist(ctx, operation, result, warnings)
+	return s.completePostConsume(ctx, setup, file, operation, result, warnings)
+}
+
+func (s *Service) completePostConsume(
+	ctx context.Context,
+	setup store.Setup,
+	file cpaauthfiles.File,
+	operation model.CodexQuotaOperation,
+	result ResetResult,
+	warnings []string,
+) (OperationResponse, error) {
+	operation.State = model.CodexQuotaOperationStateVerifying
+	operation.LastError = ""
+	operation, _ = s.persist(ctx, operation, result, warnings)
+	verified, attempts, usageAfter, verificationWarning := s.verifyUsage(ctx, setup, file)
+	result.VerificationAttempts += attempts
+	if len(usageAfter) > 0 {
+		result.UsageAfter = usageAfter
+	}
+	result.Verified = verified
+	if !verified {
+		operation.State = model.CodexQuotaOperationStatePartialSuccess
+		operation.LastError = "upstream quota recovery was not confirmed"
+		warnings = addWarning(warnings, verificationWarning)
+		operation, _ = s.persist(ctx, operation, result, warnings)
+		return operationResponse(operation), nil
+	}
+	localResponse, _, err := s.gateway.resetLocalQuota(ctx, setup, operation.AuthIndex)
+	if err != nil {
+		operation.State = model.CodexQuotaOperationStatePartialSuccess
+		operation.LastError = truncate(err.Error(), 2048)
+		operation, _ = s.persist(ctx, operation, result, addWarning(warnings, "local_quota_reset_failed"))
+		return operationResponse(operation), nil
+	}
+	result.LocalResetResponse = localResponse
+	operation.State = model.CodexQuotaOperationStateLocallyRecovered
+	operation.LastError = ""
+	operation, _ = s.persist(ctx, operation, result, warnings)
+	return s.finishAfterLocalReset(ctx, setup, file, operation, result, warnings)
+}
+
+func (s *Service) finishAfterLocalReset(
+	ctx context.Context,
+	setup store.Setup,
+	file cpaauthfiles.File,
+	operation model.CodexQuotaOperation,
+	result ResetResult,
+	warnings []string,
+) (OperationResponse, error) {
+	credits, err := s.gateway.resetCredits(ctx, setup, operation.AuthIndex, file.AccountID)
+	if err != nil || !successfulStatus(credits.StatusCode) {
+		warnings = addWarning(warnings, "reset_credits_after_unavailable")
+	} else {
+		result.ResetCreditsAfter = credits.Body
+	}
+	operation.State = model.CodexQuotaOperationStateCompleted
+	operation.LastError = ""
+	operation, _ = s.persist(ctx, operation, result, warnings)
+	return operationResponse(operation), nil
+}
+
+type beforeFetchResult struct {
+	response apiCallResult
+	err      error
+}
+
+func (s *Service) fetchBefore(ctx context.Context, setup store.Setup, file cpaauthfiles.File) (beforeFetchResult, beforeFetchResult) {
+	usageChannel := make(chan beforeFetchResult, 1)
+	creditsChannel := make(chan beforeFetchResult, 1)
+	go func() {
+		response, err := s.gateway.usage(ctx, setup, file.AuthIndex, file.AccountID)
+		usageChannel <- beforeFetchResult{response: response, err: err}
+	}()
+	go func() {
+		response, err := s.gateway.resetCredits(ctx, setup, file.AuthIndex, file.AccountID)
+		creditsChannel <- beforeFetchResult{response: response, err: err}
+	}()
+	return <-usageChannel, <-creditsChannel
+}
+
+func (s *Service) verifyUsage(ctx context.Context, setup store.Setup, file cpaauthfiles.File) (bool, int, json.RawMessage, string) {
+	attempts := 0
+	var latest json.RawMessage
+	hadResponse := false
+	for _, delay := range verificationBackoff {
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return false, attempts, latest, "usage_verification_failed"
+			case <-timer.C:
+			}
+		}
+		response, err := s.gateway.usage(ctx, setup, file.AuthIndex, file.AccountID)
+		attempts++
+		if err != nil || !successfulStatus(response.StatusCode) {
+			continue
+		}
+		hadResponse = true
+		latest = response.Body
+		observed, limited := codexUsageLimitState(response.Body)
+		if observed && !limited {
+			return true, attempts, latest, ""
+		}
+	}
+	if hadResponse {
+		return false, attempts, latest, "usage_recovery_unconfirmed"
+	}
+	return false, attempts, latest, "usage_verification_failed"
+}
+
+func (s *Service) persist(
+	ctx context.Context,
+	operation model.CodexQuotaOperation,
+	result ResetResult,
+	warnings []string,
+) (model.CodexQuotaOperation, error) {
+	resultJSON, _ := json.Marshal(result)
+	warningsJSON, _ := json.Marshal(warnings)
+	operation.ResultJSON = string(resultJSON)
+	operation.WarningCodesJSON = string(warningsJSON)
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistenceTimeout)
+	defer cancel()
+	updated, err := s.operations.Update(persistCtx, operation)
+	if err != nil {
+		return operation, err
+	}
+	return updated, nil
+}
+
+func (s *Service) persistIfState(
+	ctx context.Context,
+	operation model.CodexQuotaOperation,
+	result ResetResult,
+	warnings []string,
+	expectedState string,
+) (model.CodexQuotaOperation, bool, error) {
+	resultJSON, _ := json.Marshal(result)
+	warningsJSON, _ := json.Marshal(warnings)
+	operation.ResultJSON = string(resultJSON)
+	operation.WarningCodesJSON = string(warningsJSON)
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistenceTimeout)
+	defer cancel()
+	return s.operations.UpdateIfState(persistCtx, operation, expectedState)
+}
+
+func successfulStatus(status int) bool {
+	return status >= 200 && status < 300
+}
+
+func codexUsageLimitState(body json.RawMessage) (bool, bool) {
+	var payload map[string]any
+	if len(body) == 0 || json.Unmarshal(body, &payload) != nil {
+		return false, false
+	}
+	observed := false
+	limited := false
+	for _, key := range []string{"rate_limit", "rateLimit", "code_review_rate_limit", "codeReviewRateLimit"} {
+		if value, ok := payload[key].(map[string]any); ok {
+			observed = true
+			limited = limited || rateLimitReached(value)
+		}
+	}
+	for _, key := range []string{"additional_rate_limits", "additionalRateLimits"} {
+		items, _ := payload[key].([]any)
+		for _, item := range items {
+			record, _ := item.(map[string]any)
+			for _, childKey := range []string{"rate_limit", "rateLimit"} {
+				if child, ok := record[childKey].(map[string]any); ok {
+					observed = true
+					limited = limited || rateLimitReached(child)
+				}
+			}
+		}
+	}
+	return observed, limited
+}
+
+func rateLimitReached(limit map[string]any) bool {
+	if allowed, ok := boolValue(limit["allowed"]); ok && !allowed {
+		return true
+	}
+	for _, key := range []string{"limit_reached", "limitReached"} {
+		if reached, ok := boolValue(limit[key]); ok && reached {
+			return true
+		}
+	}
+	for _, key := range []string{"primary_window", "primaryWindow", "secondary_window", "secondaryWindow"} {
+		window, _ := limit[key].(map[string]any)
+		for _, usedKey := range []string{"used_percent", "usedPercent"} {
+			if used, ok := numberValue(window[usedKey]); ok && used >= 90 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func boolValue(value any) (bool, bool) {
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(typed))
+		return parsed, err == nil
+	case float64:
+		return typed != 0, true
+	default:
+		return false, false
+	}
+}
+
+func numberValue(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case string:
+		trimmed := strings.TrimSuffix(strings.TrimSpace(typed), "%")
+		parsed, err := strconv.ParseFloat(trimmed, 64)
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}

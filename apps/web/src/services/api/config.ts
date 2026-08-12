@@ -109,4 +109,18 @@ export const configApi = {
    * 更新路由策略
    */
   updateRoutingStrategy: (strategy: string) => apiClient.put('/routing/strategy', { value: strategy }),
+
+  /**
+   * 获取高缓存模式开关
+   */
+  async getRoutingHighCacheMode(): Promise<boolean> {
+    const data = await apiClient.get<Record<string, unknown>>('/routing/high-cache-mode');
+    return Boolean(data?.['high-cache-mode'] ?? data?.highCacheMode ?? data?.value ?? false);
+  },
+
+  /**
+   * 更新高缓存模式开关
+   */
+  updateRoutingHighCacheMode: (enabled: boolean) =>
+    apiClient.put('/routing/high-cache-mode', { value: enabled }),
 };

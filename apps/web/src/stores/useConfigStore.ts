@@ -163,6 +163,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         case 'routing/strategy':
           nextConfig.routingStrategy = value as Config['routingStrategy'];
           break;
+        case 'routing/high-cache-mode':
+          nextConfig.routingHighCacheMode = value as Config['routingHighCacheMode'];
+          break;
         case 'api-keys':
           nextConfig.apiKeys = value as Config['apiKeys'];
           break;

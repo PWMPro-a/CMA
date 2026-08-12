@@ -12,6 +12,7 @@ export const CONFIG_SECTION_KEYS: RawConfigSection[] = [
   'ws-auth',
   'force-model-prefix',
   'routing/strategy',
+  'routing/high-cache-mode',
   'api-keys',
   'gemini-api-key',
   'interactions-api-key',
@@ -50,6 +51,8 @@ export const extractConfigSectionValue = (config: Config | null, section?: RawCo
       return config.forceModelPrefix;
     case 'routing/strategy':
       return config.routingStrategy;
+    case 'routing/high-cache-mode':
+      return config.routingHighCacheMode;
     case 'api-keys':
       return config.apiKeys;
     case 'gemini-api-key':

@@ -1182,6 +1182,13 @@ export function VisualConfigEditor({
                   onChange={(routingSessionAffinity) => onChange({ routingSessionAffinity })}
                 />
                 <ToggleRow
+                  title={t('config_management.visual.sections.network.high_cache_mode')}
+                  description={t('config_management.visual.sections.network.high_cache_mode_desc')}
+                  checked={values.routingHighCacheMode}
+                  disabled={disabled}
+                  onChange={(routingHighCacheMode) => onChange({ routingHighCacheMode })}
+                />
+                <ToggleRow
                   title={t('config_management.visual.sections.network.ws_auth')}
                   description={t('config_management.visual.sections.network.ws_auth_desc')}
                   checked={values.wsAuth}

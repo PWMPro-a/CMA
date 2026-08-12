@@ -3628,6 +3628,8 @@
           "disable_claude_cloak_mode": "Отключить маскировку Claude",
           "disable_claude_cloak_mode_desc": "Глобально передавать system prompt Claude без маскировки Claude Code, если учётные данные не переопределяют это",
           "session_affinity": "Маршрутизация с привязкой к сессии",
+          "high_cache_mode": "Режим высокого кэша",
+          "high_cache_mode_desc": "Стабильно привязывает аккаунт по контексту запроса, уменьшает переключения аккаунтов и повышает долю попаданий Prompt Cache.",
           "ws_auth": "Аутентификация WebSocket",
           "ws_auth_desc": "Включить аутентификацию WebSocket (/v1/ws)"
         },

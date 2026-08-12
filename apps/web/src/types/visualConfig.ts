@@ -139,6 +139,7 @@ export type VisualConfigValues = {
   quotaAntigravityCredits: boolean;
   routingStrategy: 'round-robin' | 'fill-first';
   routingSessionAffinity: boolean;
+  routingHighCacheMode: boolean;
   routingSessionAffinityTTL: string;
   wsAuth: boolean;
   antigravitySignatureCacheEnabled: boolean;
@@ -220,6 +221,7 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   quotaAntigravityCredits: false,
   routingStrategy: 'round-robin',
   routingSessionAffinity: false,
+  routingHighCacheMode: false,
   routingSessionAffinityTTL: '',
   wsAuth: true,
   antigravitySignatureCacheEnabled: true,

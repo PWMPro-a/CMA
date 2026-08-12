@@ -653,6 +653,12 @@ function getNextDirtyFields(
       nextValues.routingSessionAffinity === baselineValues.routingSessionAffinity
     );
   }
+  if (Object.prototype.hasOwnProperty.call(patch, 'routingHighCacheMode')) {
+    updateDirty(
+      'routingHighCacheMode',
+      nextValues.routingHighCacheMode === baselineValues.routingHighCacheMode
+    );
+  }
   if (Object.prototype.hasOwnProperty.call(patch, 'routingSessionAffinityTTL')) {
     updateDirty(
       'routingSessionAffinityTTL',
@@ -941,6 +947,9 @@ export function useVisualConfig() {
         routingStrategy: routing?.strategy === 'fill-first' ? 'fill-first' : 'round-robin',
         routingSessionAffinity: Boolean(
           routing?.['session-affinity'] ?? routing?.sessionAffinity ?? routing?.['sessionAffinity']
+        ),
+        routingHighCacheMode: Boolean(
+          routing?.['high-cache-mode'] ?? routing?.highCacheMode ?? routing?.['highCacheMode']
         ),
         routingSessionAffinityTTL:
           typeof routing?.['session-affinity-ttl'] === 'string'
@@ -1373,6 +1382,7 @@ export function useVisualConfig() {
         const routingDirty =
           isDirty('routingStrategy') ||
           isDirty('routingSessionAffinity') ||
+          isDirty('routingHighCacheMode') ||
           isDirty('routingSessionAffinityTTL');
         if (routingDirty) {
           ensureMapInDoc(doc, ['routing']);
@@ -1381,6 +1391,9 @@ export function useVisualConfig() {
           }
           if (isDirty('routingSessionAffinity')) {
             setBooleanInDoc(doc, ['routing', 'session-affinity'], values.routingSessionAffinity);
+          }
+          if (isDirty('routingHighCacheMode')) {
+            setBooleanInDoc(doc, ['routing', 'high-cache-mode'], values.routingHighCacheMode);
           }
           if (isDirty('routingSessionAffinityTTL')) {
             setStringInDoc(

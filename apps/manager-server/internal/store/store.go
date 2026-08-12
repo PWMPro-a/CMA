@@ -12,6 +12,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/accountaction"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/apikeyalias"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/codexinspection"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/codexquotaoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/containeropsaudit"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/containeropsupgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/datamigration"
@@ -146,6 +147,7 @@ type Store struct {
 	APIKeyAliases        apikeyalias.Repository
 	AccountActions       accountaction.Repository
 	CodexInspections     codexinspection.Repository
+	CodexQuotaOperations codexquotaoperation.Repository
 	DataMigrations       datamigration.Repository
 	QuotaCooldowns       quotacooldown.Repository
 	QuotaSnapshots       quotasnapshot.Repository
@@ -177,6 +179,7 @@ func New(db *sql.DB, protector ...*security.Protector) *Store {
 		APIKeyAliases:        apikeyalias.New(db),
 		AccountActions:       accountaction.New(db),
 		CodexInspections:     codexinspection.New(db),
+		CodexQuotaOperations: codexquotaoperation.New(db),
 		DataMigrations:       datamigration.New(db),
 		QuotaCooldowns:       quotacooldown.New(db),
 		QuotaSnapshots:       quotasnapshot.New(db),

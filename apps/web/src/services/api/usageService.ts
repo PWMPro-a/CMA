@@ -82,6 +82,27 @@ export interface UsageServiceInfo {
   hasHistoricalData?: boolean;
 }
 
+export interface CodexQuotaResetOperation {
+  operation_id: string;
+  account_key: string;
+  auth_index: string;
+  auth_file_name?: string;
+  state:
+    | 'created'
+    | 'consuming'
+    | 'upstream_accepted'
+    | 'verifying'
+    | 'locally_recovered'
+    | 'completed'
+    | 'consume_status_unknown'
+    | 'partial_success'
+    | 'failed';
+  consumed: boolean | null;
+  upstream_status?: number;
+  warning_codes: string[];
+  last_error?: string;
+}
+
 export interface UsageServiceCollectorStatus {
   collector?: string;
   upstream?: string;
@@ -1883,6 +1904,7 @@ const USAGE_SERVICE_TIMEOUT_MS = 30 * 1000;
 const USAGE_SERVICE_TRANSFER_TIMEOUT_MS = 60 * 1000;
 const USAGE_IMPORT_CHUNK_TIMEOUT_MS = 5 * 60 * 1000;
 const CODEX_INSPECTION_RUN_TIMEOUT_MS = 10 * 60 * 1000;
+const CODEX_QUOTA_RESET_TIMEOUT_MS = 90 * 1000;
 export const USAGE_SERVICE_ID = 'cpa-manager-plus';
 export const LEGACY_USAGE_SERVICE_ID = 'cpa-manager';
 export const LEGACY_USAGE_SERVICE_IDS = [LEGACY_USAGE_SERVICE_ID, 'cpa-usage-service'] as const;
@@ -2580,6 +2602,35 @@ export const usageServiceApi = {
       const response = await axios.get<UsageServiceInfo>(buildUrl(base, '/usage-service/info'), {
         timeout: USAGE_SERVICE_TIMEOUT_MS,
       });
+      return response.data;
+    });
+  },
+
+  resetCodexQuota: async (
+    base: string,
+    managementKey: string,
+    authIndex: string,
+    operationId: string
+  ): Promise<CodexQuotaResetOperation> => {
+    if (__DEMO_SITE__ && isDemoMode()) {
+      return {
+        operation_id: operationId,
+        account_key: `codex:auth-index:${authIndex}`,
+        auth_index: authIndex,
+        state: 'completed',
+        consumed: true,
+        warning_codes: [],
+      };
+    }
+    return withUsageServiceError(async () => {
+      const response = await axios.post<CodexQuotaResetOperation>(
+        buildUrl(base, '/v0/management/cpamp/codex-quota/reset-credit'),
+        { auth_index: authIndex, operation_id: operationId },
+        {
+          timeout: CODEX_QUOTA_RESET_TIMEOUT_MS,
+          headers: authHeaders(managementKey),
+        }
+      );
       return response.data;
     });
   },

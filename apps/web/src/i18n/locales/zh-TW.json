@@ -3628,6 +3628,8 @@
           "disable_claude_cloak_mode": "停用 Claude 偽裝模式",
           "disable_claude_cloak_mode_desc": "全域原樣傳遞 Claude system 提示詞，不再偽裝成 Claude Code；個別憑證仍可覆寫",
           "session_affinity": "會話黏性路由",
+          "high_cache_mode": "高快取模式",
+          "high_cache_mode_desc": "按呼叫上下文優先穩定綁定帳號，減少帳號切換，提高 Prompt Cache 命中率。",
           "ws_auth": "WebSocket 驗證",
           "ws_auth_desc": "啟用 WebSocket 連線驗證（/v1/ws）"
         },

@@ -15,6 +15,7 @@ import (
 	automationsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/automation"
 	bootstrapsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrap"
 	codexinspectionsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/codexinspection"
+	codexquotasvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/codexquota"
 	collectorsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
 	containeropssvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/containerops"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
@@ -55,6 +56,7 @@ type Context struct {
 	UsageService                   *usagesvc.Service
 	DashboardService               *dashboardsvc.Service
 	CodexInspectionService         *codexinspectionsvc.Service
+	CodexQuotaService              *codexquotasvc.Service
 	ContainerOpsService            *containeropssvc.Service
 	MonitoringService              *monitoringsvc.Service
 	QuotaSnapshotService           *quotasnapshotsvc.Service
@@ -170,6 +172,7 @@ func fromExisting(
 			managerConfigService,
 			codexinspectionsvc.ServiceOptions{AuthFileMutationCoordinator: authFileMutationCoordinator},
 		),
+		CodexQuotaService: codexquotasvc.New(st, managerConfigService),
 		ContainerOpsService: containeropssvc.New(containeropssvc.Options{
 			AgentURL:   cfg.ContainerOpsAgentURL,
 			AgentToken: cfg.ContainerOpsAgentToken,

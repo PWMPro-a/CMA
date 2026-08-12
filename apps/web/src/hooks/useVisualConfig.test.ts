@@ -664,4 +664,46 @@ describe('useVisualConfig', () => {
     });
     harness.unmount();
   });
+  it('reads and writes routing high-cache mode without changing other routing options', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = [
+      'routing:',
+      '  strategy: round-robin',
+      '  session-affinity: true',
+      '  session-affinity-ttl: 1h',
+      '  future-routing-option: preserve-me',
+      '',
+    ].join('\n');
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+    });
+
+    expect(harness.getCurrent().visualValues).toEqual(
+      expect.objectContaining({
+        routingStrategy: 'round-robin',
+        routingSessionAffinity: true,
+        routingHighCacheMode: false,
+        routingSessionAffinityTTL: '1h',
+      })
+    );
+
+    act(() => {
+      harness.getCurrent().setVisualValues({ routingHighCacheMode: true });
+    });
+
+    const parsed = parseYaml(harness.getCurrent().applyVisualChangesToYaml(yaml)) as {
+      routing?: Record<string, unknown>;
+    };
+    expect(parsed.routing).toEqual({
+      strategy: 'round-robin',
+      'session-affinity': true,
+      'session-affinity-ttl': '1h',
+      'future-routing-option': 'preserve-me',
+      'high-cache-mode': true,
+    });
+
+    harness.unmount();
+  });
+
 });

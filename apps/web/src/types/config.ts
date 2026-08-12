@@ -44,6 +44,7 @@ export interface Config {
   wsAuth?: boolean;
   forceModelPrefix?: boolean;
   routingStrategy?: string;
+  routingHighCacheMode?: boolean;
   apiKeys?: string[];
   geminiApiKeys?: GeminiKeyConfig[];
   interactionsApiKeys?: GeminiKeyConfig[];
@@ -70,6 +71,7 @@ export type RawConfigSection =
   | 'ws-auth'
   | 'force-model-prefix'
   | 'routing/strategy'
+  | 'routing/high-cache-mode'
   | 'api-keys'
   | 'gemini-api-key'
   | 'interactions-api-key'

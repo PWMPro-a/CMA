@@ -492,12 +492,14 @@ export async function handleDemoApiRequest<T = unknown>(
       '/ws-auth',
       '/force-model-prefix',
       '/routing/strategy',
+      '/routing/high-cache-mode',
     ].includes(pathname)
   ) {
     if (method === 'get') {
       if (pathname === '/logs-max-total-size-mb') return { 'logs-max-total-size-mb': 512 } as T;
       if (pathname === '/force-model-prefix') return { 'force-model-prefix': false } as T;
       if (pathname === '/routing/strategy') return { strategy: 'round-robin' } as T;
+      if (pathname === '/routing/high-cache-mode') return { 'high-cache-mode': true } as T;
     }
     return ok as T;
   }

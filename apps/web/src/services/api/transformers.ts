@@ -503,6 +503,10 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
   if (strategyRaw !== undefined && strategyRaw !== null) {
     config.routingStrategy = String(strategyRaw);
   }
+  const highCacheModeRaw = isRecord(routing)
+    ? (routing['high-cache-mode'] ?? routing.highCacheMode ?? routing['highCacheMode'])
+    : (raw['routing-high-cache-mode'] ?? raw.routingHighCacheMode);
+  config.routingHighCacheMode = normalizeBoolean(highCacheModeRaw);
   const apiKeysRaw = raw['api-keys'] ?? raw.apiKeys;
   if (Array.isArray(apiKeysRaw)) {
     config.apiKeys = apiKeysRaw.map((key) => String(key)).filter((key) => key.trim() !== '');

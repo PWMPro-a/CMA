@@ -1,16 +1,15 @@
 import type { AxiosRequestConfig } from 'axios';
 import type { TFunction } from 'i18next';
 import type { AuthFileItem, CodexUsagePayload } from '@/types';
-import {
-  CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_URL,
-  CODEX_USAGE_URL,
-} from '@/utils/quota/constants';
+import { CODEX_USAGE_URL } from '@/utils/quota/constants';
 import { buildCodexUsageRequestHeaders } from '@/utils/quota/codexRequestHeaders';
-import { createStatusError } from '@/utils/quota/formatters';
 import { normalizeAuthIndex, parseCodexUsagePayload } from '@/utils/quota/parsers';
 import { fetchCodexQuota, type CodexQuotaData } from '@/utils/quota/providerRequests';
 import { resolveCodexChatgptAccountId } from '@/utils/quota/resolvers';
 import { apiCallApi, getApiCallErrorMessage, type ApiCallResult } from './apiCall';
+import { useAuthStore } from '@/stores/useAuthStore';
+import { useUsageServiceStore } from '@/stores/useUsageServiceStore';
+import { usageServiceApi, type CodexQuotaResetOperation } from './usageService';
 
 export type CodexUsageRequestParams = {
   authIndex: string;
@@ -66,13 +65,29 @@ export const createCodexRedeemRequestId = () => {
   if (typeof globalThis.crypto?.randomUUID === 'function') {
     return globalThis.crypto.randomUUID();
   }
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  const bytes = new Uint8Array(16);
+  if (typeof globalThis.crypto?.getRandomValues === 'function') {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 };
 
-export const consumeCodexRateLimitResetCredit = async (
+const resetOperationIds = new Map<string, string>();
+
+const resetOperationKey = (authIndex: string, accountId?: string | null) =>
+  `${authIndex}\u0000${String(accountId ?? '').trim().toLowerCase()}`;
+
+export const requestCodexQuotaReset = async (
   file: AuthFileItem,
   t?: TFunction
-): Promise<ApiCallResult> => {
+): Promise<CodexQuotaResetOperation> => {
   const rawAuthIndex = file['auth_index'] ?? file.authIndex;
   const authIndex = normalizeAuthIndex(rawAuthIndex);
   if (!authIndex) {
@@ -80,27 +95,55 @@ export const consumeCodexRateLimitResetCredit = async (
   }
 
   const accountId = resolveCodexChatgptAccountId(file);
-  const result = await apiCallApi.request({
-    authIndex,
-    method: 'POST',
-    url: CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_URL,
-    header: buildCodexUsageRequestHeaders(accountId),
-    data: JSON.stringify({
-      redeem_request_id: createCodexRedeemRequestId(),
-    }),
-  });
-
-  if (result.statusCode < 200 || result.statusCode >= 300) {
-    throw createStatusError(getApiCallErrorMessage(result), result.statusCode);
+  const usageServiceState = useUsageServiceStore.getState();
+  const authState = useAuthStore.getState();
+  const operationKey = `${usageServiceState.serviceBase || authState.apiBase}\u0000${resetOperationKey(authIndex, accountId)}`;
+  const operationId = resetOperationIds.get(operationKey) ?? createCodexRedeemRequestId();
+  const serviceBase = usageServiceState.enabled
+    ? usageServiceState.serviceBase
+    : authState.sessionMode === 'manager_embedded'
+      ? authState.apiBase
+      : '';
+  if (!serviceBase || !authState.managementKey) {
+    throw new Error('Codex quota controller is not connected');
   }
+  resetOperationIds.set(operationKey, operationId);
 
-  return result;
+  let terminal = false;
+  try {
+    let operation: CodexQuotaResetOperation | null = null;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        operation = await usageServiceApi.resetCodexQuota(
+          serviceBase,
+          authState.managementKey,
+          authIndex,
+          operationId
+        );
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!operation) throw lastError;
+    terminal = operation.state === 'completed' || operation.state === 'failed';
+    if (operation.state !== 'completed') {
+      throw new Error(
+        operation.last_error ||
+          `Codex quota reset operation ended with state ${operation.state}`
+      );
+    }
+    return operation;
+  } finally {
+    if (terminal) resetOperationIds.delete(operationKey);
+  }
 };
 
 export const resetCodexQuota = async (
   file: AuthFileItem,
   t: TFunction
 ): Promise<CodexQuotaData> => {
-  await consumeCodexRateLimitResetCredit(file, t);
+  await requestCodexQuotaReset(file, t);
   return fetchCodexQuota(file, t);
 };

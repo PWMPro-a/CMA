@@ -3628,6 +3628,8 @@
           "disable_claude_cloak_mode": "Disable Claude Cloak Mode",
           "disable_claude_cloak_mode_desc": "Globally pass Claude system prompts through without the Claude Code disguise unless a credential overrides it",
           "session_affinity": "Session Affinity Routing",
+          "high_cache_mode": "High cache mode",
+          "high_cache_mode_desc": "Prefer stable account binding by request context to reduce account switching and improve Prompt Cache hit rate.",
           "ws_auth": "WebSocket Authentication",
           "ws_auth_desc": "Enable WebSocket authentication (/v1/ws)"
         },

@@ -950,6 +950,27 @@ func Migrate(db *sql.DB) error {
 			updated_at_ms integer not null
 		)`,
 		`create index if not exists idx_quota_cooldowns_due on quota_cooldowns(status, recover_at_ms)`,
+		`create table if not exists codex_quota_operations (
+			operation_id text primary key,
+			account_key text not null,
+			auth_index text not null,
+			auth_file_name text,
+			state text not null,
+			consumed integer,
+			upstream_status integer,
+			warning_codes_json text,
+			result_json text,
+			last_error text,
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		)`,
+		`create index if not exists idx_codex_quota_operations_account_updated
+			on codex_quota_operations(account_key, updated_at_ms desc)`,
+		`create index if not exists idx_codex_quota_operations_state_updated
+			on codex_quota_operations(state, updated_at_ms desc)`,
+		`create unique index if not exists idx_codex_quota_operations_account_active
+			on codex_quota_operations(account_key)
+			where state in ('created', 'consuming', 'upstream_accepted', 'verifying', 'locally_recovered', 'consume_status_unknown', 'partial_success')`,
 		`create table if not exists account_quota_observations (
 			id integer primary key autoincrement,
 			observation_hash text not null unique,
