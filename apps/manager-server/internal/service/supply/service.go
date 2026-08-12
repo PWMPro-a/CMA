@@ -1904,8 +1904,7 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 	}
 	if smartSupplyEnabled(cfg.Supply) {
 		resource, err := s.smartResource(ctx, cfg, forceSmartRefresh)
-		if err != nil || !resource.SnapshotFresh ||
-			(resource.ConsumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling) {
+		if err != nil || !resource.SnapshotFresh {
 			// A stale/unknown snapshot is not enough evidence to abandon a paid
 			// reservation. Continue the normal status polling path instead.
 			return false, nil
@@ -1928,6 +1927,12 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 			resource.DecisionReason = emergencyReason
 			resource.SuggestedQuantity = emergencyQuantity
 			s.setSmartResource(resource)
+			return false, nil
+		}
+		if resource.ConsumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling {
+			// Unknown request demand still blocks releasing a reservation, but it
+			// must not hide a verified healthy-account shortage from the ready
+			// order take gate above.
 			return false, nil
 		}
 		resource.LockedOrderID = order.OrderID

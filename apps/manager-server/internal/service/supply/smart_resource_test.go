@@ -2416,6 +2416,54 @@ func TestSmartEmergencyAccountWaterlineKeepsAutomaticOrderWhenQuotaIsHealthy(t *
 	}
 }
 
+func TestVerifiedHealthyFloorPublishesReadyOrderTakeDecisionWithoutUsageRate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"files":[{"name":"verified.json","provider":"codex","status":"ready","remaining_rcu":2000}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "smart-verified-healthy-floor.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	cfg := store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, Product: "oauth_7d", Strategy: managerconfigsvc.SupplyStrategyCustom,
+			TargetAvailableAccounts: 2, HealthyAvailableAccounts: 2, CriticalAvailableAccounts: 0,
+			ReplenishBatchSize: 1, PrelockMaxQuantity: 1,
+		},
+	}
+	if err := st.SaveManagerConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(0))
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	order := store.SupplyOrder{
+		OrderID: "verified-floor-ready", Product: "oauth_7d", RequestedQuantity: 1,
+		Automatic: true, Status: "ready", CreatedAtMS: time.Now().Add(-time.Minute).UnixMilli(),
+	}
+
+	released, err := service.autoReleaseAutomaticOrderIfNotNeeded(context.Background(), cfg, &order, true)
+	if err != nil {
+		t.Fatalf("check automatic release: %v", err)
+	}
+	if released {
+		t.Fatal("verified healthy-floor shortage must keep the ready order")
+	}
+	resource := service.currentSmartResource(cfg.Supply)
+	if resource.DecisionReason != "healthy_available_accounts" || resource.LockedOrderID != order.OrderID ||
+		resource.SuggestedQuantity != 1 || !service.smartTakeAllowed(cfg.Supply, order.OrderID) {
+		t.Fatalf("published verified healthy-floor decision = %#v", resource)
+	}
+}
+
 func TestGetStatusPublishesLiveAccountEmergencyToWorkerState(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet {
