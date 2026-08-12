@@ -99,7 +99,7 @@ describe('requestCodexQuotaReset', () => {
 
   it('reuses the same operation id when the first request times out', async () => {
     mocks.post
-      .mockRejectedValueOnce(new Error('timeout'))
+      .mockRejectedValueOnce(Object.assign(new Error('timeout'), { code: 'ECONNABORTED' }))
       .mockResolvedValueOnce({
         operation_id: 'operation-1',
         account_key: 'codex:account-id:acct-1',
@@ -118,5 +118,20 @@ describe('requestCodexQuotaReset', () => {
 
     expect(mocks.post).toHaveBeenCalledTimes(2);
     expect(mocks.post.mock.calls[0][3]).toBe(mocks.post.mock.calls[1][3]);
+  });
+
+  it('does not retry a definitive HTTP failure', async () => {
+    mocks.post.mockRejectedValueOnce(Object.assign(new Error('conflict'), { status: 409 }));
+
+    await expect(
+      requestCodexQuotaReset({
+        name: 'codex-auth.json',
+        type: 'codex',
+        authIndex: 'auth-1',
+        id_token: { account_id: 'acct-1' },
+      })
+    ).rejects.toThrow('conflict');
+
+    expect(mocks.post).toHaveBeenCalledTimes(1);
   });
 });

@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	quotaoperationrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/codexquotaoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
@@ -36,6 +38,23 @@ type recordingGateway struct {
 	resetCreditCalls int
 	consumeErr       error
 	consumeAccepted  bool
+}
+
+type failOnceUpdateRepository struct {
+	quotaoperationrepo.Repository
+	mu        sync.Mutex
+	remaining int
+}
+
+func (r *failOnceUpdateRepository) Update(ctx context.Context, operation model.CodexQuotaOperation) (model.CodexQuotaOperation, error) {
+	r.mu.Lock()
+	if r.remaining > 0 {
+		r.remaining--
+		r.mu.Unlock()
+		return model.CodexQuotaOperation{}, errors.New("injected operation persistence failure")
+	}
+	r.mu.Unlock()
+	return r.Repository.Update(ctx, operation)
 }
 
 func (g *recordingGateway) usage(context.Context, store.Setup, string, string) (apiCallResult, error) {
@@ -146,16 +165,48 @@ func TestResetCreditCompletesOnceAndReplaysStoredResult(t *testing.T) {
 	}
 }
 
+func TestResetCreditReplaysAfterAcceptedConsumePersistenceFailure(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "quota-persistence-replay.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	gateway := &recordingGateway{}
+	service := &Service{
+		operations: &failOnceUpdateRepository{
+			Repository: st.CodexQuotaOperations,
+			remaining:  1,
+		},
+		setupService: staticSetupResolver{setup: store.Setup{CPAUpstreamURL: "http://cpa", ManagementKey: "key"}},
+		authFiles: staticAuthFiles{file: cpaauthfiles.File{
+			Name: "codex.json", AuthIndex: "auth-1", Provider: "codex", AccountID: "ACCOUNT-1",
+		}},
+		gateway: gateway,
+		locks:   newAccountLocks(),
+	}
+	request := ResetRequest{AuthIndex: "auth-1", OperationID: "251146dd-f03c-43d9-bb1d-7b13fe800b04"}
+	if _, err = service.ResetCredit(context.Background(), request); err == nil {
+		t.Fatal("first reset should expose the injected persistence failure")
+	}
+	second, err := service.ResetCredit(context.Background(), request)
+	if err != nil || second.State != "completed" || second.Consumed == nil || !*second.Consumed {
+		t.Fatalf("replayed result=%#v err=%v", second, err)
+	}
+	if gateway.consumeCalls != 1 || gateway.localResetCalls != 1 {
+		t.Fatalf("gateway calls consume=%d local-reset=%d", gateway.consumeCalls, gateway.localResetCalls)
+	}
+}
+
 func TestCodexUsageLimitStateUsesRecoveryThreshold(t *testing.T) {
 	observed, limited := codexUsageLimitState(json.RawMessage(`{
 		"rate_limit":{"allowed":true,"primary_window":{"used_percent":91}}
-	}`))
+	}`), 90)
 	if !observed || !limited {
 		t.Fatalf("91 percent should be treated as low quota: observed=%v limited=%v", observed, limited)
 	}
 	observed, limited = codexUsageLimitState(json.RawMessage(`{
 		"rate_limit":{"allowed":true,"primary_window":{"used_percent":2}}
-	}`))
+	}`), 90)
 	if !observed || limited {
 		t.Fatalf("2 percent should be recovered: observed=%v limited=%v", observed, limited)
 	}

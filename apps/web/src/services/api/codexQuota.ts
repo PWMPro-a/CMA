@@ -84,6 +84,20 @@ const resetOperationIds = new Map<string, string>();
 const resetOperationKey = (authIndex: string, accountId?: string | null) =>
   `${authIndex}\u0000${String(accountId ?? '').trim().toLowerCase()}`;
 
+const isAmbiguousCodexQuotaResetError = (error: unknown): boolean => {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { status?: unknown; code?: unknown };
+  if (typeof candidate.status === 'number') return false;
+  const code = typeof candidate.code === 'string' ? candidate.code.toUpperCase() : '';
+  return (
+    code === '' ||
+    code === 'ECONNABORTED' ||
+    code === 'ETIMEDOUT' ||
+    code === 'ECONNRESET' ||
+    code === 'ERR_NETWORK'
+  );
+};
+
 export const requestCodexQuotaReset = async (
   file: AuthFileItem,
   t?: TFunction
@@ -124,6 +138,7 @@ export const requestCodexQuotaReset = async (
         break;
       } catch (error) {
         lastError = error;
+        if (!isAmbiguousCodexQuotaResetError(error)) break;
       }
     }
     if (!operation) throw lastError;

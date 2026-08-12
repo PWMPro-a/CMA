@@ -15,6 +15,8 @@ import (
 
 var verificationBackoff = []time.Duration{0, 300 * time.Millisecond, time.Second, 2 * time.Second}
 
+const codexQuotaRecoveryThreshold = 90
+
 func (s *Service) consume(
 	ctx context.Context,
 	setup store.Setup,
@@ -30,7 +32,7 @@ func (s *Service) consume(
 				warnings = addWarning(warnings, "usage_before_unavailable")
 			} else {
 				result.UsageBefore = usage.response.Body
-				observed, needsReset := codexUsageLimitState(usage.response.Body)
+				observed, needsReset := codexUsageLimitState(usage.response.Body, codexQuotaRecoveryThreshold)
 				if observed && !needsReset {
 					return s.finishAlreadyAvailable(ctx, operation, result, addWarning(warnings, "quota_already_available"))
 				}
@@ -66,7 +68,10 @@ func (s *Service) consume(
 		operation.State = model.CodexQuotaOperationStateConsumeStatusUnknown
 		operation.Consumed = nil
 		operation.LastError = truncate(err.Error(), 2048)
-		operation, _ = s.persist(ctx, operation, result, addWarning(warnings, "consume_status_unknown"))
+		operation, err = s.persist(ctx, operation, result, addWarning(warnings, "consume_status_unknown"))
+		if err != nil {
+			return OperationResponse{}, err
+		}
 		return operationResponse(operation), nil
 	}
 	status := consumeResponse.StatusCode
@@ -77,14 +82,20 @@ func (s *Service) consume(
 			operation.State = model.CodexQuotaOperationStateConsumeStatusUnknown
 			operation.Consumed = nil
 			operation.LastError = fmt.Sprintf("reset-credit consume returned HTTP %d", status)
-			operation, _ = s.persist(ctx, operation, result, addWarning(warnings, "consume_status_unknown"))
+			operation, err = s.persist(ctx, operation, result, addWarning(warnings, "consume_status_unknown"))
+			if err != nil {
+				return OperationResponse{}, err
+			}
 			return operationResponse(operation), nil
 		}
 		consumed := false
 		operation.Consumed = &consumed
 		operation.State = model.CodexQuotaOperationStateFailed
 		operation.LastError = fmt.Sprintf("reset-credit consume returned HTTP %d", status)
-		operation, _ = s.persist(ctx, operation, result, warnings)
+		operation, err = s.persist(ctx, operation, result, warnings)
+		if err != nil {
+			return OperationResponse{}, err
+		}
 		return operationResponse(operation), nil
 	}
 	consumed := true
@@ -93,9 +104,7 @@ func (s *Service) consume(
 	operation.LastError = ""
 	operation, err = s.persist(ctx, operation, result, warnings)
 	if err != nil {
-		operation.State = model.CodexQuotaOperationStateConsumeStatusUnknown
-		operation.LastError = "upstream accepted reset-credit consumption but operation persistence failed"
-		return operationResponse(operation), nil
+		return OperationResponse{}, err
 	}
 	return s.completePostConsume(ctx, setup, file, operation, result, warnings)
 }
@@ -112,7 +121,11 @@ func (s *Service) finishAlreadyAvailable(
 	result.UsageAfter = result.UsageBefore
 	operation.State = model.CodexQuotaOperationStateCompleted
 	operation.LastError = ""
-	operation, _ = s.persist(ctx, operation, result, warnings)
+	var err error
+	operation, err = s.persist(ctx, operation, result, warnings)
+	if err != nil {
+		return OperationResponse{}, err
+	}
 	return operationResponse(operation), nil
 }
 
@@ -137,7 +150,11 @@ func (s *Service) resumeUnknownConsume(
 		if verificationWarning != "" {
 			warnings = addWarning(warnings, verificationWarning)
 		}
-		operation, _ = s.persist(ctx, operation, result, warnings)
+		var err error
+		operation, err = s.persist(ctx, operation, result, warnings)
+		if err != nil {
+			return OperationResponse{}, err
+		}
 		return operationResponse(operation), nil
 	}
 	consumed := true
@@ -145,7 +162,11 @@ func (s *Service) resumeUnknownConsume(
 	operation.State = model.CodexQuotaOperationStateUpstreamAccepted
 	operation.LastError = ""
 	warnings = addWarning(warnings, "consume_confirmed_by_usage")
-	operation, _ = s.persist(ctx, operation, result, warnings)
+	var err error
+	operation, err = s.persist(ctx, operation, result, warnings)
+	if err != nil {
+		return OperationResponse{}, err
+	}
 	return s.completePostConsume(ctx, setup, file, operation, result, warnings)
 }
 
@@ -159,7 +180,11 @@ func (s *Service) completePostConsume(
 ) (OperationResponse, error) {
 	operation.State = model.CodexQuotaOperationStateVerifying
 	operation.LastError = ""
-	operation, _ = s.persist(ctx, operation, result, warnings)
+	var err error
+	operation, err = s.persist(ctx, operation, result, warnings)
+	if err != nil {
+		return OperationResponse{}, err
+	}
 	verified, attempts, usageAfter, verificationWarning := s.verifyUsage(ctx, setup, file)
 	result.VerificationAttempts += attempts
 	if len(usageAfter) > 0 {
@@ -170,20 +195,29 @@ func (s *Service) completePostConsume(
 		operation.State = model.CodexQuotaOperationStatePartialSuccess
 		operation.LastError = "upstream quota recovery was not confirmed"
 		warnings = addWarning(warnings, verificationWarning)
-		operation, _ = s.persist(ctx, operation, result, warnings)
+		operation, err = s.persist(ctx, operation, result, warnings)
+		if err != nil {
+			return OperationResponse{}, err
+		}
 		return operationResponse(operation), nil
 	}
 	localResponse, _, err := s.gateway.resetLocalQuota(ctx, setup, operation.AuthIndex)
 	if err != nil {
 		operation.State = model.CodexQuotaOperationStatePartialSuccess
 		operation.LastError = truncate(err.Error(), 2048)
-		operation, _ = s.persist(ctx, operation, result, addWarning(warnings, "local_quota_reset_failed"))
+		operation, err = s.persist(ctx, operation, result, addWarning(warnings, "local_quota_reset_failed"))
+		if err != nil {
+			return OperationResponse{}, err
+		}
 		return operationResponse(operation), nil
 	}
 	result.LocalResetResponse = localResponse
 	operation.State = model.CodexQuotaOperationStateLocallyRecovered
 	operation.LastError = ""
-	operation, _ = s.persist(ctx, operation, result, warnings)
+	operation, err = s.persist(ctx, operation, result, warnings)
+	if err != nil {
+		return OperationResponse{}, err
+	}
 	return s.finishAfterLocalReset(ctx, setup, file, operation, result, warnings)
 }
 
@@ -203,7 +237,10 @@ func (s *Service) finishAfterLocalReset(
 	}
 	operation.State = model.CodexQuotaOperationStateCompleted
 	operation.LastError = ""
-	operation, _ = s.persist(ctx, operation, result, warnings)
+	operation, err = s.persist(ctx, operation, result, warnings)
+	if err != nil {
+		return OperationResponse{}, err
+	}
 	return operationResponse(operation), nil
 }
 
@@ -247,7 +284,7 @@ func (s *Service) verifyUsage(ctx context.Context, setup store.Setup, file cpaau
 		}
 		hadResponse = true
 		latest = response.Body
-		observed, limited := codexUsageLimitState(response.Body)
+		observed, limited := codexUsageLimitState(response.Body, codexQuotaRecoveryThreshold)
 		if observed && !limited {
 			return true, attempts, latest, ""
 		}
@@ -297,7 +334,7 @@ func successfulStatus(status int) bool {
 	return status >= 200 && status < 300
 }
 
-func codexUsageLimitState(body json.RawMessage) (bool, bool) {
+func codexUsageLimitState(body json.RawMessage, recoveryThreshold float64) (bool, bool) {
 	var payload map[string]any
 	if len(body) == 0 || json.Unmarshal(body, &payload) != nil {
 		return false, false
@@ -307,7 +344,7 @@ func codexUsageLimitState(body json.RawMessage) (bool, bool) {
 	for _, key := range []string{"rate_limit", "rateLimit", "code_review_rate_limit", "codeReviewRateLimit"} {
 		if value, ok := payload[key].(map[string]any); ok {
 			observed = true
-			limited = limited || rateLimitReached(value)
+			limited = limited || rateLimitReached(value, recoveryThreshold)
 		}
 	}
 	for _, key := range []string{"additional_rate_limits", "additionalRateLimits"} {
@@ -317,7 +354,7 @@ func codexUsageLimitState(body json.RawMessage) (bool, bool) {
 			for _, childKey := range []string{"rate_limit", "rateLimit"} {
 				if child, ok := record[childKey].(map[string]any); ok {
 					observed = true
-					limited = limited || rateLimitReached(child)
+					limited = limited || rateLimitReached(child, recoveryThreshold)
 				}
 			}
 		}
@@ -325,7 +362,7 @@ func codexUsageLimitState(body json.RawMessage) (bool, bool) {
 	return observed, limited
 }
 
-func rateLimitReached(limit map[string]any) bool {
+func rateLimitReached(limit map[string]any, recoveryThreshold float64) bool {
 	if allowed, ok := boolValue(limit["allowed"]); ok && !allowed {
 		return true
 	}
@@ -337,7 +374,7 @@ func rateLimitReached(limit map[string]any) bool {
 	for _, key := range []string{"primary_window", "primaryWindow", "secondary_window", "secondaryWindow"} {
 		window, _ := limit[key].(map[string]any)
 		for _, usedKey := range []string{"used_percent", "usedPercent"} {
-			if used, ok := numberValue(window[usedKey]); ok && used >= 90 {
+			if used, ok := numberValue(window[usedKey]); ok && used >= recoveryThreshold {
 				return true
 			}
 		}
