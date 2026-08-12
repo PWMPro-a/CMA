@@ -20,7 +20,9 @@ import {
   getHeaderSnapshotErrorCode,
   getHeaderSnapshotErrorKind,
   getHeaderSnapshotPlanType,
+  getHeaderSnapshotRecoverAtMs,
   getHeaderSnapshotTraceId,
+  getHeaderSnapshotUsedPercent,
   hasUsageHeaderDiagnosticSignal,
 } from '@/utils/usageHeaderSnapshots';
 import { resolveCodexPlanType } from '@/utils/quota/resolvers';
@@ -675,6 +677,29 @@ const quotaObservationFieldsFromSnapshot = (
 const hasObservedQuotaFields = (fields: AccountQuotaObservationFields): boolean =>
   Object.values(fields).some((value) => value !== undefined);
 
+const quotaFromHeaderSnapshot = (
+  snapshot: UsageHeaderSnapshot | undefined,
+  planType: string | null,
+  observationFields: AccountQuotaObservationFields
+): AccountQuotaSummary | null => {
+  const usedPercent = getHeaderSnapshotUsedPercent(snapshot);
+  const recoverAtMs = getHeaderSnapshotRecoverAtMs(snapshot);
+  if (usedPercent === null && recoverAtMs === null) return null;
+  const recoverLabel = recoverAtMs ? new Date(recoverAtMs).toLocaleString() : '-';
+  return quotaFromUsedWindows(
+    [
+      {
+        usedPercent,
+        resetLabel: recoverLabel,
+        resetAtMs: recoverAtMs,
+        resetAccuracy: recoverAtMs ? 'estimated' : 'unknown',
+      },
+    ],
+    planType,
+    observationFields
+  );
+};
+
 const mergeQuotaObservationFields = (
   summary: AccountQuotaSummary,
   fields: AccountQuotaObservationFields
@@ -790,7 +815,10 @@ export const resolveAccountQuota = (
     const headerPlanType = readString(getHeaderSnapshotPlanType(headerSnapshot)).toLowerCase();
     const observedPlanType = headerPlanType || filePlanType;
     if (!quota) {
-      return mergeQuotaObservationFields(emptyQuota(observedPlanType), headerObservationFields);
+      return (
+        quotaFromHeaderSnapshot(headerSnapshot, observedPlanType, headerObservationFields) ??
+        mergeQuotaObservationFields(emptyQuota(observedPlanType), headerObservationFields)
+      );
     }
     if (quota.status === 'loading') {
       return mergeQuotaObservationFields(

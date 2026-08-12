@@ -228,6 +228,9 @@ import { collectSourceIpUsageCounts } from '@/utils/sourceIp';
 import {
   buildUsageHeaderSnapshotLookup,
   getHighConfidenceUsageHeaderSnapshotForAuthFile,
+  getHeaderSnapshotErrorCode,
+  getHeaderSnapshotErrorKind,
+  getHeaderSnapshotUsedPercent,
   hasUsageHeaderQuotaSignal,
   isUsageHeaderQuotaSnapshotExpired,
 } from '@/utils/usageHeaderSnapshots';
@@ -252,6 +255,24 @@ type QuotaSetter<T> = (updater: QuotaUpdater<Record<string, T>>) => void;
 const MAX_CONCURRENT_QUOTA_REFRESHES_PER_PROVIDER = 1;
 const MAX_CONCURRENT_QUOTA_REFRESH_PROVIDERS = 3;
 const PASSIVE_HEADER_SNAPSHOT_REFRESH_MS = 60_000;
+
+const isCodexHeaderQuotaLimitSnapshot = (snapshot: UsageHeaderSnapshot | undefined): boolean => {
+  const usedPercent = getHeaderSnapshotUsedPercent(snapshot);
+  const errorText =
+    `${getHeaderSnapshotErrorKind(snapshot)} ${getHeaderSnapshotErrorCode(snapshot)}`.toLowerCase();
+  const rateLimitReachedType =
+    typeof snapshot?.response_metadata?.quota?.rate_limit_reached_type === 'string'
+      ? snapshot.response_metadata.quota.rate_limit_reached_type.trim()
+      : '';
+  return (
+    (usedPercent !== null && usedPercent >= 100) ||
+    Boolean(rateLimitReachedType) ||
+    errorText.includes('usage_limit_reached') ||
+    errorText.includes('quota_exceeded') ||
+    errorText.includes('quota_depleted') ||
+    errorText.includes('credits_depleted')
+  );
+};
 
 const readAccountsSearchFromHash = (hash: string): string => {
   const queryIndex = hash.indexOf('?');
@@ -1081,7 +1102,8 @@ export function AccountsPage() {
         activeQuota.quotaInventoryObserved === true &&
         typeof activeQuota.fetchedAtMs === 'number' &&
         Number.isFinite(activeQuota.fetchedAtMs) &&
-        headerSnapshot.timestamp_ms <= activeQuota.fetchedAtMs
+        headerSnapshot.timestamp_ms <= activeQuota.fetchedAtMs &&
+        !isCodexHeaderQuotaLimitSnapshot(headerSnapshot)
       ) {
         return undefined;
       }
@@ -1289,6 +1311,7 @@ export function AccountsPage() {
         managerServiceBase: featureAvailability.managerServiceBase,
         managementKey,
         requestMonitoringAvailable: featureAvailability.requestMonitoringAvailable,
+        headerSnapshotGeneratedAtMs,
         targets: accountHistoryTargets.map((entry) => entry.target),
       }),
     [
@@ -1296,6 +1319,7 @@ export function AccountsPage() {
       featureAvailability.checking,
       featureAvailability.managerServiceBase,
       featureAvailability.requestMonitoringAvailable,
+      headerSnapshotGeneratedAtMs,
       managementKey,
     ]
   );
@@ -2505,10 +2529,11 @@ export function AccountsPage() {
       accountHistoryAutoAbortRef.current = null;
       return;
     }
+    if (needsHeaderSnapshots) return;
     if (accountHistoryAutoLoadKeyRef.current === accountHistoryAutoLoadKey) return;
     accountHistoryAutoLoadKeyRef.current = accountHistoryAutoLoadKey;
     void loadAccountHistory();
-  }, [accountHistoryAutoLoadKey, activeView, loadAccountHistory]);
+  }, [accountHistoryAutoLoadKey, activeView, loadAccountHistory, needsHeaderSnapshots]);
 
   const loadDetailEvents = useCallback(
     async (

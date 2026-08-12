@@ -429,6 +429,34 @@ const hasHeaderValue = (value: unknown): boolean => {
   return true;
 };
 
+const isObservedQuotaLimitError = (quota: CodexQuotaMergeState | undefined): boolean => {
+  const text = `${quota?.observedErrorKind ?? ''} ${quota?.observedErrorCode ?? ''}`.toLowerCase();
+  return (
+    text.includes('usage_limit_reached') ||
+    text.includes('quota_exceeded') ||
+    text.includes('quota_depleted') ||
+    text.includes('credits_depleted')
+  );
+};
+
+const isObservedQuotaLimitReached = <TState extends DisplayQuotaState>(
+  observedQuota: TState | undefined
+): boolean => {
+  if (observedQuota?.status !== 'success') return false;
+  const quota = observedQuota as CodexQuotaMergeState;
+  if (quota.observedFromUsageHeaders !== true) return false;
+  if (hasHeaderValue(quota.rateLimitReachedType)) return true;
+  if (isObservedQuotaLimitError(quota)) return true;
+  return (
+    quota.windows?.some(
+      (window) =>
+        typeof window.usedPercent === 'number' &&
+        Number.isFinite(window.usedPercent) &&
+        window.usedPercent >= 100
+    ) ?? false
+  );
+};
+
 const hasKnownResetLabel = (value: unknown): value is string => {
   if (typeof value !== 'string') return false;
   const trimmed = value.trim();
@@ -663,6 +691,15 @@ export const resolveQuotaDisplayState = <TState extends DisplayQuotaState>(
   observedQuota: TState | undefined
 ): TState | undefined => {
   if (activeQuota?.status === 'error') {
+    if (
+      activeQuota.errorStatus !== 401 &&
+      observedQuota &&
+      isObservedQuotaLimitReached(observedQuota)
+    ) {
+      return clearQuotaFailureForObservedRecovery(
+        mergeObservedQuotaIntoActive(activeQuota, observedQuota)
+      );
+    }
     if (isObservedQuotaNewerThanFailure(activeQuota, observedQuota)) {
       return clearQuotaFailureForObservedRecovery(
         mergeObservedQuotaIntoActive(activeQuota, observedQuota)
@@ -673,6 +710,9 @@ export const resolveQuotaDisplayState = <TState extends DisplayQuotaState>(
 
   if (activeQuota && activeQuota.status !== 'idle') {
     if (activeQuota.status === 'success' && observedQuota?.status === 'success') {
+      if (isObservedQuotaLimitReached(observedQuota)) {
+        return mergeObservedQuotaIntoActive(activeQuota, observedQuota);
+      }
       const activeCodexQuota = activeQuota as CodexQuotaMergeState;
       const fetchedAtMs = readFiniteTimestamp(activeQuota.fetchedAtMs);
       const observedAtMs = readFiniteTimestamp(observedQuota.observedAtMs);

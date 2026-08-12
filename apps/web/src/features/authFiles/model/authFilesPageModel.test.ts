@@ -688,6 +688,52 @@ describe('auth file Codex status helpers', () => {
     expect(status.badges).toHaveLength(0);
   });
 
+  it('keeps an older quota-limited header after a same-row quota refresh', () => {
+    const file = codexFile();
+    const quota = codexQuota({
+      authFileKey: getAuthFileCodexInspectionKey(file.name, file.authIndex),
+      fetchedAtMs: 2_000,
+      windows: [
+        {
+          id: 'weekly',
+          label: 'Weekly limit',
+          usedPercent: 57,
+          resetLabel: '08/19 22:36',
+          limitWindowSeconds: 604_800,
+        },
+      ],
+    });
+    const headerSnapshot: UsageHeaderSnapshot = {
+      event_hash: 'older-quota-header',
+      timestamp_ms: 1_000,
+      response_metadata: {
+        quota: {
+          plan_type: 'team',
+          rate_limit_reached_type: 'workspace_member_credits_depleted',
+          reached_window_kind: 'weekly',
+          reached_window_source: 'primary',
+          primary: {
+            used_percent: 100,
+            reset_at_ms: 2_000_000,
+            window_minutes: 10_080,
+          },
+          recover_at_ms: 2_000_000,
+          used_percent: 100,
+        },
+      },
+      header_quota_used_percent: 100,
+      header_quota_recover_at_ms: 2_000_000,
+      header_quota_plan_type: 'team',
+    };
+
+    const sources = getFreshAuthFileCodexStatusSources(file, quota, undefined, headerSnapshot);
+    const status = getAuthFileCodexStatus(file, quota, undefined, sources.headerSnapshot);
+
+    expect(sources.headerSnapshot).toBe(headerSnapshot);
+    expect(status.isQuotaLimited).toBe(true);
+    expect(status.isWeeklyLimited).toBe(true);
+  });
+
   it('keeps newer Codex inspection and header status sources after an older quota refresh', () => {
     const file = codexFile();
     const quota = codexQuota({

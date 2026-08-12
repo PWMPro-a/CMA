@@ -2027,6 +2027,116 @@ describe('AccountsPage replacement flows', () => {
     expect(mocks.getHeaderSnapshots).toHaveBeenCalledTimes(3);
   });
 
+  it('reloads account history when refreshed Header evidence changes', async () => {
+    vi.useFakeTimers();
+    mocks.files = [makeCodexFile('codex-history.json', 'auth-1', 'codex@example.com')];
+    mocks.panelFeatureAvailability = {
+      checking: false,
+      managerServiceBase: 'http://manager.local:18317',
+      requestMonitoringAvailable: true,
+      serverCodexInspectionAvailable: false,
+    };
+    mocks.getAccountHistory.mockResolvedValueOnce(
+      makeAccountHistoryResponse([
+        {
+          row_key: 'codex-history.json\u0000auth-1',
+          account_key: 'codex@example.com',
+          matched: true,
+          total_requests: 80,
+          success_calls: 80,
+          failure_calls: 0,
+          total_tokens: 1_100_000,
+          total_cost: 0,
+          success_rate: 1,
+          first_seen_ms: 1,
+          last_seen_ms: 1_000,
+          sync_status: 'ready',
+        },
+      ])
+    );
+    mocks.getAccountHistory.mockResolvedValueOnce(
+      makeAccountHistoryResponse([
+        {
+          row_key: 'codex-history.json\u0000auth-1',
+          account_key: 'codex@example.com',
+          matched: true,
+          total_requests: 117,
+          success_calls: 111,
+          failure_calls: 6,
+          total_tokens: 1_545_214,
+          total_cost: 0,
+          success_rate: 111 / 117,
+          first_seen_ms: 1,
+          last_seen_ms: 2_000,
+          sync_status: 'ready',
+        },
+      ])
+    );
+    mocks.getHeaderSnapshots.mockResolvedValueOnce({
+      generated_at_ms: 1_000,
+      from_ms: 0,
+      to_ms: 1_000,
+      items: [
+        {
+          event_hash: 'quota-57',
+          timestamp_ms: 1_000,
+          auth_file_snapshot: 'codex-history.json',
+          auth_index: 'auth-1',
+          account_snapshot: 'codex@example.com',
+          auth_provider_snapshot: 'codex',
+          header_quota_used_percent: 57,
+          header_quota_recover_at_ms: 2_000_000,
+        },
+      ],
+    });
+    mocks.getHeaderSnapshots.mockResolvedValueOnce({
+      generated_at_ms: 2_000,
+      from_ms: 0,
+      to_ms: 2_000,
+      items: [
+        {
+          event_hash: 'quota-100',
+          timestamp_ms: 2_000,
+          auth_file_snapshot: 'codex-history.json',
+          auth_index: 'auth-1',
+          account_snapshot: 'codex@example.com',
+          auth_provider_snapshot: 'codex',
+          response_metadata: {
+            quota: {
+              plan_type: 'team',
+              rate_limit_reached_type: 'workspace_member_credits_depleted',
+              primary: {
+                used_percent: 100,
+                reset_at_ms: 2_000_000,
+                window_minutes: 10_080,
+              },
+              recover_at_ms: 2_000_000,
+              used_percent: 100,
+            },
+          },
+          header_quota_used_percent: 100,
+          header_quota_recover_at_ms: 2_000_000,
+        },
+      ],
+    });
+
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+    expect(mocks.getAccountHistory).toHaveBeenCalledTimes(1);
+    expect(getAccountListItemTexts(renderer).join('\n')).toContain('80');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    await flushPromises();
+
+    expect(mocks.getHeaderSnapshots).toHaveBeenCalledTimes(2);
+    expect(mocks.getAccountHistory).toHaveBeenCalledTimes(2);
+    const cardText = getAccountListItemTexts(renderer).join('\n');
+    expect(cardText).toContain('117');
+    expect(cardText).toContain('1.5M');
+  });
+
   it('reuses initial Codex Header evidence when filtering by quota window', async () => {
     mocks.files = [
       makeCodexFile('weekly.json', 'weekly-auth', 'weekly@example.com'),

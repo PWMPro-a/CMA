@@ -295,6 +295,21 @@ const isObservedQuotaLimitError = (kind: string, code: string) => {
 
 const isUnderQuotaLimit = (value: number | null): boolean => value !== null && value < 100;
 
+const hasHeaderQuotaLimitSignal = (headerSnapshot?: UsageHeaderSnapshot): boolean => {
+  const observedUsedPercent = getHeaderSnapshotUsedPercent(headerSnapshot);
+  const observedErrorKind = getHeaderSnapshotErrorKind(headerSnapshot);
+  const observedErrorCode = getHeaderSnapshotErrorCode(headerSnapshot);
+  const observedRateLimitReachedType =
+    typeof headerSnapshot?.response_metadata?.quota?.rate_limit_reached_type === 'string'
+      ? headerSnapshot.response_metadata.quota.rate_limit_reached_type.trim()
+      : '';
+  return (
+    (observedUsedPercent !== null && observedUsedPercent >= 100) ||
+    Boolean(observedRateLimitReachedType) ||
+    isObservedQuotaLimitError(observedErrorKind, observedErrorCode)
+  );
+};
+
 const normalizeAuthIndexKey = (value: unknown): string => {
   if (value === undefined || value === null) return UNKNOWN_AUTH_INDEX_KEY;
   const normalized = String(value).trim();
@@ -511,10 +526,14 @@ const shouldSuppressOlderCodexStatusSource = (
   file: AuthFileItem,
   quota: CodexQuotaState | undefined,
   sourceAtMs: unknown,
-  newerSourceAtMs?: unknown
+  newerSourceAtMs?: unknown,
+  source?: UsageHeaderSnapshot
 ): boolean => {
   const normalizedSourceAtMs = readFiniteTimestamp(sourceAtMs);
   if (normalizedSourceAtMs === null) return false;
+  if (hasHeaderQuotaLimitSignal(source as UsageHeaderSnapshot | undefined)) {
+    return false;
+  }
   const fetchedAtMs =
     quota?.status === 'success' && activeCodexQuotaMatchesAuthFile(file, quota)
       ? readFiniteTimestamp(quota.fetchedAtMs)
@@ -549,7 +568,8 @@ export const getFreshAuthFileCodexStatusSources = (
     file,
     quota,
     headerSnapshot?.timestamp_ms,
-    inspection?.inspectionAtMs
+    inspection?.inspectionAtMs,
+    headerSnapshot
   )
     ? undefined
     : headerSnapshot,

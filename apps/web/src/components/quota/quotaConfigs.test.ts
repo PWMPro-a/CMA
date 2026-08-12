@@ -373,6 +373,54 @@ describe('resolveQuotaDisplayState', () => {
     expect(resolveQuotaDisplayState(activeQuota, observedQuota)).toBe(activeQuota);
   });
 
+  it('lets an exhausted usage header override a newer manual Codex quota refresh', () => {
+    const activeQuota: CodexQuotaState = {
+      status: 'success',
+      fetchedAtMs: 2_000,
+      quotaInventoryObserved: true,
+      planType: 'team',
+      windows: [
+        {
+          id: 'weekly',
+          label: 'Weekly limit',
+          usedPercent: 57,
+          resetLabel: '08/19 22:36',
+          resetAtMs: 2_000_000,
+          limitWindowSeconds: 604_800,
+        },
+      ],
+    };
+    const observedQuota: CodexQuotaState = {
+      status: 'success',
+      observedAtMs: 1_000,
+      observedFromUsageHeaders: true,
+      planType: 'team',
+      rateLimitReachedType: 'workspace_member_credits_depleted',
+      windows: [
+        {
+          id: 'weekly',
+          label: 'Weekly limit',
+          usedPercent: 100,
+          resetLabel: '08/19 22:36',
+          resetAtMs: 2_000_000,
+          limitWindowSeconds: 604_800,
+        },
+      ],
+    };
+
+    const result = resolveQuotaDisplayState(activeQuota, observedQuota) as CodexQuotaState;
+
+    expect(result).not.toBe(activeQuota);
+    expect(result.observedFromUsageHeaders).toBe(true);
+    expect(result.observedAtMs).toBe(1_000);
+    expect(result.rateLimitReachedType).toBe('workspace_member_credits_depleted');
+    expect(result.windows[0]).toMatchObject({
+      id: 'weekly',
+      usedPercent: 100,
+      observationSource: 'response_header',
+    });
+  });
+
   it('keeps a manual Codex inventory when its timestamp equals the Header snapshot', () => {
     const activeQuota: CodexQuotaState = {
       status: 'success',
@@ -704,6 +752,49 @@ describe('resolveQuotaDisplayState', () => {
     };
 
     expect(resolveQuotaDisplayState(activeQuota, observedQuota)).toBe(activeQuota);
+  });
+
+  it('recovers manual refresh failures when an older header snapshot is quota limited', () => {
+    const activeQuota: CodexQuotaState = {
+      status: 'error',
+      error: 'refresh failed',
+      errorStatus: 502,
+      failedAtMs: 2_000,
+      planType: 'team',
+      windows: [
+        {
+          id: 'weekly',
+          label: 'Weekly limit',
+          usedPercent: 57,
+          resetLabel: '08/19 22:36',
+          limitWindowSeconds: 604_800,
+        },
+      ],
+    };
+    const observedQuota: CodexQuotaState = {
+      status: 'success',
+      observedFromUsageHeaders: true,
+      observedAtMs: 1_000,
+      planType: 'team',
+      rateLimitReachedType: 'workspace_member_credits_depleted',
+      windows: [
+        {
+          id: 'weekly',
+          label: 'Weekly limit',
+          usedPercent: 100,
+          resetLabel: '08/19 22:36',
+          limitWindowSeconds: 604_800,
+        },
+      ],
+    };
+
+    const result = resolveQuotaDisplayState(activeQuota, observedQuota) as CodexQuotaState;
+
+    expect(result.status).toBe('success');
+    expect(result.error).toBeUndefined();
+    expect(result.errorStatus).toBeUndefined();
+    expect(result.rateLimitReachedType).toBe('workspace_member_credits_depleted');
+    expect(result.windows[0].usedPercent).toBe(100);
   });
 
   it('recovers manual refresh failures with newer header snapshots without dropping API-only fields', () => {

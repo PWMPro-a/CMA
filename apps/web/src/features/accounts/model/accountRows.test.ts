@@ -405,6 +405,60 @@ describe('accountRows', () => {
     expect(rows[1].quota.observedTraceId).toBe('trace-auth-index-1');
   });
 
+  it('marks a Codex row exhausted from header snapshot overrides even without quota cache', () => {
+    const file = {
+      name: 'codex-header-only.json',
+      type: 'codex',
+      provider: 'codex',
+      authIndex: 'auth-1',
+      account: 'codex@example.com',
+    } as AuthFileItem;
+    const rows = buildAccountRows([file], emptyStores(), undefined, {
+      codexHeaderSnapshotBySelectionKey: new Map<string, UsageHeaderSnapshot>([
+        [
+          getAuthFileSelectionKey(file),
+          {
+            event_hash: 'quota-full',
+            timestamp_ms: 1_000,
+            auth_file_snapshot: file.name,
+            auth_index: 'auth-1',
+            account_snapshot: 'codex@example.com',
+            auth_provider_snapshot: 'codex',
+            response_metadata: {
+              quota: {
+                plan_type: 'team',
+                rate_limit_reached_type: 'workspace_member_credits_depleted',
+                reached_window_kind: 'weekly',
+                reached_window_source: 'primary',
+                primary: {
+                  used_percent: 100,
+                  reset_at_ms: 2_000_000,
+                  window_minutes: 10_080,
+                },
+                recover_at_ms: 2_000_000,
+                used_percent: 100,
+              },
+            },
+            header_quota_used_percent: 100,
+            header_quota_recover_at_ms: 2_000_000,
+            header_quota_plan_type: 'team',
+            header_trace_id: 'trace-quota-full',
+          },
+        ],
+      ]),
+    });
+
+    expect(rows[0].quota).toMatchObject({
+      status: 'exhausted',
+      remainingPercent: 0,
+      usedPercent: 100,
+      source: 'observed-header',
+      rateLimitReachedType: 'workspace_member_credits_depleted',
+      observedTraceId: 'trace-quota-full',
+      planType: 'team',
+    });
+  });
+
   it('finds inspection targets exactly and only falls back for unique file names', () => {
     const sharedRows = buildAccountRows(
       [
