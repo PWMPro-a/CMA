@@ -352,11 +352,11 @@ func runUsageResponseMetadataBackfill(ctx context.Context, db *store.Store) {
 
 func runUsageRoutingDiagnosticsBackfill(ctx context.Context, db *store.Store) {
 	const batchLimit = 250
+	const maxStartupBatches = 12
 	const batchTimeout = 5 * time.Second
 	const batchDelay = 250 * time.Millisecond
-	const retryDelay = 5 * time.Second
 	total := 0
-	for {
+	for batch := 0; batch < maxStartupBatches; batch++ {
 		batchCtx, cancel := context.WithTimeout(ctx, batchTimeout)
 		updated, err := db.BackfillUsageRoutingDiagnostics(batchCtx, batchLimit)
 		cancel()
@@ -365,13 +365,8 @@ func runUsageRoutingDiagnosticsBackfill(ctx context.Context, db *store.Store) {
 				return
 			}
 			if errors.Is(err, context.DeadlineExceeded) {
-				log.Printf("usage routing diagnostics backfill waiting after timeout: updated=%d batch_limit=%d timeout=%s", total, batchLimit, batchTimeout)
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(retryDelay):
-					continue
-				}
+				log.Printf("usage routing diagnostics backfill paused after timeout: updated=%d batch_limit=%d timeout=%s", total, batchLimit, batchTimeout)
+				return
 			}
 			log.Printf("usage routing diagnostics backfill: %v", err)
 			return
@@ -387,4 +382,5 @@ func runUsageRoutingDiagnosticsBackfill(ctx context.Context, db *store.Store) {
 		case <-time.After(batchDelay):
 		}
 	}
+	log.Printf("usage routing diagnostics backfill paused after startup slice: updated=%d batch_limit=%d max_batches=%d", total, batchLimit, maxStartupBatches)
 }
