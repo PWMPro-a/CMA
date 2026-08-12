@@ -366,6 +366,87 @@ func TestAccountPoolStatsSeparateTotalAvailableHealthyAndDisabled(t *testing.T) 
 	}
 }
 
+func TestInspectionVerifiedCapacityOverridesMisleadingLiveActiveCount(t *testing.T) {
+	resource := SmartResource{
+		CapacitySource:       smartCapacitySourceInspection,
+		CapacitySnapshotAtMS: time.Now().UnixMilli(),
+		TotalAccounts:        90,
+		AvailableAccounts:    12,
+		SchedulableAccounts:  12,
+		HealthyAccounts:      9,
+	}
+	stats := reconcileAccountPoolStatsWithInspection(accountPoolStats{total: 90, schedulable: 28}, resource)
+	applyAccountPoolStats(&resource, stats)
+	if resource.AvailableAccounts != 12 || resource.SchedulableAccounts != 28 ||
+		resource.WeakAccounts != 3 || resource.DisabledAccounts != 62 {
+		t.Fatalf("verified pool statistics = %#v", resource)
+	}
+}
+
+func TestPartialInspectionDoesNotHideUninspectedLiveAccounts(t *testing.T) {
+	resource := SmartResource{
+		CapacitySource:       smartCapacitySourceInspection,
+		CapacitySnapshotAtMS: time.Now().UnixMilli(),
+		TotalAccounts:        1,
+		AvailableAccounts:    1,
+		HealthyAccounts:      1,
+	}
+	stats := reconcileAccountPoolStatsWithInspection(accountPoolStats{total: 3, schedulable: 2}, resource)
+	applyAccountPoolStats(&resource, stats)
+	if resource.AvailableAccounts != 2 || resource.SchedulableAccounts != 2 || resource.DisabledAccounts != 1 {
+		t.Fatalf("partial inspection pool statistics = %#v", resource)
+	}
+}
+
+func TestCustomSupplyRefillsVerifiedPoolToConfiguredHealthyFloor(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Strategy:                  managerconfigsvc.SupplyStrategyCustom,
+		TargetAvailableAccounts:   100,
+		HealthyAvailableAccounts:  100,
+		CriticalAvailableAccounts: 2,
+		ReplenishBatchSize:        10,
+		PrelockMaxQuantity:        10,
+	}
+	resource := SmartResource{
+		SnapshotFresh:       true,
+		CapacitySource:      smartCapacitySourceInspection,
+		AvailableAccounts:   12,
+		SchedulableAccounts: 28,
+	}
+	New(nil, nil).reconcileSmartAccountPoolGuard(cfg, &resource)
+	if resource.DecisionReason != "healthy_available_accounts" ||
+		resource.SuggestedAction != smartActionEmergencyReplenish || resource.SuggestedQuantity != 10 ||
+		resource.AccountQuantityDeficit != 88 {
+		t.Fatalf("verified healthy-floor plan = %#v", resource)
+	}
+}
+
+func TestCustomSupplyClearsVerifiedHealthyFloorShortageAfterRecovery(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Strategy:                  managerconfigsvc.SupplyStrategyCustom,
+		TargetAvailableAccounts:   100,
+		HealthyAvailableAccounts:  100,
+		CriticalAvailableAccounts: 2,
+	}
+	resource := SmartResource{
+		SnapshotFresh:       true,
+		CapacitySource:      smartCapacitySourceInspection,
+		AvailableAccounts:   100,
+		SchedulableAccounts: 100,
+		EmergencyShortage:   true,
+		EmergencyReason:     "healthy_available_accounts",
+		HealthLevel:         smartHealthCritical,
+		SuggestedAction:     smartActionEmergencyReplenish,
+		DecisionReason:      "healthy_available_accounts",
+		SuggestedQuantity:   10,
+	}
+	New(nil, nil).reconcileSmartAccountPoolGuard(cfg, &resource)
+	if resource.EmergencyShortage || resource.EmergencyReason != "" || resource.SuggestedQuantity != 0 ||
+		resource.DecisionReason != "usage_rate_not_ready" {
+		t.Fatalf("recovered verified healthy-floor state = %#v", resource)
+	}
+}
+
 func TestLiveAccountPoolCapsStaleInspectionCapacityAndRecalculatesShortage(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		Product:                   "oauth_7d",
@@ -391,7 +472,7 @@ func TestLiveAccountPoolCapsStaleInspectionCapacityAndRecalculatesShortage(t *te
 	resource.CurrentCapacityRCU = 41_000
 	resource.TimeLimitedCapacityRCU = 41_000
 
-	applyAccountPoolStats(&resource, accountPoolStats{total: 1220, available: 5})
+	applyAccountPoolStats(&resource, accountPoolStats{total: 1220, schedulable: 5})
 	if !reconcileSmartCapacityWithAccountPool(&resource, 41) {
 		t.Fatal("live account decrease must cap stale inspection capacity")
 	}
@@ -1473,7 +1554,8 @@ func TestNormalizeSub2AccountPayloadForCPA(t *testing.T) {
 		result["chatgpt_plan_type"] != "team" || result["organization_id"] != "org-extra" ||
 		result["workspace_id"] != "workspace-1" ||
 		result["expired"] != "2026-07-30T00:00:00Z" || result["max_concurrency"] != float64(8) ||
-		result["selection_error_freeze_seconds"] != float64(0) {
+		result["selection_error_freeze_seconds"] != float64(0) || result["codex_cli_only"] != true ||
+		result["codex_cli_only_allow_app_server"] != false {
 		t.Fatalf("normalized metadata = %#v", result)
 	}
 	if len(key) != 64 || fileName != "codex-user@example.com.json" {
@@ -1490,7 +1572,8 @@ func TestNormalizeDirectCPAAccountPayloadDisablesSelectionErrorFreeze(t *testing
 	if err := json.Unmarshal(payload, &result); err != nil {
 		t.Fatalf("decode normalized payload: %v", err)
 	}
-	if result["max_concurrency"] != float64(8) || result["selection_error_freeze_seconds"] != float64(0) {
+	if result["max_concurrency"] != float64(8) || result["selection_error_freeze_seconds"] != float64(0) ||
+		result["codex_cli_only"] != true || result["codex_cli_only_allow_app_server"] != false {
 		t.Fatalf("normalized runtime limits = %#v", result)
 	}
 }
@@ -1800,6 +1883,9 @@ func TestNormalizeSub2BundlePayloadForCPA(t *testing.T) {
 	if first["selection_error_freeze_seconds"] != float64(0) {
 		t.Fatalf("first normalized payload freeze setting = %#v", first)
 	}
+	if first["codex_cli_only"] != true || first["codex_cli_only_allow_app_server"] != false {
+		t.Fatalf("first normalized payload client restriction = %#v", first)
+	}
 	if _, nested := first["credentials"]; nested {
 		t.Fatalf("credentials wrapper was not removed: %#v", first)
 	}
@@ -1818,6 +1904,9 @@ func TestNormalizeSub2BundlePayloadForCPA(t *testing.T) {
 	}
 	if second["selection_error_freeze_seconds"] != float64(0) {
 		t.Fatalf("second normalized payload freeze setting = %#v", second)
+	}
+	if second["codex_cli_only"] != true || second["codex_cli_only_allow_app_server"] != false {
+		t.Fatalf("second normalized payload client restriction = %#v", second)
 	}
 }
 

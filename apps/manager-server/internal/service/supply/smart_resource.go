@@ -1639,6 +1639,11 @@ func smartHealthyAvailableAccounts(cfg store.ManagerSupplyConfig) int {
 	return value
 }
 
+func smartHealthyFloorShortageEnabled(cfg store.ManagerSupplyConfig) bool {
+	return managerconfigsvc.NormalizeSupplyStrategy(cfg.Strategy) == managerconfigsvc.SupplyStrategyCustom &&
+		smartHealthyAvailableAccounts(cfg) > smartCriticalAvailableAccounts(cfg)
+}
+
 func smartEmergencyMinAccounts(cfg store.ManagerSupplyConfig) int {
 	return clampInt(positiveOr(cfg.DefaultEmergencyMinAccounts, 5), 1, 100)
 }

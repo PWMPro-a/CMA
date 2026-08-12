@@ -1888,10 +1888,11 @@ func (s *Service) requestCodexUsageAt(
 		headers["Chatgpt-Account-Id"] = strings.TrimSpace(item.AccountID)
 	}
 	payload := map[string]any{
-		"authIndex": item.AuthIndex,
-		"method":    http.MethodGet,
-		"url":       codexUsageURL,
-		"header":    headers,
+		"authIndex":        item.AuthIndex,
+		"ensureFreshToken": true,
+		"method":           http.MethodGet,
+		"url":              codexUsageURL,
+		"header":           headers,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

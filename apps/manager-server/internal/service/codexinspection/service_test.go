@@ -1825,10 +1825,14 @@ func TestFetchAuthFilesStreamsResponsesLargerThanEightMiB(t *testing.T) {
 }
 
 func TestRequestCodexUsageStreamsResponsesLargerThanEightMiB(t *testing.T) {
+	var request map[string]any
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/management/api-call" || r.Method != http.MethodPost {
 			http.NotFound(w, r)
 			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode api-call payload: %v", err)
 		}
 		_, _ = w.Write([]byte(`{"status_code":200,"body":{"padding":"`))
 		_, _ = w.Write([]byte(strings.Repeat("x", 8*1024*1024)))
@@ -1853,6 +1857,9 @@ func TestRequestCodexUsageStreamsResponsesLargerThanEightMiB(t *testing.T) {
 	}
 	if padding := readString(body, "padding"); len(padding) != 8*1024*1024 {
 		t.Fatalf("padding length = %d, want %d", len(padding), 8*1024*1024)
+	}
+	if request["ensureFreshToken"] != true {
+		t.Fatalf("ensureFreshToken = %#v, want true", request["ensureFreshToken"])
 	}
 }
 

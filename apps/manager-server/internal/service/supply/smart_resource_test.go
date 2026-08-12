@@ -611,6 +611,21 @@ func TestSmartQuotaLowWaterRefillsToHealthyAndKeepsShortCooldown(t *testing.T) {
 	}
 }
 
+func TestCustomSupplyEnablesConfiguredVerifiedHealthyFloor(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Strategy:                 managerconfigsvc.SupplyStrategyCustom,
+		TargetAvailableAccounts:  100,
+		HealthyAvailableAccounts: 100,
+	}
+	if got := smartHealthyAvailableAccounts(cfg); got != 100 || !smartHealthyFloorShortageEnabled(cfg) {
+		t.Fatalf("custom supply healthy floor = %d/enabled=%v, want 100/true", got, smartHealthyFloorShortageEnabled(cfg))
+	}
+	cfg.Strategy = managerconfigsvc.SupplyStrategyStrongSupply
+	if smartHealthyFloorShortageEnabled(cfg) {
+		t.Fatal("preset strategy unexpectedly enabled full healthy-floor replenishment")
+	}
+}
+
 func TestEmergencyCapacityGapRefillsToHealthyWaterline(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		Product:              "oauth_30d",
@@ -1687,7 +1702,11 @@ func TestStrongSupplySkipsCreateWithoutUsageAboveCriticalWaterline(t *testing.T)
 	}); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	seedCompletedQuotaInspection(t, st, quotaInspectionResult(0))
+	seedCompletedQuotaInspection(t, st,
+		store.CodexInspectionResult{FileName: "a.json", UsedPercent: floatPtr(0)},
+		store.CodexInspectionResult{FileName: "b.json", UsedPercent: floatPtr(0)},
+		store.CodexInspectionResult{FileName: "c.json", UsedPercent: floatPtr(0)},
+	)
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
 
 	if err := service.RunAutomatic(context.Background()); err != nil {

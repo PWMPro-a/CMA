@@ -634,7 +634,8 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		cancel()
 		if snapshotErr == nil || len(snapshot.files) > 0 {
 			inspectedAvailable := resource.AvailableAccounts
-			applyAccountPoolStats(&resource, accountPoolStatsFromFiles(snapshot.files))
+			poolStats := reconcileAccountPoolStatsWithInspection(accountPoolStatsFromFiles(snapshot.files), resource)
+			applyAccountPoolStats(&resource, poolStats)
 			if reconcileSmartCapacityWithAccountPool(&resource, inspectedAvailable) {
 				recalculateSmartResourceCapacityPlan(cfg.Supply, &resource)
 			}
@@ -2090,13 +2091,14 @@ func (s *Service) refreshOverview(ctx context.Context, cfg store.ManagerConfig, 
 			return err
 		}
 		inspectedAvailable := resource.AvailableAccounts
+		poolStats = reconcileAccountPoolStatsWithInspection(poolStats, resource)
 		applyAccountPoolStats(&resource, poolStats)
 		if reconcileSmartCapacityWithAccountPool(&resource, inspectedAvailable) {
 			recalculateSmartResourceCapacityPlan(cfg.Supply, &resource)
 		}
 		applySmartAccountQuantityEstimate(cfg.Supply, &resource)
 		s.setSmartResource(resource)
-		available = poolStats.available
+		available = resource.AvailableAccounts
 	} else {
 		var err error
 		available, err = s.countAvailableAccounts(ctx, cfg)
@@ -3961,12 +3963,14 @@ func (s *Service) disableRecoveredOriginal(ctx context.Context, cfg store.Manage
 
 func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerConfig) (int, error) {
 	stats, err := s.countAccountPoolStats(ctx, cfg)
-	return stats.available, err
+	return stats.schedulable, err
 }
 
 type accountPoolStats struct {
-	total     int
-	available int
+	total              int
+	schedulable        int
+	verifiedAvailable  int
+	inspectionObserved bool
 }
 
 func (s *Service) countAccountPoolStats(ctx context.Context, cfg store.ManagerConfig) (accountPoolStats, error) {
@@ -3989,9 +3993,26 @@ func accountPoolStatsFromFiles(files []cpaauthfiles.File) accountPoolStats {
 		}
 		stats.total++
 		if isAvailableCodexFile(file) {
-			stats.available++
+			stats.schedulable++
 		}
 	}
+	return stats
+}
+
+func (stats accountPoolStats) capacityAvailable(fallback int) int {
+	if stats.inspectionObserved {
+		return max(0, stats.verifiedAvailable)
+	}
+	return max(0, stats.schedulable)
+}
+
+func reconcileAccountPoolStatsWithInspection(stats accountPoolStats, resource SmartResource) accountPoolStats {
+	if resource.CapacitySource != smartCapacitySourceInspection || resource.CapacitySnapshotAtMS <= 0 ||
+		resource.TotalAccounts < stats.total {
+		return stats
+	}
+	stats.inspectionObserved = true
+	stats.verifiedAvailable = min(max(0, resource.AvailableAccounts), max(0, stats.schedulable))
 	return stats
 }
 
@@ -4000,9 +4021,9 @@ func applyAccountPoolStats(resource *SmartResource, stats accountPoolStats) {
 		return
 	}
 	resource.TotalAccounts = max(0, stats.total)
-	resource.AvailableAccounts = max(0, stats.available)
-	resource.SchedulableAccounts = resource.AvailableAccounts
-	resource.DisabledAccounts = max(0, resource.TotalAccounts-resource.AvailableAccounts)
+	resource.AvailableAccounts = stats.capacityAvailable(resource.AvailableAccounts)
+	resource.SchedulableAccounts = max(0, stats.schedulable)
+	resource.DisabledAccounts = max(0, resource.TotalAccounts-resource.SchedulableAccounts)
 	if resource.HealthyAccounts > resource.AvailableAccounts {
 		resource.HealthyAccounts = resource.AvailableAccounts
 	}
@@ -4100,15 +4121,31 @@ func (s *Service) reconcileSmartAccountPoolGuard(cfg store.ManagerSupplyConfig, 
 		}
 		return
 	}
+	if smartHealthyFloorShortageEnabled(cfg) && resource.SnapshotFresh &&
+		resource.CapacitySource == smartCapacitySourceInspection &&
+		resource.AvailableAccounts < smartHealthyAvailableAccounts(cfg) {
+		resource.EmergencyShortage = true
+		resource.EmergencyReason = "healthy_available_accounts"
+		resource.HealthLevel = smartHealthCritical
+		resource.SuggestedAction = smartActionEmergencyReplenish
+		resource.DecisionReason = "healthy_available_accounts"
+		resource.SuggestedQuantity = max(resource.SuggestedQuantity,
+			min(smartReplenishBatchLimit(cfg), smartHealthyAvailableAccounts(cfg)-resource.AvailableAccounts))
+		applySmartAccountQuantityEstimate(cfg, resource)
+		applySmartRefillProjection(cfg, resource)
+		return
+	}
 	s.clearPoolVacuum()
-	if resource.EmergencyReason != "critical_available_accounts" && resource.EmergencyReason != "emergency_pool_vacuum" {
+	if resource.EmergencyReason != "critical_available_accounts" && resource.EmergencyReason != "emergency_pool_vacuum" &&
+		resource.EmergencyReason != "healthy_available_accounts" {
 		return
 	}
 	resource.EmergencyReason = ""
 	resource.PoolVacuumActive = false
 	resource.PoolVacuumStartedAtMS = 0
 	resource.PoolVacuumDurationSeconds = 0
-	if resource.DecisionReason == "critical_available_accounts" || resource.DecisionReason == "emergency_pool_vacuum" {
+	if resource.DecisionReason == "critical_available_accounts" || resource.DecisionReason == "emergency_pool_vacuum" ||
+		resource.DecisionReason == "healthy_available_accounts" {
 		resource.EmergencyShortage = false
 		if resource.ConsumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling {
 			resource.HealthLevel = smartHealthUnknown
@@ -4130,30 +4167,62 @@ func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.Mana
 		return 0, 0, "", false, err
 	}
 	inspectedAvailable := resource.AvailableAccounts
+	poolStats = reconcileAccountPoolStatsWithInspection(poolStats, *resource)
 	applyAccountPoolStats(resource, poolStats)
 	if reconcileSmartCapacityWithAccountPool(resource, inspectedAvailable) {
 		recalculateSmartResourceCapacityPlan(cfg.Supply, resource)
 	}
-	available := poolStats.available
+	available := resource.AvailableAccounts
 	if !smartSupplyStrategyConfigured(cfg.Supply) || !smartEmergencyBypassUsageRate(cfg.Supply) {
 		return available, 0, "", true, nil
 	}
-	if available > smartCriticalAvailableAccounts(cfg.Supply) {
+	healthyFloorShortage := smartHealthyFloorShortageEnabled(cfg.Supply) && resource.SnapshotFresh &&
+		resource.CapacitySource == smartCapacitySourceInspection
+	if !healthyFloorShortage && available > smartCriticalAvailableAccounts(cfg.Supply) {
 		s.clearPoolVacuum()
-		if resource.EmergencyReason == "critical_available_accounts" || resource.EmergencyReason == "emergency_pool_vacuum" {
+		return available, 0, "", true, nil
+	}
+	if !healthyFloorShortage && available > 0 && resource.HealthyAccounts > 0 &&
+		resource.CurrentCapacityRCU > 0 && resource.ConsumeRCUPerMinute <= 0 {
+		s.clearPoolVacuum()
+		return available, 0, "", true, nil
+	}
+	if healthyFloorShortage &&
+		available >= smartHealthyAvailableAccounts(cfg.Supply) {
+		s.clearPoolVacuum()
+		if resource.EmergencyReason == "critical_available_accounts" || resource.EmergencyReason == "emergency_pool_vacuum" ||
+			resource.EmergencyReason == "healthy_available_accounts" {
 			resource.EmergencyReason = ""
 			resource.PoolVacuumActive = false
 			resource.PoolVacuumStartedAtMS = 0
 			resource.PoolVacuumDurationSeconds = 0
-			if resource.DecisionReason == "critical_available_accounts" || resource.DecisionReason == "emergency_pool_vacuum" {
+			if resource.DecisionReason == "critical_available_accounts" || resource.DecisionReason == "emergency_pool_vacuum" ||
+				resource.DecisionReason == "healthy_available_accounts" {
 				resource.EmergencyShortage = false
 				resource.SuggestedQuantity = 0
-				resource.HealthLevel = smartHealthUnknown
-				resource.SuggestedAction = smartActionSnapshotStale
-				resource.DecisionReason = "usage_rate_not_ready"
+				if resource.ConsumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling {
+					resource.HealthLevel = smartHealthUnknown
+					resource.SuggestedAction = smartActionSnapshotStale
+					resource.DecisionReason = "usage_rate_not_ready"
+				} else {
+					recalculateSmartResourceCapacityPlan(cfg.Supply, resource)
+				}
 			}
 		}
 		return available, 0, "", true, nil
+	}
+	if healthyFloorShortage &&
+		available > smartCriticalAvailableAccounts(cfg.Supply) {
+		quantity := min(smartReplenishBatchLimit(cfg.Supply), smartHealthyAvailableAccounts(cfg.Supply)-available)
+		resource.EmergencyShortage = true
+		resource.EmergencyReason = "healthy_available_accounts"
+		resource.HealthLevel = smartHealthCritical
+		resource.SuggestedAction = smartActionEmergencyReplenish
+		resource.DecisionReason = "healthy_available_accounts"
+		resource.SuggestedQuantity = max(resource.SuggestedQuantity, quantity)
+		applySmartAccountQuantityEstimate(cfg.Supply, resource)
+		applySmartRefillProjection(cfg.Supply, resource)
+		return available, quantity, "healthy_available_accounts", true, nil
 	}
 	applySmartEmergencyAvailability(cfg.Supply, resource, time.Now())
 	if available <= 0 {
@@ -4632,6 +4701,10 @@ func supplyOrderTriggerReason(resource SmartResource, automatic bool) string {
 	}
 	if isSmartEmergencyRetryReason(resource.DecisionReason) {
 		return resource.DecisionReason
+	}
+	if resource.EmergencyReason == "critical_available_accounts" && resource.CurrentCapacityRCU > 0 &&
+		resource.CapacityGapRCU > 0 && resource.ConsumeRCUPerMinute > 0 {
+		return "emergency_refill_to_healthy"
 	}
 	if resource.EmergencyReason != "" {
 		return resource.EmergencyReason
@@ -5994,6 +6067,8 @@ func normalizeSupplyAccountObject(object map[string]any, exportedAt any) (normal
 	// CPA otherwise applies its implicit 30-second freeze whenever another
 	// runtime-limit field (for example max_concurrency) is present.
 	metadata["selection_error_freeze_seconds"] = 0
+	metadata["codex_cli_only"] = true
+	metadata["codex_cli_only_allow_app_server"] = false
 
 	identity := supplyAccountIdentity(metadata)
 	if identity == "" {

@@ -79,11 +79,12 @@ func (a *cpaAdapter) apiCall(
 		headers["Chatgpt-Account-Id"] = accountID
 	}
 	payload, err := json.Marshal(map[string]any{
-		"authIndex": strings.TrimSpace(authIndex),
-		"method":    method,
-		"url":       upstreamURL,
-		"header":    headers,
-		"data":      data,
+		"authIndex":        strings.TrimSpace(authIndex),
+		"ensureFreshToken": true,
+		"method":           method,
+		"url":              upstreamURL,
+		"header":           headers,
+		"data":             data,
 	})
 	if err != nil {
 		return apiCallResult{}, err
