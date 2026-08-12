@@ -2,7 +2,8 @@ import { act, createElement, createRef, useImperativeHandle, type Ref } from 're
 import { create, type ReactTestRenderer } from 'react-test-renderer';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
-import { useVisualConfig } from './useVisualConfig';
+import { getVisualConfigValidationErrors, useVisualConfig } from './useVisualConfig';
+import { DEFAULT_VISUAL_VALUES } from '@/types/visualConfig';
 
 type UseVisualConfigResult = ReturnType<typeof useVisualConfig>;
 
@@ -42,6 +43,35 @@ const mountUseVisualConfig = (): UseVisualConfigHarness => {
 };
 
 describe('useVisualConfig', () => {
+  it('uses the sub2 Codex fingerprint defaults', () => {
+    expect(DEFAULT_VISUAL_VALUES.codexClientFingerprintSignals).toHaveLength(4);
+    expect(
+      DEFAULT_VISUAL_VALUES.codexClientFingerprintSignals.map((signal) => signal.required)
+    ).toEqual([true, false, false, false]);
+  });
+
+  it('validates Codex version syntax and range before writing YAML', () => {
+    expect(
+      getVisualConfigValidationErrors({
+        ...DEFAULT_VISUAL_VALUES,
+        codexClientMinVersion: 'latest',
+        codexClientMaxVersion: '0.200.0',
+      })
+    ).toMatchObject({
+      codexClientMinVersion: 'codex_version',
+    });
+
+    expect(
+      getVisualConfigValidationErrors({
+        ...DEFAULT_VISUAL_VALUES,
+        codexClientMinVersion: '0.200.0',
+        codexClientMaxVersion: '0.142.0',
+      })
+    ).toMatchObject({
+      codexClientMaxVersion: 'codex_version_range',
+    });
+  });
+
   it('loads plugin system state from plugins.enabled', () => {
     const harness = mountUseVisualConfig();
     const yaml = ['plugins:', '  enabled: true', ''].join('\n');
@@ -298,6 +328,61 @@ describe('useVisualConfig', () => {
     expect(savedYaml).not.toContain('identityConfuse:');
     expect(savedYaml).toContain('identity-confuse: false');
     expect(savedYaml).toContain('other-setting: kept');
+
+    harness.unmount();
+  });
+
+  it('migrates legacy Codex client restriction fields without dropping untouched values', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = [
+      'codex:',
+      '  clientRestriction:',
+      '    forceCodexCli: true',
+      '    minCodexVersion: 0.142.0',
+      '    whitelist:',
+      '      - originator: opencode',
+      '        uaContains:',
+      '          - opencode/',
+      '        skipEngineFingerprint: true',
+      '    future-policy:',
+      '      enabled: true',
+      '',
+    ].join('\n');
+
+    act(() => {
+      const result = harness.getCurrent().loadVisualValuesFromYaml(yaml);
+      expect(result.ok).toBe(true);
+    });
+    act(() => {
+      harness.getCurrent().setVisualValues({ codexClientMaxVersion: '0.200.0' });
+    });
+
+    const savedYaml = harness.getCurrent().applyVisualChangesToYaml(yaml);
+    const parsed = parseYaml(savedYaml) as {
+      codex?: {
+        clientRestriction?: unknown;
+        'client-restriction'?: {
+          'force-codex-cli'?: boolean;
+          'min-codex-version'?: string;
+          'max-codex-version'?: string;
+          whitelist?: Array<Record<string, unknown>>;
+          'future-policy'?: { enabled?: boolean };
+        };
+      };
+    };
+    const restriction = parsed.codex?.['client-restriction'];
+    expect(parsed.codex?.clientRestriction).toBeUndefined();
+    expect(restriction?.['force-codex-cli']).toBe(true);
+    expect(restriction?.['min-codex-version']).toBe('0.142.0');
+    expect(restriction?.['max-codex-version']).toBe('0.200.0');
+    expect(restriction?.whitelist).toEqual([
+      {
+        originator: 'opencode',
+        'ua-contains': ['opencode/'],
+        'skip-engine-fingerprint': true,
+      },
+    ]);
+    expect(restriction?.['future-policy']?.enabled).toBe(true);
 
     harness.unmount();
   });

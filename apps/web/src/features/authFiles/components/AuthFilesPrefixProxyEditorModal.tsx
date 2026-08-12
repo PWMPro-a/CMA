@@ -325,6 +325,37 @@ export function AuthFilesPrefixProxyEditorModal(props: AuthFilesPrefixProxyEdito
                       <div className="hint">{t('auth_files.using_api_hint')}</div>
                     </div>
                   )}
+                  {editor.providerKey === 'codex' && (
+                    <div className="form-group">
+                      <label>{t('auth_files.codex_cli_only_label')}</label>
+                      <ToggleSwitch
+                        checked={editor.codexCliOnly}
+                        onChange={(value) => onChange('codexCliOnly', value)}
+                        disabled={disableControls || editor.saving || !editor.json}
+                        ariaLabel={t('auth_files.codex_cli_only_label')}
+                      />
+                      <div className="hint">{t('auth_files.codex_cli_only_hint')}</div>
+                    </div>
+                  )}
+                  {editor.providerKey === 'codex' && (
+                    <div className="form-group">
+                      <label>{t('auth_files.codex_cli_only_app_server_label')}</label>
+                      <ToggleSwitch
+                        checked={editor.codexCliOnlyAllowAppServer}
+                        onChange={(value) => onChange('codexCliOnlyAllowAppServer', value)}
+                        disabled={
+                          disableControls ||
+                          editor.saving ||
+                          !editor.json ||
+                          !editor.codexCliOnly
+                        }
+                        ariaLabel={t('auth_files.codex_cli_only_app_server_label')}
+                      />
+                      <div className="hint">
+                        {t('auth_files.codex_cli_only_app_server_hint')}
+                      </div>
+                    </div>
+                  )}
                   <div className="form-group">
                     <label>{t('auth_files.headers_label')}</label>
                     <textarea

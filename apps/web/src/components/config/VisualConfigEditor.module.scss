@@ -657,6 +657,65 @@
   background: color-mix(in srgb, var(--surface-subtle) 88%, transparent);
 }
 
+.codexPolicyList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.codexFingerprintRow {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.7fr) minmax(240px, 1.8fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--border-subtle) 84%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--surface-subtle) 76%, transparent);
+}
+
+.codexPolicyToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.codexPolicyWarning {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.codexClientEntry {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--border-subtle) 84%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--surface-subtle) 76%, transparent);
+}
+
+.codexClientEntryGrid {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(240px, 1.4fr);
+  gap: 12px;
+}
+
+.codexClientEntryFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .stringList {
   display: flex;
   flex-direction: column;
@@ -906,6 +965,16 @@
   .payloadAdvancedGrid,
   .payloadHeaderRow {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .codexFingerprintRow,
+  .codexClientEntryGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .codexClientEntryFooter {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .apiKeyModalInputRow {

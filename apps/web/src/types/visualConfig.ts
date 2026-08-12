@@ -3,6 +3,7 @@ export type DisableImageGenerationMode = 'false' | 'true' | 'chat' | 'passthroug
 export type RemoteManagementSecretKeyAction = 'unchanged' | 'replace' | 'clear';
 export type PluginStoreAuthType = 'none' | 'bearer' | 'basic' | 'header' | 'github-token';
 export type PluginStoreAuthApplyTo = 'registry' | 'metadata' | 'artifact';
+export type CodexFingerprintSignalType = 'header_exact' | 'header_prefix' | 'body_path';
 export type PayloadParamValidationErrorCode =
   | 'payload_invalid_number'
   | 'payload_invalid_boolean'
@@ -20,6 +21,8 @@ export type VisualConfigFieldPath =
   | 'authAutoRefreshWorkers'
   | 'codexTailBurstTriggerUsedPercent'
   | 'codexTailBurstCollectorMaxConcurrency'
+  | 'codexClientMinVersion'
+  | 'codexClientMaxVersion'
   | 'streaming.keepaliveSeconds'
   | 'streaming.bootstrapRetries'
   | 'streaming.nonstreamKeepaliveInterval';
@@ -29,8 +32,24 @@ export type VisualConfigValidationErrorCode =
   | 'non_negative_integer'
   | 'integer'
   | 'retention_seconds_range'
+  | 'codex_version'
+  | 'codex_version_range'
   | 'tail_burst_trigger_percent_range'
   | 'tail_burst_collector_concurrency_range';
+
+export type CodexClientRestrictionEntry = {
+  id: string;
+  originator: string;
+  uaContains: string[];
+  skipEngineFingerprint: boolean;
+};
+
+export type CodexEngineFingerprintSignal = {
+  id: string;
+  type: CodexFingerprintSignalType;
+  match: string[];
+  required: boolean;
+};
 
 export type VisualConfigValidationErrors = Partial<
   Record<VisualConfigFieldPath, VisualConfigValidationErrorCode>
@@ -154,6 +173,13 @@ export type VisualConfigValues = {
   codexHeaderUserAgent: string;
   codexHeaderBetaFeatures: string;
   codexIdentityConfuse: boolean;
+  codexClientForceAllow: boolean;
+  codexClientMinVersion: string;
+  codexClientMaxVersion: string;
+  codexClientAllowAppServer: boolean;
+  codexClientWhitelist: CodexClientRestrictionEntry[];
+  codexClientBlacklist: CodexClientRestrictionEntry[];
+  codexClientFingerprintSignals: CodexEngineFingerprintSignal[];
   codexTailBurstEnabled: boolean;
   codexTailBurstTriggerUsedPercent: string;
   codexTailBurstSnapshotTtl: string;
@@ -236,6 +262,41 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   codexHeaderUserAgent: '',
   codexHeaderBetaFeatures: '',
   codexIdentityConfuse: false,
+  codexClientForceAllow: false,
+  codexClientMinVersion: '',
+  codexClientMaxVersion: '',
+  codexClientAllowAppServer: false,
+  codexClientWhitelist: [],
+  codexClientBlacklist: [],
+  codexClientFingerprintSignals: [
+    {
+      id: 'codex-fingerprint-x-codex',
+      type: 'header_prefix',
+      match: ['x-codex-'],
+      required: true,
+    },
+    {
+      id: 'codex-fingerprint-session',
+      type: 'header_exact',
+      match: ['session-id', 'session_id'],
+      required: false,
+    },
+    {
+      id: 'codex-fingerprint-thread',
+      type: 'header_exact',
+      match: ['thread-id', 'thread_id'],
+      required: false,
+    },
+    {
+      id: 'codex-fingerprint-body',
+      type: 'body_path',
+      match: [
+        'client_metadata.x-codex-window-id',
+        'client_metadata.x-codex-installation-id',
+      ],
+      required: false,
+    },
+  ],
   codexTailBurstEnabled: false,
   codexTailBurstTriggerUsedPercent: '98',
   codexTailBurstSnapshotTtl: '90s',

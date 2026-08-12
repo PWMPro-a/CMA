@@ -1359,6 +1359,28 @@ describe('authFilesApi patchFieldsForAuthIndexes', () => {
 });
 
 describe('applyAuthFileFieldsPatchToRecord', () => {
+  it('clears the app-server child switch when the Codex parent switch is disabled', () => {
+    const result = applyAuthFileFieldsPatchToRecord(
+      { codex_cli_only: true, codex_cli_only_allow_app_server: true },
+      { codex_cli_only: false }
+    );
+
+    expect(result).toMatchObject({
+      codex_cli_only: false,
+      codex_cli_only_allow_app_server: false,
+    });
+  });
+
+  it('does not create an app-server child switch without the Codex parent switch', () => {
+    const result = applyAuthFileFieldsPatchToRecord(
+      { codex_cli_only: false },
+      { codex_cli_only_allow_app_server: true }
+    );
+
+    expect(result.codex_cli_only).toBe(false);
+    expect(result.codex_cli_only_allow_app_server).toBe(false);
+  });
+
   it('writes and clears the canonical source IP field', () => {
     expect(
       applyAuthFileFieldsPatchToRecord(

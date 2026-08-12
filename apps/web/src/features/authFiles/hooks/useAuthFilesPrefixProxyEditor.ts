@@ -47,6 +47,8 @@ export type PrefixProxyEditorField =
   | 'disableStickyOnNextRequest'
   | 'websockets'
   | 'usingApi'
+  | 'codexCliOnly'
+  | 'codexCliOnlyAllowAppServer'
   | 'note'
   | 'headersText';
 
@@ -76,6 +78,10 @@ export type PrefixProxyEditorState = {
   websocketsTouched: boolean;
   usingApi: boolean;
   usingApiTouched: boolean;
+  codexCliOnly: boolean;
+  codexCliOnlyTouched: boolean;
+  codexCliOnlyAllowAppServer: boolean;
+  codexCliOnlyAllowAppServerTouched: boolean;
   note: string;
   noteTouched: boolean;
   headersText: string;
@@ -181,9 +187,17 @@ const pickEditableAuthFileFields = (content: Record<string, unknown>): Record<st
   const copyField = (field: string) => {
     if (field in content) editable[field] = content[field];
   };
-  ['prefix', 'proxy_url', 'priority', 'websocket', 'websockets', 'using_api', 'note'].forEach(
-    copyField
-  );
+  [
+    'prefix',
+    'proxy_url',
+    'priority',
+    'websocket',
+    'websockets',
+    'using_api',
+    'codex_cli_only',
+    'codex_cli_only_allow_app_server',
+    'note',
+  ].forEach(copyField);
   if (isRecordObject(content.headers)) {
     editable.headers = Object.fromEntries(
       Object.entries(content.headers).filter(
@@ -394,6 +408,18 @@ const buildAuthFileFieldsPatch = (
     const originalUsingApi = original.using_api === true;
     if (editor.usingApi !== originalUsingApi) patch.using_api = editor.usingApi;
   }
+  if (editor.providerKey === 'codex' && editor.codexCliOnlyTouched) {
+    const originalCodexCliOnly = original.codex_cli_only === true;
+    if (editor.codexCliOnly !== originalCodexCliOnly) {
+      patch.codex_cli_only = editor.codexCliOnly;
+    }
+  }
+  if (editor.providerKey === 'codex' && editor.codexCliOnlyAllowAppServerTouched) {
+    const originalAllowAppServer = original.codex_cli_only_allow_app_server === true;
+    if (editor.codexCliOnlyAllowAppServer !== originalAllowAppServer) {
+      patch.codex_cli_only_allow_app_server = editor.codexCliOnlyAllowAppServer;
+    }
+  }
 
   return patch;
 };
@@ -469,6 +495,10 @@ const buildPrefixProxyUpdatedText = (
     next = applyAuthFileWebsockets(next, patch.websockets);
   }
   if (patch.using_api !== undefined) next.using_api = patch.using_api;
+  if (patch.codex_cli_only !== undefined) next.codex_cli_only = patch.codex_cli_only;
+  if (patch.codex_cli_only_allow_app_server !== undefined) {
+    next.codex_cli_only_allow_app_server = patch.codex_cli_only_allow_app_server;
+  }
 
   return JSON.stringify(next);
 };
@@ -542,6 +572,10 @@ export function useAuthFilesPrefixProxyEditor(
       websocketsTouched: false,
       usingApi: false,
       usingApiTouched: false,
+      codexCliOnly: false,
+      codexCliOnlyTouched: false,
+      codexCliOnlyAllowAppServer: false,
+      codexCliOnlyAllowAppServerTouched: false,
       note: '',
       noteTouched: false,
       headersText: '',
@@ -617,6 +651,9 @@ export function useAuthFilesPrefixProxyEditor(
         ? readAuthFileWebsockets(json)
         : false;
       const usingApi = supportsAuthFileUsingApi(providerKey) && json.using_api === true;
+      const codexCliOnly = providerKey === 'codex' && json.codex_cli_only === true;
+      const codexCliOnlyAllowAppServer =
+        providerKey === 'codex' && json.codex_cli_only_allow_app_server === true;
       const note = typeof json.note === 'string' ? json.note : '';
       const headers = json.headers;
       let headersText = '';
@@ -658,6 +695,10 @@ export function useAuthFilesPrefixProxyEditor(
           websocketsTouched: false,
           usingApi,
           usingApiTouched: false,
+          codexCliOnly,
+          codexCliOnlyTouched: false,
+          codexCliOnlyAllowAppServer,
+          codexCliOnlyAllowAppServerTouched: false,
           note,
           noteTouched: false,
           headersText,
@@ -714,6 +755,27 @@ export function useAuthFilesPrefixProxyEditor(
       }
       if (field === 'usingApi') {
         return { ...prev, usingApi: Boolean(value), usingApiTouched: true };
+      }
+      if (field === 'codexCliOnly') {
+        const codexCliOnly = Boolean(value);
+        return {
+          ...prev,
+          codexCliOnly,
+          codexCliOnlyTouched: true,
+          codexCliOnlyAllowAppServer: codexCliOnly
+            ? prev.codexCliOnlyAllowAppServer
+            : false,
+          codexCliOnlyAllowAppServerTouched: codexCliOnly
+            ? prev.codexCliOnlyAllowAppServerTouched
+            : true,
+        };
+      }
+      if (field === 'codexCliOnlyAllowAppServer') {
+        return {
+          ...prev,
+          codexCliOnlyAllowAppServer: Boolean(value),
+          codexCliOnlyAllowAppServerTouched: true,
+        };
       }
       if (field === 'note') return { ...prev, note: String(value), noteTouched: true };
       if (field === 'headersText') {

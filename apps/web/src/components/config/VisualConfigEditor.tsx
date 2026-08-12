@@ -40,6 +40,8 @@ import type {
 } from '@/types/visualConfig';
 import {
   ApiKeysCardEditor,
+  CodexClientEntriesEditor,
+  CodexFingerprintSignalsEditor,
   PayloadFilterRulesEditor,
   PayloadRulesEditor,
   PluginStoreAuthEditor,
@@ -239,6 +241,14 @@ export function VisualConfigEditor({
   const codexTailBurstCollectorConcurrencyError = getValidationMessage(
     t,
     validationErrors?.codexTailBurstCollectorMaxConcurrency
+  );
+  const codexClientMinVersionError = getValidationMessage(
+    t,
+    validationErrors?.codexClientMinVersion
+  );
+  const codexClientMaxVersionError = getValidationMessage(
+    t,
+    validationErrors?.codexClientMaxVersion
   );
   const keepaliveError = getValidationMessage(t, validationErrors?.['streaming.keepaliveSeconds']);
   const bootstrapRetriesError = getValidationMessage(
@@ -1325,6 +1335,102 @@ export function VisualConfigEditor({
                   onChange={(quotaAntigravityCredits) => onChange({ quotaAntigravityCredits })}
                 />
               </SectionGrid>
+
+              <SectionSubsection
+                title={t('config_management.visual.sections.quota.codex_client_title')}
+                description={t('config_management.visual.sections.quota.codex_client_desc')}
+              >
+                <SectionStack>
+                  <ToggleRow
+                    title={t('config_management.visual.sections.quota.codex_client_force_allow')}
+                    description={t(
+                      'config_management.visual.sections.quota.codex_client_force_allow_desc'
+                    )}
+                    checked={values.codexClientForceAllow}
+                    disabled={disabled}
+                    onChange={(codexClientForceAllow) => onChange({ codexClientForceAllow })}
+                  />
+                  <SectionGrid>
+                    <Input
+                      label={t('config_management.visual.sections.quota.codex_client_min_version')}
+                      placeholder="0.142.0"
+                      value={values.codexClientMinVersion}
+                      disabled={disabled}
+                      error={codexClientMinVersionError}
+                      onChange={(event) =>
+                        onChange({ codexClientMinVersion: event.target.value })
+                      }
+                    />
+                    <Input
+                      label={t('config_management.visual.sections.quota.codex_client_max_version')}
+                      placeholder="0.200.0"
+                      value={values.codexClientMaxVersion}
+                      disabled={disabled}
+                      error={codexClientMaxVersionError}
+                      onChange={(event) =>
+                        onChange({ codexClientMaxVersion: event.target.value })
+                      }
+                    />
+                  </SectionGrid>
+                  <ToggleRow
+                    title={t('config_management.visual.sections.quota.codex_client_app_server')}
+                    description={t(
+                      'config_management.visual.sections.quota.codex_client_app_server_desc'
+                    )}
+                    checked={values.codexClientAllowAppServer}
+                    disabled={disabled}
+                    onChange={(codexClientAllowAppServer) =>
+                      onChange({ codexClientAllowAppServer })
+                    }
+                  />
+                  <SectionSubsection
+                    title={t(
+                      'config_management.visual.sections.quota.codex_client_fingerprint_title'
+                    )}
+                    description={t(
+                      'config_management.visual.sections.quota.codex_client_fingerprint_desc'
+                    )}
+                  >
+                    <CodexFingerprintSignalsEditor
+                      value={values.codexClientFingerprintSignals}
+                      disabled={disabled}
+                      onChange={(codexClientFingerprintSignals) =>
+                        onChange({ codexClientFingerprintSignals })
+                      }
+                    />
+                  </SectionSubsection>
+                  <SectionSubsection
+                    title={t(
+                      'config_management.visual.sections.quota.codex_client_whitelist_title'
+                    )}
+                    description={t(
+                      'config_management.visual.sections.quota.codex_client_whitelist_desc'
+                    )}
+                  >
+                    <CodexClientEntriesEditor
+                      value={values.codexClientWhitelist}
+                      whitelist
+                      disabled={disabled}
+                      onChange={(codexClientWhitelist) => onChange({ codexClientWhitelist })}
+                    />
+                  </SectionSubsection>
+                  <SectionSubsection
+                    title={t(
+                      'config_management.visual.sections.quota.codex_client_blacklist_title'
+                    )}
+                    description={t(
+                      'config_management.visual.sections.quota.codex_client_blacklist_desc'
+                    )}
+                  >
+                    <CodexClientEntriesEditor
+                      value={values.codexClientBlacklist}
+                      whitelist={false}
+                      disabled={disabled}
+                      onChange={(codexClientBlacklist) => onChange({ codexClientBlacklist })}
+                    />
+                  </SectionSubsection>
+                </SectionStack>
+              </SectionSubsection>
 
               <SectionSubsection
                 title={t('config_management.visual.sections.quota.tail_burst_title')}

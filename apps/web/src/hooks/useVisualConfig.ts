@@ -1,6 +1,9 @@
 import { useCallback, useMemo, useReducer } from 'react';
 import { isMap, parse as parseYaml, parseDocument } from 'yaml';
 import type {
+  CodexClientRestrictionEntry,
+  CodexEngineFingerprintSignal,
+  CodexFingerprintSignalType,
   DisableImageGenerationMode,
   PluginStoreAuthApplyTo,
   PluginStoreAuthRule,
@@ -8,7 +11,7 @@ import type {
   VisualConfigValues,
   VisualConfigValidationErrors,
 } from '@/types/visualConfig';
-import { DEFAULT_VISUAL_VALUES } from '@/types/visualConfig';
+import { DEFAULT_VISUAL_VALUES, makeClientId } from '@/types/visualConfig';
 import {
   arePayloadFilterRulesEqual,
   arePayloadRulesEqual,
@@ -74,6 +77,47 @@ function parseStringArrayText(raw: unknown): string {
 function parseStringList(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
   return raw.map((item) => String(item ?? '').trim()).filter(Boolean);
+}
+
+const CODEX_FINGERPRINT_SIGNAL_TYPES: CodexFingerprintSignalType[] = [
+  'header_exact',
+  'header_prefix',
+  'body_path',
+];
+
+function parseCodexClientRestrictionEntries(raw: unknown): CodexClientRestrictionEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.reduce<CodexClientRestrictionEntry[]>((result, value) => {
+    const entry = asRecord(value);
+    if (!entry) return result;
+    result.push({
+      id: makeClientId(),
+      originator: typeof entry.originator === 'string' ? entry.originator : '',
+      uaContains: parseStringList(entry['ua-contains'] ?? entry.uaContains),
+      skipEngineFingerprint: Boolean(
+        entry['skip-engine-fingerprint'] ?? entry.skipEngineFingerprint
+      ),
+    });
+    return result;
+  }, []);
+}
+
+function parseCodexEngineFingerprintSignals(
+  raw: unknown
+): CodexEngineFingerprintSignal[] | null {
+  if (!Array.isArray(raw)) return null;
+  return raw.reduce<CodexEngineFingerprintSignal[]>((result, value) => {
+    const signal = asRecord(value);
+    const type = String(signal?.type ?? '').trim() as CodexFingerprintSignalType;
+    if (!signal || !CODEX_FINGERPRINT_SIGNAL_TYPES.includes(type)) return result;
+    result.push({
+      id: makeClientId(),
+      type,
+      match: parseStringList(signal.match),
+      required: signal.required === true,
+    });
+    return result;
+  }, []);
 }
 
 const PLUGIN_STORE_AUTH_TYPES: PluginStoreAuthType[] = [
@@ -165,6 +209,83 @@ function ensureMapInDoc(doc: YamlDocument, path: YamlPath): void {
   if (isMap(existing)) return;
   // Use a YAML node here; plain objects are not treated as collections by subsequent `setIn`.
   doc.setIn(path, doc.createNode({}));
+}
+
+function yamlValueAsRecord(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === 'object' && 'toJSON' in value) {
+    const toJSON = (value as { toJSON?: () => unknown }).toJSON;
+    if (typeof toJSON === 'function') return asRecord(toJSON.call(value));
+  }
+  return asRecord(value);
+}
+
+function canonicalizeCodexClientRestrictionValue(key: string, value: unknown): unknown {
+  if (key === 'whitelist' || key === 'blacklist') {
+    if (!Array.isArray(value)) return value;
+    return value.map((item) => {
+      const entry = yamlValueAsRecord(item);
+      if (!entry) return item;
+      const next: Record<string, unknown> = { ...entry };
+      if (next['ua-contains'] === undefined && next.uaContains !== undefined) {
+        next['ua-contains'] = next.uaContains;
+      }
+      if (
+        next['skip-engine-fingerprint'] === undefined &&
+        next.skipEngineFingerprint !== undefined
+      ) {
+        next['skip-engine-fingerprint'] = next.skipEngineFingerprint;
+      }
+      delete next.uaContains;
+      delete next.skipEngineFingerprint;
+      return next;
+    });
+  }
+
+  if (key === 'engineFingerprintSignals' || key === 'engine-fingerprint-signals') {
+    if (!Array.isArray(value)) return value;
+    return value.map((item) => {
+      const signal = yamlValueAsRecord(item);
+      if (!signal) return item;
+      const next: Record<string, unknown> = { ...signal };
+      if (next.match === undefined && next.matches !== undefined) next.match = next.matches;
+      delete next.matches;
+      return next;
+    });
+  }
+
+  return value;
+}
+
+function migrateLegacyCodexClientRestriction(doc: YamlDocument): void {
+  const legacyPath = ['codex', 'clientRestriction'];
+  const canonicalPath = ['codex', 'client-restriction'];
+  if (!docHas(doc, legacyPath)) return;
+
+  const legacy = yamlValueAsRecord(doc.getIn(legacyPath, true));
+  const canonical = yamlValueAsRecord(doc.getIn(canonicalPath, true));
+  if (!legacy) {
+    doc.deleteIn(legacyPath);
+    return;
+  }
+
+  const keyAliases: Record<string, string> = {
+    forceCodexCli: 'force-codex-cli',
+    minCodexVersion: 'min-codex-version',
+    maxCodexVersion: 'max-codex-version',
+    allowAppServerClients: 'allow-app-server-clients',
+    engineFingerprintSignals: 'engine-fingerprint-signals',
+  };
+  const merged: Record<string, unknown> = {};
+  Object.entries(legacy).forEach(([key, value]) => {
+    const canonicalKey = keyAliases[key] ?? key;
+    merged[canonicalKey] = canonicalizeCodexClientRestrictionValue(canonicalKey, value);
+  });
+  Object.entries(canonical ?? {}).forEach(([key, value]) => {
+    merged[key] = canonicalizeCodexClientRestrictionValue(key, value);
+  });
+
+  doc.setIn(canonicalPath, doc.createNode(merged));
+  doc.deleteIn(legacyPath);
 }
 
 function deleteIfMapEmpty(doc: YamlDocument, path: YamlPath): void {
@@ -260,6 +381,39 @@ function serializePluginStoreAuthForYaml(
     .filter((rule): rule is Record<string, unknown> => Boolean(rule));
 }
 
+function serializeCodexClientRestrictionEntries(
+  entries: CodexClientRestrictionEntry[],
+  whitelist: boolean
+): Array<Record<string, unknown>> {
+  return entries
+    .map((entry) => {
+      const originator = entry.originator.trim();
+      const uaContains = serializeStringListForYaml(entry.uaContains);
+      if (whitelist && (!originator || uaContains.length === 0)) return null;
+      if (!whitelist && !originator && uaContains.length === 0) return null;
+      const value: Record<string, unknown> = {};
+      if (originator) value.originator = originator;
+      if (uaContains.length > 0) value['ua-contains'] = uaContains;
+      if (whitelist && entry.skipEngineFingerprint) {
+        value['skip-engine-fingerprint'] = true;
+      }
+      return value;
+    })
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry));
+}
+
+function serializeCodexEngineFingerprintSignals(
+  signals: CodexEngineFingerprintSignal[]
+): Array<Record<string, unknown>> {
+  const result: Array<Record<string, unknown>> = [];
+  signals.forEach((signal) => {
+    const match = serializeStringListForYaml(signal.match);
+    if (!CODEX_FINGERPRINT_SIGNAL_TYPES.includes(signal.type) || match.length === 0) return;
+    result.push({ type: signal.type, match, required: signal.required });
+  });
+  return result;
+}
+
 function areStringArraysEqual(left: string[] | undefined, right: string[] | undefined): boolean {
   const leftItems = left ?? [];
   const rightItems = right ?? [];
@@ -289,6 +443,46 @@ function arePluginStoreAuthRulesEqual(
       areStringArraysEqual(a.applyTo, b.applyTo)
     );
   });
+}
+
+function areCodexClientRestrictionEntriesEqual(
+  left: CodexClientRestrictionEntry[] | undefined,
+  right: CodexClientRestrictionEntry[] | undefined
+): boolean {
+  const leftItems = left ?? [];
+  const rightItems = right ?? [];
+  return (
+    leftItems.length === rightItems.length &&
+    leftItems.every((entry, index) => {
+      const other = rightItems[index];
+      return (
+        Boolean(other) &&
+        entry.originator === other.originator &&
+        entry.skipEngineFingerprint === other.skipEngineFingerprint &&
+        areStringArraysEqual(entry.uaContains, other.uaContains)
+      );
+    })
+  );
+}
+
+function areCodexEngineFingerprintSignalsEqual(
+  left: CodexEngineFingerprintSignal[] | undefined,
+  right: CodexEngineFingerprintSignal[] | undefined
+): boolean {
+  const leftItems = left ?? [];
+  const rightItems = right ?? [];
+  return (
+    leftItems.length === rightItems.length &&
+    leftItems.every((signal, index) => {
+      const other = rightItems[index];
+      return (
+        Boolean(other) &&
+        signal.type === other.type &&
+        signal.required === other.required &&
+        areStringArraysEqual(signal.match, other.match)
+      );
+    })
+  );
 }
 
 function getNonNegativeIntegerError(value: string): 'non_negative_integer' | undefined {
@@ -352,6 +546,22 @@ function getTailBurstTriggerPercentError(
     : 'tail_burst_trigger_percent_range';
 }
 
+function getCodexVersionError(value: string): 'codex_version' | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return /^\d+\.\d+\.\d+$/.test(trimmed) ? undefined : 'codex_version';
+}
+
+function compareCodexVersions(left: string, right: string): number {
+  const leftParts = left.split('.').map(Number);
+  const rightParts = right.split('.').map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
 function readTailBurstTriggerPercent(value: unknown): string {
   const ratio = Number(value);
   if (!Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) return '98';
@@ -377,6 +587,19 @@ function setTailBurstTriggerRatioInDoc(doc: YamlDocument, path: YamlPath, value:
 export function getVisualConfigValidationErrors(
   values: VisualConfigValues
 ): VisualConfigValidationErrors {
+  const minVersionError = getCodexVersionError(values.codexClientMinVersion);
+  const maxVersionError = getCodexVersionError(values.codexClientMaxVersion);
+  const versionRangeError =
+    !minVersionError &&
+    !maxVersionError &&
+    values.codexClientMinVersion.trim() &&
+    values.codexClientMaxVersion.trim() &&
+    compareCodexVersions(
+      values.codexClientMaxVersion.trim(),
+      values.codexClientMinVersion.trim()
+    ) < 0
+      ? 'codex_version_range'
+      : undefined;
   return {
     port: getPortError(values.port),
     errorLogsMaxFiles: getNonNegativeIntegerError(values.errorLogsMaxFiles),
@@ -389,6 +612,8 @@ export function getVisualConfigValidationErrors(
     maxRetryCredentials: getNonNegativeIntegerError(values.maxRetryCredentials),
     maxRetryInterval: getNonNegativeIntegerError(values.maxRetryInterval),
     authAutoRefreshWorkers: getNonNegativeIntegerError(values.authAutoRefreshWorkers),
+    codexClientMinVersion: minVersionError,
+    codexClientMaxVersion: maxVersionError ?? versionRangeError,
     codexTailBurstTriggerUsedPercent: values.codexTailBurstEnabled
       ? getTailBurstTriggerPercentError(values.codexTailBurstTriggerUsedPercent)
       : undefined,
@@ -512,6 +737,10 @@ function getNextDirtyFields(
       'codexHeaderUserAgent',
       'codexHeaderBetaFeatures',
       'codexIdentityConfuse',
+      'codexClientForceAllow',
+      'codexClientMinVersion',
+      'codexClientMaxVersion',
+      'codexClientAllowAppServer',
       'codexTailBurstEnabled',
       'codexTailBurstTriggerUsedPercent',
       'codexTailBurstSnapshotTtl',
@@ -526,6 +755,33 @@ function getNextDirtyFields(
     updateDirty(
       'pluginStoreAuth',
       arePluginStoreAuthRulesEqual(nextValues.pluginStoreAuth, baselineValues.pluginStoreAuth)
+    );
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'codexClientWhitelist')) {
+    updateDirty(
+      'codexClientWhitelist',
+      areCodexClientRestrictionEntriesEqual(
+        nextValues.codexClientWhitelist,
+        baselineValues.codexClientWhitelist
+      )
+    );
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'codexClientBlacklist')) {
+    updateDirty(
+      'codexClientBlacklist',
+      areCodexClientRestrictionEntriesEqual(
+        nextValues.codexClientBlacklist,
+        baselineValues.codexClientBlacklist
+      )
+    );
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'codexClientFingerprintSignals')) {
+    updateDirty(
+      'codexClientFingerprintSignals',
+      areCodexEngineFingerprintSignalsEqual(
+        nextValues.codexClientFingerprintSignals,
+        baselineValues.codexClientFingerprintSignals
+      )
     );
   }
 
@@ -807,6 +1063,9 @@ export function useVisualConfig() {
       const claudeHeaderDefaults = asRecord(parsed['claude-header-defaults']);
       const codexHeaderDefaults = asRecord(parsed['codex-header-defaults']);
       const codex = asRecord(parsed.codex);
+      const codexClientRestriction = asRecord(
+        codex?.['client-restriction'] ?? codex?.clientRestriction
+      );
       const codexTailBurst = asRecord(codex?.['tail-burst'] ?? codex?.tailBurst);
       const codexTailBurstCollector = asRecord(
         codexTailBurst?.['quota-collector'] ?? codexTailBurst?.quotaCollector
@@ -917,6 +1176,37 @@ export function useVisualConfig() {
             ? codexHeaderDefaults['beta-features']
             : '',
         codexIdentityConfuse: Boolean(codex?.['identity-confuse'] ?? codex?.identityConfuse),
+        codexClientForceAllow: Boolean(
+          codexClientRestriction?.['force-codex-cli'] ??
+            codexClientRestriction?.forceCodexCli
+        ),
+        codexClientMinVersion:
+          typeof codexClientRestriction?.['min-codex-version'] === 'string'
+            ? codexClientRestriction['min-codex-version']
+            : typeof codexClientRestriction?.minCodexVersion === 'string'
+              ? codexClientRestriction.minCodexVersion
+              : '',
+        codexClientMaxVersion:
+          typeof codexClientRestriction?.['max-codex-version'] === 'string'
+            ? codexClientRestriction['max-codex-version']
+            : typeof codexClientRestriction?.maxCodexVersion === 'string'
+              ? codexClientRestriction.maxCodexVersion
+              : '',
+        codexClientAllowAppServer: Boolean(
+          codexClientRestriction?.['allow-app-server-clients'] ??
+            codexClientRestriction?.allowAppServerClients
+        ),
+        codexClientWhitelist: parseCodexClientRestrictionEntries(
+          codexClientRestriction?.whitelist
+        ),
+        codexClientBlacklist: parseCodexClientRestrictionEntries(
+          codexClientRestriction?.blacklist
+        ),
+        codexClientFingerprintSignals:
+          parseCodexEngineFingerprintSignals(
+            codexClientRestriction?.['engine-fingerprint-signals'] ??
+              codexClientRestriction?.engineFingerprintSignals
+          ) ?? deepClone(DEFAULT_VISUAL_VALUES.codexClientFingerprintSignals),
         codexTailBurstEnabled: Boolean(codexTailBurst?.enabled),
         codexTailBurstTriggerUsedPercent: readTailBurstTriggerPercent(
           codexTailBurst?.['trigger-used-ratio'] ?? codexTailBurst?.triggerUsedRatio
@@ -1288,6 +1578,77 @@ export function useVisualConfig() {
             doc.deleteIn(codexIdentityConfuseLegacyPath);
           }
           deleteIfMapEmpty(doc, ['codex']);
+        }
+
+        const codexClientRestrictionDirty =
+          isDirty('codexClientForceAllow') ||
+          isDirty('codexClientMinVersion') ||
+          isDirty('codexClientMaxVersion') ||
+          isDirty('codexClientAllowAppServer') ||
+          isDirty('codexClientWhitelist') ||
+          isDirty('codexClientBlacklist') ||
+          isDirty('codexClientFingerprintSignals');
+        if (codexClientRestrictionDirty) {
+          ensureMapInDoc(doc, ['codex']);
+          migrateLegacyCodexClientRestriction(doc);
+          ensureMapInDoc(doc, ['codex', 'client-restriction']);
+          if (isDirty('codexClientForceAllow')) {
+            doc.setIn(
+              ['codex', 'client-restriction', 'force-codex-cli'],
+              values.codexClientForceAllow
+            );
+            if (docHas(doc, ['codex', 'client-restriction', 'forceCodexCli'])) {
+              doc.deleteIn(['codex', 'client-restriction', 'forceCodexCli']);
+            }
+          }
+          if (isDirty('codexClientMinVersion')) {
+            doc.setIn(
+              ['codex', 'client-restriction', 'min-codex-version'],
+              values.codexClientMinVersion.trim()
+            );
+            if (docHas(doc, ['codex', 'client-restriction', 'minCodexVersion'])) {
+              doc.deleteIn(['codex', 'client-restriction', 'minCodexVersion']);
+            }
+          }
+          if (isDirty('codexClientMaxVersion')) {
+            doc.setIn(
+              ['codex', 'client-restriction', 'max-codex-version'],
+              values.codexClientMaxVersion.trim()
+            );
+            if (docHas(doc, ['codex', 'client-restriction', 'maxCodexVersion'])) {
+              doc.deleteIn(['codex', 'client-restriction', 'maxCodexVersion']);
+            }
+          }
+          if (isDirty('codexClientAllowAppServer')) {
+            doc.setIn(
+              ['codex', 'client-restriction', 'allow-app-server-clients'],
+              values.codexClientAllowAppServer
+            );
+            if (docHas(doc, ['codex', 'client-restriction', 'allowAppServerClients'])) {
+              doc.deleteIn(['codex', 'client-restriction', 'allowAppServerClients']);
+            }
+          }
+          if (isDirty('codexClientWhitelist')) {
+            doc.setIn(
+              ['codex', 'client-restriction', 'whitelist'],
+              serializeCodexClientRestrictionEntries(values.codexClientWhitelist, true)
+            );
+          }
+          if (isDirty('codexClientBlacklist')) {
+            doc.setIn(
+              ['codex', 'client-restriction', 'blacklist'],
+              serializeCodexClientRestrictionEntries(values.codexClientBlacklist, false)
+            );
+          }
+          if (isDirty('codexClientFingerprintSignals')) {
+            doc.setIn(
+              ['codex', 'client-restriction', 'engine-fingerprint-signals'],
+              serializeCodexEngineFingerprintSignals(values.codexClientFingerprintSignals)
+            );
+            if (docHas(doc, ['codex', 'client-restriction', 'engineFingerprintSignals'])) {
+              doc.deleteIn(['codex', 'client-restriction', 'engineFingerprintSignals']);
+            }
+          }
         }
 
         const codexTailBurstDirty =

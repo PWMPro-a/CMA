@@ -9,8 +9,12 @@ import {
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Select';
+import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import styles from './VisualConfigEditor.module.scss';
 import type {
+  CodexClientRestrictionEntry,
+  CodexEngineFingerprintSignal,
+  CodexFingerprintSignalType,
   PayloadFilterRule,
   PayloadHeaderEntry,
   PayloadModelEntry,
@@ -30,6 +34,219 @@ import {
 } from '@/hooks/useVisualConfig';
 
 export { ApiKeysCardEditor } from './ApiKeysCardEditor';
+
+const parseSlashSeparatedValues = (value: string): string[] =>
+  value
+    .split('/')
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const CODEX_FINGERPRINT_TYPE_OPTIONS: Array<{
+  value: CodexFingerprintSignalType;
+  labelKey: string;
+}> = [
+  {
+    value: 'header_exact',
+    labelKey: 'config_management.visual.sections.quota.codex_client_signal_header_exact',
+  },
+  {
+    value: 'header_prefix',
+    labelKey: 'config_management.visual.sections.quota.codex_client_signal_header_prefix',
+  },
+  {
+    value: 'body_path',
+    labelKey: 'config_management.visual.sections.quota.codex_client_signal_body_path',
+  },
+];
+
+export const CodexFingerprintSignalsEditor = memo(function CodexFingerprintSignalsEditor({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: CodexEngineFingerprintSignal[];
+  disabled?: boolean;
+  onChange: (next: CodexEngineFingerprintSignal[]) => void;
+}) {
+  const { t } = useTranslation();
+  const updateSignal = (id: string, patch: Partial<CodexEngineFingerprintSignal>) =>
+    onChange(value.map((signal) => (signal.id === id ? { ...signal, ...patch } : signal)));
+  const removeSignal = (id: string) => onChange(value.filter((signal) => signal.id !== id));
+  const addSignal = () =>
+    onChange([
+      ...value,
+      { id: makeClientId(), type: 'header_exact', match: [], required: false },
+    ]);
+
+  return (
+    <div className={styles.codexPolicyList}>
+      {value.map((signal) => (
+        <div key={signal.id} className={styles.codexFingerprintRow}>
+          <Select
+            value={signal.type}
+            options={CODEX_FINGERPRINT_TYPE_OPTIONS.map((option) => ({
+              value: option.value,
+              label: t(option.labelKey),
+            }))}
+            disabled={disabled}
+            ariaLabel={t('config_management.visual.sections.quota.codex_client_signal_type')}
+            onChange={(type) =>
+              updateSignal(signal.id, { type: type as CodexFingerprintSignalType })
+            }
+          />
+          <input
+            className="input"
+            value={signal.match.join(' / ')}
+            placeholder={t(
+              'config_management.visual.sections.quota.codex_client_signal_placeholder'
+            )}
+            disabled={disabled}
+            onChange={(event) =>
+              updateSignal(signal.id, { match: parseSlashSeparatedValues(event.target.value) })
+            }
+          />
+          <label className={styles.codexPolicyToggle}>
+            <ToggleSwitch
+              checked={signal.required}
+              disabled={disabled}
+              ariaLabel={t('config_management.visual.sections.quota.codex_client_required')}
+              onChange={(required) => updateSignal(signal.id, { required })}
+            />
+            <span>{t('config_management.visual.sections.quota.codex_client_required')}</span>
+          </label>
+          <Button
+            variant="ghost"
+            size="xs"
+            disabled={disabled}
+            onClick={() => removeSignal(signal.id)}
+          >
+            {t('config_management.visual.common.delete')}
+          </Button>
+        </div>
+      ))}
+      <div className={styles.actionRow}>
+        <Button variant="secondary" size="xs" disabled={disabled} onClick={addSignal}>
+          {t('config_management.visual.sections.quota.codex_client_add_signal')}
+        </Button>
+      </div>
+      {!value.some((signal) => signal.required) ? (
+        <div className={styles.codexPolicyWarning}>
+          {t('config_management.visual.sections.quota.codex_client_no_required_warning')}
+        </div>
+      ) : null}
+    </div>
+  );
+});
+
+export const CodexClientEntriesEditor = memo(function CodexClientEntriesEditor({
+  value,
+  whitelist,
+  disabled,
+  onChange,
+}: {
+  value: CodexClientRestrictionEntry[];
+  whitelist: boolean;
+  disabled?: boolean;
+  onChange: (next: CodexClientRestrictionEntry[]) => void;
+}) {
+  const { t } = useTranslation();
+  const updateEntry = (id: string, patch: Partial<CodexClientRestrictionEntry>) =>
+    onChange(value.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)));
+  const removeEntry = (id: string) => onChange(value.filter((entry) => entry.id !== id));
+  const addEntry = () =>
+    onChange([
+      ...value,
+      {
+        id: makeClientId(),
+        originator: '',
+        uaContains: [],
+        skipEngineFingerprint: false,
+      },
+    ]);
+
+  return (
+    <div className={styles.codexPolicyList}>
+      {value.length === 0 ? (
+        <div className={styles.emptyState}>
+          {t(
+            whitelist
+              ? 'config_management.visual.sections.quota.codex_client_whitelist_empty'
+              : 'config_management.visual.sections.quota.codex_client_blacklist_empty'
+          )}
+        </div>
+      ) : null}
+      {value.map((entry) => (
+        <div key={entry.id} className={styles.codexClientEntry}>
+          <div className={styles.codexClientEntryGrid}>
+            <label className={styles.storeAuthField}>
+              <span>{t('config_management.visual.sections.quota.codex_client_originator')}</span>
+              <input
+                className="input"
+                value={entry.originator}
+                disabled={disabled}
+                onChange={(event) => updateEntry(entry.id, { originator: event.target.value })}
+              />
+            </label>
+            <label className={styles.storeAuthField}>
+              <span>{t('config_management.visual.sections.quota.codex_client_ua_contains')}</span>
+              <input
+                className="input"
+                value={entry.uaContains.join(' / ')}
+                placeholder={t(
+                  'config_management.visual.sections.quota.codex_client_ua_contains_placeholder'
+                )}
+                disabled={disabled}
+                onChange={(event) =>
+                  updateEntry(entry.id, {
+                    uaContains: parseSlashSeparatedValues(event.target.value),
+                  })
+                }
+              />
+            </label>
+          </div>
+          <div className={styles.codexClientEntryFooter}>
+            {whitelist ? (
+              <label className={styles.codexPolicyToggle}>
+                <ToggleSwitch
+                  checked={entry.skipEngineFingerprint}
+                  disabled={disabled}
+                  ariaLabel={t(
+                    'config_management.visual.sections.quota.codex_client_skip_fingerprint'
+                  )}
+                  onChange={(skipEngineFingerprint) =>
+                    updateEntry(entry.id, { skipEngineFingerprint })
+                  }
+                />
+                <span>
+                  {t('config_management.visual.sections.quota.codex_client_skip_fingerprint')}
+                </span>
+              </label>
+            ) : (
+              <span />
+            )}
+            <Button
+              variant="ghost"
+              size="xs"
+              disabled={disabled}
+              onClick={() => removeEntry(entry.id)}
+            >
+              {t('config_management.visual.common.delete')}
+            </Button>
+          </div>
+        </div>
+      ))}
+      <div className={styles.actionRow}>
+        <Button variant="secondary" size="xs" disabled={disabled} onClick={addEntry}>
+          {t(
+            whitelist
+              ? 'config_management.visual.sections.quota.codex_client_add_whitelist'
+              : 'config_management.visual.sections.quota.codex_client_add_blacklist'
+          )}
+        </Button>
+      </div>
+    </div>
+  );
+});
 
 /** Minimum character count before the expand/collapse toggle appears. */
 const EXPAND_THRESHOLD = 30;

@@ -58,6 +58,8 @@ export type AuthFileFieldsPatch = {
   source_ip?: string;
   websockets?: boolean;
   using_api?: boolean;
+  codex_cli_only?: boolean;
+  codex_cli_only_allow_app_server?: boolean;
   usingApi?: null;
   'using-api'?: null;
   headers?: Record<string, string>;
@@ -832,6 +834,18 @@ export const applyAuthFileFieldsPatchToRecord = (
 
   if (fields.using_api !== undefined) {
     next.using_api = fields.using_api;
+  }
+  if (fields.codex_cli_only !== undefined) {
+    next.codex_cli_only = fields.codex_cli_only;
+  }
+  if (fields.codex_cli_only_allow_app_server !== undefined) {
+    next.codex_cli_only_allow_app_server = fields.codex_cli_only_allow_app_server;
+  }
+  const codexRestrictionTouched =
+    fields.codex_cli_only !== undefined ||
+    fields.codex_cli_only_allow_app_server !== undefined;
+  if (codexRestrictionTouched && next.codex_cli_only !== true) {
+    next.codex_cli_only_allow_app_server = false;
   }
   const numericFields: Array<keyof AuthFileFieldsPatch> = [
     'max_concurrency',
