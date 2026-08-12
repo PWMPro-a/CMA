@@ -1327,8 +1327,27 @@ func inspectionResultCapacityExcluded(result store.CodexInspectionResult) bool {
 	if result.IsQuota {
 		return true
 	}
-	message := strings.ToLower(strings.Join([]string{result.Status, result.State, result.ErrorKind, result.Error, result.ErrorDetail}, " "))
+	action := strings.ToLower(strings.TrimSpace(result.Action))
+	switch action {
+	case "reauth", "delete":
+		return true
+	}
+	if result.StatusCode != nil {
+		switch *result.StatusCode {
+		case 401, 402, 403, 404, 410:
+			return true
+		}
+	}
+	message := strings.ToLower(strings.Join([]string{
+		result.Status,
+		result.State,
+		result.ActionReason,
+		result.ErrorKind,
+		result.Error,
+		result.ErrorDetail,
+	}, " "))
 	if strings.Contains(message, "invalid") ||
+		strings.Contains(message, "deactivated") ||
 		strings.Contains(message, "expired") ||
 		strings.Contains(message, "revoked") ||
 		strings.Contains(message, "unauthorized") ||

@@ -20,6 +20,14 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
+func intPtr(value int) *int {
+	return &value
+}
+
+func floatPtr(value float64) *float64 {
+	return &value
+}
+
 func seedCompletedQuotaInspection(t *testing.T, st *store.Store, results ...store.CodexInspectionResult) {
 	t.Helper()
 	now := time.Now().UnixMilli()
@@ -257,6 +265,32 @@ func TestSmartResourceShowsVerifiedCapacityWhenInspectionQuotaEvidenceIsPartial(
 	if resource.CurrentCapacityRCU <= 0 || resource.ConsumeRCUPerMinute <= 0 ||
 		resource.TargetCapacityRCU <= 0 || resource.EstimatedSustainMinutes <= 0 {
 		t.Fatalf("verified capacity must remain visible during an incomplete inspection: %#v", resource)
+	}
+}
+
+func TestSmartResourceIgnoresClearlyUnavailableCredentialsForCoverage(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	unused := 0.0
+	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product:              "oauth_7d",
+		HealthyMinutesTarget: 40,
+	}, inspectionQuotaSnapshot{
+		run:         store.CodexInspectionRun{ProbeSetCount: 4, SampledCount: 4, FinishedAtMS: now.UnixMilli()},
+		generatedAt: now,
+		results: []store.CodexInspectionResult{
+			{AccountKey: "verified", FileName: "verified.json", Provider: "codex", Status: "active", Action: "keep", StatusCode: intPtr(200), UsedPercent: &unused},
+			{AccountKey: "revoked", FileName: "revoked.json", Provider: "codex", Status: "active", Action: "reauth", StatusCode: intPtr(401), ErrorKind: "http_status"},
+			{AccountKey: "deactivated", FileName: "deactivated.json", Provider: "codex", Status: "disabled", Action: "delete", StatusCode: intPtr(402), ErrorDetail: `{"detail":{"code":"deactivated_workspace"}}`, Disabled: true},
+			{AccountKey: "quota-full", FileName: "quota-full.json", Provider: "codex", Status: "active", Action: "disable", StatusCode: intPtr(200), IsQuota: true, UsedPercent: floatPtr(100)},
+		},
+	}, now)
+
+	if !resource.SnapshotFresh || resource.DecisionReason == "inspection_quota_incomplete" || resource.CapacityCoverage != 100 {
+		t.Fatalf("unavailable credentials must not make the usable quota snapshot incomplete: %#v", resource)
+	}
+	if resource.TotalAccounts != 4 || resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 || resource.DisabledAccounts != 3 {
+		t.Fatalf("unavailable credentials should remain visible as disabled without reducing coverage: %#v", resource)
 	}
 }
 

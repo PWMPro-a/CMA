@@ -313,6 +313,34 @@ const smartPanelTone = (resource?: SupplySmartResource) => {
   return styles.smartPanelUnknown;
 };
 
+const snapshotLabelKey = (resource?: SupplySmartResource) => {
+  if (!resource) return 'supply.no_snapshot';
+  if (resource.snapshotFresh) return 'supply.snapshot_fresh';
+  if (resource.snapshotRefreshInProgress) return 'supply.snapshot_refreshing';
+  if (
+    resource.decisionReason === 'snapshot_not_ready' ||
+    resource.decisionReason === 'inspection_snapshot_unavailable' ||
+    resource.decisionReason === 'inspection_snapshot_incomplete' ||
+    resource.decisionReason === 'usage_rate_not_ready'
+  ) {
+    return 'supply.snapshot_not_ready';
+  }
+  if (resource.decisionReason === 'using_stale_inspection_snapshot') {
+    return 'supply.snapshot_read_failed';
+  }
+  if (
+    resource.decisionReason.startsWith('inspection_quota_incomplete') ||
+    resource.decisionReason.startsWith('inspection_usability_incomplete') ||
+    resource.pendingInspectionAccounts
+  ) {
+    if (resource.capacityCoverage > 0 && resource.capacityCoverage < 100) {
+      return 'supply.snapshot_coverage_pending';
+    }
+    return 'supply.snapshot_partial';
+  }
+  return 'supply.snapshot_stale';
+};
+
 export function SupplyPage() {
   const { t } = useTranslation();
   const { showNotification, showConfirmation } = useNotificationStore();
@@ -688,13 +716,20 @@ export function SupplyPage() {
         ((smart.currentCapacityRcu ?? 0) / Math.max(1, smart.targetCapacityRcu ?? 1)) * 100
       )
     : 0;
-  const snapshotLabel = smart
-    ? smart.snapshotFresh
-      ? t('supply.snapshot_fresh')
-      : smart.snapshotRefreshInProgress
-        ? t('supply.snapshot_refreshing')
-        : t('supply.snapshot_stale')
-    : t('supply.no_snapshot');
+  const snapshotLabel = t(snapshotLabelKey(smart), {
+    coverage: formatNumber(smart?.capacityCoverage, 0),
+  });
+  const smartActionLabel = (action: string, reason: string) => {
+    if (action !== 'snapshot_stale') {
+      return t(`supply.smart_action_${action}`, {
+        defaultValue: action,
+      });
+    }
+    const resourceForReason = smart ? { ...smart, decisionReason: reason } : smart;
+    return t(snapshotLabelKey(resourceForReason), {
+      coverage: formatNumber(resourceForReason?.capacityCoverage, 0),
+    });
+  };
   const nextExecutionDue = Boolean(
     autoSupplyEnabled &&
     !automation?.running &&
@@ -729,9 +764,7 @@ export function SupplyPage() {
         value: formatTime(automation.lastFinishedAtMs),
       })
     : t('supply.automation_no_execution');
-  const lastExecutionActionLabel = t(`supply.smart_action_${lastExecutionAction}`, {
-    defaultValue: lastExecutionAction,
-  });
+  const lastExecutionActionLabel = smartActionLabel(lastExecutionAction, lastExecutionReason);
   const lastExecutionReasonLabel = t(`supply.smart_reason_${lastExecutionReason}`, {
     defaultValue: lastExecutionReason,
   });
@@ -1412,11 +1445,7 @@ export function SupplyPage() {
                 </div>
                 <div className={styles.decisionBody}>
                   <span>{t('supply.ops_next_action')}</span>
-                  <strong>
-                    {t(`supply.smart_action_${suggestedAction}`, {
-                      defaultValue: suggestedAction,
-                    })}
-                  </strong>
+                  <strong>{smartActionLabel(suggestedAction, decisionReason)}</strong>
                   <p>
                     {t('supply.decision_reason')}:{' '}
                     {t(`supply.smart_reason_${decisionReason}`, {
