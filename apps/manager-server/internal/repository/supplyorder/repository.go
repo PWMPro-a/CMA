@@ -49,6 +49,13 @@ type repository struct {
 
 const openOrderStatusClause = `'creating','create_uncertain','created','waiting_inventory','ready','taking','importing','partial'`
 
+// supplyPurchaseOrderPredicate excludes synthetic recovery import rows that
+// share the supply_orders table only to reuse the credential import pipeline.
+// Those rows are not supplier purchases and must never block or pace buying.
+const supplyPurchaseOrderPredicate = `lower(coalesce(strategy, '')) <> 'recovery'
+	and lower(coalesce(remote_status, '')) <> 'recovery_claimed'
+	and lower(order_id) not like 'recovery-%'`
+
 func New(db *sql.DB, protector ...*security.Protector) Repository {
 	var p *security.Protector
 	if len(protector) > 0 {
@@ -76,14 +83,15 @@ func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model
 		item_count, imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms,
 		created_at_ms, updated_at_ms
 	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	if isOpenOrderStatus(order.Status) {
+	if isOpenOrderStatus(order.Status) && isPurchaseOrder(order) {
 		statement = `insert into supply_orders (
 			order_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
 			ready_quantity, progress, status_url, take_url, charged_fen, released_fen,
 			item_count, imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms,
 			created_at_ms, updated_at_ms
 		) select ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-		where not exists (select 1 from supply_orders where status in (` + openOrderStatusClause + `))`
+		where not exists (select 1 from supply_orders where status in (` + openOrderStatusClause + `)
+			and ` + supplyPurchaseOrderPredicate + `)`
 	}
 	var result sql.Result
 	err := sqliterepo.WithBusyRetry(ctx, func() error {
@@ -101,7 +109,7 @@ func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model
 	if err != nil {
 		return model.SupplyOrder{}, err
 	}
-	if isOpenOrderStatus(order.Status) {
+	if isOpenOrderStatus(order.Status) && isPurchaseOrder(order) {
 		affected, err := result.RowsAffected()
 		if err != nil {
 			return model.SupplyOrder{}, err
@@ -124,7 +132,8 @@ func (r *repository) Get(ctx context.Context, orderID string) (model.SupplyOrder
 }
 
 func (r *repository) GetOpen(ctx context.Context) (model.SupplyOrder, bool, error) {
-	row := r.db.QueryRowContext(ctx, orderSelect+` where status in (`+openOrderStatusClause+`) order by created_at_ms asc limit 1`)
+	row := r.db.QueryRowContext(ctx, orderSelect+` where status in (`+openOrderStatusClause+`)
+		and `+supplyPurchaseOrderPredicate+` order by created_at_ms asc limit 1`)
 	order, err := scanOrder(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.SupplyOrder{}, false, nil
@@ -133,7 +142,7 @@ func (r *repository) GetOpen(ctx context.Context) (model.SupplyOrder, bool, erro
 }
 
 func (r *repository) GetLatestAutomatic(ctx context.Context) (model.SupplyOrder, bool, error) {
-	row := r.db.QueryRowContext(ctx, orderSelect+` where automatic = 1
+	row := r.db.QueryRowContext(ctx, orderSelect+` where automatic = 1 and `+supplyPurchaseOrderPredicate+`
 		order by created_at_ms desc, id desc limit 1`)
 	order, err := scanOrder(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -144,6 +153,7 @@ func (r *repository) GetLatestAutomatic(ctx context.Context) (model.SupplyOrder,
 
 func (r *repository) GetLatestCompletedAutomatic(ctx context.Context) (model.SupplyOrder, bool, error) {
 	row := r.db.QueryRowContext(ctx, orderSelect+` where automatic = 1 and status = 'completed'
+		and `+supplyPurchaseOrderPredicate+`
 		order by completed_at_ms desc, id desc limit 1`)
 	order, err := scanOrder(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -160,7 +170,11 @@ func (r *repository) ActivateNextLegacyRepair(ctx context.Context) (model.Supply
 	defer func() { _ = tx.Rollback() }()
 	var orderID string
 	err = tx.QueryRowContext(ctx, `select o.order_id from supply_orders o
-		where o.status = 'completed' and exists (
+		where o.status = 'completed'
+			and lower(coalesce(o.strategy, '')) <> 'recovery'
+			and lower(coalesce(o.remote_status, '')) <> 'recovery_claimed'
+			and lower(o.order_id) not like 'recovery-%'
+			and exists (
 			select 1 from supply_import_items i
 			where i.order_id = o.order_id and i.status = 'imported' and i.file_name like 'supply-%'
 		)
@@ -339,7 +353,8 @@ func (r *repository) List(ctx context.Context, limit int) ([]model.SupplyOrder, 
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := r.db.QueryContext(ctx, orderSelect+` order by created_at_ms desc, id desc limit ?`, limit)
+	rows, err := r.db.QueryContext(ctx, orderSelect+` where `+supplyPurchaseOrderPredicate+`
+		order by created_at_ms desc, id desc limit ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -359,10 +374,10 @@ func (r *repository) ListBetween(ctx context.Context, fromMS int64, toMS int64, 
 	if limit <= 0 || limit > 10000 {
 		limit = 5000
 	}
-	rows, err := r.db.QueryContext(ctx, orderSelect+` where
+	rows, err := r.db.QueryContext(ctx, orderSelect+` where `+supplyPurchaseOrderPredicate+` and (
 		(created_at_ms >= ? and created_at_ms < ?) or
 		(updated_at_ms >= ? and updated_at_ms < ?) or
-		(coalesce(completed_at_ms, 0) >= ? and coalesce(completed_at_ms, 0) < ?)
+		(coalesce(completed_at_ms, 0) >= ? and coalesce(completed_at_ms, 0) < ?))
 		order by created_at_ms desc, id desc limit ?`,
 		fromMS, toMS, fromMS, toMS, fromMS, toMS, limit)
 	if err != nil {
@@ -745,6 +760,12 @@ func scanOrder(row scanner) (model.SupplyOrder, error) {
 	order.SupplierRetryUntilMS = supplierRetryUntilMS.Int64
 	order.CompletedAtMS = completedAtMS.Int64
 	return order, nil
+}
+
+func isPurchaseOrder(order model.SupplyOrder) bool {
+	return !strings.EqualFold(strings.TrimSpace(order.Strategy), "recovery") &&
+		!strings.EqualFold(strings.TrimSpace(order.RemoteStatus), "recovery_claimed") &&
+		!strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.OrderID)), "recovery-")
 }
 
 func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {

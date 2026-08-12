@@ -2782,6 +2782,7 @@ export function SupplyPage() {
                       <th>{t('supply.import_progress')}</th>
                       <th>{t('supply.charged')}</th>
                       <th>{t('common.status')}</th>
+                      <th>{t('supply.order_result_detail')}</th>
                       <th>{t('supply.created_at')}</th>
                     </tr>
                   </thead>
@@ -2801,12 +2802,18 @@ export function SupplyPage() {
                             {t(`supply.status_${order.status}`, { defaultValue: order.status })}
                           </span>
                         </td>
+                        <td>
+                          {order.lastError ||
+                            t(`supply.order_result_${order.status}`, {
+                              defaultValue: t('supply.order_result_unknown'),
+                            })}
+                        </td>
                         <td>{formatTime(order.createdAtMs)}</td>
                       </tr>
                     ))}
                     {!status?.orders?.length ? (
                       <tr>
-                        <td colSpan={8} className={styles.emptyCell}>
+                        <td colSpan={9} className={styles.emptyCell}>
                           {t('supply.no_history')}
                         </td>
                       </tr>

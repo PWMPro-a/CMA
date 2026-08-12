@@ -150,6 +150,49 @@ func TestAutomaticCreateCooldownUsesPersistedLatestOrder(t *testing.T) {
 	}
 }
 
+func TestAutomaticCreateCooldownIgnoresRecentRecoveryImport(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-recovery-cooldown.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	now := time.Now()
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID:           "automatic-old-purchase",
+		Product:           "oauth_7d",
+		RequestedQuantity: 3,
+		Automatic:         true,
+		Status:            "completed",
+		CreatedAtMS:       now.Add(-10 * time.Minute).UnixMilli(),
+		CompletedAtMS:     now.Add(-9 * time.Minute).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("create old automatic purchase: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID:           "recovery-recent-import",
+		Product:           "oauth_7d",
+		RequestedQuantity: 1,
+		Automatic:         true,
+		Strategy:          "recovery",
+		RemoteStatus:      "recovery_claimed",
+		Status:            "completed",
+		CreatedAtMS:       now.Add(-5 * time.Second).UnixMilli(),
+		CompletedAtMS:     now.Add(-4 * time.Second).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("create recent recovery import: %v", err)
+	}
+	service := New(st, nil)
+	active, err := service.automaticCreateCooldownActive(context.Background(), store.ManagerSupplyConfig{
+		CreateCooldownSeconds: 120,
+	}, SmartResource{EmergencyShortage: true})
+	if err != nil {
+		t.Fatalf("check persisted cooldown: %v", err)
+	}
+	if active {
+		t.Fatal("recent recovery import must not start the supplier purchase cooldown")
+	}
+}
+
 func TestAutomaticSupplyGuardRequiresFreshBaselineAndSettledImports(t *testing.T) {
 	service := New(nil, nil)
 	nowMS := time.Now().UnixMilli()
@@ -755,11 +798,39 @@ func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create supply order: %v", err)
 	}
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID:           "recovery-report-1",
+		Product:           "oauth_30d",
+		RequestedQuantity: 1,
+		Automatic:         true,
+		Strategy:          "recovery",
+		TriggerReason:     "recovery_claimed",
+		Status:            "completed",
+		RemoteStatus:      "recovery_claimed",
+		ItemCount:         1,
+		ImportedCount:     1,
+		CompletedAtMS:     now.Add(-28 * time.Minute).UnixMilli(),
+		CreatedAtMS:       now.Add(-29 * time.Minute).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("create recovery import row: %v", err)
+	}
 	if inserted, err := st.InsertSupplyImportItems(ctx, "order-report-1", []store.SupplyImportItem{
 		{OrderID: "order-report-1", ItemKey: "item-a", FileName: "codex-supply-a.json", PayloadJSON: `{"type":"codex"}`, LeaseExpiresAtMS: now.Add(10 * time.Minute).UnixMilli(), BasePriceFen: 700, ChargedFen: 500},
 		{OrderID: "order-report-1", ItemKey: "item-b", FileName: "codex-supply-b.json", PayloadJSON: `{"type":"codex"}`, LeaseExpiresAtMS: now.Add(time.Hour).UnixMilli(), BasePriceFen: 700, ChargedFen: 700},
 	}); err != nil || inserted != 2 {
 		t.Fatalf("insert import items inserted=%d err=%v", inserted, err)
+	}
+	if inserted, err := st.InsertSupplyImportItems(ctx, "recovery-report-1", []store.SupplyImportItem{{
+		OrderID: "recovery-report-1", ItemKey: "replacement-a", FileName: "codex-supply-a.json", PayloadJSON: `{"type":"codex"}`,
+	}}); err != nil || inserted != 1 {
+		t.Fatalf("insert recovery import item inserted=%d err=%v", inserted, err)
+	}
+	recoveryItems, err := st.ListPendingSupplyImportItems(ctx, "recovery-report-1", now.UnixMilli(), 10)
+	if err != nil || len(recoveryItems) != 1 {
+		t.Fatalf("pending recovery items=%#v err=%v", recoveryItems, err)
+	}
+	if err := st.MarkSupplyImportItemImported(ctx, recoveryItems[0].ID, now.Add(-27*time.Minute).UnixMilli()); err != nil {
+		t.Fatalf("mark recovery item imported: %v", err)
 	}
 	items, err := st.ListPendingSupplyImportItems(ctx, "order-report-1", now.UnixMilli(), 10)
 	if err != nil || len(items) != 2 {
@@ -826,7 +897,7 @@ func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 		t.Fatalf("report: %v", err)
 	}
 	if report.Executive.Orders != 1 || report.Executive.AutomaticOrders != 1 ||
-		report.Executive.RequestedAccounts != 2 || report.Executive.ImportedAccounts != 2 {
+		report.Executive.RecoveryOrders != 0 || report.Executive.RequestedAccounts != 2 || report.Executive.ImportedAccounts != 2 {
 		t.Fatalf("executive order counts = %#v", report.Executive)
 	}
 	if report.Executive.EmergencyReplenishments != 1 || report.Executive.VacuumReplenishments != 1 ||
@@ -841,6 +912,7 @@ func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 		t.Fatalf("executive money = %#v", report.Executive)
 	}
 	if report.Reconciliation.Summary.AllocationMethod != "supplier_item_exact_else_order_even_split" ||
+		report.Reconciliation.Summary.OrderRows != 1 ||
 		report.Reconciliation.Summary.AccountAllocatedChargedFen != 1200 ||
 		report.Reconciliation.Summary.AccountAllocatedReleasedFen != 200 ||
 		report.Reconciliation.Summary.AccountAllocatedNetFen != 1200 {
@@ -861,7 +933,9 @@ func TestReportAggregatesSupplySpendRecoveriesAndUsageRevenue(t *testing.T) {
 		report.UsageModels[0].Calls != 1 || math.Abs(report.UsageModels[0].Revenue-0.24) > 0.000001 {
 		t.Fatalf("usage models = %#v", report.UsageModels)
 	}
-	if report.ImportHealth.Items != 2 || report.ImportHealth.ImportedItems != 2 ||
+	// Replacement imports stay in import-health/account reconciliation even
+	// though they are excluded from supplier purchase counts and spend.
+	if report.ImportHealth.Items != 3 || report.ImportHealth.ImportedItems != 3 ||
 		report.ImportHealth.ExpiringSoonItems != 1 || report.Executive.ImportSuccessRate != 1 {
 		t.Fatalf("import health = %#v executive=%#v", report.ImportHealth, report.Executive)
 	}
