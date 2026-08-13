@@ -827,6 +827,43 @@ describe('auth file Codex status helpers', () => {
     expect(status.needsReauth).toBe(false);
   });
 
+  it('suppresses an older quota-limited header after a newer healthy Codex inspection', () => {
+    const file = codexFile();
+    const inspection: AuthFileCodexInspectionSnapshot = {
+      fileName: file.name,
+      authIndex: file.authIndex,
+      statusCode: 200,
+      action: 'keep',
+      usedPercent: null,
+      isQuota: false,
+      inspectionAtMs: 2_000,
+    };
+    const headerSnapshot: UsageHeaderSnapshot = {
+      event_hash: 'older-weekly-limit',
+      timestamp_ms: 1_000,
+      response_metadata: {
+        quota: {
+          rate_limit_reached_type: 'secondary',
+          reached_window_kind: 'weekly',
+          secondary: { used_percent: 100, window_minutes: 10_080 },
+        },
+      },
+    };
+
+    const sources = getFreshAuthFileCodexStatusSources(file, undefined, inspection, headerSnapshot);
+    const status = getAuthFileCodexStatus(
+      file,
+      undefined,
+      sources.inspection,
+      sources.headerSnapshot
+    );
+
+    expect(sources.inspection).toBe(inspection);
+    expect(sources.headerSnapshot).toBeUndefined();
+    expect(status.isWeeklyLimited).toBe(false);
+    expect(status.badges.map((badge) => badge.kind)).not.toContain('observed_quota');
+  });
+
   it('does not suppress older status sources when quota identity is missing', () => {
     const file = codexFile();
     const quota = codexQuota({

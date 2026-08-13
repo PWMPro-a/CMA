@@ -531,14 +531,20 @@ const shouldSuppressOlderCodexStatusSource = (
 ): boolean => {
   const normalizedSourceAtMs = readFiniteTimestamp(sourceAtMs);
   if (normalizedSourceAtMs === null) return false;
-  if (hasHeaderQuotaLimitSignal(source as UsageHeaderSnapshot | undefined)) {
+  const normalizedNewerSourceAtMs = readFiniteTimestamp(newerSourceAtMs);
+  // A quota-limited response header is stronger than a later browser-side
+  // quota refresh, but a newer credential inspection has probed the same
+  // credential directly and must retire the older header snapshot.
+  if (
+    hasHeaderQuotaLimitSignal(source as UsageHeaderSnapshot | undefined) &&
+    !(normalizedNewerSourceAtMs !== null && normalizedNewerSourceAtMs > normalizedSourceAtMs)
+  ) {
     return false;
   }
   const fetchedAtMs =
     quota?.status === 'success' && activeCodexQuotaMatchesAuthFile(file, quota)
       ? readFiniteTimestamp(quota.fetchedAtMs)
       : null;
-  const normalizedNewerSourceAtMs = readFiniteTimestamp(newerSourceAtMs);
   return (
     (fetchedAtMs !== null && fetchedAtMs >= normalizedSourceAtMs) ||
     (normalizedNewerSourceAtMs !== null && normalizedNewerSourceAtMs > normalizedSourceAtMs)

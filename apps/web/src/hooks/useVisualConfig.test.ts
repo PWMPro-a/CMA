@@ -43,11 +43,11 @@ const mountUseVisualConfig = (): UseVisualConfigHarness => {
 };
 
 describe('useVisualConfig', () => {
-  it('uses the sub2 Codex fingerprint defaults', () => {
+  it('uses the strict Codex quota-protection fingerprint defaults', () => {
     expect(DEFAULT_VISUAL_VALUES.codexClientFingerprintSignals).toHaveLength(4);
     expect(
       DEFAULT_VISUAL_VALUES.codexClientFingerprintSignals.map((signal) => signal.required)
-    ).toEqual([true, false, false, false]);
+    ).toEqual([true, true, true, true]);
   });
 
   it('validates Codex version syntax and range before writing YAML', () => {
