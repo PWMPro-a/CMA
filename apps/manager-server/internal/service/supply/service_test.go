@@ -1551,7 +1551,8 @@ func TestNormalizeSub2AccountPayloadForCPA(t *testing.T) {
 	}
 	if result["account_id"] != "account-1" || result["chatgpt_account_id"] != "account-1" ||
 		result["email"] != "user@example.com" || result["plan_type"] != "team" ||
-		result["chatgpt_plan_type"] != "team" || result["organization_id"] != "org-extra" ||
+		result["chatgpt_plan_type"] != "team" || result["codex_plan_type_pinned"] != true ||
+		result["organization_id"] != "org-extra" ||
 		result["workspace_id"] != "workspace-1" ||
 		result["expired"] != "2026-07-30T00:00:00Z" || result["max_concurrency"] != float64(8) ||
 		result["selection_error_freeze_seconds"] != float64(0) || result["codex_cli_only"] != true ||
@@ -1614,13 +1615,35 @@ func TestNormalizeSupplyAccountKeepsExplicitCodexIdentityFingerprint(t *testing.
 func TestPreserveCodexIdentityFingerprintOnReplacement(t *testing.T) {
 	next := []byte(`{"type":"codex","email":"new@example.com","codex_identity_fingerprint":"new-device","access_token":"new"}`)
 	existing := []byte(`{"type":"codex","email":"old@example.com","codex_identity_fingerprint":"stable-device","access_token":"old"}`)
-	preserved := preserveCodexIdentityFingerprint(next, existing)
+	preserved := preserveCodexSupplyMetadata(next, existing)
 	var result map[string]any
 	if err := json.Unmarshal(preserved, &result); err != nil {
 		t.Fatalf("decode preserved payload: %v", err)
 	}
 	if got := stringFromMap(result, "codex_identity_fingerprint"); got != "stable-device" {
 		t.Fatalf("codex_identity_fingerprint = %q, want stable-device", got)
+	}
+	if got := stringFromMap(result, "access_token"); got != "new" {
+		t.Fatalf("access_token = %q, want new", got)
+	}
+}
+
+func TestPreservePinnedSupplyTeamPlanOnTransientFreeReplacement(t *testing.T) {
+	next := []byte(`{"type":"codex","email":"team@example.com","plan_type":"free","chatgpt_plan_type":"free","access_token":"new"}`)
+	existing := []byte(`{"type":"codex","email":"team@example.com","import_format":"sub2api","plan_type":"team","chatgpt_plan_type":"team","access_token":"old"}`)
+	preserved := preserveCodexSupplyMetadata(next, existing)
+	var result map[string]any
+	if err := json.Unmarshal(preserved, &result); err != nil {
+		t.Fatalf("decode preserved payload: %v", err)
+	}
+	if got := stringFromMap(result, "plan_type"); got != "team" {
+		t.Fatalf("plan_type = %q, want team", got)
+	}
+	if got := stringFromMap(result, "chatgpt_plan_type"); got != "team" {
+		t.Fatalf("chatgpt_plan_type = %q, want team", got)
+	}
+	if !boolField(result, "codex_plan_type_pinned") {
+		t.Fatalf("codex_plan_type_pinned = %#v, want true", result["codex_plan_type_pinned"])
 	}
 	if got := stringFromMap(result, "access_token"); got != "new" {
 		t.Fatalf("access_token = %q, want new", got)

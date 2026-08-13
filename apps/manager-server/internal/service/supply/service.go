@@ -5237,9 +5237,9 @@ func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.Manage
 	if strings.EqualFold(strings.TrimSpace(importAction), "replace") {
 		existingPayload, errDownload := s.authFiles.Download(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName)
 		if errDownload == nil {
-			payload = preserveCodexIdentityFingerprint(payload, existingPayload)
+			payload = preserveCodexSupplyMetadata(payload, existingPayload)
 		} else if !errors.Is(errDownload, cpaauthfiles.ErrAuthFileNotFound) {
-			return fmt.Errorf("preserve CPA auth file fingerprint %q: %w", fileName, errDownload)
+			return fmt.Errorf("preserve CPA auth file metadata %q: %w", fileName, errDownload)
 		}
 	}
 	if err := s.authFiles.Upload(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey,
@@ -6076,6 +6076,7 @@ func normalizeSupplyAccountObject(object map[string]any, exportedAt any) (normal
 	} else {
 		return normalizedSupplyAccount{}, errors.New("account does not contain OAuth token data")
 	}
+	pinSupplyCodexPlanType(metadata)
 	// Supplier-managed pool accounts must remain immediately selectable after
 	// account-level or model-selection errors. An explicit zero is required:
 	// CPA otherwise applies its implicit 30-second freeze whenever another
@@ -6385,6 +6386,21 @@ func resolveSupplyPlanType(values ...map[string]any) string {
 	return ""
 }
 
+func pinSupplyCodexPlanType(metadata map[string]any) {
+	planType := resolveSupplyPlanType(metadata)
+	if planType == "" {
+		return
+	}
+	metadata["plan_type"] = planType
+	metadata["chatgpt_plan_type"] = planType
+	// Supplier metadata describes the purchased workspace entitlement. A newly
+	// issued ID token can temporarily report `free` while Team membership is
+	// propagating, so CPA keeps this stable value as the effective plan.
+	if planType != "free" {
+		metadata["codex_plan_type_pinned"] = true
+	}
+}
+
 func supplyAccountIdentity(metadata map[string]any) string {
 	accountID := stringFromMap(metadata, "account_id", "chatgpt_account_id")
 	email := stringFromMap(metadata, "email")
@@ -6412,7 +6428,7 @@ func stableCodexIdentityFingerprint(identity string) string {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("cpa-manager-plus:codex:account-fingerprint:"+identity)).String()
 }
 
-func preserveCodexIdentityFingerprint(payload []byte, existingPayload []byte) []byte {
+func preserveCodexSupplyMetadata(payload []byte, existingPayload []byte) []byte {
 	if len(payload) == 0 || len(existingPayload) == 0 {
 		return payload
 	}
@@ -6421,20 +6437,46 @@ func preserveCodexIdentityFingerprint(payload []byte, existingPayload []byte) []
 	if json.Unmarshal(payload, &next) != nil || json.Unmarshal(existingPayload, &existing) != nil {
 		return payload
 	}
+	changed := false
 	fingerprint := strings.TrimSpace(stringFromMap(existing,
 		"codex_identity_fingerprint",
 		"codex-identity-fingerprint",
 		"codexIdentityFingerprint",
 	))
-	if fingerprint == "" {
+	if fingerprint != "" {
+		next["codex_identity_fingerprint"] = fingerprint
+		changed = true
+	}
+	if supplyCodexPlanTypePinned(existing) {
+		existingPlan := resolveSupplyPlanType(existing)
+		nextPlan := resolveSupplyPlanType(next)
+		if existingPlan != "" && existingPlan != "free" && (nextPlan == "" || nextPlan == "free") {
+			next["plan_type"] = existingPlan
+			next["chatgpt_plan_type"] = existingPlan
+			next["codex_plan_type_pinned"] = true
+			changed = true
+		}
+	}
+	if !changed {
 		return payload
 	}
-	next["codex_identity_fingerprint"] = fingerprint
 	normalized, err := json.Marshal(next)
 	if err != nil {
 		return payload
 	}
 	return normalized
+}
+
+func supplyCodexPlanTypePinned(metadata map[string]any) bool {
+	if boolField(metadata, "codex_plan_type_pinned", "codexPlanTypePinned") {
+		return true
+	}
+	// Compatibility for supplier files imported before the explicit marker was
+	// introduced. Their normalized paid plan already came from the Sub2
+	// workspace payload and has the same authority as newly marked files.
+	planType := resolveSupplyPlanType(metadata)
+	return strings.EqualFold(stringFromMap(metadata, "import_format"), "sub2api") &&
+		planType != "" && planType != "free"
 }
 
 func cloneMap(source map[string]any) map[string]any {
