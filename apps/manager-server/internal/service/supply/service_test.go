@@ -1555,7 +1555,7 @@ func TestNormalizeSub2AccountPayloadForCPA(t *testing.T) {
 		result["workspace_id"] != "workspace-1" ||
 		result["expired"] != "2026-07-30T00:00:00Z" || result["max_concurrency"] != float64(8) ||
 		result["selection_error_freeze_seconds"] != float64(0) || result["codex_cli_only"] != true ||
-		result["codex_cli_only_allow_app_server"] != true {
+		result["codex_cli_only_allow_app_server"] != true || stringFromMap(result, "codex_identity_fingerprint") == "" {
 		t.Fatalf("normalized metadata = %#v", result)
 	}
 	if len(key) != 64 || fileName != "codex-user@example.com.json" {
@@ -1573,7 +1573,8 @@ func TestNormalizeDirectCPAAccountPayloadDisablesSelectionErrorFreeze(t *testing
 		t.Fatalf("decode normalized payload: %v", err)
 	}
 	if result["max_concurrency"] != float64(8) || result["selection_error_freeze_seconds"] != float64(0) ||
-		result["codex_cli_only"] != true || result["codex_cli_only_allow_app_server"] != true {
+		result["codex_cli_only"] != true || result["codex_cli_only_allow_app_server"] != true ||
+		stringFromMap(result, "codex_identity_fingerprint") == "" {
 		t.Fatalf("normalized runtime limits = %#v", result)
 	}
 }
@@ -1593,6 +1594,36 @@ func TestSupplyFileNameStaysStableWhenCredentialsChange(t *testing.T) {
 	}
 	if first[0].itemKey == second[0].itemKey {
 		t.Fatal("credential identity should still distinguish different underlying accounts")
+	}
+}
+
+func TestNormalizeSupplyAccountKeepsExplicitCodexIdentityFingerprint(t *testing.T) {
+	payload, _, _, err := normalizeAccountPayload([]byte(`{"type":"codex","email":"stable@example.com","account_id":"account-a","access_token":"access","codex_identity_fingerprint":"persisted-device"}`))
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(payload, &result); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if got := stringFromMap(result, "codex_identity_fingerprint"); got != "persisted-device" {
+		t.Fatalf("codex_identity_fingerprint = %q, want persisted-device", got)
+	}
+}
+
+func TestPreserveCodexIdentityFingerprintOnReplacement(t *testing.T) {
+	next := []byte(`{"type":"codex","email":"new@example.com","codex_identity_fingerprint":"new-device","access_token":"new"}`)
+	existing := []byte(`{"type":"codex","email":"old@example.com","codex_identity_fingerprint":"stable-device","access_token":"old"}`)
+	preserved := preserveCodexIdentityFingerprint(next, existing)
+	var result map[string]any
+	if err := json.Unmarshal(preserved, &result); err != nil {
+		t.Fatalf("decode preserved payload: %v", err)
+	}
+	if got := stringFromMap(result, "codex_identity_fingerprint"); got != "stable-device" {
+		t.Fatalf("codex_identity_fingerprint = %q, want stable-device", got)
+	}
+	if got := stringFromMap(result, "access_token"); got != "new" {
+		t.Fatalf("access_token = %q, want new", got)
 	}
 }
 

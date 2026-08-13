@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/google/uuid"
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
@@ -5233,6 +5234,14 @@ func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.Manage
 			return nil
 		}
 	}
+	if strings.EqualFold(strings.TrimSpace(importAction), "replace") {
+		existingPayload, errDownload := s.authFiles.Download(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName)
+		if errDownload == nil {
+			payload = preserveCodexIdentityFingerprint(payload, existingPayload)
+		} else if !errors.Is(errDownload, cpaauthfiles.ErrAuthFileNotFound) {
+			return fmt.Errorf("preserve CPA auth file fingerprint %q: %w", fileName, errDownload)
+		}
+	}
 	if err := s.authFiles.Upload(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey,
 		fileName, payload, cfg.Supply.DefaultWebsockets); err != nil {
 		return err
@@ -6083,6 +6092,9 @@ func normalizeSupplyAccountObject(object map[string]any, exportedAt any) (normal
 	if identity == "" {
 		return normalizedSupplyAccount{}, errors.New("stable account identity is missing")
 	}
+	if strings.TrimSpace(stringFromMap(metadata, "codex_identity_fingerprint")) == "" {
+		metadata["codex_identity_fingerprint"] = stableCodexIdentityFingerprint(identity)
+	}
 
 	normalized, err := json.Marshal(metadata)
 	if err != nil {
@@ -6390,6 +6402,39 @@ func supplyAccountIdentity(metadata map[string]any) string {
 		return email + "|" + planType
 	}
 	return stringFromMap(metadata, "refresh_token", "access_token", "id_token")
+}
+
+func stableCodexIdentityFingerprint(identity string) string {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return ""
+	}
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("cpa-manager-plus:codex:account-fingerprint:"+identity)).String()
+}
+
+func preserveCodexIdentityFingerprint(payload []byte, existingPayload []byte) []byte {
+	if len(payload) == 0 || len(existingPayload) == 0 {
+		return payload
+	}
+	var next map[string]any
+	var existing map[string]any
+	if json.Unmarshal(payload, &next) != nil || json.Unmarshal(existingPayload, &existing) != nil {
+		return payload
+	}
+	fingerprint := strings.TrimSpace(stringFromMap(existing,
+		"codex_identity_fingerprint",
+		"codex-identity-fingerprint",
+		"codexIdentityFingerprint",
+	))
+	if fingerprint == "" {
+		return payload
+	}
+	next["codex_identity_fingerprint"] = fingerprint
+	normalized, err := json.Marshal(next)
+	if err != nil {
+		return payload
+	}
+	return normalized
 }
 
 func cloneMap(source map[string]any) map[string]any {
