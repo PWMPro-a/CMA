@@ -27,6 +27,7 @@ import {
   type SupplyStrategy,
 } from '@/services/api';
 import { useNotificationStore } from '@/stores';
+import { resolveSupplyPoolAccountStats } from './model/poolAccountStats';
 import styles from './SupplyPage.module.scss';
 
 const emptyConfig: SupplyConfig = {
@@ -681,6 +682,7 @@ export function SupplyPage() {
   const inventory = overview?.inventory;
   const balance = overview?.balance;
   const smart = status?.smartResource;
+  const poolAccounts = resolveSupplyPoolAccountStats(smart, overview?.cpaAvailable);
   const automation = status?.automation;
   const recovery = status?.recovery;
   const autoSupplyEnabled = status?.config?.enabled ?? draft.enabled ?? false;
@@ -1139,6 +1141,8 @@ export function SupplyPage() {
             raw: formatNumber(smart?.rawCapacityRcu ?? smart?.currentCapacityRcu),
             waste: formatNumber(smart?.expiryWasteRiskRcu ?? 0),
             minutes: smart?.accountLifetimeMinutes ?? 60,
+            accounts: formatInteger(smart?.expiringAccounts ?? 0),
+            next: formatMinutes(smart?.expiringWithinMinutes),
           }),
           icon: <IconDatabaseZap size={18} />,
           tone: 'teal',
@@ -1351,20 +1355,20 @@ export function SupplyPage() {
       <section className={styles.poolSummaryGrid} aria-label={t('supply.pool_summary')}>
         <div className={styles.poolSummaryItem}>
           <span>{t('supply.pool_available_accounts')}</span>
-          <strong>{formatInteger(smart?.availableAccounts ?? overview?.cpaAvailable)}</strong>
+          <strong>{formatInteger(poolAccounts.healthy)}</strong>
           <small>
             {t('supply.pool_total_accounts_hint', {
-              total: formatInteger(smart?.totalAccounts ?? smart?.schedulableAccounts),
-              disabled: formatInteger(smart?.disabledAccounts),
+              total: formatInteger(poolAccounts.total),
+              disabled: formatInteger(poolAccounts.disabled),
             })}
           </small>
         </div>
         <div className={styles.poolSummaryItem}>
-          <span>{t('supply.pool_healthy_accounts')}</span>
-          <strong>{formatInteger(smart?.healthyAccounts)}</strong>
+          <span>{t('supply.pool_at_risk_accounts')}</span>
+          <strong>{formatInteger(poolAccounts.atRisk)}</strong>
           <small>
-            {t('supply.pool_unverified_accounts_hint', {
-              value: formatInteger(smart?.weakAccounts),
+            {t('supply.pool_schedulable_accounts_hint', {
+              value: formatInteger(poolAccounts.schedulable),
             })}
           </small>
         </div>

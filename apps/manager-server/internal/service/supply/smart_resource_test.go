@@ -103,6 +103,33 @@ func TestInspectionResultQuotaFractionUsesShortestWindow(t *testing.T) {
 	}
 }
 
+func TestSmartResourceSeparatesNormallyAvailableFromQuotaRisk(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now()
+	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product: "oauth_7d",
+	}, inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{ProbeSetCount: 2, SampledCount: 2, FinishedAtMS: now.UnixMilli()},
+		results: []store.CodexInspectionResult{
+			func() store.CodexInspectionResult {
+				result := quotaInspectionResult(79)
+				result.Provider = "codex"
+				return result
+			}(),
+			func() store.CodexInspectionResult {
+				result := quotaInspectionResult(81)
+				result.Provider = "codex"
+				return result
+			}(),
+		},
+		generatedAt: now,
+	}, now)
+	if resource.SchedulableAccounts != 2 || resource.HealthyAccounts != 2 ||
+		resource.NormalAccounts != 1 || resource.AtRiskAccounts != 1 {
+		t.Fatalf("normal/risk account split = %#v", resource)
+	}
+}
+
 func TestInspectionResultQuotaFractionUsesWeeklyWhenNoShorterWindowExists(t *testing.T) {
 	result := store.CodexInspectionResult{
 		QuotaWindows: []model.CodexInspectionQuotaWindow{
@@ -937,7 +964,9 @@ func TestSmartResourcePublishesInspectionCredentialCountsForCachedPanels(t *test
 	}
 	if payload["totalAccounts"] != float64(4) || payload["availableAccounts"] != float64(2) ||
 		payload["schedulableAccounts"] != float64(2) || payload["healthyAccounts"] != float64(2) ||
-		payload["weakAccounts"] != float64(0) || payload["disabledAccounts"] != float64(2) {
+		payload["normalAccounts"] != float64(1) || payload["atRiskAccounts"] != float64(1) ||
+		payload["weakAccounts"] != float64(0) ||
+		payload["disabledAccounts"] != float64(2) {
 		t.Fatalf("serialized inspection counts = %#v", payload)
 	}
 }
@@ -1026,6 +1055,39 @@ func TestSmartResourceDoesNotFallbackToAccountCountWithoutUsageRate(t *testing.T
 	}
 	if resource.AvailableAccounts == 0 || resource.CurrentCapacityRCU == 0 {
 		t.Fatalf("capacity should still be reported for the dashboard: %#v", resource)
+	}
+}
+
+func TestNoTrafficKeepsOnlyMinimumPoolAndCreatesNoCapacityOrder(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Strategy:                  managerconfigsvc.SupplyStrategyStrongSupply,
+		CriticalAvailableAccounts: 2,
+		HealthyAvailableAccounts:  10,
+	}
+	resource := SmartResource{
+		AvailableAccounts:       3,
+		SchedulableAccounts:     3,
+		HealthyAccounts:         3,
+		ConsumeRCUPerMinute:     0,
+		DemandTrend:             smartDemandTrendUnknown,
+		CurrentCapacityRCU:      200,
+		CapacityGapRCU:          100,
+		SuggestedQuantity:       8,
+		EffectiveHealthyMinutes: 55,
+	}
+	recalculateSmartResourceCapacityPlan(cfg, &resource)
+	if resource.SuggestedAction != smartActionObserveDemand || resource.DecisionReason != "no_traffic_minimum_pool" ||
+		resource.TargetCapacityRCU != 0 || resource.CapacityGapRCU != 0 || resource.SuggestedQuantity != 0 {
+		t.Fatalf("no-traffic pool must not buy unused capacity: %#v", resource)
+	}
+	applySmartEmergencyAvailability(cfg, &resource, time.Now())
+	if resource.EmergencyShortage || resource.SuggestedQuantity != 0 {
+		t.Fatalf("pool above the critical floor must stay idle: %#v", resource)
+	}
+	resource.AvailableAccounts = 2
+	applySmartEmergencyAvailability(cfg, &resource, time.Now())
+	if !resource.EmergencyShortage || resource.SuggestedQuantity <= 0 {
+		t.Fatalf("pool at the critical floor must receive a bounded emergency refill: %#v", resource)
 	}
 }
 
@@ -1601,6 +1663,26 @@ func TestSmartResourceLimitsCapacityByOneHourExpiry(t *testing.T) {
 	}
 	if resource.HealthLevel != smartHealthHealthy || resource.SuggestedQuantity != 0 {
 		t.Fatalf("low burn with enough expiry-limited capacity should not replenish, got %#v", resource)
+	}
+}
+
+func TestSmartResourceReportsExpiringAccountCapacity(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now()
+	resource := service.buildSmartResourceFromSnapshots(store.ManagerSupplyConfig{
+		Product:              "oauth_30d",
+		HealthyMinutesTarget: 40,
+		WarningMinutes:       20,
+		CriticalMinutes:      10,
+	}, authFileSnapshot{generatedAt: now, files: []cpaauthfiles.File{{
+		Name: "expires-soon.json", Provider: "codex", Raw: map[string]any{
+			"status": "ready", "remaining_rcu": 100,
+			"supply_lease_expires_at_ms": now.Add(12 * time.Minute).UnixMilli(),
+		},
+	}}}, now)
+	if resource.ExpiringAccounts != 1 || resource.ExpiringWithinMinutes < 11 ||
+		resource.ExpiringWithinMinutes > 13 || resource.ExpiringCapacityRCU != 100 {
+		t.Fatalf("expiring account metrics = %#v", resource)
 	}
 }
 

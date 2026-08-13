@@ -131,6 +131,13 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 		result, err := h.App.SupplyService.ListAccounts(r.Context(), req)
 		h.writeResult(w, result, err)
+	case "/v0/management/supply/account-leases":
+		if r.Method != http.MethodGet {
+			response.MethodNotAllowed(w)
+			return
+		}
+		result, err := h.App.SupplyService.ListAccountLeases(r.Context())
+		h.writeResult(w, result, err)
 	case "/v0/management/supply/reports":
 		if r.Method != http.MethodGet {
 			response.MethodNotAllowed(w)

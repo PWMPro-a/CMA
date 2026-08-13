@@ -332,6 +332,10 @@ func TestAutomaticSupplyGuardRequiresFreshBaselineAndSettledImports(t *testing.T
 	if reason := service.automaticSupplyGuardReason(resource); reason != "pending_account_inspection" {
 		t.Fatalf("pending import guard reason = %q", reason)
 	}
+	resource.EmergencyShortage = true
+	if reason := service.automaticSupplyGuardReason(resource); reason != "" {
+		t.Fatalf("emergency must bypass pending inspection guard, reason = %q", reason)
+	}
 }
 
 func TestAccountPoolStatsSeparateTotalAvailableHealthyAndDisabled(t *testing.T) {
@@ -358,11 +362,29 @@ func TestAccountPoolStatsSeparateTotalAvailableHealthyAndDisabled(t *testing.T) 
 	if err != nil {
 		t.Fatalf("count account pool: %v", err)
 	}
-	resource := SmartResource{HealthyAccounts: 1}
+	resource := SmartResource{HealthyAccounts: 1, NormalAccounts: 1}
 	applyAccountPoolStats(&resource, stats)
 	if resource.TotalAccounts != 3 || resource.AvailableAccounts != 2 || resource.SchedulableAccounts != 2 ||
-		resource.HealthyAccounts != 1 || resource.WeakAccounts != 1 || resource.DisabledAccounts != 1 {
+		resource.HealthyAccounts != 1 || resource.WeakAccounts != 1 || resource.AtRiskAccounts != 1 ||
+		resource.DisabledAccounts != 1 {
 		t.Fatalf("account pool statistics = %#v", resource)
+	}
+}
+
+func TestSupplyAccountLeaseMetadataUsesSupplierDeadline(t *testing.T) {
+	leaseExpiresAtMS := time.Now().Add(45 * time.Minute).UnixMilli()
+	account := normalizedSupplyAccount{payload: []byte(`{"type":"codex","expires_at":4102444800}`)}
+	account = withSupplyAccountLeaseMetadata(account, leaseExpiresAtMS)
+	var metadata map[string]any
+	if err := json.Unmarshal(account.payload, &metadata); err != nil {
+		t.Fatalf("decode account metadata: %v", err)
+	}
+	if got := int64(numberField(metadata, "supply_lease_expires_at_ms")); got != leaseExpiresAtMS {
+		t.Fatalf("supplier lease = %d, want %d", got, leaseExpiresAtMS)
+	}
+	remaining := smartAccountRemainingMinutes(metadata, time.Now(), smartAccountLifetimeMinutes())
+	if remaining < 44 || remaining > 46 {
+		t.Fatalf("remaining supplier validity = %.2f minutes, want about 45", remaining)
 	}
 }
 
@@ -374,11 +396,12 @@ func TestInspectionVerifiedCapacityOverridesMisleadingLiveActiveCount(t *testing
 		AvailableAccounts:    12,
 		SchedulableAccounts:  12,
 		HealthyAccounts:      9,
+		NormalAccounts:       9,
 	}
 	stats := reconcileAccountPoolStatsWithInspection(accountPoolStats{total: 90, schedulable: 28}, resource)
 	applyAccountPoolStats(&resource, stats)
 	if resource.AvailableAccounts != 12 || resource.SchedulableAccounts != 28 ||
-		resource.WeakAccounts != 3 || resource.DisabledAccounts != 62 {
+		resource.WeakAccounts != 3 || resource.AtRiskAccounts != 19 || resource.DisabledAccounts != 62 {
 		t.Fatalf("verified pool statistics = %#v", resource)
 	}
 }

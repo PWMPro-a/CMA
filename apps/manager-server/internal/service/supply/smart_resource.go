@@ -77,9 +77,20 @@ type SmartResource struct {
 	AvailableAccounts   int `json:"availableAccounts"`
 	SchedulableAccounts int `json:"schedulableAccounts"`
 	HealthyAccounts     int `json:"healthyAccounts"`
-	WeakAccounts        int `json:"weakAccounts"`
-	TotalAccounts       int `json:"totalAccounts"`
-	DisabledAccounts    int `json:"disabledAccounts"`
+	// NormalAccounts mirrors the credential page's "normally available"
+	// bucket: the latest inspection succeeded, is not cooling down and has at
+	// least 20% remaining quota. HealthyAccounts remains the broader positive-
+	// capacity count used by replenishment planning.
+	NormalAccounts int `json:"normalAccounts"`
+	// AtRiskAccounts are live schedulable credentials outside the latest
+	// normal set. This includes quota-risk and action-required
+	// credentials and keeps the pool summary exclusive:
+	// schedulable = normal + at-risk.
+	// Replenishment decisions continue to use AvailableAccounts.
+	AtRiskAccounts   int `json:"atRiskAccounts"`
+	WeakAccounts     int `json:"weakAccounts"`
+	TotalAccounts    int `json:"totalAccounts"`
+	DisabledAccounts int `json:"disabledAccounts"`
 	// Newly delivered credentials are only added as a conservative provisional
 	// capacity overlay until the next completed usability inspection verifies
 	// them. They are deliberately separate from HealthyAccounts.
@@ -101,32 +112,38 @@ type SmartResource struct {
 	EstimatedSustainMinutes   float64 `json:"estimatedSustainMinutes"`
 	// EmergencyShortage marks a runway shortfall that takes precedence over
 	// normal demand-trend observation.
-	EmergencyShortage               bool    `json:"emergencyShortage"`
-	HealthyMinutesTarget            int     `json:"healthyMinutesTarget"`
-	WarningMinutes                  int     `json:"warningMinutes"`
-	CriticalMinutes                 int     `json:"criticalMinutes"`
-	RPM30M                          float64 `json:"rpm30m"`
-	RPM5MPeak                       float64 `json:"rpm5mPeak"`
-	TPM30M                          float64 `json:"tpm30m"`
-	RPM1M                           float64 `json:"rpm1m"`
-	RPM5M                           float64 `json:"rpm5m"`
-	RPM10M                          float64 `json:"rpm10m"`
-	TPM1M                           float64 `json:"tpm1m"`
-	TPM5M                           float64 `json:"tpm5m"`
-	TPM10M                          float64 `json:"tpm10m"`
-	RequestDemandRCUPerMinute       float64 `json:"requestDemandRcuPerMinute"`
-	TokenDemandRCUPerMinute         float64 `json:"tokenDemandRcuPerMinute"`
-	DemandDriver                    string  `json:"demandDriver,omitempty"`
-	ConsumeRCU1M                    float64 `json:"consumeRcu1m"`
-	ConsumeRCU5M                    float64 `json:"consumeRcu5m"`
-	ConsumeRCU10M                   float64 `json:"consumeRcu10m"`
-	DemandTrend                     string  `json:"demandTrend"`
-	DemandPlanningRCUPerMinute      float64 `json:"demandPlanningRcuPerMinute"`
-	ConsumeRCUPerMinute             float64 `json:"consumeRcuPerMinute"`
-	CurrentCapacityRCU              float64 `json:"currentCapacityRcu"`
-	RawCapacityRCU                  float64 `json:"rawCapacityRcu,omitempty"`
-	TimeLimitedCapacityRCU          float64 `json:"timeLimitedCapacityRcu,omitempty"`
-	ExpiryWasteRiskRCU              float64 `json:"expiryWasteRiskRcu,omitempty"`
+	EmergencyShortage          bool    `json:"emergencyShortage"`
+	HealthyMinutesTarget       int     `json:"healthyMinutesTarget"`
+	WarningMinutes             int     `json:"warningMinutes"`
+	CriticalMinutes            int     `json:"criticalMinutes"`
+	RPM30M                     float64 `json:"rpm30m"`
+	RPM5MPeak                  float64 `json:"rpm5mPeak"`
+	TPM30M                     float64 `json:"tpm30m"`
+	RPM1M                      float64 `json:"rpm1m"`
+	RPM5M                      float64 `json:"rpm5m"`
+	RPM10M                     float64 `json:"rpm10m"`
+	TPM1M                      float64 `json:"tpm1m"`
+	TPM5M                      float64 `json:"tpm5m"`
+	TPM10M                     float64 `json:"tpm10m"`
+	RequestDemandRCUPerMinute  float64 `json:"requestDemandRcuPerMinute"`
+	TokenDemandRCUPerMinute    float64 `json:"tokenDemandRcuPerMinute"`
+	DemandDriver               string  `json:"demandDriver,omitempty"`
+	ConsumeRCU1M               float64 `json:"consumeRcu1m"`
+	ConsumeRCU5M               float64 `json:"consumeRcu5m"`
+	ConsumeRCU10M              float64 `json:"consumeRcu10m"`
+	DemandTrend                string  `json:"demandTrend"`
+	DemandPlanningRCUPerMinute float64 `json:"demandPlanningRcuPerMinute"`
+	ConsumeRCUPerMinute        float64 `json:"consumeRcuPerMinute"`
+	CurrentCapacityRCU         float64 `json:"currentCapacityRcu"`
+	RawCapacityRCU             float64 `json:"rawCapacityRcu,omitempty"`
+	TimeLimitedCapacityRCU     float64 `json:"timeLimitedCapacityRcu,omitempty"`
+	ExpiryWasteRiskRCU         float64 `json:"expiryWasteRiskRcu,omitempty"`
+	// ExpiringAccounts counts currently schedulable credentials whose remaining
+	// supplier/OAuth validity is inside the warning window. They remain usable,
+	// but their usable capacity is already bounded by expiry.
+	ExpiringAccounts                int     `json:"expiringAccounts"`
+	ExpiringWithinMinutes           int     `json:"expiringWithinMinutes"`
+	ExpiringCapacityRCU             float64 `json:"expiringCapacityRcu,omitempty"`
 	TargetCapacityRCU               float64 `json:"targetCapacityRcu"`
 	CapacityGapRCU                  float64 `json:"capacityGapRcu"`
 	UnitCapacityRCU                 float64 `json:"unitCapacityRcu"`
@@ -453,9 +470,13 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		if capacity <= 0 {
 			continue
 		}
+		resource.recordExpiringAccount(remainingMinutes, capacity)
 		// A successful current quota inspection is direct evidence that the
 		// credential is alive. 401 thresholds do not reduce its actual quota.
 		resource.HealthyAccounts++
+		if hasCapacityQuota && remaining >= smartNormalAccountMinimumRemainingFraction && !inspectionResultInCooldown(result) {
+			resource.NormalAccounts++
+		}
 		capacityItems = append(capacityItems, smartCapacityItem{
 			capacityRCU:      capacity,
 			remainingMinutes: remainingMinutes,
@@ -498,9 +519,11 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		resource.AvailableAccounts++
 		resource.PendingInspectionAccounts++
 		resource.PendingInspectionCapacityRCU += capacity
+		resource.recordExpiringAccount(remainingMinutes, capacity)
 	}
+	resource.NormalAccounts += resource.PendingInspectionAccounts
 	resource.DisabledAccounts = max(0, resource.TotalAccounts-resource.AvailableAccounts)
-	resource.WeakAccounts = max(0, resource.AvailableAccounts-resource.HealthyAccounts)
+	applySmartAccountCountBreakdown(&resource)
 	resource.PendingInspectionCapacityRCU = round2(resource.PendingInspectionCapacityRCU)
 	resource.LeaseEstimatedCapacityRCU = round2(resource.LeaseEstimatedCapacityRCU)
 	if eligible > 0 {
@@ -619,6 +642,9 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		// 只用于全局消耗速度，不能折减单凭证余额或可用数量。
 		resource.AvailableAccounts++
 		resource.HealthyAccounts++
+		// The auth-file fallback has no authoritative quota classification. Keep
+		// live ready files normal until a completed inspection can split risk.
+		resource.NormalAccounts++
 		remainingMinutes := smartAccountRemainingMinutes(file.Raw, now, smartAccountLifetimeMinutes())
 		rawCapacity, ok := smartAccountCapacityRCU(file.Raw, unit, remainingMinutes)
 		if !ok {
@@ -631,10 +657,11 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 				remainingMinutes: remainingMinutes,
 			})
 		}
+		resource.recordExpiringAccount(remainingMinutes, rawCapacity)
 		effectiveAvailable++
 	}
 	resource.AvailableAccounts = int(effectiveAvailable)
-	resource.WeakAccounts = max(0, resource.AvailableAccounts-resource.HealthyAccounts)
+	applySmartAccountCountBreakdown(&resource)
 	resource.RawCapacityRCU = round2(weightedCapacity)
 	resource.CurrentCapacityRCU = resource.RawCapacityRCU
 	if consumeRCUPerMinute > 0 {
@@ -670,6 +697,17 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 	return resource
 }
 
+func (resource *SmartResource) recordExpiringAccount(remainingMinutes, capacity float64) {
+	if resource == nil || remainingMinutes <= 0 || remainingMinutes > float64(resource.WarningMinutes) {
+		return
+	}
+	resource.ExpiringAccounts++
+	resource.ExpiringCapacityRCU += math.Max(0, capacity)
+	if resource.ExpiringWithinMinutes <= 0 || int(math.Ceil(remainingMinutes)) < resource.ExpiringWithinMinutes {
+		resource.ExpiringWithinMinutes = max(1, int(math.Ceil(remainingMinutes)))
+	}
+}
+
 // recalculateSmartResourceCapacityPlan applies the active configuration to an
 // existing capacity snapshot. GetStatus uses it too, so a changed health-water
 // level never keeps an obsolete health decision until the next CPA refresh.
@@ -682,12 +720,17 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 		applySmartRefillProjection(cfg, resource)
 	}()
 	if resource.ConsumeRCUPerMinute <= 0 {
-		if resource.DemandTrend != smartDemandTrendFalling {
+		// An in-flight reservation has its own state machine. A config refresh
+		// must not replace a take/wait instruction merely because the current
+		// traffic sample is empty.
+		if resource.SuggestedAction == smartActionTakeLocked || resource.SuggestedAction == smartActionWaitLocked {
 			return
 		}
-		// A completed zero-traffic minute after a previously observed demand is
-		// a valid falling signal, not a cold-start data gap. It has no active
-		// capacity target and must visibly pause new short-lived purchases.
+		// With no observed or remembered traffic, capacity demand is zero. Keep
+		// only the configured emergency account floor: applySmartEmergencyAvailability
+		// remains responsible for an empty/critical pool, while ordinary accounts
+		// are left untouched to avoid buying short-lived inventory that cannot be
+		// consumed.
 		resource.TargetCapacityRCU = 0
 		resource.RecommendedCapacityRCU = 0
 		resource.EstimatedSustainMinutes = 0
@@ -695,7 +738,11 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 		resource.SuggestedQuantity = 0
 		resource.HealthLevel = smartHealthHealthy
 		resource.SuggestedAction = smartActionObserveDemand
-		resource.DecisionReason = "demand_falling_observe"
+		if resource.DemandTrend == smartDemandTrendFalling {
+			resource.DecisionReason = "demand_falling_observe"
+		} else {
+			resource.DecisionReason = "no_traffic_minimum_pool"
+		}
 		return
 	}
 	resource.TargetCapacityRCU = round2(resource.ConsumeRCUPerMinute * float64(resource.EffectiveHealthyMinutes))
@@ -1400,9 +1447,10 @@ func smartSupplyManagedFileName(fileName string) bool {
 }
 
 const (
-	smartQuotaFiveHourSeconds = 5 * 60 * 60
-	smartQuotaWeekSeconds     = 7 * 24 * 60 * 60
-	smartQuotaMonthSeconds    = 30 * 24 * 60 * 60
+	smartQuotaFiveHourSeconds                  = 5 * 60 * 60
+	smartQuotaWeekSeconds                      = 7 * 24 * 60 * 60
+	smartQuotaMonthSeconds                     = 30 * 24 * 60 * 60
+	smartNormalAccountMinimumRemainingFraction = 0.20
 )
 
 // inspectionResultRemainingQuotaFraction returns the capacity fraction that
@@ -2005,6 +2053,13 @@ func smartAccountRemainingMinutes(values map[string]any, now time.Time, fallback
 	}
 	if seconds, ok := numberFieldOK(values, "expires_in", "expiresIn", "expire_in", "expireIn"); ok {
 		return clampFloat(seconds/60, 0, float64(smartAccountLifetimeMinutes()))
+	}
+	for _, key := range []string{"supply_lease_expires_at_ms", "supplyLeaseExpiresAtMs", "supply_lease_expires_at", "supplyLeaseExpiresAt"} {
+		if raw, ok := values[key]; ok && raw != nil {
+			if expiry, parsed := parseSmartExpiryTime(raw, now); parsed {
+				return clampFloat(expiry.Sub(now).Minutes(), 0, float64(smartAccountLifetimeMinutes()))
+			}
+		}
 	}
 	for _, key := range []string{"expired", "expires_at", "expiresAt", "expire_at", "expireAt", "valid_until", "validUntil"} {
 		raw, ok := values[key]

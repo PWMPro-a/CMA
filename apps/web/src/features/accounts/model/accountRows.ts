@@ -121,6 +121,8 @@ export interface AccountRow {
   priority: number | null;
   createdAtMs: number | null;
   updatedAtMs: number | null;
+  expiresAtMs?: number | null;
+  concurrency?: number | null;
   quota: AccountQuotaSummary;
   usage: AccountUsageSummary;
   inspection: AccountInspectionSummary | null;
@@ -184,6 +186,47 @@ const readNumber = (value: unknown): number | null => {
   if (typeof value === 'string') {
     const parsed = Number(value.trim());
     return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+};
+
+const readAccountExpiryAtMs = (file: AuthFileItem): number | null => {
+  const candidates = [
+    file['supply_lease_expires_at_ms'],
+    file['supplyLeaseExpiresAtMs'],
+    file['supply_lease_expires_at'],
+    file['supplyLeaseExpiresAt'],
+    file['expired'],
+    file.expires_at,
+    file['expiresAt'],
+    file['valid_until'],
+    file['validUntil'],
+  ];
+  for (const value of candidates) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return value < 10_000_000_000 ? Math.round(value * 1000) : Math.round(value);
+    }
+    if (typeof value !== 'string' || !value.trim()) continue;
+    const numeric = Number(value.trim());
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return numeric < 10_000_000_000 ? Math.round(numeric * 1000) : Math.round(numeric);
+    }
+    const parsed = Date.parse(value.trim());
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+};
+
+const readAccountConcurrency = (file: AuthFileItem): number | null => {
+  for (const value of [
+    file['max_concurrency'],
+    file['maxConcurrency'],
+    file['concurrency'],
+    file['concurrency_limit'],
+    file['concurrencyLimit'],
+  ]) {
+    const parsed = readNumber(value);
+    if (parsed !== null && parsed >= 0) return Math.floor(parsed);
   }
   return null;
 };
@@ -275,7 +318,8 @@ export const buildAccountRows = (
   files: AuthFileItem[],
   stores: AccountQuotaStores,
   inspectionResults?: AccountInspectionResult[],
-  overrides?: AccountQuotaOverrides
+  overrides?: AccountQuotaOverrides,
+  expiryByFileName?: ReadonlyMap<string, number>
 ): AccountRow[] => {
   const inspectionByFile = buildInspectionMap(inspectionResults);
   const fileNameCounts = files.reduce((counts, file) => {
@@ -307,6 +351,8 @@ export const buildAccountRows = (
       priority: readNumber(file.priority),
       createdAtMs: readAuthFileCreatedAtMs(file),
       updatedAtMs: readAuthFileUpdatedAtMs(file),
+      expiresAtMs: expiryByFileName?.get(file.name) ?? readAccountExpiryAtMs(file),
+      concurrency: readAccountConcurrency(file),
       quota,
       usage: buildUsageSummary(file),
       inspection:

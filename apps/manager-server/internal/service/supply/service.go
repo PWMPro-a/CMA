@@ -227,6 +227,11 @@ type SupplyAccountList struct {
 	Items   []SupplyAccountItem  `json:"items"`
 }
 
+type SupplyAccountLeaseItem struct {
+	FileName         string `json:"fileName"`
+	LeaseExpiresAtMS int64  `json:"leaseExpiresAtMs"`
+}
+
 type ReportExecutive struct {
 	Orders                       int     `json:"orders"`
 	ManualOrders                 int     `json:"manualOrders"`
@@ -1107,26 +1112,58 @@ func (s *Service) ListAccounts(ctx context.Context, req SupplyAccountsRequest) (
 	if err != nil {
 		return SupplyAccountList{}, err
 	}
-	prices, err := s.store.LoadModelPrices(ctx)
-	if err != nil {
-		return SupplyAccountList{}, err
-	}
 	authFiles := supplyUsageAuthFiles(items)
-	usageByFile, err := s.supplyAccountUsageByFile(ctx, ReportRequest{FromMS: req.FromMS, ToMS: req.ToMS}, authFiles, prices, revenueMultiplier)
-	if err != nil {
-		return SupplyAccountList{}, err
+	var prices map[string]store.ModelPrice
+	var usageByFile map[string]supplyAccountUsage
+	var issuesByFile map[string]supplyAccountIssue
+	var orders map[string]store.SupplyOrder
+	var recoveriesByFile map[string]supplyAccountRecoveryStatus
+	tasksCtx, cancelTasks := context.WithCancel(ctx)
+	defer cancelTasks()
+	var taskGroup sync.WaitGroup
+	var taskError error
+	var taskErrorMu sync.Mutex
+	runTask := func(task func() error) {
+		taskGroup.Add(1)
+		go func() {
+			defer taskGroup.Done()
+			if taskErr := task(); taskErr != nil {
+				taskErrorMu.Lock()
+				if taskError == nil {
+					taskError = taskErr
+					cancelTasks()
+				}
+				taskErrorMu.Unlock()
+			}
+		}()
 	}
-	issuesByFile, err := s.supplyAccountIssuesByFile(ctx, authFiles)
-	if err != nil {
-		return SupplyAccountList{}, err
-	}
-	orders, err := s.supplyOrdersForItems(ctx, nil, items)
-	if err != nil {
-		return SupplyAccountList{}, err
-	}
-	recoveriesByFile, err := s.supplyRecoveriesByOriginalFile(ctx)
-	if err != nil {
-		return SupplyAccountList{}, err
+	runTask(func() error {
+		var loadErr error
+		prices, loadErr = s.store.LoadModelPrices(tasksCtx)
+		if loadErr != nil {
+			return loadErr
+		}
+		usageByFile, loadErr = s.supplyAccountUsageByFile(tasksCtx, ReportRequest{FromMS: req.FromMS, ToMS: req.ToMS}, authFiles, prices, revenueMultiplier)
+		return loadErr
+	})
+	runTask(func() error {
+		var loadErr error
+		issuesByFile, loadErr = s.supplyAccountIssuesByFile(tasksCtx, authFiles)
+		return loadErr
+	})
+	runTask(func() error {
+		var loadErr error
+		orders, loadErr = s.supplyOrdersForItems(tasksCtx, nil, items)
+		return loadErr
+	})
+	runTask(func() error {
+		var loadErr error
+		recoveriesByFile, loadErr = s.supplyRecoveriesByOriginalFile(tasksCtx)
+		return loadErr
+	})
+	taskGroup.Wait()
+	if taskError != nil {
+		return SupplyAccountList{}, taskError
 	}
 
 	var cpaStatusErr string
@@ -1184,6 +1221,36 @@ func (s *Service) ListAccounts(ctx context.Context, req SupplyAccountsRequest) (
 	}
 	result.Summary.UsageRevenue = reportRatioFloat(result.Summary.UsageRevenue, 1)
 	result.Summary.AverageRevenuePerCall = reportRatioFloat(result.Summary.UsageRevenue, float64(result.Summary.UsageCalls))
+	return result, nil
+}
+
+// ListAccountLeases is intentionally lightweight for the credential list. It
+// avoids the analytics, pricing, recovery and CPA status joins performed by
+// ListAccounts while still giving operators the supplier validity deadline.
+func (s *Service) ListAccountLeases(ctx context.Context) ([]SupplyAccountLeaseItem, error) {
+	if s == nil || s.store == nil {
+		return nil, ErrNotConfigured
+	}
+	items, err := s.store.ListSupplyImportItems(ctx, 5000, "imported")
+	if err != nil {
+		return nil, err
+	}
+	latestByFile := make(map[string]store.SupplyImportItem, len(items))
+	for _, item := range items {
+		fileName := strings.TrimSpace(item.FileName)
+		if fileName == "" || item.SupersededAtMS > 0 || item.LeaseExpiresAtMS <= 0 {
+			continue
+		}
+		current, found := latestByFile[fileName]
+		if !found || item.UpdatedAtMS > current.UpdatedAtMS {
+			latestByFile[fileName] = item
+		}
+	}
+	result := make([]SupplyAccountLeaseItem, 0, len(latestByFile))
+	for fileName, item := range latestByFile {
+		result = append(result, SupplyAccountLeaseItem{FileName: fileName, LeaseExpiresAtMS: item.LeaseExpiresAtMS})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].FileName < result[j].FileName })
 	return result, nil
 }
 
@@ -2018,6 +2085,9 @@ func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, orde
 	var firstErr error
 	for _, item := range items {
 		account, err := normalizeAccountForImport(item.PayloadJSON)
+		if err == nil {
+			account = withSupplyAccountLeaseMetadata(account, item.LeaseExpiresAtMS)
+		}
 		fileName := item.FileName
 		importAction := strings.ToLower(strings.TrimSpace(item.ImportAction))
 		if err == nil && (importAction != "add" && importAction != "replace") {
@@ -2083,6 +2153,22 @@ func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, orde
 		s.requestStaleInspectionSnapshotRefresh()
 	}
 	return firstErr
+}
+
+func withSupplyAccountLeaseMetadata(account normalizedSupplyAccount, leaseExpiresAtMS int64) normalizedSupplyAccount {
+	if leaseExpiresAtMS <= 0 || len(account.payload) == 0 {
+		return account
+	}
+	var metadata map[string]any
+	if json.Unmarshal(account.payload, &metadata) != nil {
+		return account
+	}
+	metadata["supply_lease_expires_at_ms"] = leaseExpiresAtMS
+	metadata["supply_lease_expires_at"] = time.UnixMilli(leaseExpiresAtMS).UTC().Format(time.RFC3339)
+	if normalized, err := json.Marshal(metadata); err == nil {
+		account.payload = normalized
+	}
+	return account
 }
 
 func (s *Service) refreshOverview(ctx context.Context, cfg store.ManagerConfig, quantity int) error {
@@ -4033,7 +4119,22 @@ func applyAccountPoolStats(resource *SmartResource, stats accountPoolStats) {
 	if resource.HealthyAccounts > resource.AvailableAccounts {
 		resource.HealthyAccounts = resource.AvailableAccounts
 	}
+	if resource.NormalAccounts > resource.AvailableAccounts {
+		resource.NormalAccounts = resource.AvailableAccounts
+	}
+	applySmartAccountCountBreakdown(resource)
+}
+
+// applySmartAccountCountBreakdown keeps the two account-counting dimensions
+// explicit. AvailableAccounts/WeakAccounts are inspection-backed capacity
+// counts used by the replenishment strategy, while SchedulableAccounts and
+// AtRiskAccounts describe the live CPA pool shown to operators.
+func applySmartAccountCountBreakdown(resource *SmartResource) {
+	if resource == nil {
+		return
+	}
 	resource.WeakAccounts = max(0, resource.AvailableAccounts-resource.HealthyAccounts)
+	resource.AtRiskAccounts = max(0, resource.SchedulableAccounts-resource.NormalAccounts)
 }
 
 // reconcileSmartCapacityWithAccountPool prevents a completed inspection from
@@ -4988,6 +5089,12 @@ func (s *Service) automaticSupplyGuardReason(resource SmartResource) string {
 	}
 	if resource.PendingInspectionAccounts > 0 {
 		s.requestStaleInspectionSnapshotRefresh()
+		// Pending inspection must not strand a critical pool. The emergency
+		// quantity remains bounded by the verified live deficit and all persisted
+		// cooldown/in-flight-order guards still apply.
+		if smartResourceEmergency(resource) || smartAccountAvailabilityEmergency(resource) {
+			return ""
+		}
 		return "pending_account_inspection"
 	}
 	return ""
@@ -6454,6 +6561,16 @@ func preserveCodexSupplyMetadata(payload []byte, existingPayload []byte) []byte 
 			next["plan_type"] = existingPlan
 			next["chatgpt_plan_type"] = existingPlan
 			next["codex_plan_type_pinned"] = true
+			changed = true
+		}
+	}
+	if nextLeaseExpiresAtMS := int64(numberField(next, "supply_lease_expires_at_ms", "supplyLeaseExpiresAtMs")); nextLeaseExpiresAtMS <= 0 {
+		leaseExpiresAtMS := int64(numberField(existing, "supply_lease_expires_at_ms", "supplyLeaseExpiresAtMs"))
+		if leaseExpiresAtMS > 0 {
+			next["supply_lease_expires_at_ms"] = leaseExpiresAtMS
+			if leaseExpiresAt := stringFromMap(existing, "supply_lease_expires_at", "supplyLeaseExpiresAt"); leaseExpiresAt != "" {
+				next["supply_lease_expires_at"] = leaseExpiresAt
+			}
 			changed = true
 		}
 	}

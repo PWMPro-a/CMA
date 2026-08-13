@@ -143,6 +143,8 @@ import {
   formatPercent,
   formatQuotaResetDisplay,
   formatQuotaResetTooltipParams,
+  formatTimestamp,
+  formatTimestampTitle,
   getAccountHistoryTitle,
   getAccountSortFieldOption,
   getProviderLabel,
@@ -200,6 +202,7 @@ import {
 import {
   accountQuotaSnapshotApi,
   monitoringAnalyticsApi,
+  supplyApi,
   usageServiceApi,
   type AccountActionCandidate,
   type AccountQuotaSnapshotObservationInput,
@@ -428,6 +431,9 @@ export function AccountsPage() {
   } = useAuthFilesData({ connectionFingerprint });
 
   const [oauthViewMode, setOauthViewMode] = useState<'diagram' | 'list'>('list');
+  const [supplyLeaseExpiryByFile, setSupplyLeaseExpiryByFile] = useState<ReadonlyMap<string, number>>(
+    () => new Map()
+  );
   const oauthState = useAuthFilesOauth({
     viewMode: oauthViewMode,
     files,
@@ -906,6 +912,35 @@ export function AccountsPage() {
       : null
   );
 
+  const loadSupplyAccountLeases = useCallback(async () => {
+    if (!managerStorageAvailable) return;
+    try {
+      const leases = await supplyApi.listAccountLeases();
+      setSupplyLeaseExpiryByFile(
+        new Map(
+          leases
+            .filter((item) => item.fileName && Number.isFinite(item.leaseExpiresAtMs))
+            .map((item) => [item.fileName, item.leaseExpiresAtMs] as const)
+        )
+      );
+    } catch {
+      // The lease endpoint is supplemental. Older Manager builds and a
+      // transient storage failure must not hide the credential list.
+    }
+  }, [managerStorageAvailable]);
+
+  useEffect(() => {
+    if (activeView !== 'accounts' || !managerStorageAvailable) return;
+    void loadSupplyAccountLeases();
+  }, [activeView, loadSupplyAccountLeases, managerStorageAvailable]);
+
+  useInterval(
+    () => {
+      void loadSupplyAccountLeases();
+    },
+    activeView === 'accounts' && documentVisible && managerStorageAvailable ? 60_000 : null
+  );
+
   useEffect(
     () => () => {
       if (identityCopyTimerRef.current !== null) {
@@ -1144,8 +1179,15 @@ export function AccountsPage() {
   }, [files, getDisplayCodexQuota, getFreshCodexHeaderSnapshot]);
 
   const rows = useMemo(
-    () => buildAccountRows(files, baseQuotaStores, inspectionResults, accountQuotaOverrides),
-    [accountQuotaOverrides, baseQuotaStores, files, inspectionResults]
+    () =>
+      buildAccountRows(
+        files,
+        baseQuotaStores,
+        inspectionResults,
+        accountQuotaOverrides,
+        supplyLeaseExpiryByFile
+      ),
+    [accountQuotaOverrides, baseQuotaStores, files, inspectionResults, supplyLeaseExpiryByFile]
   );
   const accountSourceIpContext = useMemo(() => {
     const values = rows.map((row) => row.raw.sourceIp ?? row.raw.source_ip ?? '');
@@ -4048,6 +4090,23 @@ export function AccountsPage() {
                         {t('accounts.copy_feedback_copied')}
                       </span>
                     ) : null}
+                  </div>
+                  <div
+                    className={styles.accountExpiryMeta}
+                    data-account-expiry={row.selectionKey}
+                    title={formatTimestampTitle(row.expiresAtMs, i18n.language)}
+                  >
+                    <span>{t('accounts.account_expires_at')}</span>
+                    <strong>
+                      {row.expiresAtMs
+                        ? formatTimestamp(row.expiresAtMs, i18n.language)
+                        : t('accounts.account_expiry_unknown')}
+                    </strong>
+                    <span className={styles.accountMetaSeparator} aria-hidden="true">
+                      ·
+                    </span>
+                    <span>{t('accounts.account_concurrency')}</span>
+                    <strong>{row.concurrency ?? t('accounts.account_concurrency_default')}</strong>
                   </div>
                 </div>
 

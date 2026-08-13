@@ -122,6 +122,8 @@ export interface SupplySmartResource {
   availableAccounts: number;
   schedulableAccounts: number;
   healthyAccounts: number;
+  normalAccounts?: number;
+  atRiskAccounts?: number;
   weakAccounts: number;
   totalAccounts?: number;
   disabledAccounts?: number;
@@ -162,6 +164,9 @@ export interface SupplySmartResource {
   rawCapacityRcu?: number;
   timeLimitedCapacityRcu?: number;
   expiryWasteRiskRcu?: number;
+  expiringAccounts?: number;
+  expiringWithinMinutes?: number;
+  expiringCapacityRcu?: number;
   targetCapacityRcu: number;
   capacityGapRcu: number;
   unitCapacityRcu: number;
@@ -377,6 +382,11 @@ export interface SupplyAccountList {
   range: SupplyReportRange;
   summary: SupplyAccountSummary;
   items: SupplyAccountItem[];
+}
+
+export interface SupplyAccountLeaseItem {
+  fileName: string;
+  leaseExpiresAtMs: number;
 }
 
 export interface SupplyReportExecutive {
@@ -622,6 +632,9 @@ export const supplyApi = {
   listAccounts: (
     params: { fromMs?: number; toMs?: number; limit?: number; status?: string } = {}
   ): Promise<SupplyAccountList> => apiClient.get('/supply/accounts', { params }),
+
+  listAccountLeases: (): Promise<SupplyAccountLeaseItem[]> =>
+    apiClient.get('/supply/account-leases'),
 
   listRecoveries: (params: { limit?: number; status?: string } = {}): Promise<SupplyRecovery[]> =>
     apiClient.get('/supply/recoveries', { params }),

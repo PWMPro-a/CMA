@@ -61,6 +61,22 @@ const buildAccountRows = (
 ) => buildAccountRowsBase(files, scopeTestQuotaStores(files, stores), inspectionResults, overrides);
 
 describe('accountRows', () => {
+  it('exposes supplier expiry and configured concurrency', () => {
+    const expiresAtMs = Date.now() + 45 * 60_000;
+    const [row] = buildAccountRows(
+      [
+        {
+          name: 'supply.json',
+          type: 'codex',
+          supply_lease_expires_at_ms: expiresAtMs,
+          max_concurrency: 8,
+        },
+      ],
+      emptyStores()
+    );
+    expect(row.expiresAtMs).toBe(expiresAtMs);
+    expect(row.concurrency).toBe(8);
+  });
   it('normalizes Codex quota usage into remaining percent and risk status', () => {
     const files: AuthFileItem[] = [
       {

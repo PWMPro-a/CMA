@@ -500,6 +500,34 @@
   white-space: nowrap;
 }
 
+.accountExpiryMeta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--text-tertiary, var(--text-secondary));
+  font-size: 10px;
+  line-height: 1.2;
+
+  span {
+    flex: 0 0 auto;
+  }
+
+  strong {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 800;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.accountMetaSeparator {
+  color: var(--border-color);
+}
+
 .accountIdentityCopyLine {
   display: flex;
   align-items: center;
