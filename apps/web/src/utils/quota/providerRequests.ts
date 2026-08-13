@@ -64,6 +64,7 @@ import {
 import {
   normalizeAuthIndex,
   normalizeNumberValue,
+  normalizePlanType,
   normalizeStringValue,
   parseAntigravityPayload,
   parseClaudeUsagePayload,
@@ -72,6 +73,7 @@ import {
   parseXaiBillingPayload,
 } from './parsers';
 import {
+  isCodexPlanTypePinned,
   resolveCodexChatgptAccountId,
   resolveCodexPlanType,
   resolveEffectiveCodexPlanType,
@@ -496,20 +498,32 @@ export const fetchCodexQuota = async (
     throw new Error(t('codex_quota.empty_windows'));
   }
 
-  const planType =
-    resolveEffectiveCodexPlanType(
-      file,
-      payload.chatgpt_plan_type ?? payload.chatgptPlanType ?? payload.plan_type ?? payload.planType
-    ) ?? planTypeFromFile;
+  const observedPlanType = normalizePlanType(
+    payload.chatgpt_plan_type ?? payload.chatgptPlanType ?? payload.plan_type ?? payload.planType
+  );
+  const planType = resolveEffectiveCodexPlanType(file, observedPlanType) ?? planTypeFromFile;
   const observedAtMs = Date.now();
   const windows = buildCodexQuotaWindows(payload, t, planType, observedAtMs);
+  const storedPlanType = normalizePlanType(planTypeFromFile);
+  const pinnedPaidPlanObservedAsFreeWithoutWeekly =
+    isCodexPlanTypePinned(file) &&
+    storedPlanType !== null &&
+    storedPlanType !== 'free' &&
+    observedPlanType === 'free' &&
+    !windows.some(
+      (window) =>
+        window.id === 'weekly' ||
+        window.id.endsWith('-weekly') ||
+        window.limitWindowSeconds === 604_800
+    );
   const usageResetCreditsAvailableCount = resolveCodexRateLimitResetCreditsAvailableCount(payload);
   const resetCredits = await fetchCodexResetCredits(authIndex, accountId, t);
   return {
     planType,
     windows,
     observedAtMs,
-    quotaInventoryObserved: hasCodexQuotaInventory(payload),
+    quotaInventoryObserved:
+      hasCodexQuotaInventory(payload) && !pinnedPaidPlanObservedAsFreeWithoutWeekly,
     subscriptionActiveUntil: resolveCodexSubscriptionActiveUntil(payload),
     ...resolveCodexCreditsInfo(payload),
     ...resolveCodexSpendControlInfo(payload),

@@ -8,6 +8,7 @@ import {
   ANTIGRAVITY_CONFIG,
   buildObservedCodexQuotaState,
   buildQuotaFailureState,
+  buildQuotaSuccessState,
   CLAUDE_CONFIG,
   CODEX_CONFIG,
   getCodexQuotaStoreKey,
@@ -319,6 +320,125 @@ describe('XAI_CONFIG.renderQuotaItems', () => {
     expect(output).not.toContain('Pay-as-you-go');
     expect(output).not.toContain('Monthly credits');
     expect(output).not.toContain('data-percent');
+  });
+});
+
+describe('buildQuotaSuccessState', () => {
+  const file = {
+    name: 'codex-team.json',
+    type: 'codex',
+    authIndex: 'auth-1',
+    plan_type: 'team',
+    codex_plan_type_pinned: true,
+  };
+  const buildData = (quotaInventoryObserved: boolean) => ({
+    planType: 'team',
+    windows: [
+      {
+        id: 'monthly',
+        label: 'Monthly limit',
+        usedPercent: 0,
+        resetLabel: '09/13 01:36',
+        resetAtMs: Date.now() + 30 * 24 * 60 * 60 * 1000,
+        limitWindowSeconds: 2_592_000,
+      },
+    ],
+    quotaInventoryObserved,
+    subscriptionActiveUntil: null,
+    rateLimitResetCreditsAvailableCount: 0,
+    rateLimitResetCredits: [],
+    rateLimitResetCreditsError: null,
+  });
+
+  it('preserves an active 7D window when a pinned Team refresh only returns partial 30D data', () => {
+    const previous: CodexQuotaState = {
+      status: 'success',
+      planType: 'team',
+      windows: [
+        {
+          id: 'weekly',
+          label: 'Weekly limit',
+          usedPercent: 56,
+          resetLabel: '08/21 01:20',
+          resetAtMs: Date.now() + 7 * 24 * 60 * 60 * 1000,
+          limitWindowSeconds: 604_800,
+        },
+      ],
+    };
+
+    const result = buildQuotaSuccessState(CODEX_CONFIG, buildData(false), file, previous);
+
+    expect(result.quotaInventoryObserved).toBe(false);
+    expect(result.windows.map((window) => window.id)).toEqual(['weekly', 'monthly']);
+    expect(result.windows.find((window) => window.id === 'weekly')).toMatchObject({
+      usedPercent: 56,
+    });
+  });
+
+  it('drops an expired 7D window during a partial pinned Team refresh', () => {
+    const previous: CodexQuotaState = {
+      status: 'success',
+      planType: 'team',
+      windows: [
+        {
+          id: 'weekly',
+          label: 'Weekly limit',
+          usedPercent: 100,
+          resetLabel: 'expired',
+          resetAtMs: Date.now() - 1,
+          limitWindowSeconds: 604_800,
+        },
+      ],
+    };
+
+    const result = buildQuotaSuccessState(CODEX_CONFIG, buildData(false), file, previous);
+
+    expect(result.windows.map((window) => window.id)).toEqual(['monthly']);
+  });
+
+  it('uses a complete Team inventory as-is instead of retaining an omitted old 7D window', () => {
+    const previous: CodexQuotaState = {
+      status: 'success',
+      planType: 'team',
+      windows: [
+        {
+          id: 'weekly',
+          label: 'Weekly limit',
+          usedPercent: 56,
+          resetLabel: '08/21 01:20',
+          resetAtMs: Date.now() + 7 * 24 * 60 * 60 * 1000,
+          limitWindowSeconds: 604_800,
+        },
+      ],
+    };
+
+    const result = buildQuotaSuccessState(CODEX_CONFIG, buildData(true), file, previous);
+
+    expect(result.windows.map((window) => window.id)).toEqual(['monthly']);
+  });
+
+  it.each([
+    ['genuine Free', { ...file, plan_type: 'free' }],
+    ['explicitly unpinned', { ...file, codex_plan_type_pinned: false }],
+  ])('does not inherit a Team 7D window for %s credentials', (_name, targetFile) => {
+    const previous: CodexQuotaState = {
+      status: 'success',
+      planType: 'team',
+      windows: [
+        {
+          id: 'weekly',
+          label: 'Weekly limit',
+          usedPercent: 56,
+          resetLabel: '08/21 01:20',
+          resetAtMs: Date.now() + 7 * 24 * 60 * 60 * 1000,
+          limitWindowSeconds: 604_800,
+        },
+      ],
+    };
+
+    const result = buildQuotaSuccessState(CODEX_CONFIG, buildData(false), targetFile, previous);
+
+    expect(result.windows.map((window) => window.id)).toEqual(['monthly']);
   });
 });
 

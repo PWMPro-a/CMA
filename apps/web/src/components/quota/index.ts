@@ -13,6 +13,7 @@ export {
   KIMI_CONFIG,
   XAI_CONFIG,
   buildObservedCodexQuotaState,
+  buildQuotaSuccessState,
   getQuotaStoreKey,
   resolveQuotaDisplayState,
 } from './quotaConfigs';

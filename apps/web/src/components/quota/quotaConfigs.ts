@@ -30,7 +30,9 @@ import { QuotaInfoTooltip } from '@/components/quota/QuotaInfoTooltip';
 import {
   normalizePlanType,
   resolveCodexChatgptAccountId,
+  resolveCodexPlanType,
   resolveEffectiveCodexPlanType,
+  isCodexPlanTypePinned,
   formatQuotaResetTime,
   formatKimiResetHint,
   isValidQuotaResetAtMs,
@@ -100,6 +102,11 @@ export interface QuotaConfig<TState, TData> {
   getStoreKey?: (file: AuthFileItem) => string;
   buildLoadingState: (file?: AuthFileItem) => TState;
   buildSuccessState: (data: TData, file?: AuthFileItem) => TState;
+  mergeSuccessState?: (
+    nextState: TState,
+    previousState: TState | undefined,
+    file: AuthFileItem | undefined
+  ) => TState;
   buildErrorState: (message: string, status?: number, file?: AuthFileItem) => TState;
   buildFailureState?: (
     message: string,
@@ -154,6 +161,16 @@ export const buildQuotaFailureState = <TState, TData>(
   config.buildFailureState
     ? config.buildFailureState(message, status, file, activeState, failedAtMs)
     : config.buildErrorState(message, status, file);
+
+export const buildQuotaSuccessState = <TState, TData>(
+  config: Pick<QuotaConfig<TState, TData>, 'buildSuccessState' | 'mergeSuccessState'>,
+  data: TData,
+  file: AuthFileItem | undefined,
+  previousState: TState | undefined
+): TState => {
+  const nextState = config.buildSuccessState(data, file);
+  return config.mergeSuccessState?.(nextState, previousState, file) ?? nextState;
+};
 
 const formatAntigravityDuration = (t: TFunction, deltaMs: number): string => {
   const totalMinutes = Math.max(0, Math.ceil(deltaMs / 60000));
@@ -684,6 +701,46 @@ const buildCodexQuotaFailureState = (
     failedAtMs,
     ...buildQuotaCredentialIdentity(file),
   };
+};
+
+const isWeeklyCodexQuotaWindow = (window: CodexQuotaWindow): boolean =>
+  window.id === 'weekly' || window.id.endsWith('-weekly') || window.limitWindowSeconds === 604_800;
+
+const mergePartialCodexQuotaSuccessState = (
+  nextState: CodexQuotaState,
+  previousState: CodexQuotaState | undefined,
+  file: AuthFileItem | undefined
+): CodexQuotaState => {
+  const filePlanType = file ? normalizePlanType(resolveCodexPlanType(file)) : null;
+  if (
+    nextState.status !== 'success' ||
+    nextState.quotaInventoryObserved !== false ||
+    !file ||
+    filePlanType === null ||
+    filePlanType === 'free' ||
+    !isCodexPlanTypePinned(file) ||
+    !previousState?.windows?.length
+  ) {
+    return nextState;
+  }
+
+  const nextWindowIDs = new Set(nextState.windows.map((window) => window.id));
+  const preservedWeeklyWindows = filterFreshCodexQuotaWindows(previousState.windows).filter(
+    (window) => isWeeklyCodexQuotaWindow(window) && !nextWindowIDs.has(window.id)
+  );
+  if (preservedWeeklyWindows.length === 0) return nextState;
+
+  const windows = [...nextState.windows, ...preservedWeeklyWindows].sort((left, right) => {
+    const rank = (window: CodexQuotaWindow): number => {
+      if (window.id === 'five-hour' || window.id.endsWith('-five-hour')) return 0;
+      if (isWeeklyCodexQuotaWindow(window)) return 1;
+      if (window.id === 'monthly' || window.id.endsWith('-monthly')) return 2;
+      return 3;
+    };
+    return rank(left) - rank(right);
+  });
+
+  return { ...nextState, windows };
 };
 
 export const resolveQuotaDisplayState = <TState extends DisplayQuotaState>(
@@ -1306,6 +1363,7 @@ export const CODEX_CONFIG: QuotaConfig<CodexQuotaState, CodexQuotaData> = {
       readFiniteTimestamp(data.windows[0]?.observedAtMs) ??
       Date.now(),
   }),
+  mergeSuccessState: mergePartialCodexQuotaSuccessState,
   buildErrorState: (message, status, file) => ({
     status: 'error',
     windows: [],

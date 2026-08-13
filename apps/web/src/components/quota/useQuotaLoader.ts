@@ -5,11 +5,7 @@
 import { useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { AuthFileItem } from '@/types';
-import {
-  captureQuotaCacheGeneration,
-  commitIfQuotaCacheCurrent,
-  useQuotaStore,
-} from '@/stores';
+import { captureQuotaCacheGeneration, commitIfQuotaCacheCurrent, useQuotaStore } from '@/stores';
 import { getStatusFromError } from '@/utils/quota';
 import {
   buildProviderCredentialTaskPlan,
@@ -17,6 +13,7 @@ import {
 } from '@/utils/quota/providerRefreshScheduler';
 import {
   buildQuotaFailureState,
+  buildQuotaSuccessState,
   getQuotaStoreKey,
   getScopedQuotaState,
   type QuotaConfig,
@@ -105,9 +102,11 @@ export function useQuotaLoader<TState, TData>(config: QuotaConfig<TState, TData>
             const nextState = { ...prev };
             results.forEach((result) => {
               if (result.status === 'success') {
-                nextState[result.storeKey] = config.buildSuccessState(
+                nextState[result.storeKey] = buildQuotaSuccessState(
+                  config,
                   result.data as TData,
-                  result.file
+                  result.file,
+                  previousStateByStoreKey.get(result.storeKey)
                 );
               } else {
                 nextState[result.storeKey] = buildQuotaFailureState(

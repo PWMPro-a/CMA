@@ -26,6 +26,7 @@ import type { QuotaStatusState } from './QuotaCard';
 import { useQuotaLoader } from './useQuotaLoader';
 import {
   buildQuotaFailureState,
+  buildQuotaSuccessState,
   getQuotaStoreKey,
   getScopedQuotaState,
   resolveQuotaDisplayState,
@@ -388,12 +389,9 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
         commitIfQuotaCacheCurrent(cacheGeneration, () => {
           setQuota((prev) => ({
             ...prev,
-            [storeKey]: config.buildSuccessState(data, file),
+            [storeKey]: buildQuotaSuccessState(config, data, file, previousQuota),
           }));
-          showNotification(
-            t('auth_files.quota_refresh_success', { name: displayName }),
-            'success'
-          );
+          showNotification(t('auth_files.quota_refresh_success', { name: displayName }), 'success');
         });
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : t('common.unknown_error');
@@ -452,7 +450,7 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
             commitIfQuotaCacheCurrent(cacheGeneration, () => {
               setQuota((prev) => ({
                 ...prev,
-                [storeKey]: config.buildSuccessState(data, file),
+                [storeKey]: buildQuotaSuccessState(config, data, file, previousQuota),
               }));
               showNotification(
                 t(`${config.i18nPrefix}.reset_success`, { name: displayName }),

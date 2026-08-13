@@ -208,6 +208,50 @@ describe('fetchCodexQuota', () => {
 
     expect(result.planType).toBe('team');
     expect(result.windows.map((window) => window.id)).toEqual(['five-hour', 'weekly']);
+    expect(result.quotaInventoryObserved).toBe(true);
+  });
+
+  it('marks a pinned Team monthly-only Free payload as a partial quota inventory', async () => {
+    mocks.request
+      .mockResolvedValueOnce({
+        statusCode: 200,
+        hasStatusCode: true,
+        header: {},
+        bodyText: '',
+        body: {
+          plan_type: 'free',
+          rate_limit: {
+            primary_window: {
+              used_percent: 0,
+              limit_window_seconds: 2_592_000,
+              reset_after_seconds: 2_592_000,
+            },
+            secondary_window: null,
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        statusCode: 200,
+        hasStatusCode: true,
+        header: {},
+        bodyText: '',
+        body: { available_count: 0, credits: [] },
+      });
+
+    const result = await fetchCodexQuota(
+      {
+        name: 'codex-team.json',
+        type: 'codex',
+        authIndex: 'auth-1',
+        plan_type: 'team',
+        codex_plan_type_pinned: true,
+      },
+      t
+    );
+
+    expect(result.planType).toBe('team');
+    expect(result.windows.map((window) => window.id)).toEqual(['monthly']);
+    expect(result.quotaInventoryObserved).toBe(false);
   });
 
   it('marks an explicit rate-limit object as a complete quota inventory', async () => {

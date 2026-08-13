@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import {
   ANTIGRAVITY_CONFIG,
+  buildQuotaSuccessState,
   CLAUDE_CONFIG,
   CODEX_CONFIG,
   getQuotaStoreKey,
@@ -130,7 +131,7 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
       commitIfQuotaCacheCurrent(cacheGeneration, () => {
         updateQuotaState((prev: Record<string, unknown>) => ({
           ...prev,
-          [storeKey]: config.buildSuccessState(data, file),
+          [storeKey]: buildQuotaSuccessState(config, data, file, previousQuota),
         }));
         showNotification(t('auth_files.quota_refresh_success', { name: file.name }), 'success');
       });

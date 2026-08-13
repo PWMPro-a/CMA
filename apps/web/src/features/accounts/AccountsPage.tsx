@@ -48,7 +48,11 @@ import {
   resolveQuotaDisplayState,
   type QuotaConfig,
 } from '@/components/quota';
-import { buildQuotaFailureState, getScopedQuotaState } from '@/components/quota/quotaConfigs';
+import {
+  buildQuotaFailureState,
+  buildQuotaSuccessState,
+  getScopedQuotaState,
+} from '@/components/quota/quotaConfigs';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useInterval } from '@/hooks/useInterval';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
@@ -332,7 +336,12 @@ async function refreshQuotaWithConfig<TState, TData>({
     return commitIfQuotaCacheCurrent(cacheGeneration, () => {
       setQuota((prev) => ({
         ...prev,
-        [storeKey]: config.buildSuccessState(data, file),
+        [storeKey]: buildQuotaSuccessState(
+          config,
+          data,
+          file,
+          getScopedQuotaState(config, prev, file)
+        ),
       }));
     });
   } catch (error: unknown) {
@@ -2881,7 +2890,12 @@ export function AccountsPage() {
             const committed = commitIfQuotaCacheCurrent(cacheGeneration, () => {
               setCodexQuota((prev) => ({
                 ...prev,
-                [storeKey]: CODEX_CONFIG.buildSuccessState(data, row.raw),
+                [storeKey]: buildQuotaSuccessState(
+                  CODEX_CONFIG,
+                  data,
+                  row.raw,
+                  getScopedQuotaState(CODEX_CONFIG, prev, row.raw)
+                ),
               }));
             });
             if (!committed) return;
