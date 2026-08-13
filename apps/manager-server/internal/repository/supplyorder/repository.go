@@ -24,6 +24,7 @@ type Repository interface {
 	ClaimTaking(ctx context.Context, orderID string, nowMS int64, leaseUntilMS int64) (bool, error)
 	Update(ctx context.Context, order model.SupplyOrder) error
 	List(ctx context.Context, limit int) ([]model.SupplyOrder, error)
+	ListByOrderIDs(ctx context.Context, orderIDs []string) ([]model.SupplyOrder, error)
 	ListBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyOrder, error)
 	InsertItems(ctx context.Context, orderID string, items []model.SupplyImportItem) (int, error)
 	ListItems(ctx context.Context, limit int, status string) ([]model.SupplyImportItem, error)
@@ -364,6 +365,44 @@ func (r *repository) List(ctx context.Context, limit int) ([]model.SupplyOrder, 
 		order, err := scanOrder(rows)
 		if err != nil {
 			return nil, err
+		}
+		orders = append(orders, order)
+	}
+	return orders, rows.Err()
+}
+
+func (r *repository) ListByOrderIDs(ctx context.Context, orderIDs []string) ([]model.SupplyOrder, error) {
+	unique := make([]string, 0, len(orderIDs))
+	seen := make(map[string]struct{}, len(orderIDs))
+	for _, orderID := range orderIDs {
+		orderID = strings.TrimSpace(orderID)
+		if orderID == "" {
+			continue
+		}
+		if _, ok := seen[orderID]; ok {
+			continue
+		}
+		seen[orderID] = struct{}{}
+		unique = append(unique, orderID)
+	}
+	if len(unique) == 0 {
+		return []model.SupplyOrder{}, nil
+	}
+	placeholders := make([]string, len(unique))
+	args := make([]any, len(unique))
+	for i, orderID := range unique {
+		placeholders[i], args[i] = "?", orderID
+	}
+	rows, err := r.db.QueryContext(ctx, orderSelect+` where order_id in (`+strings.Join(placeholders, ",")+")", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	orders := make([]model.SupplyOrder, 0, len(unique))
+	for rows.Next() {
+		order, scanErr := scanOrder(rows)
+		if scanErr != nil {
+			return nil, scanErr
 		}
 		orders = append(orders, order)
 	}

@@ -700,10 +700,6 @@ export function SupplyPage() {
   const confidence = smart?.confidence || 'low';
   const supplyPressureLevel = smart?.supplyPressureLevel || 'unknown';
   const demandTrend = smart?.demandTrend || 'unknown';
-  const currentStrategy = (smart?.strategy ||
-    status?.config?.strategy ||
-    draft.strategy ||
-    'strong_supply') as SupplyStrategy;
   const draftStrategy = (draft.strategy || 'strong_supply') as SupplyStrategy;
   const effectiveHealthTargetMinutes =
     smart?.effectiveHealthyMinutesTarget ??
@@ -1354,8 +1350,8 @@ export function SupplyPage() {
 
       <section className={styles.poolSummaryGrid} aria-label={t('supply.pool_summary')}>
         <div className={styles.poolSummaryItem}>
-          <span>{t('supply.pool_available_accounts')}</span>
-          <strong>{formatInteger(poolAccounts.healthy)}</strong>
+          <span>{t('supply.pool_total_accounts')}</span>
+          <strong>{formatInteger(poolAccounts.total)}</strong>
           <small>
             {t('supply.pool_total_accounts_hint', {
               total: formatInteger(poolAccounts.total),
@@ -1364,40 +1360,35 @@ export function SupplyPage() {
           </small>
         </div>
         <div className={styles.poolSummaryItem}>
-          <span>{t('supply.pool_at_risk_accounts')}</span>
-          <strong>{formatInteger(poolAccounts.atRisk)}</strong>
+          <span>{t('supply.pool_available_accounts')}</span>
+          <strong>{formatInteger(poolAccounts.healthy)}</strong>
           <small>
-            {t('supply.pool_schedulable_accounts_hint', {
-              value: formatInteger(poolAccounts.schedulable),
-            })}
+            {t('supply.pool_normal_accounts_hint', { value: formatInteger(poolAccounts.healthy) })}
           </small>
         </div>
         <div className={styles.poolSummaryItem}>
-          <span>{t('supply.pool_pending_inspection')}</span>
-          <strong>{formatInteger(smart?.pendingInspectionAccounts ?? 0)}</strong>
+          <span>{t('supply.pool_attention_accounts')}</span>
+          <strong>{formatInteger(poolAccounts.needsAttention)}</strong>
           <small>
-            {t('supply.pool_account_estimate_hint', {
-              current: formatInteger(smart?.projectedAvailableAccounts ?? smart?.availableAccounts),
-              required: formatInteger(smart?.estimatedRequiredAccounts),
-              deficit: formatInteger(smart?.accountQuantityDeficit),
-            })}
+            {t('supply.pool_attention_accounts_hint')}
           </small>
         </div>
         <div className={styles.poolSummaryItem}>
-          <span>{t('supply.pool_supply_strategy')}</span>
-          <strong>
-            {t(`supply.strategy_${currentStrategy}`, { defaultValue: currentStrategy })}
-          </strong>
+          <span>{t('supply.pool_quota_risk_accounts')}</span>
+          <strong>{formatInteger(poolAccounts.quotaRisk)}</strong>
           <small>
-            {smart?.poolVacuumActive
-              ? t('supply.pool_vacuum_duration', {
-                  value: formatSeconds(smart.poolVacuumDurationSeconds),
-                })
-              : t('supply.pool_waterline_hint', {
-                  critical: smart?.criticalAvailableAccounts ?? draft.criticalAvailableAccounts,
-                  healthy: smart?.healthyAvailableAccounts ?? draft.healthyAvailableAccounts,
-                })}
+            {t('supply.pool_quota_risk_accounts_hint')}
           </small>
+        </div>
+        <div className={styles.poolSummaryItem}>
+          <span>{t('supply.pool_disabled_accounts')}</span>
+          <strong>{formatInteger(poolAccounts.disabled)}</strong>
+          <small>{t('supply.pool_disabled_accounts_hint')}</small>
+        </div>
+        <div className={styles.poolSummaryItem}>
+          <span>{t('supply.pool_unconfirmed_accounts')}</span>
+          <strong>{formatInteger(poolAccounts.unconfirmed)}</strong>
+          <small>{t('supply.pool_unconfirmed_accounts_hint')}</small>
         </div>
       </section>
 

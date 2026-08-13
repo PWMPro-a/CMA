@@ -3,6 +3,9 @@ import type { SupplySmartResource } from '@/services/api';
 export interface SupplyPoolAccountStats {
   schedulable: number | undefined;
   healthy: number | undefined;
+  needsAttention: number | undefined;
+  quotaRisk: number | undefined;
+  unconfirmed: number | undefined;
   atRisk: number | undefined;
   total: number | undefined;
   disabled: number | undefined;
@@ -22,15 +25,28 @@ export const resolveSupplyPoolAccountStats = (
   const schedulable = finiteNonNegative(resource?.schedulableAccounts) ?? available;
   const healthy =
     finiteNonNegative(resource?.normalAccounts) ?? finiteNonNegative(resource?.healthyAccounts);
+  const needsAttention = finiteNonNegative(resource?.needsAttentionAccounts);
+  const quotaRisk = finiteNonNegative(resource?.quotaRiskAccounts);
+  const unconfirmed = finiteNonNegative(resource?.unconfirmedAccounts);
+  const explicitAtRisk =
+    needsAttention !== undefined && quotaRisk !== undefined && unconfirmed !== undefined
+      ? needsAttention + quotaRisk + unconfirmed
+      : undefined;
   const atRisk =
+    explicitAtRisk ??
     finiteNonNegative(resource?.atRiskAccounts) ??
     (schedulable !== undefined && healthy !== undefined
       ? Math.max(0, schedulable - healthy)
       : undefined);
   const total = finiteNonNegative(resource?.totalAccounts) ?? schedulable;
+  const enabled = finiteNonNegative(resource?.enabledAccounts);
   const disabled =
     finiteNonNegative(resource?.disabledAccounts) ??
-    (total !== undefined && schedulable !== undefined ? Math.max(0, total - schedulable) : undefined);
+    (total !== undefined && enabled !== undefined
+      ? Math.max(0, total - enabled)
+      : total !== undefined && schedulable !== undefined
+        ? Math.max(0, total - schedulable)
+        : undefined);
 
-  return { schedulable, healthy, atRisk, total, disabled };
+  return { schedulable, healthy, needsAttention, quotaRisk, unconfirmed, atRisk, total, disabled };
 };

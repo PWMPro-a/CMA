@@ -490,7 +490,17 @@ type Service struct {
 	automaticEnabled        bool
 	automaticBaselineAtMS   int64
 	automaticAccountAtMS    int64
+	accountListCacheMu      sync.Mutex
+	accountListCache        supplyAccountListCache
 }
+
+type supplyAccountListCache struct {
+	key       string
+	generated time.Time
+	result    SupplyAccountList
+}
+
+const supplyAccountListCacheTTL = 15 * time.Second
 
 const (
 	staleInspectionSnapshotRefreshCooldown = 30 * time.Second
@@ -640,7 +650,26 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		cancel()
 		if snapshotErr == nil || len(snapshot.files) > 0 {
 			inspectedAvailable := resource.AvailableAccounts
-			poolStats := reconcileAccountPoolStatsWithInspection(accountPoolStatsFromFiles(snapshot.files), resource)
+			poolStats := accountPoolStatsFromFiles(snapshot.files)
+			inspectionCtx, inspectionCancel := context.WithTimeout(ctx, 2*time.Second)
+			inspectionSnapshot, inspectionErr := s.cachedInspectionQuotaSnapshot(inspectionCtx, cfg.Supply, false)
+			inspectionCancel()
+			if inspectionErr == nil && inspectionSnapshot.run.ID > 0 &&
+				inspectionSnapshot.run.ID == resource.CapacitySnapshotRunID {
+				poolStats = accountPoolStatsFromFilesAndInspection(snapshot.files, inspectionSnapshot.results)
+			} else if resource.CapacitySource == smartCapacitySourceInspection &&
+				resource.CapacitySnapshotRunID > 0 {
+				// The live file set is still authoritative for population counts, but
+				// an unavailable or mismatched inspection must not reuse the prior
+				// normal/risk split. Mark every enabled file as unconfirmed until
+				// evidence from the same completed run is available.
+				poolStats.classificationObserved = true
+				poolStats.normal = 0
+				poolStats.needsAttention = 0
+				poolStats.quotaRisk = 0
+				poolStats.unconfirmed = poolStats.enabled
+			}
+			poolStats = reconcileAccountPoolStatsWithInspection(poolStats, resource)
 			applyAccountPoolStats(&resource, poolStats)
 			if reconcileSmartCapacityWithAccountPool(&resource, inspectedAvailable) {
 				recalculateSmartResourceCapacityPlan(cfg.Supply, &resource)
@@ -1108,6 +1137,16 @@ func (s *Service) ListAccounts(ctx context.Context, req SupplyAccountsRequest) (
 			revenueMultiplier = supplyRevenueMultiplier(managerCfg.Supply)
 		}
 	}
+	cacheKey := supplyAccountListCacheKey(req, statusFilter, revenueMultiplier)
+	s.accountListCacheMu.Lock()
+	if cached, ok := s.accountListCache.get(cacheKey, time.Now()); ok {
+		s.accountListCacheMu.Unlock()
+		return cached, nil
+	}
+	// Hold the short-lived read lock for the complete build. Concurrent page
+	// refreshes then collapse into one analytics query instead of multiplying
+	// the expensive pricing-band aggregation under SQLite.
+	defer s.accountListCacheMu.Unlock()
 	items, err := s.store.ListSupplyImportItems(ctx, supplyAccountListLimit(req, statusFilter), supplyImportStatusFilter(statusFilter))
 	if err != nil {
 		return SupplyAccountList{}, err
@@ -1221,7 +1260,33 @@ func (s *Service) ListAccounts(ctx context.Context, req SupplyAccountsRequest) (
 	}
 	result.Summary.UsageRevenue = reportRatioFloat(result.Summary.UsageRevenue, 1)
 	result.Summary.AverageRevenuePerCall = reportRatioFloat(result.Summary.UsageRevenue, float64(result.Summary.UsageCalls))
+	s.accountListCache.put(cacheKey, result, now)
 	return result, nil
+}
+
+func supplyAccountListCacheKey(req SupplyAccountsRequest, status string, revenueMultiplier float64) string {
+	return fmt.Sprintf("%d:%d:%d:%s:%.8f", req.FromMS, req.ToMS, req.Limit, strings.ToLower(strings.TrimSpace(status)), revenueMultiplier)
+}
+
+func (cache *supplyAccountListCache) get(key string, now time.Time) (SupplyAccountList, bool) {
+	if cache == nil || cache.key != key || cache.generated.IsZero() || now.Sub(cache.generated) > supplyAccountListCacheTTL {
+		return SupplyAccountList{}, false
+	}
+	return cloneSupplyAccountList(cache.result), true
+}
+
+func (cache *supplyAccountListCache) put(key string, result SupplyAccountList, generated time.Time) {
+	if cache == nil {
+		return
+	}
+	cache.key = key
+	cache.generated = generated
+	cache.result = cloneSupplyAccountList(result)
+}
+
+func cloneSupplyAccountList(result SupplyAccountList) SupplyAccountList {
+	result.Items = append([]SupplyAccountItem(nil), result.Items...)
+	return result
 }
 
 // ListAccountLeases is intentionally lightweight for the credential list. It
@@ -2112,7 +2177,7 @@ func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, orde
 			if markErr := s.store.MarkSupplyImportItemImported(ctx, item.ID, time.Now().UnixMilli()); markErr != nil {
 				return markErr
 			}
-			s.invalidateAuthFilesCache()
+			s.invalidateAuthAndCapacityCaches()
 			continue
 		}
 		if firstErr == nil {
@@ -2549,6 +2614,7 @@ func (s *Service) supplyOrdersForItems(ctx context.Context, existing []store.Sup
 	if s == nil || s.store == nil {
 		return orders, nil
 	}
+	missingIDs := make([]string, 0)
 	seenMissing := make(map[string]struct{})
 	for _, item := range items {
 		orderID := strings.TrimSpace(item.OrderID)
@@ -2561,14 +2627,18 @@ func (s *Service) supplyOrdersForItems(ctx context.Context, existing []store.Sup
 		if _, skipped := seenMissing[orderID]; skipped {
 			continue
 		}
-		order, found, err := s.store.GetSupplyOrder(ctx, orderID)
+		seenMissing[orderID] = struct{}{}
+		missingIDs = append(missingIDs, orderID)
+	}
+	if len(missingIDs) > 0 {
+		loaded, err := s.store.ListSupplyOrdersByIDs(ctx, missingIDs)
 		if err != nil {
 			return nil, err
 		}
-		if found {
-			orders[orderID] = order
-		} else {
-			seenMissing[orderID] = struct{}{}
+		for _, order := range loaded {
+			if orderID := strings.TrimSpace(order.OrderID); orderID != "" {
+				orders[orderID] = order
+			}
 		}
 	}
 	return orders, nil
@@ -4059,10 +4129,17 @@ func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerC
 }
 
 type accountPoolStats struct {
-	total              int
-	schedulable        int
-	verifiedAvailable  int
-	inspectionObserved bool
+	total                  int
+	enabled                int
+	schedulable            int
+	verifiedAvailable      int
+	normal                 int
+	needsAttention         int
+	quotaRisk              int
+	unconfirmed            int
+	classificationObserved bool
+	liveObserved           bool
+	inspectionObserved     bool
 }
 
 func (s *Service) countAccountPoolStats(ctx context.Context, cfg store.ManagerConfig) (accountPoolStats, error) {
@@ -4078,17 +4155,172 @@ func (s *Service) countAccountPoolStats(ctx context.Context, cfg store.ManagerCo
 }
 
 func accountPoolStatsFromFiles(files []cpaauthfiles.File) accountPoolStats {
-	stats := accountPoolStats{}
+	stats := accountPoolStats{liveObserved: true}
 	for _, file := range files {
 		if !isCodexAuthFile(file) {
 			continue
 		}
 		stats.total++
+		if !file.Disabled {
+			stats.enabled++
+			if textField(file.Raw, "status_message", "statusMessage") != "" || smartAccountCapacityHardBlocked(file.Raw) {
+				stats.needsAttention++
+			} else {
+				stats.unconfirmed++
+			}
+		}
 		if isAvailableCodexFile(file) {
 			stats.schedulable++
 		}
 	}
 	return stats
+}
+
+type operatorAccountBucket int
+
+const (
+	operatorAccountUnconfirmed operatorAccountBucket = iota
+	operatorAccountNormal
+	operatorAccountNeedsAttention
+	operatorAccountQuotaRisk
+)
+
+// accountPoolStatsFromFilesAndInspection uses the current CPA file set as the
+// population and the latest completed inspection only as per-account evidence.
+// This avoids combining counts from different snapshots while matching the
+// credential page's exclusive precedence: disabled, action/error, quota risk,
+// unconfirmed, then normally available.
+func accountPoolStatsFromFilesAndInspection(files []cpaauthfiles.File, results []store.CodexInspectionResult) accountPoolStats {
+	stats := accountPoolStatsFromFiles(files)
+	stats.normal = 0
+	stats.needsAttention = 0
+	stats.quotaRisk = 0
+	stats.unconfirmed = 0
+	stats.classificationObserved = true
+	stats.liveObserved = true
+
+	resultsByFile := make(map[string][]store.CodexInspectionResult, len(results))
+	filesByName := make(map[string]int, len(files))
+	for _, file := range files {
+		if isCodexAuthFile(file) {
+			filesByName[strings.TrimSpace(file.Name)]++
+		}
+	}
+	for _, result := range results {
+		if !isSmartCapacityInspectionResult(result) {
+			continue
+		}
+		name := strings.TrimSpace(result.FileName)
+		resultsByFile[name] = append(resultsByFile[name], result)
+	}
+
+	for _, file := range files {
+		if !isCodexAuthFile(file) || file.Disabled {
+			continue
+		}
+		result, matched := matchInspectionResultForAuthFile(
+			file,
+			resultsByFile[strings.TrimSpace(file.Name)],
+			filesByName[strings.TrimSpace(file.Name)],
+		)
+		bucket := operatorAccountUnconfirmed
+		if matched {
+			bucket = classifyOperatorAccount(file, result)
+		} else if textField(file.Raw, "status_message", "statusMessage") != "" || smartAccountCapacityHardBlocked(file.Raw) {
+			bucket = operatorAccountNeedsAttention
+		}
+		switch bucket {
+		case operatorAccountNormal:
+			stats.normal++
+		case operatorAccountNeedsAttention:
+			stats.needsAttention++
+		case operatorAccountQuotaRisk:
+			stats.quotaRisk++
+		default:
+			stats.unconfirmed++
+		}
+	}
+	return stats
+}
+
+func matchInspectionResultForAuthFile(file cpaauthfiles.File, candidates []store.CodexInspectionResult, sameNameFiles int) (store.CodexInspectionResult, bool) {
+	matches := make([]store.CodexInspectionResult, 0, 1)
+	for _, result := range candidates {
+		if !inspectionResultMatchesAuthFile(result, file, sameNameFiles == 1 && len(candidates) == 1) {
+			continue
+		}
+		matches = append(matches, result)
+	}
+	if len(matches) != 1 {
+		return store.CodexInspectionResult{}, false
+	}
+	return matches[0], true
+}
+
+func inspectionResultMatchesAuthFile(result store.CodexInspectionResult, file cpaauthfiles.File, allowFileOnly bool) bool {
+	if strings.TrimSpace(result.FileName) != strings.TrimSpace(file.Name) ||
+		normalizeOperatorAccountProvider(result.Provider) != normalizeOperatorAccountProvider(file.Provider) {
+		return false
+	}
+	resultAuthIndex := strings.TrimSpace(result.AuthIndex)
+	if resultAuthIndex != "" && resultAuthIndex != strings.TrimSpace(file.AuthIndex) {
+		return false
+	}
+	resultAccountID := strings.TrimSpace(result.AccountID)
+	if resultAccountID != "" {
+		return resultAccountID == strings.TrimSpace(file.AccountID)
+	}
+	resultSnapshot := directOperatorAccountSnapshot(result.FileName, result.AccountSnapshot)
+	if resultSnapshot != "" {
+		return resultSnapshot == directOperatorAccountSnapshot(file.Name, file.AccountSnapshot)
+	}
+	return resultAuthIndex != "" || allowFileOnly
+}
+
+func normalizeOperatorAccountProvider(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "_", "-")
+	if value == "openai" {
+		return "codex"
+	}
+	if value == "openai-codex" {
+		return "codex"
+	}
+	return value
+}
+
+func directOperatorAccountSnapshot(fileName, snapshot string) string {
+	snapshot = strings.TrimSpace(snapshot)
+	if snapshot == "" || snapshot == strings.TrimSpace(fileName) {
+		return ""
+	}
+	return snapshot
+}
+
+func classifyOperatorAccount(file cpaauthfiles.File, result store.CodexInspectionResult) operatorAccountBucket {
+	if textField(file.Raw, "status_message", "statusMessage") != "" || smartAccountCapacityHardBlocked(file.Raw) {
+		return operatorAccountNeedsAttention
+	}
+	action := strings.ToLower(strings.TrimSpace(result.Action))
+	// The credential page normalizes a missing historical action to keep.
+	// Identity uncertainty, rather than an omitted legacy action, is what
+	// belongs in the unconfirmed bucket.
+	if action != "" && action != "keep" {
+		return operatorAccountNeedsAttention
+	}
+	// Quota-limited results can carry an error/status message describing the
+	// exhausted window. The credential page puts those in quota risk before
+	// diagnostic exceptions, so preserve the same precedence here.
+	if inspectionResultInCooldown(result) || result.IsQuota {
+		return operatorAccountQuotaRisk
+	}
+	if strings.TrimSpace(result.ErrorKind) != "" || strings.TrimSpace(result.Error) != "" || strings.TrimSpace(result.ErrorDetail) != "" {
+		return operatorAccountNeedsAttention
+	}
+	if remaining, hasQuota := inspectionResultRemainingQuotaFraction(result); hasQuota && remaining < smartNormalAccountMinimumRemainingFraction {
+		return operatorAccountQuotaRisk
+	}
+	return operatorAccountNormal
 }
 
 func (stats accountPoolStats) capacityAvailable(fallback int) int {
@@ -4115,12 +4347,21 @@ func applyAccountPoolStats(resource *SmartResource, stats accountPoolStats) {
 	resource.TotalAccounts = max(0, stats.total)
 	resource.AvailableAccounts = stats.capacityAvailable(resource.AvailableAccounts)
 	resource.SchedulableAccounts = max(0, stats.schedulable)
-	resource.DisabledAccounts = max(0, resource.TotalAccounts-resource.SchedulableAccounts)
+	if stats.liveObserved {
+		resource.EnabledAccounts = max(0, stats.enabled)
+		resource.DisabledAccounts = max(0, resource.TotalAccounts-resource.EnabledAccounts)
+	} else {
+		resource.DisabledAccounts = max(0, resource.TotalAccounts-resource.SchedulableAccounts)
+	}
+	if stats.classificationObserved {
+		resource.operatorClassificationObserved = true
+		resource.NormalAccounts = max(0, stats.normal)
+		resource.NeedsAttentionAccounts = max(0, stats.needsAttention)
+		resource.QuotaRiskAccounts = max(0, stats.quotaRisk)
+		resource.UnconfirmedAccounts = max(0, stats.unconfirmed)
+	}
 	if resource.HealthyAccounts > resource.AvailableAccounts {
 		resource.HealthyAccounts = resource.AvailableAccounts
-	}
-	if resource.NormalAccounts > resource.AvailableAccounts {
-		resource.NormalAccounts = resource.AvailableAccounts
 	}
 	applySmartAccountCountBreakdown(resource)
 }
@@ -4134,6 +4375,10 @@ func applySmartAccountCountBreakdown(resource *SmartResource) {
 		return
 	}
 	resource.WeakAccounts = max(0, resource.AvailableAccounts-resource.HealthyAccounts)
+	if resource.operatorClassificationObserved {
+		resource.AtRiskAccounts = max(0, resource.NeedsAttentionAccounts+resource.QuotaRiskAccounts+resource.UnconfirmedAccounts)
+		return
+	}
 	resource.AtRiskAccounts = max(0, resource.SchedulableAccounts-resource.NormalAccounts)
 }
 
@@ -4520,9 +4765,7 @@ func (s *Service) invalidateAuthAndCapacityCaches() {
 	if s == nil {
 		return
 	}
-	s.authCacheMu.Lock()
-	s.authCache = authFileSnapshot{}
-	s.authCacheMu.Unlock()
+	s.invalidateAuthFilesCache()
 	s.invalidateInspectionQuotaSnapshot()
 }
 
@@ -5597,7 +5840,7 @@ func (s *Service) backfillSupplyAccountMetadata(ctx context.Context, cfg store.M
 		changed = true
 	}
 	if changed {
-		s.invalidateAuthFilesCache()
+		s.invalidateAuthAndCapacityCaches()
 	}
 	if len(reconcileErrors) > 0 {
 		return errors.Join(reconcileErrors...)
@@ -5719,6 +5962,15 @@ func (s *Service) findCanonicalSupplyAuthFile(ctx context.Context, cfg store.Man
 }
 
 func (s *Service) invalidateAuthFilesCache() {
+	if s == nil {
+		return
+	}
+	// Keep the lock order aligned with ListAccounts (account-list cache before
+	// auth-file cache); import completion can happen while an account query is
+	// reading CPA state, so reversing this order would deadlock the two paths.
+	s.accountListCacheMu.Lock()
+	s.accountListCache = supplyAccountListCache{}
+	s.accountListCacheMu.Unlock()
 	s.authCacheMu.Lock()
 	s.authCache = authFileSnapshot{}
 	s.authCacheMu.Unlock()

@@ -371,6 +371,67 @@ func TestAccountPoolStatsSeparateTotalAvailableHealthyAndDisabled(t *testing.T) 
 	}
 }
 
+func TestAccountPoolStatsMatchesCredentialStatusBuckets(t *testing.T) {
+	remainingNormal := 10.0
+	remainingRisk := 90.0
+	files := []cpaauthfiles.File{
+		{Name: "normal.json", Provider: "codex", AuthIndex: "normal", AccountSnapshot: "normal@example.com", Raw: map[string]any{"status": "active"}},
+		{Name: "attention.json", Provider: "codex", AuthIndex: "attention", AccountSnapshot: "attention@example.com", Raw: map[string]any{"status": "active"}},
+		{Name: "risk.json", Provider: "codex", AuthIndex: "risk", AccountSnapshot: "risk@example.com", Raw: map[string]any{"status": "active"}},
+		{Name: "unconfirmed.json", Provider: "codex", AuthIndex: "unconfirmed", AccountSnapshot: "unconfirmed@example.com", Raw: map[string]any{"status": "active"}},
+		{Name: "disabled.json", Provider: "codex", AuthIndex: "disabled", Disabled: true, Raw: map[string]any{"status": "disabled", "disabled": true}},
+	}
+	results := []store.CodexInspectionResult{
+		{FileName: "normal.json", Provider: "codex", AuthIndex: "normal", AccountSnapshot: "normal@example.com", Action: "keep", Status: "active", UsedPercent: &remainingNormal},
+		{FileName: "attention.json", Provider: "codex", AuthIndex: "attention", AccountSnapshot: "attention@example.com", Action: "reauth", Status: "active", StatusCode: intPtr(http.StatusUnauthorized)},
+		{FileName: "risk.json", Provider: "codex", AuthIndex: "risk", AccountSnapshot: "risk@example.com", Action: "keep", Status: "active", UsedPercent: &remainingRisk},
+	}
+	stats := accountPoolStatsFromFilesAndInspection(files, results)
+	resource := SmartResource{}
+	applyAccountPoolStats(&resource, stats)
+	if resource.TotalAccounts != 5 || resource.EnabledAccounts != 4 || resource.DisabledAccounts != 1 ||
+		resource.NormalAccounts != 1 || resource.NeedsAttentionAccounts != 1 || resource.QuotaRiskAccounts != 1 ||
+		resource.UnconfirmedAccounts != 1 || resource.AtRiskAccounts != 3 {
+		t.Fatalf("operator account buckets = %#v", resource)
+	}
+	if resource.NormalAccounts+resource.AtRiskAccounts+resource.DisabledAccounts != resource.TotalAccounts {
+		t.Fatalf("account bucket identity does not hold: %#v", resource)
+	}
+}
+
+func TestAccountPoolStatsUsesUnconfirmedFallbackWhenInspectionIdentityIsMissing(t *testing.T) {
+	files := []cpaauthfiles.File{
+		{Name: "live.json", Provider: "codex", AuthIndex: "live", Raw: map[string]any{"status": "active"}},
+	}
+	stats := accountPoolStatsFromFiles(files)
+	stats.classificationObserved = true
+	stats.normal = 0
+	stats.needsAttention = 0
+	stats.quotaRisk = 0
+	stats.unconfirmed = stats.enabled
+	resource := SmartResource{}
+	applyAccountPoolStats(&resource, stats)
+	if resource.TotalAccounts != 1 || resource.EnabledAccounts != 1 || resource.DisabledAccounts != 0 ||
+		resource.NormalAccounts != 0 || resource.NeedsAttentionAccounts != 0 || resource.QuotaRiskAccounts != 0 ||
+		resource.UnconfirmedAccounts != 1 || resource.AtRiskAccounts != 1 {
+		t.Fatalf("unconfirmed fallback statistics = %#v", resource)
+	}
+}
+
+func TestAccountPoolStatsDoesNotMatchAmbiguousFileOnlyInspection(t *testing.T) {
+	files := []cpaauthfiles.File{
+		{Name: "shared.json", Provider: "codex", AuthIndex: "one", AccountSnapshot: "one@example.com"},
+		{Name: "shared.json", Provider: "codex", AuthIndex: "two", AccountSnapshot: "two@example.com"},
+	}
+	results := []store.CodexInspectionResult{{
+		FileName: "shared.json", Provider: "codex", Action: "keep", Status: "active",
+	}}
+	stats := accountPoolStatsFromFilesAndInspection(files, results)
+	if stats.normal != 0 || stats.quotaRisk != 0 || stats.needsAttention != 0 || stats.unconfirmed != 2 {
+		t.Fatalf("ambiguous inspection classification = %#v", stats)
+	}
+}
+
 func TestSupplyAccountLeaseMetadataUsesSupplierDeadline(t *testing.T) {
 	leaseExpiresAtMS := time.Now().Add(45 * time.Minute).UnixMilli()
 	account := normalizedSupplyAccount{payload: []byte(`{"type":"codex","expires_at":4102444800}`)}

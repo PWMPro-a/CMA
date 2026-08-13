@@ -20,7 +20,44 @@ describe('resolveSupplyPoolAccountStats', () => {
         }),
         undefined
       )
-    ).toEqual({ schedulable: 13, healthy: 7, atRisk: 6, total: 75, disabled: 62 });
+    ).toEqual({
+      schedulable: 13,
+      healthy: 7,
+      needsAttention: undefined,
+      quotaRisk: undefined,
+      unconfirmed: undefined,
+      atRisk: 6,
+      total: 75,
+      disabled: 62,
+    });
+  });
+
+  it('prefers the explicit operator buckets for risk and enabled counts', () => {
+    expect(
+      resolveSupplyPoolAccountStats(
+        resource({
+          availableAccounts: 14,
+          schedulableAccounts: 17,
+          healthyAccounts: 14,
+          enabledAccounts: 14,
+          normalAccounts: 9,
+          needsAttentionAccounts: 2,
+          quotaRiskAccounts: 3,
+          unconfirmedAccounts: 0,
+          totalAccounts: 75,
+        }),
+        undefined
+      )
+    ).toEqual({
+      schedulable: 17,
+      healthy: 9,
+      needsAttention: 2,
+      quotaRisk: 3,
+      unconfirmed: 0,
+      atRisk: 5,
+      total: 75,
+      disabled: 61,
+    });
   });
 
   it('derives at-risk and disabled counts for an older manager response', () => {
@@ -34,13 +71,25 @@ describe('resolveSupplyPoolAccountStats', () => {
         }),
         undefined
       )
-    ).toEqual({ schedulable: 14, healthy: 9, atRisk: 5, total: 75, disabled: 61 });
+    ).toEqual({
+      schedulable: 14,
+      healthy: 9,
+      needsAttention: undefined,
+      quotaRisk: undefined,
+      unconfirmed: undefined,
+      atRisk: 5,
+      total: 75,
+      disabled: 61,
+    });
   });
 
   it('keeps the overview fallback for cold-start responses', () => {
     expect(resolveSupplyPoolAccountStats(undefined, 4)).toEqual({
       schedulable: 4,
       healthy: undefined,
+      needsAttention: undefined,
+      quotaRisk: undefined,
+      unconfirmed: undefined,
       atRisk: undefined,
       total: 4,
       disabled: 0,

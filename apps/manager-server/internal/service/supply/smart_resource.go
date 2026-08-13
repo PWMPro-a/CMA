@@ -77,16 +77,16 @@ type SmartResource struct {
 	AvailableAccounts   int `json:"availableAccounts"`
 	SchedulableAccounts int `json:"schedulableAccounts"`
 	HealthyAccounts     int `json:"healthyAccounts"`
-	// NormalAccounts mirrors the credential page's "normally available"
-	// bucket: the latest inspection succeeded, is not cooling down and has at
-	// least 20% remaining quota. HealthyAccounts remains the broader positive-
-	// capacity count used by replenishment planning.
-	NormalAccounts int `json:"normalAccounts"`
-	// AtRiskAccounts are live schedulable credentials outside the latest
-	// normal set. This includes quota-risk and action-required
-	// credentials and keeps the pool summary exclusive:
-	// schedulable = normal + at-risk.
-	// Replenishment decisions continue to use AvailableAccounts.
+	// EnabledAccounts and the four operator buckets below mirror the credential
+	// page's exclusive account summary. They are reconciled from the current CPA
+	// files plus the latest completed inspection and never drive capacity math.
+	EnabledAccounts        int `json:"enabledAccounts"`
+	NormalAccounts         int `json:"normalAccounts"`
+	NeedsAttentionAccounts int `json:"needsAttentionAccounts"`
+	QuotaRiskAccounts      int `json:"quotaRiskAccounts"`
+	UnconfirmedAccounts    int `json:"unconfirmedAccounts"`
+	// AtRiskAccounts is the compatibility aggregate of the three non-normal,
+	// non-disabled operator buckets.
 	AtRiskAccounts   int `json:"atRiskAccounts"`
 	WeakAccounts     int `json:"weakAccounts"`
 	TotalAccounts    int `json:"totalAccounts"`
@@ -182,7 +182,8 @@ type SmartResource struct {
 	// RiskAdjustedUnitCapacityRCU is retained for API compatibility. It is the
 	// conservative quota estimate for one newly supplied credential. 401
 	// thresholds are operational risk signals and do not change this value.
-	RiskAdjustedUnitCapacityRCU float64 `json:"riskAdjustedUnitCapacityRcu,omitempty"`
+	RiskAdjustedUnitCapacityRCU    float64 `json:"riskAdjustedUnitCapacityRcu,omitempty"`
+	operatorClassificationObserved bool
 }
 
 type smartUsageBucket struct {
@@ -409,6 +410,9 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			continue
 		}
 		resource.TotalAccounts++
+		if !result.Disabled {
+			resource.EnabledAccounts++
+		}
 		if fileName := strings.TrimSpace(result.FileName); fileName != "" {
 			inspectedFiles[fileName] = struct{}{}
 		}
@@ -515,13 +519,14 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		}
 		capacityItems = append(capacityItems, smartCapacityItem{capacityRCU: capacity, remainingMinutes: remainingMinutes})
 		resource.TotalAccounts++
+		resource.EnabledAccounts++
+		resource.UnconfirmedAccounts++
 		resource.SchedulableAccounts++
 		resource.AvailableAccounts++
 		resource.PendingInspectionAccounts++
 		resource.PendingInspectionCapacityRCU += capacity
 		resource.recordExpiringAccount(remainingMinutes, capacity)
 	}
-	resource.NormalAccounts += resource.PendingInspectionAccounts
 	resource.DisabledAccounts = max(0, resource.TotalAccounts-resource.AvailableAccounts)
 	applySmartAccountCountBreakdown(&resource)
 	resource.PendingInspectionCapacityRCU = round2(resource.PendingInspectionCapacityRCU)
@@ -629,6 +634,14 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 			continue
 		}
 		resource.TotalAccounts++
+		if !file.Disabled {
+			resource.EnabledAccounts++
+			if textField(file.Raw, "status_message", "statusMessage") != "" || smartAccountCapacityHardBlocked(file.Raw) {
+				resource.NeedsAttentionAccounts++
+			} else {
+				resource.UnconfirmedAccounts++
+			}
+		}
 		if !isSmartCapacityCodexFile(file) {
 			resource.DisabledAccounts++
 			continue
@@ -642,8 +655,6 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		// 只用于全局消耗速度，不能折减单凭证余额或可用数量。
 		resource.AvailableAccounts++
 		resource.HealthyAccounts++
-		// The auth-file fallback has no authoritative quota classification. Keep
-		// live ready files normal until a completed inspection can split risk.
 		resource.NormalAccounts++
 		remainingMinutes := smartAccountRemainingMinutes(file.Raw, now, smartAccountLifetimeMinutes())
 		rawCapacity, ok := smartAccountCapacityRCU(file.Raw, unit, remainingMinutes)

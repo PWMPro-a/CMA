@@ -473,6 +473,10 @@ func (s *Store) ListSupplyOrders(ctx context.Context, limit int) ([]SupplyOrder,
 	return s.SupplyOrders.List(ctx, limit)
 }
 
+func (s *Store) ListSupplyOrdersByIDs(ctx context.Context, orderIDs []string) ([]SupplyOrder, error) {
+	return s.SupplyOrders.ListByOrderIDs(ctx, orderIDs)
+}
+
 func (s *Store) ListSupplyOrdersBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]SupplyOrder, error) {
 	return s.SupplyOrders.ListBetween(ctx, fromMS, toMS, limit)
 }

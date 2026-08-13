@@ -122,7 +122,11 @@ export interface SupplySmartResource {
   availableAccounts: number;
   schedulableAccounts: number;
   healthyAccounts: number;
+  enabledAccounts?: number;
   normalAccounts?: number;
+  needsAttentionAccounts?: number;
+  quotaRiskAccounts?: number;
+  unconfirmedAccounts?: number;
   atRiskAccounts?: number;
   weakAccounts: number;
   totalAccounts?: number;
