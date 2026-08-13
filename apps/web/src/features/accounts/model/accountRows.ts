@@ -13,7 +13,7 @@ import {
   getAuthFileSelectionKey,
   type AuthFileCodexStatusSummary,
 } from '@/features/authFiles/model/authFilesPageModel';
-import { resolveCodexPlanType } from '@/utils/quota/resolvers';
+import { resolveCodexPlanType, resolveEffectiveCodexPlanType } from '@/utils/quota/resolvers';
 import {
   compareQuotaResetLabels,
   compareQuotaResets,
@@ -293,7 +293,10 @@ export const buildAccountRows = (
       fileName: file.name,
       accountLabel: resolveAccountLabel(file),
       provider,
-      planType: quota.planType ?? readPlanType(file),
+      planType:
+        provider === 'codex'
+          ? resolveEffectiveCodexPlanType(file, quota.planType)
+          : (quota.planType ?? readPlanType(file)),
       disabled: file.disabled === true,
       runtimeOnly:
         file.runtimeOnly === true || file.runtimeOnly === 'true' || file.runtime_only === true,

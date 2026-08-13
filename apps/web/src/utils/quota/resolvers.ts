@@ -142,3 +142,65 @@ export function resolveCodexPlanType(file: AuthFileItem): string | null {
 
   return null;
 }
+
+const readBoolean = (value: unknown): boolean | null => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  }
+  return null;
+};
+
+export function isCodexPlanTypePinned(file: AuthFileItem): boolean {
+  const metadata =
+    file && typeof file.metadata === 'object' && file.metadata !== null
+      ? (file.metadata as Record<string, unknown>)
+      : null;
+  const attributes =
+    file && typeof file.attributes === 'object' && file.attributes !== null
+      ? (file.attributes as Record<string, unknown>)
+      : null;
+  for (const record of [file as Record<string, unknown>, metadata, attributes]) {
+    if (!record) continue;
+    for (const key of ['codex_plan_type_pinned', 'codexPlanTypePinned']) {
+      if (!(key in record)) continue;
+      return readBoolean(record[key]) === true;
+    }
+  }
+  const planType = normalizePlanType(resolveCodexPlanType(file));
+  if (!planType || planType === 'free') return false;
+  if (
+    [file as Record<string, unknown>, metadata, attributes].some((record) => {
+      if (!record) return false;
+      const format = normalizeStringValue(record.import_format ?? record.importFormat);
+      return format?.toLowerCase() === 'sub2api';
+    })
+  ) {
+    return true;
+  }
+  const tokenCandidates = [file.id_token, metadata?.id_token, attributes?.id_token];
+  return tokenCandidates.some((candidate) => {
+    const payload = parseIdTokenPayload(candidate);
+    const tokenPlan = normalizePlanType(
+      payload?.chatgpt_plan_type ??
+        payload?.chatgptPlanType ??
+        payload?.plan_type ??
+        payload?.planType
+    );
+    return tokenPlan === 'free';
+  });
+}
+
+export function resolveEffectiveCodexPlanType(
+  file: AuthFileItem,
+  observedPlanType: unknown
+): string | null {
+  const filePlanType = normalizePlanType(resolveCodexPlanType(file));
+  if (filePlanType && filePlanType !== 'free' && isCodexPlanTypePinned(file)) {
+    return filePlanType;
+  }
+  return normalizePlanType(observedPlanType) ?? filePlanType;
+}

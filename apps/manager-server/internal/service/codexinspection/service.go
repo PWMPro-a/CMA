@@ -1805,10 +1805,10 @@ func (s *Service) inspectSingleAccount(
 	if payload == nil {
 		payload = parseRecord(response.BodyText)
 	}
-	planType := normalizeCodexPlanType(readString(payload, "plan_type", "planType"))
-	if planType == "" {
-		planType = resolveCodexPlanType(item.File)
-	}
+	planType := resolveEffectiveCodexPlanType(
+		item.File,
+		readString(payload, "chatgpt_plan_type", "chatgptPlanType", "plan_type", "planType"),
+	)
 	rateLimit := parseRateLimit(readMap(payload, "rate_limit", "rateLimit"))
 	usedPercent := deriveRateLimitUsedPercent(rateLimit)
 	bodyLower := strings.ToLower(response.BodyText)
@@ -4274,25 +4274,99 @@ func extractCodexAccountIDFromToken(value any) string {
 func resolveCodexPlanType(file authFile) string {
 	metadata := readMap(file, "metadata")
 	attributes := readMap(file, "attributes")
-	candidates := []any{
+	directCandidates := []any{
+		file["chatgpt_plan_type"],
+		file["chatgptPlanType"],
 		file["plan_type"],
 		file["planType"],
-		extractCodexPlanTypeFromToken(file["id_token"]),
-		readMap(file, "id_token"),
+		metadata["chatgpt_plan_type"],
+		metadata["chatgptPlanType"],
 		metadata["plan_type"],
 		metadata["planType"],
-		extractCodexPlanTypeFromToken(metadata["id_token"]),
-		readMap(metadata, "id_token"),
+		attributes["chatgpt_plan_type"],
+		attributes["chatgptPlanType"],
 		attributes["plan_type"],
 		attributes["planType"],
+	}
+	if planType := preferredCodexPlanType(directCandidates...); planType != "" {
+		return planType
+	}
+	tokenCandidates := []any{
+		extractCodexPlanTypeFromToken(file["id_token"]),
+		readMap(file, "id_token"),
+		extractCodexPlanTypeFromToken(metadata["id_token"]),
+		readMap(metadata, "id_token"),
 		extractCodexPlanTypeFromToken(attributes["id_token"]),
 	}
-	for _, candidate := range candidates {
-		if planType := readCodexPlanTypeCandidate(candidate); planType != "" {
+	return preferredCodexPlanType(tokenCandidates...)
+}
+
+func resolveEffectiveCodexPlanType(file authFile, observed ...string) string {
+	filePlan := resolveCodexPlanType(file)
+	if codexPlanTypePinned(file) && isPaidCodexPlanType(filePlan) {
+		return filePlan
+	}
+	for _, candidate := range observed {
+		if planType := normalizeCodexPlanType(candidate); planType != "" {
 			return planType
 		}
 	}
-	return ""
+	return filePlan
+}
+
+func codexPlanTypePinned(file authFile) bool {
+	metadata := readMap(file, "metadata")
+	attributes := readMap(file, "attributes")
+	for _, record := range []map[string]any{file, metadata, attributes} {
+		if pinned, declared := readBoolPtr(record, "codex_plan_type_pinned", "codexPlanTypePinned"); declared {
+			return pinned != nil && *pinned
+		}
+	}
+	planType := resolveCodexPlanType(file)
+	for _, record := range []map[string]any{file, metadata, attributes} {
+		if strings.EqualFold(readString(record, "import_format", "importFormat"), "sub2api") &&
+			isPaidCodexPlanType(planType) {
+			return true
+		}
+	}
+	if isPaidCodexPlanType(planType) {
+		tokenPlan := preferredCodexPlanType(
+			extractCodexPlanTypeFromToken(file["id_token"]),
+			readMap(file, "id_token"),
+			extractCodexPlanTypeFromToken(metadata["id_token"]),
+			readMap(metadata, "id_token"),
+			extractCodexPlanTypeFromToken(attributes["id_token"]),
+		)
+		// The CPA management payload exposes its runtime-effective paid plan at
+		// the top level while keeping the transient JWT claim separately. Treat
+		// that paid-vs-Free mismatch as the legacy pin marker.
+		if tokenPlan == "free" {
+			return true
+		}
+	}
+	return false
+}
+
+func preferredCodexPlanType(candidates ...any) string {
+	first := ""
+	for _, candidate := range candidates {
+		planType := readCodexPlanTypeCandidate(candidate)
+		if planType == "" {
+			continue
+		}
+		if first == "" {
+			first = planType
+		}
+		if isPaidCodexPlanType(planType) {
+			return planType
+		}
+	}
+	return first
+}
+
+func isPaidCodexPlanType(planType string) bool {
+	planType = normalizeCodexPlanType(planType)
+	return planType != "" && planType != "free"
 }
 
 func extractCodexPlanTypeFromToken(value any) string {
@@ -4311,7 +4385,7 @@ func readCodexPlanTypeCandidate(value any) string {
 	case string:
 		return normalizeCodexPlanType(typed)
 	case map[string]any:
-		return normalizeCodexPlanType(readString(typed, "plan_type", "planType"))
+		return normalizeCodexPlanType(readString(typed, "chatgpt_plan_type", "chatgptPlanType", "plan_type", "planType"))
 	default:
 		return normalizeCodexPlanType(fmt.Sprint(value))
 	}

@@ -255,6 +255,73 @@ func TestRunMarksOnlyRecognizedEmptyCodexQuotaInventory(t *testing.T) {
 	}
 }
 
+func TestResolveEffectiveCodexPlanTypePreservesRuntimePinnedTeam(t *testing.T) {
+	file := authFile{
+		"plan_type":         "team",
+		"chatgpt_plan_type": "team",
+		"id_token": map[string]any{
+			"plan_type": "free",
+		},
+	}
+	if got := resolveEffectiveCodexPlanType(file, "free"); got != "team" {
+		t.Fatalf("effective plan type = %q, want team", got)
+	}
+}
+
+func TestResolveEffectiveCodexPlanTypeHonorsExplicitUnpin(t *testing.T) {
+	file := authFile{
+		"plan_type":              "team",
+		"chatgpt_plan_type":      "team",
+		"codex_plan_type_pinned": false,
+		"id_token":               map[string]any{"plan_type": "free"},
+	}
+	if got := resolveEffectiveCodexPlanType(file, "free"); got != "free" {
+		t.Fatalf("effective plan type = %q, want free", got)
+	}
+}
+
+func TestRunPreservesPinnedTeamWhenQuotaUsageReportsFree(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"files":[{"name":"auth-a.json","auth_index":"auth-1","provider":"codex","account":"alice@example.com","status":"ok","state":"ready","plan_type":"team","chatgpt_plan_type":"team","id_token":{"plan_type":"free"}}]}`))
+		case r.URL.Path == "/v0/management/api-call" && r.Method == http.MethodPost:
+			_, _ = w.Write([]byte(`{"status_code":200,"body":{"plan_type":"free","rate_limit":{"primary_window":{"used_percent":25,"limit_window_seconds":18000},"secondary_window":{"used_percent":40,"limit_window_seconds":604800}}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	db := newCodexInspectionTestStore(t)
+	managerCfg := newCodexInspectionManagerConfig(upstream.URL)
+	managerCfg.CodexInspection.AutoActionMode = model.CodexInspectionAutoActionNone
+	if err := db.SaveManagerConfig(context.Background(), managerCfg); err != nil {
+		t.Fatalf("save manager config: %v", err)
+	}
+	detail, err := newCodexInspectionTestService(t, db).Run(
+		context.Background(),
+		RunRequest{TriggerType: "manual", TriggerKey: "pinned-team-free-probe"},
+	)
+	if err != nil {
+		t.Fatalf("run inspection: %v", err)
+	}
+	if len(detail.Results) != 1 {
+		t.Fatalf("results = %#v, want 1", detail.Results)
+	}
+	result := detail.Results[0]
+	if result.PlanType != "team" {
+		t.Fatalf("plan type = %q, want team", result.PlanType)
+	}
+	windowIDs := make([]string, 0, len(result.QuotaWindows))
+	for _, window := range result.QuotaWindows {
+		windowIDs = append(windowIDs, window.ID)
+	}
+	if !reflect.DeepEqual(windowIDs, []string{"five-hour", "weekly"}) {
+		t.Fatalf("quota windows = %#v, want Team classification", windowIDs)
+	}
+}
+
 func TestBuildCodexInspectionQuotaWindowsKeepsGenericFamiliesDistinct(t *testing.T) {
 	genericWindow := func(usedPercent float64) map[string]any {
 		return map[string]any{

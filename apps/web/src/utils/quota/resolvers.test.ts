@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { resolveCodexChatgptAccountId, resolveCodexPlanType } from './resolvers';
+import {
+  isCodexPlanTypePinned,
+  resolveCodexChatgptAccountId,
+  resolveCodexPlanType,
+  resolveEffectiveCodexPlanType,
+} from './resolvers';
 
 describe('Sub2API Team metadata resolvers', () => {
   it('uses a Team workspace as the quota request identity when account id is absent', () => {
@@ -23,6 +28,31 @@ describe('Sub2API Team metadata resolvers', () => {
         chatgpt_plan_type: 'team',
       })
     ).toBe('team');
+  });
+
+  it('keeps the CPA runtime Team plan when the separately exposed JWT claim is Free', () => {
+    const file = {
+      name: 'sub2-team.json',
+      type: 'codex',
+      plan_type: 'team',
+      chatgpt_plan_type: 'team',
+      id_token: { plan_type: 'free' },
+    };
+    expect(isCodexPlanTypePinned(file)).toBe(true);
+    expect(resolveEffectiveCodexPlanType(file, 'free')).toBe('team');
+  });
+
+  it('lets an explicit unpin adopt a Free quota response', () => {
+    const file = {
+      name: 'codex-unpinned.json',
+      type: 'codex',
+      plan_type: 'team',
+      chatgpt_plan_type: 'team',
+      codex_plan_type_pinned: false,
+      id_token: { plan_type: 'free' },
+    };
+    expect(isCodexPlanTypePinned(file)).toBe(false);
+    expect(resolveEffectiveCodexPlanType(file, 'free')).toBe('free');
   });
 });
 

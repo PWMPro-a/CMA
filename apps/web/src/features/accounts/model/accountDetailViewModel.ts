@@ -12,7 +12,7 @@ import type {
 import type { AuthFileCodexStatusSummary } from '@/features/authFiles/model/authFilesPageModel';
 import { normalizePlanType, parseIdTokenPayload } from '@/utils/quota/parsers';
 import { isValidQuotaResetAtMs } from '@/utils/quota/formatters';
-import { resolveCodexPlanType } from '@/utils/quota/resolvers';
+import { resolveCodexPlanType, resolveEffectiveCodexPlanType } from '@/utils/quota/resolvers';
 import { parseTimestampMs } from '@/utils/timestamp';
 import { sumRecentRequests, type RecentRequestBucket } from '@/utils/recentRequests';
 import type { AccountRow } from './accountRows';
@@ -1049,7 +1049,8 @@ const buildOverviewCredential = (
     return Number.isNaN(new Date(parsed).getTime()) ? null : parsed;
   };
   const effectivePlanType = normalizePlanType(
-    codexQuota?.planType ?? row.planType ?? resolveCodexPlanType(row.raw)
+    resolveEffectiveCodexPlanType(row.raw, codexQuota?.planType ?? row.planType) ??
+      resolveCodexPlanType(row.raw)
   );
   const hasPaidCodexSubscription =
     row.provider === 'codex' && effectivePlanType !== null && effectivePlanType !== 'free';

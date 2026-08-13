@@ -208,6 +208,8 @@ export interface CodexUsagePayload {
   account_id?: string;
   accountId?: string;
   email?: string;
+  chatgpt_plan_type?: string;
+  chatgptPlanType?: string;
   plan_type?: string;
   planType?: string;
   rate_limit?: CodexRateLimitInfo | null;

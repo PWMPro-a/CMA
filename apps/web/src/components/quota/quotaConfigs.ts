@@ -30,7 +30,7 @@ import { QuotaInfoTooltip } from '@/components/quota/QuotaInfoTooltip';
 import {
   normalizePlanType,
   resolveCodexChatgptAccountId,
-  resolveCodexPlanType,
+  resolveEffectiveCodexPlanType,
   formatQuotaResetTime,
   formatKimiResetHint,
   isValidQuotaResetAtMs,
@@ -365,7 +365,7 @@ const getCodexPlanLabel = (planType: string | null | undefined, t: TFunction): s
 };
 
 const getCodexEffectivePlanType = (file: AuthFileItem, quota?: CodexQuotaState): string | null =>
-  quota?.planType ?? resolveCodexPlanType(file) ?? null;
+  resolveEffectiveCodexPlanType(file, quota?.planType);
 
 const getCodexPlanSortRank = (file: AuthFileItem, quota?: CodexQuotaState): number | null => {
   const normalized = normalizePlanType(getCodexEffectivePlanType(file, quota));
@@ -744,7 +744,7 @@ export const buildObservedCodexQuotaState = (
   const recoverAtMS = getHeaderSnapshotRecoverAtMs(snapshot);
   const recoverLabel = recoverAtMS ? new Date(recoverAtMS).toLocaleString() : '-';
   const headerPlanType = observedQuota?.planType || getHeaderSnapshotPlanType(snapshot);
-  const planType = headerPlanType || resolveCodexPlanType(file) || null;
+  const planType = resolveEffectiveCodexPlanType(file, headerPlanType);
   const rawObservedWindows = observedQuota?.payload
     ? buildCodexQuotaWindows(
         observedQuota.payload,

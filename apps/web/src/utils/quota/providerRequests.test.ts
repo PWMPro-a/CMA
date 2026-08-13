@@ -171,6 +171,45 @@ describe('fetchCodexQuota', () => {
     });
   });
 
+  it('keeps a pinned Team plan when the refreshed usage payload temporarily reports Free', async () => {
+    mocks.request
+      .mockResolvedValueOnce({
+        statusCode: 200,
+        hasStatusCode: true,
+        header: {},
+        bodyText: '',
+        body: {
+          plan_type: 'free',
+          rate_limit: {
+            primary_window: { used_percent: 25, limit_window_seconds: 18000 },
+            secondary_window: { used_percent: 40, limit_window_seconds: 604800 },
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        statusCode: 200,
+        hasStatusCode: true,
+        header: {},
+        bodyText: '',
+        body: { available_count: 0, credits: [] },
+      });
+
+    const result = await fetchCodexQuota(
+      {
+        name: 'codex-team.json',
+        type: 'codex',
+        authIndex: 'auth-1',
+        plan_type: 'team',
+        chatgpt_plan_type: 'team',
+        id_token: { plan_type: 'free' },
+      },
+      t
+    );
+
+    expect(result.planType).toBe('team');
+    expect(result.windows.map((window) => window.id)).toEqual(['five-hour', 'weekly']);
+  });
+
   it('marks an explicit rate-limit object as a complete quota inventory', async () => {
     mocks.request
       .mockResolvedValueOnce({

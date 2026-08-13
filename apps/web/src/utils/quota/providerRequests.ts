@@ -64,7 +64,6 @@ import {
 import {
   normalizeAuthIndex,
   normalizeNumberValue,
-  normalizePlanType,
   normalizeStringValue,
   parseAntigravityPayload,
   parseClaudeUsagePayload,
@@ -72,7 +71,11 @@ import {
   parseKimiUsagePayload,
   parseXaiBillingPayload,
 } from './parsers';
-import { resolveCodexChatgptAccountId, resolveCodexPlanType } from './resolvers';
+import {
+  resolveCodexChatgptAccountId,
+  resolveCodexPlanType,
+  resolveEffectiveCodexPlanType,
+} from './resolvers';
 import { buildCodexQuotaWindowInfos } from './codexQuota';
 import {
   buildCodexResetCreditsRequestHeaders,
@@ -493,8 +496,11 @@ export const fetchCodexQuota = async (
     throw new Error(t('codex_quota.empty_windows'));
   }
 
-  const planTypeFromUsage = normalizePlanType(payload.plan_type ?? payload.planType);
-  const planType = planTypeFromUsage ?? planTypeFromFile;
+  const planType =
+    resolveEffectiveCodexPlanType(
+      file,
+      payload.chatgpt_plan_type ?? payload.chatgptPlanType ?? payload.plan_type ?? payload.planType
+    ) ?? planTypeFromFile;
   const observedAtMs = Date.now();
   const windows = buildCodexQuotaWindows(payload, t, planType, observedAtMs);
   const usageResetCreditsAvailableCount = resolveCodexRateLimitResetCreditsAvailableCount(payload);
