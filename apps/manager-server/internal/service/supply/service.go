@@ -6073,7 +6073,11 @@ func normalizeSupplyAccountObject(object map[string]any, exportedAt any) (normal
 	// runtime-limit field (for example max_concurrency) is present.
 	metadata["selection_error_freeze_seconds"] = 0
 	metadata["codex_cli_only"] = true
-	metadata["codex_cli_only_allow_app_server"] = false
+	// Supplier-managed Team credentials serve both official Codex clients and
+	// CPA's already-authenticated gateway path. CLIProxyAPI requires an internal
+	// post-authentication proof before this per-account exception is considered,
+	// so a caller cannot activate it with copied HTTP headers.
+	metadata["codex_cli_only_allow_app_server"] = true
 
 	identity := supplyAccountIdentity(metadata)
 	if identity == "" {

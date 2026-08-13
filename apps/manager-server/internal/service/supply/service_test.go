@@ -1555,7 +1555,7 @@ func TestNormalizeSub2AccountPayloadForCPA(t *testing.T) {
 		result["workspace_id"] != "workspace-1" ||
 		result["expired"] != "2026-07-30T00:00:00Z" || result["max_concurrency"] != float64(8) ||
 		result["selection_error_freeze_seconds"] != float64(0) || result["codex_cli_only"] != true ||
-		result["codex_cli_only_allow_app_server"] != false {
+		result["codex_cli_only_allow_app_server"] != true {
 		t.Fatalf("normalized metadata = %#v", result)
 	}
 	if len(key) != 64 || fileName != "codex-user@example.com.json" {
@@ -1573,7 +1573,7 @@ func TestNormalizeDirectCPAAccountPayloadDisablesSelectionErrorFreeze(t *testing
 		t.Fatalf("decode normalized payload: %v", err)
 	}
 	if result["max_concurrency"] != float64(8) || result["selection_error_freeze_seconds"] != float64(0) ||
-		result["codex_cli_only"] != true || result["codex_cli_only_allow_app_server"] != false {
+		result["codex_cli_only"] != true || result["codex_cli_only_allow_app_server"] != true {
 		t.Fatalf("normalized runtime limits = %#v", result)
 	}
 }
@@ -1883,7 +1883,7 @@ func TestNormalizeSub2BundlePayloadForCPA(t *testing.T) {
 	if first["selection_error_freeze_seconds"] != float64(0) {
 		t.Fatalf("first normalized payload freeze setting = %#v", first)
 	}
-	if first["codex_cli_only"] != true || first["codex_cli_only_allow_app_server"] != false {
+	if first["codex_cli_only"] != true || first["codex_cli_only_allow_app_server"] != true {
 		t.Fatalf("first normalized payload client restriction = %#v", first)
 	}
 	if _, nested := first["credentials"]; nested {
@@ -1905,7 +1905,7 @@ func TestNormalizeSub2BundlePayloadForCPA(t *testing.T) {
 	if second["selection_error_freeze_seconds"] != float64(0) {
 		t.Fatalf("second normalized payload freeze setting = %#v", second)
 	}
-	if second["codex_cli_only"] != true || second["codex_cli_only_allow_app_server"] != false {
+	if second["codex_cli_only"] != true || second["codex_cli_only_allow_app_server"] != true {
 		t.Fatalf("second normalized payload client restriction = %#v", second)
 	}
 }
