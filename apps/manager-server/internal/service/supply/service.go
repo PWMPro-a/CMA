@@ -4409,6 +4409,18 @@ func applyAccountPoolStats(resource *SmartResource, stats accountPoolStats) {
 		resource.NeedsAttentionAccounts = max(0, stats.needsAttention)
 		resource.QuotaRiskAccounts = max(0, stats.quotaRisk)
 		resource.UnconfirmedAccounts = max(0, stats.unconfirmed)
+	} else if stats.liveObserved {
+		// Do not retain the previous inspection split when the current response
+		// has no matching evidence. HealthyAccounts/AvailableAccounts are
+		// capacity-planning values, not an operator classification; carrying
+		// them into the summary makes the pool appear fully normal after an
+		// inspection read failure or while smart mode is disabled.
+		resource.operatorClassificationObserved = false
+		resource.AccountClassificationObserved = false
+		resource.NormalAccounts = 0
+		resource.NeedsAttentionAccounts = 0
+		resource.QuotaRiskAccounts = 0
+		resource.UnconfirmedAccounts = 0
 	}
 	if resource.HealthyAccounts > resource.AvailableAccounts {
 		resource.HealthyAccounts = resource.AvailableAccounts

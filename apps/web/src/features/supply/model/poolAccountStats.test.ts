@@ -62,24 +62,47 @@ describe('resolveSupplyPoolAccountStats', () => {
     });
   });
 
-  it('derives at-risk and disabled counts for an older manager response', () => {
+  it('uses an explicit normal bucket for an older manager response', () => {
     expect(
       resolveSupplyPoolAccountStats(
         resource({
           availableAccounts: 9,
           schedulableAccounts: 14,
           healthyAccounts: 9,
+          normalAccounts: 6,
           totalAccounts: 75,
         }),
         undefined
       )
     ).toEqual({
       schedulable: 14,
-      healthy: 9,
+      healthy: 6,
       needsAttention: undefined,
       quotaRisk: undefined,
       unconfirmed: undefined,
-      atRisk: 5,
+      atRisk: 8,
+      total: 75,
+      disabled: 61,
+    });
+  });
+
+  it('does not display capacity health as normal before classification is observed', () => {
+    expect(
+      resolveSupplyPoolAccountStats(
+        resource({
+          availableAccounts: 14,
+          schedulableAccounts: 14,
+          healthyAccounts: 14,
+          totalAccounts: 75,
+          enabledAccounts: 14,
+          disabledAccounts: 61,
+        }),
+        undefined
+      )
+    ).toMatchObject({
+      schedulable: 14,
+      healthy: undefined,
+      atRisk: 14,
       total: 75,
       disabled: 61,
     });
@@ -103,11 +126,12 @@ describe('resolveSupplyPoolAccountStats', () => {
         undefined
       )
     ).toMatchObject({
-      healthy: 6,
+      healthy: undefined,
       needsAttention: undefined,
       quotaRisk: undefined,
       unconfirmed: undefined,
       disabled: 72,
+      atRisk: 23,
     });
   });
 

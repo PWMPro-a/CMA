@@ -365,9 +365,36 @@ func TestAccountPoolStatsSeparateTotalAvailableHealthyAndDisabled(t *testing.T) 
 	resource := SmartResource{HealthyAccounts: 1, NormalAccounts: 1}
 	applyAccountPoolStats(&resource, stats)
 	if resource.TotalAccounts != 3 || resource.AvailableAccounts != 2 || resource.SchedulableAccounts != 2 ||
-		resource.HealthyAccounts != 1 || resource.WeakAccounts != 1 || resource.AtRiskAccounts != 1 ||
+		resource.HealthyAccounts != 1 || resource.WeakAccounts != 1 || resource.AtRiskAccounts != 2 ||
 		resource.DisabledAccounts != 1 {
 		t.Fatalf("account pool statistics = %#v", resource)
+	}
+}
+
+func TestAccountPoolStatsKeepsPopulationIdentityAcrossLiveAndInspectionBuckets(t *testing.T) {
+	remainingNormal := 10.0
+	remainingRisk := 90.0
+	files := []cpaauthfiles.File{
+		{Name: "normal.json", Provider: "codex", AuthIndex: "normal", Raw: map[string]any{"status": "active"}},
+		{Name: "risk.json", Provider: "codex", AuthIndex: "risk", Raw: map[string]any{"status": "active"}},
+		{Name: "attention.json", Provider: "codex", AuthIndex: "attention", Raw: map[string]any{"status": "active"}},
+		{Name: "disabled.json", Provider: "codex", AuthIndex: "disabled", Disabled: true, Raw: map[string]any{"status": "disabled"}},
+	}
+	results := []store.CodexInspectionResult{
+		{FileName: "normal.json", Provider: "codex", AuthIndex: "normal", Action: "keep", UsedPercent: &remainingNormal},
+		{FileName: "risk.json", Provider: "codex", AuthIndex: "risk", Action: "keep", UsedPercent: &remainingRisk},
+		{FileName: "attention.json", Provider: "codex", AuthIndex: "attention", Action: "reauth"},
+	}
+	stats := accountPoolStatsFromFilesAndInspection(files, results)
+	if stats.total != 4 || stats.enabled != 3 || stats.schedulable != 3 ||
+		stats.normal != 1 || stats.quotaRisk != 1 || stats.needsAttention != 1 || stats.unconfirmed != 0 {
+		t.Fatalf("live/inspection population identity = %#v", stats)
+	}
+	resource := SmartResource{}
+	applyAccountPoolStats(&resource, stats)
+	if resource.NormalAccounts+resource.NeedsAttentionAccounts+resource.QuotaRiskAccounts+
+		resource.UnconfirmedAccounts+resource.DisabledAccounts != resource.TotalAccounts {
+		t.Fatalf("exclusive account identity does not hold: %#v", resource)
 	}
 }
 
@@ -483,6 +510,31 @@ func TestInspectionVerifiedCapacityOverridesMisleadingLiveActiveCount(t *testing
 	if resource.AvailableAccounts != 12 || resource.SchedulableAccounts != 28 ||
 		resource.WeakAccounts != 3 || resource.AtRiskAccounts != 19 || resource.DisabledAccounts != 62 {
 		t.Fatalf("verified pool statistics = %#v", resource)
+	}
+}
+
+func TestApplyAccountPoolStatsClearsStaleOperatorClassificationWithoutEvidence(t *testing.T) {
+	resource := SmartResource{
+		TotalAccounts:                  10,
+		EnabledAccounts:                8,
+		NormalAccounts:                 6,
+		NeedsAttentionAccounts:         1,
+		QuotaRiskAccounts:              1,
+		UnconfirmedAccounts:            0,
+		AccountClassificationObserved:  true,
+		operatorClassificationObserved: true,
+	}
+	applyAccountPoolStats(&resource, accountPoolStats{
+		total:        10,
+		enabled:      8,
+		schedulable:  8,
+		liveObserved: true,
+		// No matching completed inspection evidence.
+	})
+	if resource.AccountClassificationObserved || resource.operatorClassificationObserved ||
+		resource.NormalAccounts != 0 || resource.NeedsAttentionAccounts != 0 ||
+		resource.QuotaRiskAccounts != 0 || resource.UnconfirmedAccounts != 0 {
+		t.Fatalf("stale operator classification was retained: %#v", resource)
 	}
 }
 

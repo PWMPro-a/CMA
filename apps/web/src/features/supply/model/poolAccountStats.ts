@@ -24,9 +24,20 @@ export const resolveSupplyPoolAccountStats = (
   const available = finiteNonNegative(resource?.availableAccounts ?? fallbackAvailable);
   const schedulable = finiteNonNegative(resource?.schedulableAccounts) ?? available;
   const classificationObserved = resource?.accountClassificationObserved === true;
+  const legacyNormal = finiteNonNegative(resource?.normalAccounts);
   const healthy = classificationObserved
     ? finiteNonNegative(resource?.normalAccounts) ?? finiteNonNegative(resource?.healthyAccounts)
-    : finiteNonNegative(resource?.healthyAccounts) ?? finiteNonNegative(resource?.normalAccounts);
+    // `healthyAccounts` is an inspection-backed capacity count. It can be
+    // larger than the credential page's normal bucket (for example, a
+    // recently cooling or low-quota credential can still contribute usable
+    // capacity). Never present that planning value as a normal account when
+    // the matching classification snapshot is absent.
+    // A zero bucket is what the manager emits while it has no matching
+    // inspection evidence. Treat it as unknown rather than rendering
+    // `0 normal` or falling back to the capacity-planning count.
+    : legacyNormal !== undefined && legacyNormal > 0
+      ? legacyNormal
+      : undefined;
   const needsAttention = classificationObserved
     ? finiteNonNegative(resource?.needsAttentionAccounts)
     : undefined;
@@ -39,8 +50,10 @@ export const resolveSupplyPoolAccountStats = (
   const atRisk =
     explicitAtRisk ??
     finiteNonNegative(resource?.atRiskAccounts) ??
-    (schedulable !== undefined && healthy !== undefined
-      ? Math.max(0, schedulable - healthy)
+    (resource && schedulable !== undefined
+      ? healthy !== undefined
+        ? Math.max(0, schedulable - healthy)
+        : schedulable
       : undefined);
   const total = finiteNonNegative(resource?.totalAccounts) ?? schedulable;
   const enabled = finiteNonNegative(resource?.enabledAccounts);
