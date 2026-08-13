@@ -13,6 +13,7 @@ describe('resolveSupplyPoolAccountStats', () => {
           availableAccounts: 7,
           schedulableAccounts: 13,
           healthyAccounts: 8,
+          accountClassificationObserved: true,
           normalAccounts: 7,
           atRiskAccounts: 6,
           totalAccounts: 75,
@@ -40,6 +41,7 @@ describe('resolveSupplyPoolAccountStats', () => {
           schedulableAccounts: 17,
           healthyAccounts: 14,
           enabledAccounts: 14,
+          accountClassificationObserved: true,
           normalAccounts: 9,
           needsAttentionAccounts: 2,
           quotaRiskAccounts: 3,
@@ -80,6 +82,32 @@ describe('resolveSupplyPoolAccountStats', () => {
       atRisk: 5,
       total: 75,
       disabled: 61,
+    });
+  });
+
+  it('does not treat unobserved zero-valued operator buckets as a classification', () => {
+    expect(
+      resolveSupplyPoolAccountStats(
+        resource({
+          availableAccounts: 6,
+          schedulableAccounts: 23,
+          healthyAccounts: 6,
+          normalAccounts: 0,
+          needsAttentionAccounts: 0,
+          quotaRiskAccounts: 0,
+          unconfirmedAccounts: 0,
+          totalAccounts: 95,
+          enabledAccounts: 23,
+          disabledAccounts: 72,
+        }),
+        undefined
+      )
+    ).toMatchObject({
+      healthy: 6,
+      needsAttention: undefined,
+      quotaRisk: undefined,
+      unconfirmed: undefined,
+      disabled: 72,
     });
   });
 

@@ -382,9 +382,11 @@ func TestAccountPoolStatsMatchesCredentialStatusBuckets(t *testing.T) {
 		{Name: "disabled.json", Provider: "codex", AuthIndex: "disabled", Disabled: true, Raw: map[string]any{"status": "disabled", "disabled": true}},
 	}
 	results := []store.CodexInspectionResult{
-		{FileName: "normal.json", Provider: "codex", AuthIndex: "normal", AccountSnapshot: "normal@example.com", Action: "keep", Status: "active", UsedPercent: &remainingNormal},
-		{FileName: "attention.json", Provider: "codex", AuthIndex: "attention", AccountSnapshot: "attention@example.com", Action: "reauth", Status: "active", StatusCode: intPtr(http.StatusUnauthorized)},
-		{FileName: "risk.json", Provider: "codex", AuthIndex: "risk", AccountSnapshot: "risk@example.com", Action: "keep", Status: "active", UsedPercent: &remainingRisk},
+		// CPA may omit account_id while the inspection result retains it. The
+		// stable auth_index must still join the same credential.
+		{FileName: "normal.json", Provider: "codex", AuthIndex: "normal", AccountID: "acct-normal", AccountSnapshot: "normal@example.com", Action: "keep", Status: "active", UsedPercent: &remainingNormal},
+		{FileName: "attention.json", Provider: "codex", AuthIndex: "attention", AccountID: "acct-attention", AccountSnapshot: "attention@example.com", Action: "reauth", Status: "active", StatusCode: intPtr(http.StatusUnauthorized)},
+		{FileName: "risk.json", Provider: "codex", AuthIndex: "risk", AccountID: "acct-risk", AccountSnapshot: "risk@example.com", Action: "keep", Status: "active", UsedPercent: &remainingRisk},
 	}
 	stats := accountPoolStatsFromFilesAndInspection(files, results)
 	resource := SmartResource{}
@@ -429,6 +431,23 @@ func TestAccountPoolStatsDoesNotMatchAmbiguousFileOnlyInspection(t *testing.T) {
 	stats := accountPoolStatsFromFilesAndInspection(files, results)
 	if stats.normal != 0 || stats.quotaRisk != 0 || stats.needsAttention != 0 || stats.unconfirmed != 2 {
 		t.Fatalf("ambiguous inspection classification = %#v", stats)
+	}
+}
+
+func TestAccountPoolStatsJoinsInspectionByAuthIndexWhenCPAOmitsAccountID(t *testing.T) {
+	remaining := 10.0
+	files := []cpaauthfiles.File{{
+		Name: "team.json", Provider: "codex", AuthIndex: "auth-team",
+		AccountSnapshot: "team@example.com", Raw: map[string]any{"status": "active"},
+	}}
+	results := []store.CodexInspectionResult{{
+		FileName: "team.json", Provider: "codex", AuthIndex: "auth-team",
+		AccountID: "account-from-inspection", AccountSnapshot: "team@example.com",
+		Action: "keep", Status: "active", UsedPercent: &remaining,
+	}}
+	stats := accountPoolStatsFromFilesAndInspection(files, results)
+	if stats.normal != 1 || stats.unconfirmed != 0 || stats.needsAttention != 0 || stats.quotaRisk != 0 {
+		t.Fatalf("auth-index identity join = %#v", stats)
 	}
 }
 

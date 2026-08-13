@@ -645,31 +645,9 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	// auth-file cache so the ten-second dashboard poll does not scan the whole
 	// pool on every request.
 	if cpaManagementConfigured(cfg) {
-		authCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		snapshot, snapshotErr := s.cachedAuthFiles(authCtx, cfg, false)
-		cancel()
-		if snapshotErr == nil || len(snapshot.files) > 0 {
+		poolStats, poolStatsErr := s.countAccountPoolStatsWithInspection(ctx, cfg, resource)
+		if poolStatsErr == nil || poolStats.liveObserved {
 			inspectedAvailable := resource.AvailableAccounts
-			poolStats := accountPoolStatsFromFiles(snapshot.files)
-			inspectionCtx, inspectionCancel := context.WithTimeout(ctx, 2*time.Second)
-			inspectionSnapshot, inspectionErr := s.cachedInspectionQuotaSnapshot(inspectionCtx, cfg.Supply, false)
-			inspectionCancel()
-			if inspectionErr == nil && inspectionSnapshot.run.ID > 0 &&
-				inspectionSnapshot.run.ID == resource.CapacitySnapshotRunID {
-				poolStats = accountPoolStatsFromFilesAndInspection(snapshot.files, inspectionSnapshot.results)
-			} else if resource.CapacitySource == smartCapacitySourceInspection &&
-				resource.CapacitySnapshotRunID > 0 {
-				// The live file set is still authoritative for population counts, but
-				// an unavailable or mismatched inspection must not reuse the prior
-				// normal/risk split. Mark every enabled file as unconfirmed until
-				// evidence from the same completed run is available.
-				poolStats.classificationObserved = true
-				poolStats.normal = 0
-				poolStats.needsAttention = 0
-				poolStats.quotaRisk = 0
-				poolStats.unconfirmed = poolStats.enabled
-			}
-			poolStats = reconcileAccountPoolStatsWithInspection(poolStats, resource)
 			applyAccountPoolStats(&resource, poolStats)
 			if reconcileSmartCapacityWithAccountPool(&resource, inspectedAvailable) {
 				recalculateSmartResourceCapacityPlan(cfg.Supply, &resource)
@@ -2243,12 +2221,11 @@ func (s *Service) refreshOverview(ctx context.Context, cfg store.ManagerConfig, 
 		if err != nil {
 			return err
 		}
-		poolStats, err := s.countAccountPoolStats(ctx, cfg)
+		poolStats, err := s.countAccountPoolStatsWithInspection(ctx, cfg, resource)
 		if err != nil {
 			return err
 		}
 		inspectedAvailable := resource.AvailableAccounts
-		poolStats = reconcileAccountPoolStatsWithInspection(poolStats, resource)
 		applyAccountPoolStats(&resource, poolStats)
 		if reconcileSmartCapacityWithAccountPool(&resource, inspectedAvailable) {
 			recalculateSmartResourceCapacityPlan(cfg.Supply, &resource)
@@ -4129,6 +4106,7 @@ func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerC
 }
 
 type accountPoolStats struct {
+	files                  []cpaauthfiles.File
 	total                  int
 	enabled                int
 	schedulable            int
@@ -4154,8 +4132,53 @@ func (s *Service) countAccountPoolStats(ctx context.Context, cfg store.ManagerCo
 	return accountPoolStatsFromFiles(files), err
 }
 
+// countAccountPoolStatsWithInspection deliberately has one population source
+// and one evidence source. The current CPA auth-file set defines total,
+// enabled, disabled and schedulable; only inspection results from the same
+// completed run as the capacity snapshot may define normal/risk buckets.
+// This keeps GetStatus, manual checks and the worker on the same accounting
+// contract instead of allowing one path to reuse an older split.
+func (s *Service) countAccountPoolStatsWithInspection(
+	ctx context.Context,
+	cfg store.ManagerConfig,
+	resource SmartResource,
+) (accountPoolStats, error) {
+	if strings.TrimSpace(cfg.CPAConnection.CPABaseURL) == "" || strings.TrimSpace(cfg.CPAConnection.ManagementKey) == "" {
+		return accountPoolStats{}, errors.New("CPA connection is not configured")
+	}
+	authCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	snapshot, liveErr := s.cachedAuthFiles(authCtx, cfg, false)
+	cancel()
+	if liveErr != nil && len(snapshot.files) == 0 {
+		return accountPoolStats{}, liveErr
+	}
+	stats := accountPoolStatsFromFiles(snapshot.files)
+	if !stats.liveObserved {
+		return stats, liveErr
+	}
+	if resource.CapacitySource != smartCapacitySourceInspection || resource.CapacitySnapshotRunID <= 0 {
+		return stats, liveErr
+	}
+	inspectionCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	inspectionSnapshot, inspectionErr := s.cachedInspectionQuotaSnapshot(inspectionCtx, cfg.Supply, false)
+	cancel()
+	if inspectionErr == nil && inspectionSnapshot.run.ID == resource.CapacitySnapshotRunID {
+		stats = accountPoolStatsFromFilesAndInspection(stats.files, inspectionSnapshot.results)
+		return reconcileAccountPoolStatsWithInspection(stats, resource), liveErr
+	}
+	// The live population remains useful even when the matching evidence is
+	// not readable yet. Do not let a prior run make new or changed credentials
+	// look normal; expose them as unconfirmed until the matching run is loaded.
+	stats.classificationObserved = true
+	stats.normal = 0
+	stats.needsAttention = 0
+	stats.quotaRisk = 0
+	stats.unconfirmed = stats.enabled
+	return reconcileAccountPoolStatsWithInspection(stats, resource), liveErr
+}
+
 func accountPoolStatsFromFiles(files []cpaauthfiles.File) accountPoolStats {
-	stats := accountPoolStats{liveObserved: true}
+	stats := accountPoolStats{files: files, liveObserved: true}
 	for _, file := range files {
 		if !isCodexAuthFile(file) {
 			continue
@@ -4263,18 +4286,44 @@ func inspectionResultMatchesAuthFile(result store.CodexInspectionResult, file cp
 		return false
 	}
 	resultAuthIndex := strings.TrimSpace(result.AuthIndex)
-	if resultAuthIndex != "" && resultAuthIndex != strings.TrimSpace(file.AuthIndex) {
-		return false
+	fileAuthIndex := strings.TrimSpace(file.AuthIndex)
+	// CPA's auth-files response does not expose account_id for every Codex
+	// credential. auth_index is the stable credential identity in that case,
+	// so an account-id value present only in the inspection row must not make an
+	// otherwise exact auth-index match look unconfirmed.
+	if resultAuthIndex != "" {
+		if fileAuthIndex == "" || resultAuthIndex != fileAuthIndex {
+			return false
+		}
+		if resultAccountID := strings.TrimSpace(result.AccountID); resultAccountID != "" {
+			if fileAccountID := strings.TrimSpace(file.AccountID); fileAccountID != "" && fileAccountID != resultAccountID {
+				return false
+			}
+		}
+		if resultSnapshot := directOperatorAccountSnapshot(result.FileName, result.AccountSnapshot); resultSnapshot != "" {
+			if fileSnapshot := directOperatorAccountSnapshot(file.Name, file.AccountSnapshot); fileSnapshot != "" && fileSnapshot != resultSnapshot {
+				return false
+			}
+		}
+		return true
 	}
 	resultAccountID := strings.TrimSpace(result.AccountID)
 	if resultAccountID != "" {
-		return resultAccountID == strings.TrimSpace(file.AccountID)
+		fileAccountID := strings.TrimSpace(file.AccountID)
+		if fileAccountID != "" {
+			return resultAccountID == fileAccountID
+		}
 	}
 	resultSnapshot := directOperatorAccountSnapshot(result.FileName, result.AccountSnapshot)
 	if resultSnapshot != "" {
-		return resultSnapshot == directOperatorAccountSnapshot(file.Name, file.AccountSnapshot)
+		fileSnapshot := directOperatorAccountSnapshot(file.Name, file.AccountSnapshot)
+		if fileSnapshot != "" {
+			return resultSnapshot == fileSnapshot
+		}
 	}
-	return resultAuthIndex != "" || allowFileOnly
+	// An identity that exists only in the inspection database cannot be safely
+	// assigned to a live file unless the filename is unique in the caller.
+	return allowFileOnly
 }
 
 func normalizeOperatorAccountProvider(value string) string {
@@ -4355,6 +4404,7 @@ func applyAccountPoolStats(resource *SmartResource, stats accountPoolStats) {
 	}
 	if stats.classificationObserved {
 		resource.operatorClassificationObserved = true
+		resource.AccountClassificationObserved = true
 		resource.NormalAccounts = max(0, stats.normal)
 		resource.NeedsAttentionAccounts = max(0, stats.needsAttention)
 		resource.QuotaRiskAccounts = max(0, stats.quotaRisk)
@@ -4514,12 +4564,11 @@ func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.Mana
 	if resource == nil {
 		return 0, 0, "", false, nil
 	}
-	poolStats, err := s.countAccountPoolStats(ctx, cfg)
+	poolStats, err := s.countAccountPoolStatsWithInspection(ctx, cfg, *resource)
 	if err != nil {
 		return 0, 0, "", false, err
 	}
 	inspectedAvailable := resource.AvailableAccounts
-	poolStats = reconcileAccountPoolStatsWithInspection(poolStats, *resource)
 	applyAccountPoolStats(resource, poolStats)
 	if reconcileSmartCapacityWithAccountPool(resource, inspectedAvailable) {
 		recalculateSmartResourceCapacityPlan(cfg.Supply, resource)

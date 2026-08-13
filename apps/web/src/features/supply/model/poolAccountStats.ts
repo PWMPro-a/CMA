@@ -23,11 +23,15 @@ export const resolveSupplyPoolAccountStats = (
 ): SupplyPoolAccountStats => {
   const available = finiteNonNegative(resource?.availableAccounts ?? fallbackAvailable);
   const schedulable = finiteNonNegative(resource?.schedulableAccounts) ?? available;
-  const healthy =
-    finiteNonNegative(resource?.normalAccounts) ?? finiteNonNegative(resource?.healthyAccounts);
-  const needsAttention = finiteNonNegative(resource?.needsAttentionAccounts);
-  const quotaRisk = finiteNonNegative(resource?.quotaRiskAccounts);
-  const unconfirmed = finiteNonNegative(resource?.unconfirmedAccounts);
+  const classificationObserved = resource?.accountClassificationObserved === true;
+  const healthy = classificationObserved
+    ? finiteNonNegative(resource?.normalAccounts) ?? finiteNonNegative(resource?.healthyAccounts)
+    : finiteNonNegative(resource?.healthyAccounts) ?? finiteNonNegative(resource?.normalAccounts);
+  const needsAttention = classificationObserved
+    ? finiteNonNegative(resource?.needsAttentionAccounts)
+    : undefined;
+  const quotaRisk = classificationObserved ? finiteNonNegative(resource?.quotaRiskAccounts) : undefined;
+  const unconfirmed = classificationObserved ? finiteNonNegative(resource?.unconfirmedAccounts) : undefined;
   const explicitAtRisk =
     needsAttention !== undefined && quotaRisk !== undefined && unconfirmed !== undefined
       ? needsAttention + quotaRisk + unconfirmed

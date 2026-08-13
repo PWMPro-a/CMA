@@ -683,6 +683,7 @@ export function SupplyPage() {
   const balance = overview?.balance;
   const smart = status?.smartResource;
   const poolAccounts = resolveSupplyPoolAccountStats(smart, overview?.cpaAvailable);
+  const poolClassificationObserved = smart?.accountClassificationObserved === true;
   const automation = status?.automation;
   const recovery = status?.recovery;
   const autoSupplyEnabled = status?.config?.enabled ?? draft.enabled ?? false;
@@ -1368,14 +1369,14 @@ export function SupplyPage() {
         </div>
         <div className={styles.poolSummaryItem}>
           <span>{t('supply.pool_attention_accounts')}</span>
-          <strong>{formatInteger(poolAccounts.needsAttention)}</strong>
+          <strong>{poolClassificationObserved ? formatInteger(poolAccounts.needsAttention) : '-'}</strong>
           <small>
             {t('supply.pool_attention_accounts_hint')}
           </small>
         </div>
         <div className={styles.poolSummaryItem}>
           <span>{t('supply.pool_quota_risk_accounts')}</span>
-          <strong>{formatInteger(poolAccounts.quotaRisk)}</strong>
+          <strong>{poolClassificationObserved ? formatInteger(poolAccounts.quotaRisk) : '-'}</strong>
           <small>
             {t('supply.pool_quota_risk_accounts_hint')}
           </small>
@@ -1387,7 +1388,7 @@ export function SupplyPage() {
         </div>
         <div className={styles.poolSummaryItem}>
           <span>{t('supply.pool_unconfirmed_accounts')}</span>
-          <strong>{formatInteger(poolAccounts.unconfirmed)}</strong>
+          <strong>{poolClassificationObserved ? formatInteger(poolAccounts.unconfirmed) : '-'}</strong>
           <small>{t('supply.pool_unconfirmed_accounts_hint')}</small>
         </div>
       </section>
@@ -2106,6 +2107,7 @@ export function SupplyPage() {
                   <div>
                     <h2>{t('supply.accounts_title')}</h2>
                     <p>{t('supply.accounts_hint')}</p>
+                    <span className={styles.statusPill}>{t('supply.account_scope_ledger')}</span>
                   </div>
                   <div className={styles.heroSummary}>
                     <SegmentedTabs<ReportRangePreset>

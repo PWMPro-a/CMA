@@ -80,11 +80,12 @@ type SmartResource struct {
 	// EnabledAccounts and the four operator buckets below mirror the credential
 	// page's exclusive account summary. They are reconciled from the current CPA
 	// files plus the latest completed inspection and never drive capacity math.
-	EnabledAccounts        int `json:"enabledAccounts"`
-	NormalAccounts         int `json:"normalAccounts"`
-	NeedsAttentionAccounts int `json:"needsAttentionAccounts"`
-	QuotaRiskAccounts      int `json:"quotaRiskAccounts"`
-	UnconfirmedAccounts    int `json:"unconfirmedAccounts"`
+	EnabledAccounts               int  `json:"enabledAccounts"`
+	AccountClassificationObserved bool `json:"accountClassificationObserved"`
+	NormalAccounts                int  `json:"normalAccounts"`
+	NeedsAttentionAccounts        int  `json:"needsAttentionAccounts"`
+	QuotaRiskAccounts             int  `json:"quotaRiskAccounts"`
+	UnconfirmedAccounts           int  `json:"unconfirmedAccounts"`
 	// AtRiskAccounts is the compatibility aggregate of the three non-normal,
 	// non-disabled operator buckets.
 	AtRiskAccounts   int `json:"atRiskAccounts"`

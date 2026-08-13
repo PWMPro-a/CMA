@@ -123,6 +123,7 @@ export interface SupplySmartResource {
   schedulableAccounts: number;
   healthyAccounts: number;
   enabledAccounts?: number;
+  accountClassificationObserved?: boolean;
   normalAccounts?: number;
   needsAttentionAccounts?: number;
   quotaRiskAccounts?: number;
