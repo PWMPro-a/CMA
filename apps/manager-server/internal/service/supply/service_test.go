@@ -343,13 +343,13 @@ func TestEmergencyRetryNextIntervalHonorsShortCooldown(t *testing.T) {
 		wantMax time.Duration
 	}{
 		{
-			name: "cancelled order waits for remaining retry cooldown",
+			name: "cancelled order wakes the next retry immediately",
 			order: store.SupplyOrder{
 				OrderID: "cancelled-recent", Product: "oauth_30d", Automatic: true,
 				Status: "cancelled", CompletedAtMS: now.Add(-4 * time.Second).UnixMilli(),
 			},
-			wantMin: 5 * time.Second,
-			wantMax: 7 * time.Second,
+			wantMin: 500 * time.Millisecond,
+			wantMax: 1500 * time.Millisecond,
 		},
 		{
 			name: "cancelled order retries promptly after cooldown",
@@ -397,7 +397,7 @@ func TestEmergencyRetryNextIntervalHonorsShortCooldown(t *testing.T) {
 	}
 }
 
-func TestEmergencyRetryBacksOffAfterZeroDeliveryBurst(t *testing.T) {
+func TestEmergencyRetryWakesAfterZeroDeliveryBurst(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "supply-retry-burst.sqlite"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -434,8 +434,27 @@ func TestEmergencyRetryBacksOffAfterZeroDeliveryBurst(t *testing.T) {
 	})
 
 	interval := service.NextInterval(ctx)
-	if interval < 110*time.Second || interval > 125*time.Second {
-		t.Fatalf("burst retry interval = %s, want about two minutes", interval)
+	if interval < 500*time.Millisecond || interval > 1500*time.Millisecond {
+		t.Fatalf("burst retry interval = %s, want immediate retry", interval)
+	}
+}
+
+func TestAutomaticRetryLadderQuantityKeepsTheOriginalBase(t *testing.T) {
+	tests := []struct {
+		base     int
+		failures int
+		want     int
+	}{
+		{base: 10, failures: 1, want: 5},
+		{base: 10, failures: 2, want: 2},
+		{base: 10, failures: 3, want: 1},
+		{base: 21, failures: 1, want: 11},
+		{base: 21, failures: 2, want: 5},
+	}
+	for _, tt := range tests {
+		if got := automaticRetryLadderQuantity(tt.base, tt.failures); got != tt.want {
+			t.Errorf("ladder(%d, %d) = %d, want %d", tt.base, tt.failures, got, tt.want)
+		}
 	}
 }
 
@@ -506,8 +525,8 @@ func TestAutomaticParallelCreateBlocksAfterZeroDeliveryBurst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parallel burst guard: %v", err)
 	}
-	if !blocked {
-		t.Fatal("parallel order creation should be blocked after repeated zero-delivery attempts")
+	if blocked {
+		t.Fatal("parallel order creation must keep the bounded competition window open after cancellations")
 	}
 }
 
@@ -2012,6 +2031,75 @@ func TestOrderConflictIsPersistedAsCancelled(t *testing.T) {
 	order, found, err := st.GetSupplyOrder(context.Background(), "order-cancelled")
 	if err != nil || !found || order.Status != "cancelled" || order.CompletedAtMS == 0 {
 		t.Fatalf("order=%#v found=%v err=%v", order, found, err)
+	}
+}
+
+func TestAutomaticCancelledOrderImmediatelyCreatesNextLadderRung(t *testing.T) {
+	var createQuantity atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/pickup/orders/order-cancelled":
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"message":"order cancelled"}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":100,"missing":0,"estimated_total_fen":100}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
+		case r.URL.Path == "/api/customer/pickup/orders" && r.Method == http.MethodPost:
+			var request struct {
+				Quantity int `json:"quantity"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("decode replacement create request: %v", err)
+			}
+			createQuantity.Store(int32(request.Quantity))
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"order":{"id":"replacement-1","status":"waiting_inventory","quantity":5,"retry_after_seconds":60}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "cancelled-immediate-retry.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	smartDisabled := false
+	ctx := context.Background()
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, SmartEnabled: &smartDisabled,
+			BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_7d",
+			TargetAvailableAccounts: 20, ReplenishBatchSize: 10,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "order-cancelled", Product: "oauth_7d", RequestedQuantity: 10,
+		Automatic: true, Status: "waiting_inventory",
+	}); err != nil {
+		t.Fatalf("create cancelled seed order: %v", err)
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	if err := service.RunAutomatic(ctx); err != nil {
+		t.Fatalf("automatic retry after cancellation: %v", err)
+	}
+	if got := createQuantity.Load(); got != 5 {
+		t.Fatalf("replacement quantity = %d, want 5 immediately after the cancelled 10-order", got)
+	}
+	orders, err := st.ListOpenSupplyOrders(ctx, 10)
+	if err != nil || len(orders) != 1 || orders[0].OrderID != "replacement-1" || orders[0].RequestedQuantity != 5 {
+		t.Fatalf("replacement open orders = %#v err=%v", orders, err)
 	}
 }
 
