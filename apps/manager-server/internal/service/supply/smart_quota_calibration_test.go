@@ -49,6 +49,26 @@ func TestSmartQuotaCalibrationLearnsIdentityAndPlanCapacity(t *testing.T) {
 	}
 }
 
+func TestNormalizeSmartQuotaFractionTreatsSubOneValuesAsPercent(t *testing.T) {
+	for _, tt := range []struct {
+		value float64
+		want  float64
+	}{
+		{value: 0.5, want: 0.005},
+		{value: 1, want: 0.01},
+		{value: 50, want: 0.5},
+		{value: 100, want: 1},
+	} {
+		got, ok := normalizeSmartQuotaFraction(tt.value)
+		if !ok || got != tt.want {
+			t.Fatalf("normalize quota percent %.2f = %.6f/%v, want %.6f/true", tt.value, got, ok, tt.want)
+		}
+	}
+	if _, ok := normalizeSmartQuotaFraction(100.01); ok {
+		t.Fatal("quota percentage above 100 must be rejected")
+	}
+}
+
 func TestSmartResourceUsesRuntimeQuotaCalibration(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Second)

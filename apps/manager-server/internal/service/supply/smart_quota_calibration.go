@@ -62,16 +62,15 @@ func newSmartQuotaCalibrationState() smartQuotaCalibrationState {
 }
 
 func normalizeSmartQuotaFraction(value float64) (float64, bool) {
-	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 100 {
 		return 0, false
 	}
-	if value > 1 {
-		value /= 100
-	}
-	if value > 1 {
-		return 0, false
-	}
-	return clampFloat(value, 0, 1), true
+	// x-cpa-quota-used-percent is stored as a percentage in the inclusive
+	// 0..100 range. Values below one are fractional percentages (for example
+	// 0.5 means 0.5%), not already-normalized fractions. Treating 0.5 as 50%
+	// gives those early-window samples 100x weight and collapses the inferred
+	// account capacity.
+	return value / 100, true
 }
 
 func smartQuotaCalibrationEventIdentity(event usage.Event) string {
