@@ -122,7 +122,8 @@ export interface AccountRow {
   createdAtMs: number | null;
   updatedAtMs: number | null;
   expiresAtMs?: number | null;
-  concurrency?: number | null;
+  /** Number of requests currently in flight for this account. */
+  currentConcurrency?: number | null;
   quota: AccountQuotaSummary;
   usage: AccountUsageSummary;
   inspection: AccountInspectionSummary | null;
@@ -217,13 +218,16 @@ const readAccountExpiryAtMs = (file: AuthFileItem): number | null => {
   return null;
 };
 
-const readAccountConcurrency = (file: AuthFileItem): number | null => {
+const readAccountCurrentConcurrency = (file: AuthFileItem): number | null => {
   for (const value of [
-    file['max_concurrency'],
-    file['maxConcurrency'],
-    file['concurrency'],
-    file['concurrency_limit'],
-    file['concurrencyLimit'],
+    file['runtime_current_concurrency'],
+    file['runtimeCurrentConcurrency'],
+    file['current_concurrency'],
+    file['currentConcurrency'],
+    file['active_requests'],
+    file['activeRequests'],
+    file['in_flight_requests'],
+    file['inFlightRequests'],
   ]) {
     const parsed = readNumber(value);
     if (parsed !== null && parsed >= 0) return Math.floor(parsed);
@@ -352,7 +356,7 @@ export const buildAccountRows = (
       createdAtMs: readAuthFileCreatedAtMs(file),
       updatedAtMs: readAuthFileUpdatedAtMs(file),
       expiresAtMs: expiryByFileName?.get(file.name) ?? readAccountExpiryAtMs(file),
-      concurrency: readAccountConcurrency(file),
+      currentConcurrency: readAccountCurrentConcurrency(file),
       quota,
       usage: buildUsageSummary(file),
       inspection:

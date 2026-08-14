@@ -61,7 +61,7 @@ const buildAccountRows = (
 ) => buildAccountRowsBase(files, scopeTestQuotaStores(files, stores), inspectionResults, overrides);
 
 describe('accountRows', () => {
-  it('exposes supplier expiry and configured concurrency', () => {
+  it('exposes supplier expiry and runtime current concurrency', () => {
     const expiresAtMs = Date.now() + 45 * 60_000;
     const [row] = buildAccountRows(
       [
@@ -69,21 +69,30 @@ describe('accountRows', () => {
           name: 'supply.json',
           type: 'codex',
           supply_lease_expires_at_ms: expiresAtMs,
+          runtime_current_concurrency: 3,
           max_concurrency: 8,
         },
       ],
       emptyStores()
     );
     expect(row.expiresAtMs).toBe(expiresAtMs);
-    expect(row.concurrency).toBe(8);
+    expect(row.currentConcurrency).toBe(3);
   });
 
-  it('preserves zero max concurrency as the unlimited sentinel', () => {
+  it('preserves zero runtime current concurrency as an idle value', () => {
     const [row] = buildAccountRows(
-      [{ name: 'unlimited.json', type: 'codex', max_concurrency: 0 }],
+      [{ name: 'idle.json', type: 'codex', runtime_current_concurrency: 0, max_concurrency: 8 }],
       emptyStores()
     );
-    expect(row.concurrency).toBe(0);
+    expect(row.currentConcurrency).toBe(0);
+  });
+
+  it('does not use max concurrency as the current request count', () => {
+    const [row] = buildAccountRows(
+      [{ name: 'limit-only.json', type: 'codex', max_concurrency: 0 }],
+      emptyStores()
+    );
+    expect(row.currentConcurrency).toBeNull();
   });
 
   it('normalizes Codex quota usage into remaining percent and risk status', () => {

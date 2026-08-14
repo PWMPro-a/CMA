@@ -119,6 +119,9 @@ export interface AuthFileItem {
   geminiVirtualProject?: string;
   recent_requests?: RecentRequestBucket[];
   recentRequests?: RecentRequestBucket[];
+  /** Number of requests currently in flight for this runtime credential. */
+  runtime_current_concurrency?: number;
+  runtimeCurrentConcurrency?: number;
   codex_quota_snapshots?: Record<string, CodexQuotaSnapshot>;
   codexQuotaSnapshots?: Record<string, CodexQuotaSnapshot>;
   agent_identity_registration?: AgentIdentityRegistrationStatus;

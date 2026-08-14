@@ -1112,6 +1112,37 @@ describe('AccountsPage replacement flows', () => {
     expect(mocks.loadFiles).toHaveBeenCalledTimes(2);
   });
 
+  it('shows the runtime in-flight request count instead of the max concurrency limit', async () => {
+    mocks.files = [
+      {
+        ...makeCodexFile('active.json', 'auth-active', 'active@example.com'),
+        runtime_current_concurrency: 3,
+        max_concurrency: 0,
+      },
+    ];
+
+    const renderer = await renderAccountsPage();
+    const badges = renderer.root.findAll(
+      (node) => node.type === 'div' && node.props.title === 'accounts.account_concurrency_hint'
+    );
+
+    expect(badges).toHaveLength(1);
+    expect(readText(badges[0])).toBe('accounts.account_concurrency3');
+  });
+
+  it('silently refreshes runtime concurrency while the account list is visible', async () => {
+    vi.useFakeTimers();
+    await renderAccountsPage();
+    expect(mocks.loadFiles).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+
+    expect(mocks.loadFiles).toHaveBeenCalledTimes(2);
+    expect(mocks.loadFiles).toHaveBeenLastCalledWith({ silent: true });
+  });
+
   it('clears quota snapshot state and ignores a late query from the previous connection', async () => {
     const file = {
       ...makeCodexFile('codex.json', 'auth-1', 'codex@example.com'),

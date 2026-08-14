@@ -274,6 +274,7 @@ type QuotaSetter<T> = (updater: QuotaUpdater<Record<string, T>>) => void;
 const MAX_CONCURRENT_QUOTA_REFRESHES_PER_PROVIDER = 1;
 const MAX_CONCURRENT_QUOTA_REFRESH_PROVIDERS = 3;
 const PASSIVE_HEADER_SNAPSHOT_REFRESH_MS = 60_000;
+const PASSIVE_RUNTIME_CONCURRENCY_REFRESH_MS = 5_000;
 
 const isCodexHeaderQuotaLimitSnapshot = (snapshot: UsageHeaderSnapshot | undefined): boolean => {
   const usedPercent = getHeaderSnapshotUsedPercent(snapshot);
@@ -988,6 +989,18 @@ export function AccountsPage() {
   useEffect(() => {
     void loadFiles();
   }, [connectionFingerprint, loadFiles]);
+
+  // CPA exposes the in-flight request count on the auth-file list. Keep this
+  // lightweight, silent refresh separate from quota and supply refreshes so
+  // the account cards reflect live activity without touching request routing.
+  useInterval(
+    () => {
+      void loadFiles({ silent: true });
+    },
+    activeView === 'accounts' && documentVisible && !loading
+      ? PASSIVE_RUNTIME_CONCURRENCY_REFRESH_MS
+      : null
+  );
 
   useEffect(() => {
     if (activeView === 'accounts') return;
@@ -4234,24 +4247,20 @@ export function AccountsPage() {
                   <div className={styles.accountHealthMetaRow}>
                     <div
                       className={`${styles.accountConcurrencyBadge} ${
-                        row.concurrency !== null &&
-                        row.concurrency !== undefined &&
-                        row.concurrency > 0
+                        row.currentConcurrency !== null &&
+                        row.currentConcurrency !== undefined &&
+                        row.currentConcurrency > 0
                           ? styles.accountConcurrencyBadgeConfigured
                           : styles.accountConcurrencyBadgeDefault
                       }`}
                       title={
-                        row.concurrency === 0
-                          ? t('accounts.max_concurrency_hint')
-                          : t('accounts.account_concurrency')
+                        row.currentConcurrency === null || row.currentConcurrency === undefined
+                          ? t('accounts.account_concurrency_unknown')
+                          : t('accounts.account_concurrency_hint')
                       }
                     >
                       <span>{t('accounts.account_concurrency')}</span>
-                      <strong>
-                        {row.concurrency === 0
-                          ? t('accounts.account_concurrency_unlimited')
-                          : (row.concurrency ?? t('accounts.account_concurrency_default'))}
-                      </strong>
+                      <strong>{row.currentConcurrency ?? '—'}</strong>
                     </div>
                     <span
                       className={
