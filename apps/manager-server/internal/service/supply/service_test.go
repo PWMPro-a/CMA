@@ -456,6 +456,14 @@ func TestAccountPoolStatsKeepsPopulationIdentityAcrossLiveAndInspectionBuckets(t
 		stats.normal != 1 || stats.quotaRisk != 1 || stats.needsAttention != 1 || stats.unconfirmed != 0 {
 		t.Fatalf("live/inspection population identity = %#v", stats)
 	}
+	if got := stats.operatorAvailable(99); got != 1 {
+		t.Fatalf("operator overview count = %d, want normal bucket 1", got)
+	}
+	unclassifiedStats := stats
+	unclassifiedStats.classificationObserved = false
+	if got := unclassifiedStats.operatorAvailable(99); got != 3 {
+		t.Fatalf("unclassified operator overview count = %d, want live schedulable 3", got)
+	}
 	resource := SmartResource{}
 	applyAccountPoolStats(&resource, stats)
 	if resource.NormalAccounts+resource.NeedsAttentionAccounts+resource.QuotaRiskAccounts+

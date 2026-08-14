@@ -52,7 +52,12 @@ const (
 )
 
 type Overview struct {
-	CheckedAtMS  int64                   `json:"checkedAtMs,omitempty"`
+	CheckedAtMS int64 `json:"checkedAtMs,omitempty"`
+	// CPAAvailable is the operator-facing normal account count. Capacity
+	// planning has its own SmartResource.AvailableAccounts field; exposing
+	// that stricter capacity count here made the legacy overview disagree with
+	// the credential-management metrics (for example 9 normal vs 14 verified
+	// capacity accounts).
 	CPAAvailable int                     `json:"cpaAvailable"`
 	CPATarget    int                     `json:"cpaTarget"`
 	CPADeficit   int                     `json:"cpaDeficit"`
@@ -654,6 +659,7 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	// many Codex credentials currently exist and are enabled. Reuse the short
 	// auth-file cache so the ten-second dashboard poll does not scan the whole
 	// pool on every request.
+	overviewAvailable := -1
 	if cpaManagementConfigured(cfg) {
 		poolStats, poolStatsErr := s.countAccountPoolStatsWithInspection(ctx, cfg, resource)
 		if poolStatsErr == nil || poolStats.liveObserved {
@@ -664,6 +670,7 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 			}
 			s.reconcileSmartAccountPoolGuard(cfg.Supply, &resource)
 			applySmartAccountQuantityEstimate(cfg.Supply, &resource)
+			overviewAvailable = poolStats.operatorAvailable(resource.SchedulableAccounts)
 		}
 	}
 	retryPlan, err := s.applySmartEmergencyRetryPlan(ctx, cfg.Supply, &resource)
@@ -715,6 +722,9 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	overview := s.overview
 	running := s.running
 	s.stateMu.RUnlock()
+	if overviewAvailable >= 0 {
+		overview.CPAAvailable = overviewAvailable
+	}
 	overview.CPATarget = cfg.Supply.TargetAvailableAccounts
 	if overview.CPATarget > overview.CPAAvailable {
 		overview.CPADeficit = overview.CPATarget - overview.CPAAvailable
@@ -1535,8 +1545,8 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	if manualQuantity == 0 {
 		if useSmart {
 			if reason := s.automaticSupplyGuardReason(resource); reason != "" {
-	resource.EmergencyShortage = false
-			resource.EmergencyReason = ""
+				resource.EmergencyShortage = false
+				resource.EmergencyReason = ""
 				resource.SuggestedAction = smartActionSnapshotStale
 				resource.SuggestedQuantity = 0
 				resource.DecisionReason = reason
@@ -2261,7 +2271,10 @@ func (s *Service) refreshOverview(ctx context.Context, cfg store.ManagerConfig, 
 		}
 		applySmartAccountQuantityEstimate(cfg.Supply, &resource)
 		s.setSmartResource(resource)
-		available = resource.AvailableAccounts
+		// The overview is an operator-facing account summary. Keep it aligned
+		// with the credential page instead of exposing the stricter inspection
+		// capacity count used by smart replenishment.
+		available = poolStats.operatorAvailable(resource.SchedulableAccounts)
 	} else {
 		var err error
 		available, err = s.countAvailableAccounts(ctx, cfg)
@@ -4408,6 +4421,22 @@ func (stats accountPoolStats) capacityAvailable(fallback int) int {
 	return max(0, stats.schedulable)
 }
 
+// operatorAvailable is deliberately separate from capacityAvailable. The
+// former mirrors the credential-management "normally available" bucket; the
+// latter is the conservative inspection-backed population used by the supply
+// planner. A missing classification snapshot falls back to the live
+// schedulable count rather than pretending that capacity health is an
+// operator classification.
+func (stats accountPoolStats) operatorAvailable(fallback int) int {
+	if stats.classificationObserved {
+		return max(0, stats.normal)
+	}
+	if stats.liveObserved {
+		return max(0, stats.schedulable)
+	}
+	return max(0, fallback)
+}
+
 func reconcileAccountPoolStatsWithInspection(stats accountPoolStats, resource SmartResource) accountPoolStats {
 	if resource.CapacitySource != smartCapacitySourceInspection || resource.CapacitySnapshotAtMS <= 0 ||
 		resource.TotalAccounts < stats.total {
@@ -4614,22 +4643,25 @@ func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.Mana
 	if reconcileSmartCapacityWithAccountPool(resource, inspectedAvailable) {
 		recalculateSmartResourceCapacityPlan(cfg.Supply, resource)
 	}
-	available := resource.AvailableAccounts
+	capacityAvailable := resource.AvailableAccounts
+	// The first return value only updates the operator overview; every guard and
+	// replenishment decision below remains based on verified capacity.
+	operatorAvailable := poolStats.operatorAvailable(resource.SchedulableAccounts)
 	if !smartSupplyStrategyConfigured(cfg.Supply) || !smartEmergencyBypassUsageRate(cfg.Supply) {
-		return available, 0, "", true, nil
+		return operatorAvailable, 0, "", true, nil
 	}
 	healthyFloorShortage := smartHealthyFloorShortageEnabled(cfg.Supply) && resource.ConsumeRCUPerMinute > 0 && resource.SnapshotFresh &&
 		resource.CapacitySource == smartCapacitySourceInspection
-	if !healthyFloorShortage && available > smartCriticalAvailableAccounts(cfg.Supply) {
+	if !healthyFloorShortage && capacityAvailable > smartCriticalAvailableAccounts(cfg.Supply) {
 		s.clearPoolVacuum()
-		return available, 0, "", true, nil
+		return operatorAvailable, 0, "", true, nil
 	}
-	if !healthyFloorShortage && available >= smartCriticalAvailableAccounts(cfg.Supply) && resource.ConsumeRCUPerMinute <= 0 {
+	if !healthyFloorShortage && capacityAvailable >= smartCriticalAvailableAccounts(cfg.Supply) && resource.ConsumeRCUPerMinute <= 0 {
 		s.clearPoolVacuum()
-		return available, 0, "", true, nil
+		return operatorAvailable, 0, "", true, nil
 	}
 	if healthyFloorShortage &&
-		available >= smartHealthyAvailableAccounts(cfg.Supply) {
+		capacityAvailable >= smartHealthyAvailableAccounts(cfg.Supply) {
 		s.clearPoolVacuum()
 		if resource.EmergencyReason == "critical_available_accounts" || resource.EmergencyReason == "emergency_pool_vacuum" ||
 			resource.EmergencyReason == "healthy_available_accounts" {
@@ -4650,11 +4682,11 @@ func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.Mana
 				}
 			}
 		}
-		return available, 0, "", true, nil
+		return operatorAvailable, 0, "", true, nil
 	}
 	if healthyFloorShortage &&
-		available > smartCriticalAvailableAccounts(cfg.Supply) {
-		quantity := min(smartReplenishBatchLimit(cfg.Supply), smartHealthyAvailableAccounts(cfg.Supply)-available)
+		capacityAvailable > smartCriticalAvailableAccounts(cfg.Supply) {
+		quantity := min(smartReplenishBatchLimit(cfg.Supply), smartHealthyAvailableAccounts(cfg.Supply)-capacityAvailable)
 		resource.EmergencyShortage = true
 		resource.EmergencyReason = "healthy_available_accounts"
 		resource.HealthLevel = smartHealthCritical
@@ -4663,10 +4695,10 @@ func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.Mana
 		resource.SuggestedQuantity = max(resource.SuggestedQuantity, quantity)
 		applySmartAccountQuantityEstimate(cfg.Supply, resource)
 		applySmartRefillProjection(cfg.Supply, resource)
-		return available, quantity, "healthy_available_accounts", true, nil
+		return operatorAvailable, quantity, "healthy_available_accounts", true, nil
 	}
 	applySmartEmergencyAvailability(cfg.Supply, resource, time.Now())
-	if available <= 0 {
+	if capacityAvailable <= 0 {
 		startedAtMS := s.beginPoolVacuum()
 		resource.PoolVacuumActive = true
 		resource.PoolVacuumStartedAtMS = startedAtMS
@@ -4677,15 +4709,15 @@ func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.Mana
 		resource.PoolVacuumStartedAtMS = 0
 		resource.PoolVacuumDurationSeconds = 0
 	}
-	quantity := smartEmergencyRefillQuantity(cfg.Supply, available)
+	quantity := smartEmergencyRefillQuantity(cfg.Supply, capacityAvailable)
 	if resource.ConsumeRCUPerMinute <= 0 {
-		quantity = smartIdleEmergencyRefillQuantity(cfg.Supply, available)
+		quantity = smartIdleEmergencyRefillQuantity(cfg.Supply, capacityAvailable)
 	}
 	reason := resource.DecisionReason
 	if reason == "" {
 		reason = "critical_available_accounts"
 	}
-	return available, quantity, reason, true, nil
+	return operatorAvailable, quantity, reason, true, nil
 }
 
 func (s *Service) beginPoolVacuum() int64 {
