@@ -349,7 +349,8 @@ func TestSmartResourceExcludesInspectionErrorUntilUsabilityIsVerified(t *testing
 		t.Fatalf("an inspection error must pause automation until availability is verified: %#v", resource)
 	}
 	if resource.TotalAccounts != 2 || resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 ||
-		resource.DisabledAccounts != 1 || resource.WeakAccounts != 0 || resource.RawCapacityRCU != 2200 {
+		resource.DisabledAccounts != 1 || resource.WeakAccounts != 0 || resource.RawCapacityRCU != 250 ||
+		resource.RawCapacityTokenM != 10 {
 		t.Fatalf("only the successfully verified credential may contribute capacity: %#v", resource)
 	}
 }
@@ -397,8 +398,8 @@ func TestSmartResourceUsesVerifiedLowerBoundDuringIncompleteInspection(t *testin
 func TestSmartResourceRetainsWarningPlanForRecentPartialInspectionCapacityDeficit(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Second)
-	// 78.32M tokens/minute on oauth_7d is 1,958 RCU/minute. Twenty-two
-	// verified credentials have 48,400 RCU, so the lower bound supports
+	// 8.9M tokens/minute on oauth_7d is 222.5 RCU/minute. Twenty-two
+	// verified credentials have 220M tokens, so the lower bound supports
 	// about 24.7 minutes: below the 25-minute warning water and below the
 	// 40-minute health target. This is the regression case where the UI previously
 	// showed capacity unknown and a suggested quantity of zero.
@@ -407,7 +408,7 @@ func TestSmartResourceRetainsWarningPlanForRecentPartialInspectionCapacityDefici
 			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
 			Provider:    "codex",
 			AuthIndex:   "verified.json",
-			TotalTokens: 78_320_000,
+			TotalTokens: 8_900_000,
 		}}, now)
 	}
 	unused := 0.0
@@ -443,7 +444,7 @@ func TestSmartResourceRetainsWarningPlanForRecentPartialInspectionCapacityDefici
 		resource.DecisionReason != "inspection_usability_incomplete_capacity_deficit" || resource.SuggestedQuantity != 3 {
 		t.Fatalf("recent partial inspection must retain warning capacity plan: %#v", resource)
 	}
-	if resource.CurrentCapacityRCU <= 48_000 || resource.EstimatedSustainMinutes >= float64(resource.WarningMinutes) ||
+	if resource.CurrentCapacityTokenM != 220 || resource.EstimatedSustainMinutes >= float64(resource.WarningMinutes) ||
 		resource.EstimatedSustainMinutes >= float64(resource.EffectiveHealthyMinutes) || !smartPartialInspectionCapacityDeficitAllowed(resource) {
 		t.Fatalf("plan must use only the recent verified capacity lower bound: %#v", resource)
 	}
@@ -667,8 +668,8 @@ func TestEmergencyCapacityGapRefillsToHealthyWaterline(t *testing.T) {
 	}
 	resource := defaultSmartResource(cfg)
 	resource.SnapshotFresh = true
-	resource.CurrentCapacityRCU = 23_342
-	resource.ConsumeRCUPerMinute = 1_291.27
+	resource.CurrentCapacityRCU = 800
+	resource.ConsumeRCUPerMinute = 40
 	resource.DemandTrend = smartDemandTrendStable
 
 	recalculateSmartResourceCapacityPlan(cfg, &resource)
@@ -676,8 +677,8 @@ func TestEmergencyCapacityGapRefillsToHealthyWaterline(t *testing.T) {
 	if !resource.EmergencyShortage || resource.SuggestedQuantity != 16 {
 		t.Fatalf("emergency healthy-water refill = %#v, want 16 accounts", resource)
 	}
-	if resource.CapacityGapRCU < 47_670 || resource.CapacityGapRCU > 47_690 {
-		t.Fatalf("capacity gap = %.2f, want about 47678 RCU", resource.CapacityGapRCU)
+	if resource.CapacityGapRCU != 1_400 || resource.CapacityGapTokenM != 112 {
+		t.Fatalf("capacity gap = %.2f RCU / %.2fM, want 1400 RCU / 112M", resource.CapacityGapRCU, resource.CapacityGapTokenM)
 	}
 	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); got != 16 {
 		t.Fatalf("create quantity = %d, want 16", got)
@@ -897,7 +898,8 @@ func TestSmartResourceUsesPersistedSupplyLeaseForCapacity(t *testing.T) {
 	if !resource.SnapshotFresh || resource.CapacityLifetimeCoverage != 100 {
 		t.Fatalf("active supply lease should be a usable snapshot: %#v", resource)
 	}
-	if resource.RawCapacityRCU != 400 || resource.CurrentCapacityRCU != 5 {
+	if resource.RawCapacityRCU != 125 || resource.CurrentCapacityRCU != 5 ||
+		resource.RawCapacityTokenM != 10 || resource.CurrentCapacityTokenM != 0.4 {
 		t.Fatalf("capacity must use the remaining five-minute lease rather than an account count: %#v", resource)
 	}
 }
@@ -918,8 +920,9 @@ func TestSmartResourceUsesLiveQuotaProbeAfterSupplyLeaseExpires(t *testing.T) {
 		generatedAt: now,
 	}, now)
 
-	if !resource.SnapshotFresh || resource.CapacityLifetimeCoverage != 0 || resource.RawCapacityRCU != 4_400 ||
-		resource.CurrentCapacityRCU != 4_400 || resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 || resource.WeakAccounts != 0 {
+	if !resource.SnapshotFresh || resource.CapacityLifetimeCoverage != 100 || resource.RawCapacityRCU != 125 ||
+		resource.CurrentCapacityRCU != 125 || resource.RawCapacityTokenM != 10 || resource.CurrentCapacityTokenM != 10 ||
+		resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 || resource.WeakAccounts != 0 {
 		t.Fatalf("a current successful quota probe must retain capacity after the delivery lease expires: %#v", resource)
 	}
 }
@@ -1622,8 +1625,8 @@ func TestSmartResourceUsesLifetimeCapacityForFallbackAccounts(t *testing.T) {
 		NewAccountConfidence: 0.7,
 	}, authFileSnapshot{generatedAt: now, files: files}, now)
 
-	if resource.RawCapacityRCU != 24000 {
-		t.Fatalf("fallback capacity should include the one-hour lifetime, got %#v", resource)
+	if resource.RawCapacityRCU != 2500 || resource.RawCapacityTokenM != 100 {
+		t.Fatalf("fallback capacity should use the conservative 10M quota per account, got %#v", resource)
 	}
 	if resource.HealthLevel != smartHealthHealthy || resource.SuggestedQuantity != 0 {
 		t.Fatalf("steady low burn should not recommend excessive replenishment, got %#v", resource)
@@ -1962,13 +1965,14 @@ func Test401ChurnThresholdsDoNotChangeQuotaCapacityOrPoolWaterline(t *testing.T)
 		AccountMaxUsefulSeconds401:  120,
 		NewAccountConfidence:        0.7,
 	}
-	if got := smartEstimatedNewAccountCapacityRCU(cfg); got != 3_080 {
+	resource := defaultSmartResource(cfg)
+	if got := smartEstimatedNewAccountCapacityForResource(cfg, resource); got != 87.5 {
 		t.Fatalf("new-account conservative quota capacity = %f", got)
 	}
 	otherThresholds := cfg
 	otherThresholds.AccountMaxRequestsBefore401 = 50
 	otherThresholds.AccountMaxUsefulSeconds401 = 180
-	if got := smartEstimatedNewAccountCapacityRCU(otherThresholds); got != 3_080 {
+	if got := smartEstimatedNewAccountCapacityForResource(otherThresholds, defaultSmartResource(otherThresholds)); got != 87.5 {
 		t.Fatalf("401 warning thresholds must not change quota capacity, got %f", got)
 	}
 	if got := smartEffectiveHealthyMinutesTarget(cfg); got != 55 {
@@ -1976,6 +1980,36 @@ func Test401ChurnThresholdsDoNotChangeQuotaCapacityOrPoolWaterline(t *testing.T)
 	}
 	if got := smartEffectiveHealthyMinutesTarget(otherThresholds); got != 55 {
 		t.Fatalf("401 warning thresholds must not change pool waterline, got %d", got)
+	}
+}
+
+func TestMillionTokenRunwayUsesSameCapacityAndDemandDimension(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Product:              "oauth_7d",
+		HealthyMinutesTarget: 55,
+		WarningMinutes:       27,
+		CriticalMinutes:      13,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   100,
+		ReplenishBatchSize:   100,
+		NewAccountConfidence: 0.7,
+	}
+	resource := defaultSmartResource(cfg)
+	resource.CurrentCapacityRCU = smartTokenMillionToRCU(57.2, resource.UnitCapacityRCU)
+	resource.RawCapacityRCU = resource.CurrentCapacityRCU
+	resource.TimeLimitedCapacityRCU = resource.CurrentCapacityRCU
+	resource.ConsumeRCUPerMinute = smartTokenMillionToRCU(7.94, resource.UnitCapacityRCU)
+	resource.DemandPlanningRCUPerMinute = resource.ConsumeRCUPerMinute
+	resource.DemandTrend = smartDemandTrendStable
+
+	recalculateSmartResourceCapacityPlan(cfg, &resource)
+
+	if resource.CurrentCapacityTokenM != 57.2 || resource.ConsumeTokenMPerMinute != 7.94 ||
+		resource.EstimatedSustainMinutes != 7.2 {
+		t.Fatalf("million-token runway mismatch: %#v", resource)
+	}
+	if resource.HealthLevel != smartHealthCritical || !resource.EmergencyShortage || resource.CapacityGapTokenM <= 0 {
+		t.Fatalf("7.2-minute runway must be a visible capacity emergency: %#v", resource)
 	}
 }
 
@@ -2052,7 +2086,8 @@ func Test401AgeDoesNotEraseVerifiedAccountQuotaCapacity(t *testing.T) {
 	if resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 || resource.WeakAccounts != 0 {
 		t.Fatalf("401 churn warning must not change account health counts: %#v", resource)
 	}
-	if resource.RawCapacityRCU != 2_200 || resource.CurrentCapacityRCU != 2_200 {
+	if resource.RawCapacityRCU != 250 || resource.CurrentCapacityRCU != 250 ||
+		resource.RawCapacityTokenM != 10 || resource.CurrentCapacityTokenM != 10 {
 		t.Fatalf("a fresh successful inspection must retain verified quota capacity: %#v", resource)
 	}
 }
@@ -2074,9 +2109,9 @@ func TestStrongSupplyUsesQuotaCapacityForPlanning(t *testing.T) {
 	resource.AvailableAccounts = 21
 	resource.SchedulableAccounts = 21
 	resource.HealthyAccounts = 21
-	resource.RequestDemandRCUPerMinute = 149
-	resource.ConsumeRCUPerMinute = 391.62
-	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	resource.RequestDemandRCUPerMinute = 20
+	resource.ConsumeRCUPerMinute = 42.5
+	unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
 	resource.RiskAdjustedUnitCapacityRCU = unit
 	resource.CurrentCapacityRCU = float64(resource.AvailableAccounts) * unit
 	resource.DemandTrend = smartDemandTrendStable
@@ -2117,20 +2152,20 @@ func TestStrongSupplyRunwayUsesActualPoolQuotaInsteadOfRequestThreshold(t *testi
 	resource.AvailableAccounts = 38
 	resource.SchedulableAccounts = 38
 	resource.HealthyAccounts = 38
-	resource.RawCapacityRCU = 45_380.8
-	resource.CurrentCapacityRCU = 45_380.8
-	resource.TimeLimitedCapacityRCU = 45_380.8
-	resource.ConsumeRCUPerMinute = 1_028.6
-	resource.RequestDemandRCUPerMinute = 274
+	resource.RawCapacityRCU = smartTokenMillionToRCU(57.2, resource.UnitCapacityRCU)
+	resource.CurrentCapacityRCU = resource.RawCapacityRCU
+	resource.TimeLimitedCapacityRCU = resource.RawCapacityRCU
+	resource.ConsumeRCUPerMinute = smartTokenMillionToRCU(7.94, resource.UnitCapacityRCU)
+	resource.RequestDemandRCUPerMinute = 50
 	resource.DemandTrend = smartDemandTrendStable
 
 	recalculateSmartResourceCapacityPlan(cfg, &resource)
 
-	if resource.CurrentCapacityRCU != 45_380.8 || resource.EstimatedSustainMinutes != 44.1 {
+	if resource.CurrentCapacityTokenM != 57.2 || resource.ConsumeTokenMPerMinute != 7.94 || resource.EstimatedSustainMinutes != 7.2 {
 		t.Fatalf("actual quota runway was altered by 401 thresholds: %#v", resource)
 	}
-	if resource.HealthLevel != smartHealthWarning || resource.SuggestedQuantity != 4 ||
-		resource.EstimatedRequiredAccounts != 42 || resource.AccountQuantityDeficit != 4 {
+	if resource.HealthLevel != smartHealthCritical || resource.SuggestedQuantity != 10 ||
+		resource.EstimatedRequiredAccounts != 93 || resource.AccountQuantityDeficit != 55 {
 		t.Fatalf("38-account quota plan = %#v", resource)
 	}
 }
@@ -2264,7 +2299,7 @@ func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *t
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if createQuantity.Load() != 5 {
+	if createQuantity.Load() != 10 {
 		t.Fatalf("quota-capacity shortage should create one healthy-floor batch, quantity=%d", createQuantity.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
@@ -2276,7 +2311,7 @@ func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *t
 		status.SmartResource.DecisionReason != "emergency_capacity_shortage" {
 		t.Fatalf("smart resource = %#v", status.SmartResource)
 	}
-	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "emergency_refill_to_healthy" || status.Orders[0].RequestedQuantity != 5 {
+	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "emergency_refill_to_healthy" || status.Orders[0].RequestedQuantity != 10 {
 		t.Fatalf("staged order = %#v", status.Orders)
 	}
 }
@@ -2342,7 +2377,7 @@ func TestSmartAutomaticUsesQuotaSizedBatchWhenSupplyIsScarce(t *testing.T) {
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if createQuantity.Load() != 5 {
+	if createQuantity.Load() != 10 {
 		t.Fatalf("scarce supply must still use the healthy-floor batch, quantity=%d", createQuantity.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
@@ -2354,7 +2389,7 @@ func TestSmartAutomaticUsesQuotaSizedBatchWhenSupplyIsScarce(t *testing.T) {
 		status.SmartResource.DecisionReason != "emergency_capacity_shortage" {
 		t.Fatalf("smart resource = %#v", status.SmartResource)
 	}
-	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "emergency_refill_to_healthy" || status.Orders[0].RequestedQuantity != 5 {
+	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "emergency_refill_to_healthy" || status.Orders[0].RequestedQuantity != 10 {
 		t.Fatalf("staged scarce order = %#v", status.Orders)
 	}
 }
@@ -2972,11 +3007,11 @@ func TestSmartEmergencyShortageOverridesTrendObservation(t *testing.T) {
 	}
 	recalculateSmartResourceCapacityPlan(cfg, &falling)
 	if !falling.EmergencyShortage || falling.SuggestedAction != smartActionEmergencyReplenish ||
-		falling.DecisionReason != "emergency_capacity_shortage" || falling.SuggestedQuantity != 1 {
+		falling.DecisionReason != "emergency_capacity_shortage" || falling.SuggestedQuantity != 3 {
 		t.Fatalf("falling emergency should bypass observation: %#v", falling)
 	}
-	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, falling); got != 1 {
-		t.Fatalf("falling emergency quantity=%d, want 1", got)
+	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, falling); got != 3 {
+		t.Fatalf("falling emergency quantity=%d, want 3", got)
 	}
 	if got, reason := smartPrelockQuantityForSupplyPressure(cfg, falling, smartSupplyPressure{level: smartSupplyPressurePlenty}, 10); got != 5 || reason != "emergency_refill_to_healthy" {
 		t.Fatalf("capacity emergency pressure adjustment=%d/%q, want healthy refill", got, reason)

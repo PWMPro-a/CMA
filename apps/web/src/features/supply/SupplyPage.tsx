@@ -235,11 +235,11 @@ const formatSeconds = (value?: number) => {
   return `${value.toFixed(0)}s`;
 };
 
-const formatRcu = (value?: number, digits = 1) =>
-  typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(digits)} RCU` : '-';
+const formatTokenM = (value?: number, digits = 1) =>
+  typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(digits)} M` : '-';
 
-const formatRcuRate = (value?: number) =>
-  typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)} RCU/min` : '-';
+const formatTokenMRate = (value?: number) =>
+  typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)} M/min` : '-';
 
 const formatMinutes = (value?: number) => {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return '-';
@@ -781,9 +781,23 @@ export function SupplyPage() {
     smart?.configuredHealthyMinutesTarget ??
     smart?.healthyMinutesTarget ??
     draft.healthyMinutesTarget;
+  const tokenUnit = Math.max(1, smart?.unitCapacityRcu ?? 40);
+  const rcuToTokenM = (value?: number) =>
+    typeof value === 'number' && Number.isFinite(value) ? (value * tokenUnit) / 1000 : undefined;
+  const currentCapacityTokenM =
+    smart?.currentCapacityTokenM ?? rcuToTokenM(smart?.currentCapacityRcu);
+  const targetCapacityTokenM =
+    smart?.targetCapacityTokenM ?? rcuToTokenM(smart?.targetCapacityRcu);
+  const capacityGapTokenM = smart?.capacityGapTokenM ?? rcuToTokenM(smart?.capacityGapRcu);
+  const rawCapacityTokenM =
+    smart?.rawCapacityTokenM ?? rcuToTokenM(smart?.rawCapacityRcu ?? smart?.currentCapacityRcu);
+  const expiryWasteRiskTokenM =
+    smart?.expiryWasteRiskTokenM ?? rcuToTokenM(smart?.expiryWasteRiskRcu ?? 0);
+  const consumeTokenMPerMinute =
+    smart?.consumeTokenMPerMinute ?? rcuToTokenM(smart?.consumeRcuPerMinute);
   const capacityPercent = smart
     ? clampPercent(
-        ((smart.currentCapacityRcu ?? 0) / Math.max(1, smart.targetCapacityRcu ?? 1)) * 100
+        ((currentCapacityTokenM ?? 0) / Math.max(0.001, targetCapacityTokenM ?? 0.001)) * 100
       )
     : 0;
   const snapshotLabel = t(snapshotLabelKey(smart), {
@@ -1204,10 +1218,10 @@ export function SupplyPage() {
       return [
         {
           label: t('supply.effective_capacity_1h'),
-          value: formatRcu(smart?.currentCapacityRcu),
+          value: formatTokenM(currentCapacityTokenM),
           detail: t('supply.raw_capacity_waste_detail', {
-            raw: formatNumber(smart?.rawCapacityRcu ?? smart?.currentCapacityRcu),
-            waste: formatNumber(smart?.expiryWasteRiskRcu ?? 0),
+            raw: formatNumber(rawCapacityTokenM),
+            waste: formatNumber(expiryWasteRiskTokenM ?? 0),
             minutes: smart?.accountLifetimeMinutes ?? 60,
             accounts: formatInteger(smart?.expiringAccounts ?? 0),
             next: formatMinutes(smart?.expiringWithinMinutes),
@@ -1217,12 +1231,12 @@ export function SupplyPage() {
         },
         {
           label: t('supply.consume_rate'),
-          value: formatRcuRate(smart?.consumeRcuPerMinute),
+          value: formatTokenMRate(consumeTokenMPerMinute),
           detail: t('supply.consume_rate_detail', {
             rpm: formatNumber(smart?.rpm30m),
-            tpm: formatNumber(smart?.tpm30m, 0),
+            tpm: formatTokenM(smart?.observedTokenM30m ?? (smart?.tpm30m ?? 0) / 1_000_000, 2),
             request: formatNumber(smart?.requestDemandRcuPerMinute),
-            token: formatNumber(smart?.tokenDemandRcuPerMinute),
+            token: formatTokenMRate(consumeTokenMPerMinute),
             driver: t(`supply.demand_driver_${smart?.demandDriver || 'none'}`),
           }),
           icon: <IconTrendingUp size={18} />,
@@ -1291,11 +1305,15 @@ export function SupplyPage() {
     ];
   }, [
     balance,
+    consumeTokenMPerMinute,
+    currentCapacityTokenM,
     draft.healthyMinutesTarget,
     draft.smartEnabled,
     draft.targetAvailableAccounts,
+    expiryWasteRiskTokenM,
     inventory,
     overview,
+    rawCapacityTokenM,
     smart,
     t,
   ]);
@@ -1344,7 +1362,7 @@ export function SupplyPage() {
         ),
       },
     ],
-    [accounts?.summary?.total, activeOrder, orderCount, recoveryCount, t]
+    [accounts?.summary?.total, activeOrders.length, orderCount, recoveryCount, t]
   );
   const reportRangeItems = useMemo<SegmentedTabItem<ReportRangePreset>[]>(
     () =>
@@ -1531,19 +1549,19 @@ export function SupplyPage() {
                   <div className={styles.demandMetricGrid}>
                     <div>
                       <span>{t('supply.demand_actual_1m')}</span>
-                      <strong>{formatRcuRate(smart?.consumeRcu1m)}</strong>
+                      <strong>{formatTokenMRate(smart?.consumeTokenM1m ?? rcuToTokenM(smart?.consumeRcu1m))}</strong>
                     </div>
                     <div>
                       <span>{t('supply.demand_reference_5m')}</span>
-                      <strong>{formatRcuRate(smart?.consumeRcu5m)}</strong>
+                      <strong>{formatTokenMRate(smart?.consumeTokenM5m ?? rcuToTokenM(smart?.consumeRcu5m))}</strong>
                     </div>
                     <div>
                       <span>{t('supply.demand_reference_10m')}</span>
-                      <strong>{formatRcuRate(smart?.consumeRcu10m)}</strong>
+                      <strong>{formatTokenMRate(smart?.consumeTokenM10m ?? rcuToTokenM(smart?.consumeRcu10m))}</strong>
                     </div>
                     <div>
                       <span>{t('supply.demand_purchase_basis')}</span>
-                      <strong>{formatRcuRate(smart?.demandPlanningRcuPerMinute)}</strong>
+                      <strong>{formatTokenMRate(smart?.demandPlanningTokenMPerMinute ?? rcuToTokenM(smart?.demandPlanningRcuPerMinute))}</strong>
                     </div>
                   </div>
                 </div>
@@ -1627,11 +1645,11 @@ export function SupplyPage() {
                 <div className={styles.capacityOverview}>
                   <div>
                     <span>{t('supply.current_capacity')}</span>
-                    <strong>{formatRcu(smart?.currentCapacityRcu)}</strong>
+                    <strong>{formatTokenM(currentCapacityTokenM)}</strong>
                   </div>
                   <div>
                     <span>{t('supply.target_capacity')}</span>
-                    <strong>{formatRcu(smart?.targetCapacityRcu)}</strong>
+                    <strong>{formatTokenM(targetCapacityTokenM)}</strong>
                   </div>
                 </div>
                 <div className={styles.progressTrack}>
@@ -1640,7 +1658,7 @@ export function SupplyPage() {
                 <div className={styles.miniMetricGrid}>
                   <div>
                     <span>{t('supply.capacity_gap_label')}</span>
-                    <strong>{formatRcu(smart?.capacityGapRcu)}</strong>
+                    <strong>{formatTokenM(capacityGapTokenM)}</strong>
                   </div>
                   <div>
                     <span>{t('supply.supply_pressure')}</span>
@@ -1733,7 +1751,7 @@ export function SupplyPage() {
                 <div className={styles.summaryList}>
                   <div>
                     <span>{t('supply.consume_rate')}</span>
-                    <strong>{formatRcuRate(smart?.consumeRcuPerMinute)}</strong>
+                    <strong>{formatTokenMRate(consumeTokenMPerMinute)}</strong>
                   </div>
                   <div>
                     <span>{t('supply.rpm30m')}</span>

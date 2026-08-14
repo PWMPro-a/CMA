@@ -237,6 +237,26 @@ export interface SupplySmartResource {
   accountMaxUsefulSecondsBefore401?: number;
   estimatedNewAccountCapacityRcu?: number;
   riskAdjustedUnitCapacityRcu?: number;
+  tokenCapacityMode?: string;
+  accountQuotaEstimateM?: number;
+  rawCapacityTokenM?: number;
+  currentCapacityTokenM?: number;
+  timeLimitedCapacityTokenM?: number;
+  expiryWasteRiskTokenM?: number;
+  observedTokenM1m?: number;
+  observedTokenM5m?: number;
+  observedTokenM10m?: number;
+  observedTokenM30m?: number;
+  consumeTokenM1m?: number;
+  consumeTokenM5m?: number;
+  consumeTokenM10m?: number;
+  consumeTokenMPerMinute?: number;
+  demandPlanningTokenMPerMinute?: number;
+  targetCapacityTokenM?: number;
+  capacityGapTokenM?: number;
+  estimatedNewAccountCapacityTokenM?: number;
+  prelockedCapacityTokenM?: number;
+  projectedCapacityAfterRefillTokenM?: number;
 }
 
 export interface SupplyAutomationExecution {

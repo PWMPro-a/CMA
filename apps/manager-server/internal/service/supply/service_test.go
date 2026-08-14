@@ -1005,8 +1005,8 @@ func TestLiveAccountPoolCapsStaleInspectionCapacityAndRecalculatesShortage(t *te
 	}
 
 	recalculateSmartResourceCapacityPlan(cfg, &resource)
-	if resource.HealthLevel != smartHealthCritical || resource.EstimatedRequiredAccounts != 109 ||
-		resource.AccountQuantityDeficit != 104 || resource.SuggestedQuantity != 20 {
+	if resource.HealthLevel != smartHealthCritical || resource.EstimatedRequiredAccounts != 920 ||
+		resource.AccountQuantityDeficit != 915 || resource.SuggestedQuantity != 20 {
 		t.Fatalf("live five-account shortage plan = %#v", resource)
 	}
 	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 20 {
@@ -2289,6 +2289,16 @@ func TestSmartSuggestedCreateQuantitySubtractsAggregatePrelockedCapacity(t *test
 	}
 }
 
+func TestSupplyOrderCapacityUsesMillionTokenEstimate(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{Product: "oauth_7d", NewAccountConfidence: 0.7}
+	resource := defaultSmartResource(cfg)
+	got := estimatedSupplyOrderCapacityRCU(cfg, resource, 5)
+	want := smartTokenMillionToRCU(35, resource.UnitCapacityRCU)
+	if got != want {
+		t.Fatalf("five-account in-flight capacity = %.2f RCU, want %.2f RCU (35M)", got, want)
+	}
+}
+
 func TestParallelSupplyCreatePlanningCompetesOnWaitingOrdersAndStopsOnCommittedStock(t *testing.T) {
 	off := false
 	cfg := store.ManagerSupplyConfig{
@@ -2371,7 +2381,7 @@ func TestReadySupplyOrderTakeBudgetIgnoresWaitingReservations(t *testing.T) {
 		ID: 2, OrderID: "waiting", RequestedQuantity: 100,
 		Automatic: true, Status: "waiting_inventory", CreatedAtMS: 2,
 	}
-	if !readySupplyOrderAccepted(cfg, []store.SupplyOrder{ready, waiting}, &ready, 5*unit, unit) {
+	if !readySupplyOrderAccepted(cfg, SmartResource{}, []store.SupplyOrder{ready, waiting}, &ready, 5*unit, unit) {
 		t.Fatal("a waiting-inventory reservation displaced the ready order")
 	}
 }
@@ -2386,11 +2396,11 @@ func TestReadySupplyOrderTakeBudgetKeepsRequiredOrdersAndReleasesSurplus(t *test
 	}
 	need := 6 * unit
 	allowance := unit
-	if !readySupplyOrderAccepted(cfg, orders, &orders[0], need, allowance) ||
-		!readySupplyOrderAccepted(cfg, orders, &orders[1], need, allowance) {
+	if !readySupplyOrderAccepted(cfg, SmartResource{}, orders, &orders[0], need, allowance) ||
+		!readySupplyOrderAccepted(cfg, SmartResource{}, orders, &orders[1], need, allowance) {
 		t.Fatal("orders required to cross the take target were rejected")
 	}
-	if readySupplyOrderAccepted(cfg, orders, &orders[2], need, allowance) {
+	if readySupplyOrderAccepted(cfg, SmartResource{}, orders, &orders[2], need, allowance) {
 		t.Fatal("surplus ready order exceeded the aggregate take budget")
 	}
 }
@@ -2403,10 +2413,10 @@ func TestReadySupplyOrderTakeBudgetReleasesLaterOrderWhenFirstAlreadyCoversTarge
 		{ID: 2, OrderID: "ready-later", RequestedQuantity: 5, ReadyQuantity: 5, Automatic: true, Status: "ready", CreatedAtMS: 2},
 	}
 	need := 4 * unit
-	if !readySupplyOrderAccepted(cfg, orders, &orders[0], need, unit) {
+	if !readySupplyOrderAccepted(cfg, SmartResource{}, orders, &orders[0], need, unit) {
 		t.Fatal("the first ready order should satisfy the target")
 	}
-	if readySupplyOrderAccepted(cfg, orders, &orders[1], need, unit) {
+	if readySupplyOrderAccepted(cfg, SmartResource{}, orders, &orders[1], need, unit) {
 		t.Fatal("the later ready order should be released as aggregate surplus")
 	}
 }

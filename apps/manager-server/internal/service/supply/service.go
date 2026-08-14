@@ -721,7 +721,7 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		return Status{}, err
 	}
 	if len(activeOrders) > 0 {
-		resource.PrelockedCapacityRCU = totalSupplyOrderCapacityRCU(cfg.Supply, activeOrders)
+		resource.PrelockedCapacityRCU = totalSupplyOrderCapacityRCU(cfg.Supply, resource, activeOrders)
 		resource.LockedOrderID = activeOrders[0].OrderID
 	} else {
 		resource.PrelockedCapacityRCU = 0
@@ -749,6 +749,7 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	} else {
 		overview.CPADeficit = 0
 	}
+	applySmartTokenMetrics(&resource)
 	status := Status{
 		Config:        sanitizeConfig(cfg.Supply),
 		Running:       running,
@@ -1871,7 +1872,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			return err
 		}
 		if len(openOrders) > 0 {
-			resource.PrelockedCapacityRCU = totalSupplyOrderCapacityRCU(supplyCfg, openOrders)
+			resource.PrelockedCapacityRCU = totalSupplyOrderCapacityRCU(supplyCfg, resource, openOrders)
 			resource.LockedOrderID = openOrders[0].OrderID
 			applySmartRefillProjection(supplyCfg, &resource)
 		}
@@ -2081,7 +2082,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			return nil
 		}
 		resource.SuggestedQuantity = quantity
-		resource.PrelockedCapacityRCU = round2(resource.PrelockedCapacityRCU + estimatedSupplyOrderCapacityRCU(supplyCfg, quantity))
+		resource.PrelockedCapacityRCU = round2(resource.PrelockedCapacityRCU + estimatedSupplyOrderCapacityRCU(supplyCfg, resource, quantity))
 		applySmartRefillProjection(supplyCfg, &resource)
 		s.setSmartResource(resource)
 	}
@@ -2553,7 +2554,7 @@ func (s *Service) shouldReleaseOversizedOpenOrder(
 		return false, "", err
 	}
 	need := math.Max(0, resource.CapacityGapRCU)
-	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
 	accountDeficit := max(0, resource.AccountQuantityDeficit)
 	accountDeficit = max(accountDeficit, max(0, resource.ConcurrencyAccountDeficit))
 	if unit > 0 && accountDeficit > 0 {
@@ -2566,7 +2567,7 @@ func (s *Service) shouldReleaseOversizedOpenOrder(
 	// tolerance for parallel抢货. Anything beyond that is held as an avoidable
 	// reservation and should be allowed to expire locally before taking.
 	allowance := math.Max(unit, need*0.15)
-	if readySupplyOrderAccepted(cfg, orders, order, need, allowance) {
+	if readySupplyOrderAccepted(cfg, resource, orders, order, need, allowance) {
 		return false, "", nil
 	}
 	return true, "parallel_capacity_overage", nil
@@ -5731,7 +5732,7 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	}
 	quantity := resource.SuggestedQuantity
 	if quantity <= 0 && resource.CapacityGapRCU > 0 && resource.UnitCapacityRCU > 0 {
-		unit := smartEstimatedNewAccountCapacityRCU(cfg)
+		unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
 		if unit <= 0 {
 			unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
 		}
@@ -5741,7 +5742,7 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 		return 0
 	}
 	if resource.PrelockedCapacityRCU > 0 && resource.CapacityGapRCU > 0 {
-		unit := smartEstimatedNewAccountCapacityRCU(cfg)
+		unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
 		if unit <= 0 {
 			unit = resource.UnitCapacityRCU
 		}
@@ -5793,35 +5794,35 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	return clampInt(quantity, 1, 100)
 }
 
-func estimatedSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, quantity int) float64 {
+func estimatedSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, resource SmartResource, quantity int) float64 {
 	if quantity <= 0 {
 		return 0
 	}
-	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
 	return round2(float64(quantity) * unit)
 }
 
-func supplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, order store.SupplyOrder) float64 {
+func supplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, resource SmartResource, order store.SupplyOrder) float64 {
 	quantity := max(0, order.RequestedQuantity)
 	if order.ReadyQuantity > quantity {
 		quantity = order.ReadyQuantity
 	}
-	return estimatedSupplyOrderCapacityRCU(cfg, quantity)
+	return estimatedSupplyOrderCapacityRCU(cfg, resource, quantity)
 }
 
-func totalSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, orders []store.SupplyOrder) float64 {
+func totalSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, resource SmartResource, orders []store.SupplyOrder) float64 {
 	total := 0.0
 	for _, order := range orders {
-		total += supplyOrderCapacityRCU(cfg, order)
+		total += supplyOrderCapacityRCU(cfg, resource, order)
 	}
 	return round2(total)
 }
 
-func totalCommittedSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, orders []store.SupplyOrder) float64 {
+func totalCommittedSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, resource SmartResource, orders []store.SupplyOrder) float64 {
 	total := 0.0
 	for _, order := range orders {
 		if isSupplyOrderCapacityCommitted(order) {
-			total += supplyOrderCapacityRCU(cfg, order)
+			total += supplyOrderCapacityRCU(cfg, resource, order)
 		}
 	}
 	return round2(total)
@@ -5841,7 +5842,7 @@ func supplyCreatePlanningResource(
 	if !parallel {
 		return resource
 	}
-	resource.PrelockedCapacityRCU = totalCommittedSupplyOrderCapacityRCU(cfg, orders)
+	resource.PrelockedCapacityRCU = totalCommittedSupplyOrderCapacityRCU(cfg, resource, orders)
 	applySmartAccountQuantityEstimate(cfg, &resource)
 	applySmartRefillProjection(cfg, &resource)
 	return resource
@@ -5881,6 +5882,7 @@ func emergencyParallelOrderQuantity(
 // leave the pool below the required capacity.
 func readySupplyOrderAccepted(
 	cfg store.ManagerSupplyConfig,
+	resource SmartResource,
 	orders []store.SupplyOrder,
 	current *store.SupplyOrder,
 	need float64,
@@ -5910,7 +5912,7 @@ func readySupplyOrderAccepted(
 	ready := make([]store.SupplyOrder, 0, len(committed))
 	for _, order := range committed {
 		if isSupplyOrderCapacityIrreversible(order) {
-			acceptedCapacity += supplyOrderCapacityRCU(cfg, order)
+			acceptedCapacity += supplyOrderCapacityRCU(cfg, resource, order)
 			if order.OrderID == current.OrderID {
 				currentAccepted = true
 			}
@@ -5929,7 +5931,7 @@ func readySupplyOrderAccepted(
 	})
 	capWithAllowance := math.Max(0, need) + math.Max(0, allowance)
 	for _, order := range ready {
-		capacity := supplyOrderCapacityRCU(cfg, order)
+		capacity := supplyOrderCapacityRCU(cfg, resource, order)
 		accept := acceptedCapacity < need || acceptedCapacity+capacity <= capWithAllowance
 		if accept {
 			acceptedCapacity += capacity
@@ -6303,7 +6305,7 @@ func recentAutomaticOrderCoversCurrentShortage(
 	}
 
 	required := math.Max(0, resource.CapacityGapRCU)
-	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
 	if unit <= 0 && resource.UnitCapacityRCU > 0 {
 		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
 	}
@@ -6318,7 +6320,7 @@ func recentAutomaticOrderCoversCurrentShortage(
 	if resource.PrelockedCapacityRCU >= required {
 		return true
 	}
-	deliveredCapacity := estimatedSupplyOrderCapacityRCU(cfg, automaticOrderDeliveredQuantity(order))
+	deliveredCapacity := estimatedSupplyOrderCapacityRCU(cfg, resource, automaticOrderDeliveredQuantity(order))
 	return deliveredCapacity >= required
 }
 

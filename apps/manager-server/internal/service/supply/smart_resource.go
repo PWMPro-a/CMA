@@ -47,12 +47,19 @@ const (
 
 	smartCapacitySourceInspection  = "inspection_snapshot"
 	smartCapacitySourceUnavailable = "unavailable"
+	smartTokenCapacityMode         = "million_tokens"
 
 	smartDemandTrendUnknown = "unknown"
 	smartDemandTrendStable  = "stable"
 	smartDemandTrendRising  = "rising"
 	smartDemandTrendFalling = "falling"
 	smartDemandTrendVirtual = "virtual"
+
+	// Codex quota headers expose a remaining percentage but not the absolute
+	// token limit. Supplier credentials currently provide about 10M effective
+	// tokens per short quota window. Keep this as a conservative baseline until
+	// enough runtime quota-delta samples are available to replace it.
+	smartDefaultAccountQuotaMillionTokens = 10.0
 )
 
 type SmartResource struct {
@@ -206,8 +213,32 @@ type SmartResource struct {
 	// RiskAdjustedUnitCapacityRCU is retained for API compatibility. It is the
 	// conservative quota estimate for one newly supplied credential. 401
 	// thresholds are operational risk signals and do not change this value.
-	RiskAdjustedUnitCapacityRCU    float64 `json:"riskAdjustedUnitCapacityRcu,omitempty"`
-	operatorClassificationObserved bool
+	RiskAdjustedUnitCapacityRCU float64 `json:"riskAdjustedUnitCapacityRcu,omitempty"`
+	// Token-capacity fields expose the replenishment dimension directly in
+	// million tokens. RCU fields remain for API compatibility, but are derived
+	// from the same token budget so runway and order sizing stay dimensionally
+	// consistent.
+	TokenCapacityMode                  string  `json:"tokenCapacityMode,omitempty"`
+	AccountQuotaEstimateM              float64 `json:"accountQuotaEstimateM,omitempty"`
+	RawCapacityTokenM                  float64 `json:"rawCapacityTokenM,omitempty"`
+	CurrentCapacityTokenM              float64 `json:"currentCapacityTokenM,omitempty"`
+	TimeLimitedCapacityTokenM          float64 `json:"timeLimitedCapacityTokenM,omitempty"`
+	ExpiryWasteRiskTokenM              float64 `json:"expiryWasteRiskTokenM,omitempty"`
+	ObservedTokenM1M                   float64 `json:"observedTokenM1m,omitempty"`
+	ObservedTokenM5M                   float64 `json:"observedTokenM5m,omitempty"`
+	ObservedTokenM10M                  float64 `json:"observedTokenM10m,omitempty"`
+	ObservedTokenM30M                  float64 `json:"observedTokenM30m,omitempty"`
+	ConsumeTokenM1M                    float64 `json:"consumeTokenM1m,omitempty"`
+	ConsumeTokenM5M                    float64 `json:"consumeTokenM5m,omitempty"`
+	ConsumeTokenM10M                   float64 `json:"consumeTokenM10m,omitempty"`
+	ConsumeTokenMPerMinute             float64 `json:"consumeTokenMPerMinute,omitempty"`
+	DemandPlanningTokenMPerMinute      float64 `json:"demandPlanningTokenMPerMinute,omitempty"`
+	TargetCapacityTokenM               float64 `json:"targetCapacityTokenM,omitempty"`
+	CapacityGapTokenM                  float64 `json:"capacityGapTokenM,omitempty"`
+	EstimatedNewAccountCapacityTokenM  float64 `json:"estimatedNewAccountCapacityTokenM,omitempty"`
+	PrelockedCapacityTokenM            float64 `json:"prelockedCapacityTokenM,omitempty"`
+	ProjectedCapacityAfterRefillTokenM float64 `json:"projectedCapacityAfterRefillTokenM,omitempty"`
+	operatorClassificationObserved     bool
 }
 
 type smartUsageBucket struct {
@@ -251,35 +282,36 @@ func defaultSmartResource(cfg store.ManagerSupplyConfig) SmartResource {
 	configuredTarget := smartHealthyMinutesTarget(cfg)
 	effectiveTarget := smartEffectiveHealthyMinutesTarget(cfg)
 	strategy := managerconfigsvc.NormalizeSupplyStrategy(cfg.Strategy)
-	return SmartResource{
-		Enabled:                        smartSupplyEnabled(cfg),
-		HealthLevel:                    smartHealthUnknown,
-		SuggestedAction:                smartActionSnapshotStale,
-		DecisionReason:                 "snapshot_not_ready",
-		Confidence:                     smartConfidenceLow,
-		SnapshotFresh:                  false,
-		GeneratedAtMS:                  time.Now().UnixMilli(),
-		CapacitySource:                 smartCapacitySourceUnavailable,
-		DemandTrend:                    smartDemandTrendUnknown,
-		CapacityLifetimeCoverage:       100,
-		TargetAvailableAccounts:        cfg.TargetAvailableAccounts,
-		ConfiguredHealthyMinutes:       configuredTarget,
-		EffectiveHealthyMinutes:        effectiveTarget,
-		AccountLifetimeMinutes:         smartAccountLifetimeMinutes(),
-		HealthyMinutesTarget:           effectiveTarget,
-		WarningMinutes:                 smartWarningMinutes(cfg),
-		CriticalMinutes:                smartCriticalMinutes(cfg),
-		UnitCapacityRCU:                smartProductUnitCapacity(cfg.Product),
-		Strategy:                       strategy,
-		CriticalAvailableAccounts:      smartCriticalAvailableAccounts(cfg),
-		HealthyAvailableAccounts:       smartHealthyAvailableAccounts(cfg),
-		EmergencyMinAccounts:           smartEmergencyMinAccounts(cfg),
-		VirtualDemandTTLMinutes:        smartVirtualDemandTTLMinutes(cfg),
-		AccountMaxRequestsBefore401:    smartAccountMaxRequestsBefore401(cfg),
-		AccountMaxUsefulSeconds401:     smartAccountMaxUsefulSecondsBefore401(cfg),
-		EstimatedNewAccountCapacityRCU: round2(smartEstimatedNewAccountCapacityRCU(cfg)),
-		RiskAdjustedUnitCapacityRCU:    round2(smartEstimatedNewAccountCapacityRCU(cfg)),
+	resource := SmartResource{
+		Enabled:                     smartSupplyEnabled(cfg),
+		HealthLevel:                 smartHealthUnknown,
+		SuggestedAction:             smartActionSnapshotStale,
+		DecisionReason:              "snapshot_not_ready",
+		Confidence:                  smartConfidenceLow,
+		SnapshotFresh:               false,
+		GeneratedAtMS:               time.Now().UnixMilli(),
+		CapacitySource:              smartCapacitySourceUnavailable,
+		DemandTrend:                 smartDemandTrendUnknown,
+		CapacityLifetimeCoverage:    100,
+		TargetAvailableAccounts:     cfg.TargetAvailableAccounts,
+		ConfiguredHealthyMinutes:    configuredTarget,
+		EffectiveHealthyMinutes:     effectiveTarget,
+		AccountLifetimeMinutes:      smartAccountLifetimeMinutes(),
+		HealthyMinutesTarget:        effectiveTarget,
+		WarningMinutes:              smartWarningMinutes(cfg),
+		CriticalMinutes:             smartCriticalMinutes(cfg),
+		UnitCapacityRCU:             smartProductUnitCapacity(cfg.Product),
+		Strategy:                    strategy,
+		CriticalAvailableAccounts:   smartCriticalAvailableAccounts(cfg),
+		HealthyAvailableAccounts:    smartHealthyAvailableAccounts(cfg),
+		EmergencyMinAccounts:        smartEmergencyMinAccounts(cfg),
+		VirtualDemandTTLMinutes:     smartVirtualDemandTTLMinutes(cfg),
+		AccountMaxRequestsBefore401: smartAccountMaxRequestsBefore401(cfg),
+		AccountMaxUsefulSeconds401:  smartAccountMaxUsefulSecondsBefore401(cfg),
 	}
+	applySmartTokenCapacityDefaults(cfg, &resource)
+	applySmartTokenMetrics(&resource)
+	return resource
 }
 
 func (s *Service) HandleUsageEvents(ctx context.Context, runtimeCfg collectorpkg.RuntimeConfig, events []usage.Event) {
@@ -404,8 +436,11 @@ func (s *Service) smartResource(ctx context.Context, cfg store.ManagerConfig, fo
 	return s.publishSmartResource(resource), nil
 }
 
-func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupplyConfig, snapshot inspectionQuotaSnapshot, now time.Time) SmartResource {
-	resource := defaultSmartResource(cfg)
+func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupplyConfig, snapshot inspectionQuotaSnapshot, now time.Time) (resource SmartResource) {
+	resource = defaultSmartResource(cfg)
+	defer func() {
+		applySmartTokenMetrics(&resource)
+	}()
 	resource.GeneratedAtMS = now.UnixMilli()
 	resource.CapacitySource = smartCapacitySourceInspection
 	resource.CapacitySnapshotRunID = snapshot.run.ID
@@ -418,6 +453,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 
 	usageStats := s.smartUsageSnapshot(now)
 	resource.UnitCapacityRCU = smartProductUnitCapacity(cfg.Product)
+	applySmartTokenCapacityDefaults(cfg, &resource)
 	consumeRCUPerMinute := applySmartUsage(&resource, usageStats, resource.UnitCapacityRCU)
 
 	if !smartInspectionSnapshotComplete(snapshot) {
@@ -469,10 +505,9 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		resource.AvailableAccounts++
 		remainingMinutes := float64(smartUsefulAccountLifetimeMinutes())
 		hasActiveLease := false
-		if smartSupplyManagedFileName(result.FileName) {
+		if leaseExpiresAtMS, found := snapshot.leaseExpiresByFile[result.FileName]; found {
 			leaseRequired++
-			leaseExpiresAtMS, found := snapshot.leaseExpiresByFile[result.FileName]
-			if found && leaseExpiresAtMS > now.UnixMilli() {
+			if leaseExpiresAtMS > now.UnixMilli() {
 				withActiveLease++
 				hasActiveLease = true
 				remainingMinutes = clampFloat(time.UnixMilli(leaseExpiresAtMS).Sub(now).Minutes(), 0, float64(smartUsefulAccountLifetimeMinutes()))
@@ -491,13 +526,13 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		capacity := 0.0
 		switch {
 		case hasCapacityQuota:
-			capacity = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * remaining
+			capacity = smartAccountQuotaCapacityRCU(resource.UnitCapacityRCU, remaining)
 		case hasActiveLease:
 			// The completed probe proved that the credential works, while the
 			// supplier's delivery record bounds how long it can remain usable.
 			// This is intentionally a conservative lease estimate, not a
 			// conversion of the excluded monthly allowance.
-			capacity = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * smartNewAccountConfidence(cfg)
+			capacity = smartEstimatedNewAccountTokenCapacityRCU(cfg)
 			resource.LeaseEstimatedAccounts++
 			resource.LeaseEstimatedCapacityRCU += capacity
 		default:
@@ -545,7 +580,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		}
 		overlaidFiles[fileName] = struct{}{}
 		remainingMinutes := clampFloat(time.UnixMilli(item.LeaseExpiresAtMS).Sub(now).Minutes(), 0, float64(smartUsefulAccountLifetimeMinutes()))
-		capacity := smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, remainingMinutes) * smartNewAccountConfidence(cfg)
+		capacity := smartEstimatedNewAccountTokenCapacityRCU(cfg)
 		if capacity <= 0 {
 			continue
 		}
@@ -646,8 +681,11 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	return resource
 }
 
-func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig, authSnapshot authFileSnapshot, now time.Time) SmartResource {
-	resource := defaultSmartResource(cfg)
+func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig, authSnapshot authFileSnapshot, now time.Time) (resource SmartResource) {
+	resource = defaultSmartResource(cfg)
+	defer func() {
+		applySmartTokenMetrics(&resource)
+	}()
 	resource.GeneratedAtMS = now.UnixMilli()
 	resource.SnapshotFresh = !authSnapshot.generatedAt.IsZero() && now.Sub(authSnapshot.generatedAt) <= time.Duration(smartAuthFilesCacheTTLSeconds(cfg))*time.Second*2
 	if !authSnapshot.generatedAt.IsZero() {
@@ -657,6 +695,7 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 
 	unit := smartProductUnitCapacity(cfg.Product)
 	resource.UnitCapacityRCU = unit
+	applySmartTokenCapacityDefaults(cfg, &resource)
 	consumeRCUPerMinute := applySmartUsage(&resource, usageStats, unit)
 	var weightedCapacity float64
 	var effectiveAvailable float64
@@ -691,7 +730,7 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		remainingMinutes := smartAccountRemainingMinutes(file.Raw, now, smartAccountLifetimeMinutes())
 		rawCapacity, ok := smartAccountCapacityRCU(file.Raw, unit, remainingMinutes)
 		if !ok {
-			rawCapacity = smartEstimatedAccountCapacityRCU(unit, remainingMinutes)
+			rawCapacity = smartTokenMillionToRCU(smartDefaultAccountQuotaMillionTokens, unit)
 		}
 		weightedCapacity += rawCapacity
 		if rawCapacity > 0 {
@@ -759,9 +798,11 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 	if resource == nil {
 		return
 	}
+	applySmartTokenCapacityDefaults(cfg, resource)
 	defer func() {
 		applySmartAccountQuantityEstimate(cfg, resource)
 		applySmartRefillProjection(cfg, resource)
+		applySmartTokenMetrics(resource)
 	}()
 	if resource.ConsumeRCUPerMinute <= 0 {
 		// An in-flight reservation has its own state machine. A config refresh
@@ -835,7 +876,7 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 		return
 	}
 
-	unitForNew := smartEstimatedNewAccountCapacityRCU(cfg)
+	unitForNew := smartEstimatedNewAccountCapacityForResource(cfg, *resource)
 	if unitForNew <= 0 {
 		unitForNew = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
 	}
@@ -860,7 +901,7 @@ func applySmartRefillProjection(cfg store.ManagerSupplyConfig, resource *SmartRe
 	if resource == nil {
 		return
 	}
-	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	unit := smartEstimatedNewAccountCapacityForResource(cfg, *resource)
 	if unit <= 0 && resource.UnitCapacityRCU > 0 {
 		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
 	}
@@ -877,6 +918,7 @@ func applySmartRefillProjection(cfg store.ManagerSupplyConfig, resource *SmartRe
 	if resource.ConsumeRCUPerMinute > 0 {
 		resource.ProjectedSustainAfterRefillMin = round1(projected / resource.ConsumeRCUPerMinute)
 	}
+	applySmartTokenMetrics(resource)
 }
 
 func applySmartAccountQuantityEstimate(cfg store.ManagerSupplyConfig, resource *SmartResource) {
@@ -888,7 +930,7 @@ func applySmartAccountQuantityEstimate(cfg store.ManagerSupplyConfig, resource *
 	// Required account count uses the conservative quota estimate for a new
 	// credential. 401 request/time thresholds are churn warnings only: they do
 	// not become an RCU conversion factor or cap the pool-wide waterline.
-	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	unit := smartEstimatedNewAccountCapacityForResource(cfg, *resource)
 	if unit <= 0 && resource.UnitCapacityRCU > 0 {
 		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
 	}
@@ -1170,7 +1212,40 @@ func applySmartUsage(resource *SmartResource, usage smartUsageAggregate, unit fl
 	resource.DemandPlanningRCUPerMinute = round2(demand.planningRCU)
 	resource.ConsumeRCUPerMinute = round2(demand.consumeRCU)
 	resource.UsageSampleMinutes = usage.sampleMinutes
+	applySmartTokenMetrics(resource)
 	return demand.consumeRCU
+}
+
+func applySmartTokenMetrics(resource *SmartResource) {
+	if resource == nil {
+		return
+	}
+	unit := resource.UnitCapacityRCU
+	if unit <= 0 {
+		unit = 1
+	}
+	resource.TokenCapacityMode = smartTokenCapacityMode
+	if resource.AccountQuotaEstimateM <= 0 {
+		resource.AccountQuotaEstimateM = smartDefaultAccountQuotaMillionTokens
+	}
+	resource.RawCapacityTokenM = round2(smartRCUToTokenMillion(resource.RawCapacityRCU, unit))
+	resource.CurrentCapacityTokenM = round2(smartRCUToTokenMillion(resource.CurrentCapacityRCU, unit))
+	resource.TimeLimitedCapacityTokenM = round2(smartRCUToTokenMillion(resource.TimeLimitedCapacityRCU, unit))
+	resource.ExpiryWasteRiskTokenM = round2(smartRCUToTokenMillion(resource.ExpiryWasteRiskRCU, unit))
+	resource.ObservedTokenM1M = round2(math.Max(0, resource.TPM1M) / 1_000_000)
+	resource.ObservedTokenM5M = round2(math.Max(0, resource.TPM5M) / 1_000_000)
+	resource.ObservedTokenM10M = round2(math.Max(0, resource.TPM10M) / 1_000_000)
+	resource.ObservedTokenM30M = round2(math.Max(0, resource.TPM30M) / 1_000_000)
+	resource.ConsumeTokenM1M = round2(smartRCUToTokenMillion(resource.ConsumeRCU1M, unit))
+	resource.ConsumeTokenM5M = round2(smartRCUToTokenMillion(resource.ConsumeRCU5M, unit))
+	resource.ConsumeTokenM10M = round2(smartRCUToTokenMillion(resource.ConsumeRCU10M, unit))
+	resource.ConsumeTokenMPerMinute = round2(smartRCUToTokenMillion(resource.ConsumeRCUPerMinute, unit))
+	resource.DemandPlanningTokenMPerMinute = round2(smartRCUToTokenMillion(resource.DemandPlanningRCUPerMinute, unit))
+	resource.TargetCapacityTokenM = round2(smartRCUToTokenMillion(resource.TargetCapacityRCU, unit))
+	resource.CapacityGapTokenM = round2(smartRCUToTokenMillion(resource.CapacityGapRCU, unit))
+	resource.EstimatedNewAccountCapacityTokenM = round2(smartRCUToTokenMillion(resource.EstimatedNewAccountCapacityRCU, unit))
+	resource.PrelockedCapacityTokenM = round2(smartRCUToTokenMillion(resource.PrelockedCapacityRCU, unit))
+	resource.ProjectedCapacityAfterRefillTokenM = round2(smartRCUToTokenMillion(resource.ProjectedCapacityAfterRefillRCU, unit))
 }
 
 func (s *Service) applySmartDemandMemory(cfg store.ManagerSupplyConfig, resource *SmartResource, now time.Time, currentRCU float64) float64 {
@@ -1712,8 +1787,7 @@ func (s *Service) currentSmartResource(cfg store.ManagerSupplyConfig) SmartResou
 	resource.VirtualDemandTTLMinutes = smartVirtualDemandTTLMinutes(cfg)
 	resource.AccountMaxRequestsBefore401 = smartAccountMaxRequestsBefore401(cfg)
 	resource.AccountMaxUsefulSeconds401 = smartAccountMaxUsefulSecondsBefore401(cfg)
-	resource.EstimatedNewAccountCapacityRCU = round2(smartEstimatedNewAccountCapacityRCU(cfg))
-	resource.RiskAdjustedUnitCapacityRCU = round2(smartEstimatedNewAccountCapacityRCU(cfg))
+	applySmartTokenCapacityDefaults(cfg, &resource)
 	configChanged := previousEffectiveMinutes != resource.EffectiveHealthyMinutes ||
 		previousWarningMinutes != resource.WarningMinutes ||
 		previousCriticalMinutes != resource.CriticalMinutes ||
@@ -1722,6 +1796,7 @@ func (s *Service) currentSmartResource(cfg store.ManagerSupplyConfig) SmartResou
 	if resource.Enabled && resource.SnapshotFresh && (configChanged || capacityDecision) {
 		recalculateSmartResourceCapacityPlan(cfg, &resource)
 	}
+	applySmartTokenMetrics(&resource)
 	return s.withInspectionSnapshotRefreshState(resource)
 }
 
@@ -2000,7 +2075,7 @@ func smartRisingObservationQuantity(cfg store.ManagerSupplyConfig, resource Smar
 	// reservation to 1/2/3 credentials according to the currently observed
 	// shortfall, then let the next complete minute and 5/10-minute windows
 	// decide whether another batch is justified.
-	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
 	if unit <= 0 {
 		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
 	}
@@ -2077,6 +2152,35 @@ func smartEstimatedAccountCapacityRCU(unitPerMinute float64, remainingMinutes fl
 	return unitPerMinute * remainingMinutes
 }
 
+// smartTokenMillionToRCU converts an absolute token budget into the existing
+// request-capacity unit. One RCU represents unit*1000 effective tokens, which
+// is also the conversion used by smartTokenDemandRCU. Keeping both sides on
+// the same scale removes the previous unit^2 runway inflation.
+func smartTokenMillionToRCU(tokenM, unit float64) float64 {
+	if tokenM <= 0 {
+		return 0
+	}
+	if unit <= 0 {
+		unit = 1
+	}
+	return tokenM * 1000 / unit
+}
+
+func smartRCUToTokenMillion(rcu, unit float64) float64 {
+	if rcu <= 0 {
+		return 0
+	}
+	if unit <= 0 {
+		unit = 1
+	}
+	return rcu * unit / 1000
+}
+
+func smartAccountQuotaCapacityRCU(unit, remainingFraction float64) float64 {
+	remainingFraction = clampFloat(remainingFraction, 0, 1)
+	return smartTokenMillionToRCU(smartDefaultAccountQuotaMillionTokens*remainingFraction, unit)
+}
+
 func smartEstimatedNewAccountCapacityRCU(cfg store.ManagerSupplyConfig) float64 {
 	unit := smartProductUnitCapacity(cfg.Product)
 	capacity := smartEstimatedAccountCapacityRCU(unit, float64(smartUsefulAccountLifetimeMinutes()))
@@ -2085,6 +2189,33 @@ func smartEstimatedNewAccountCapacityRCU(cfg store.ManagerSupplyConfig) float64 
 		confidence = 1
 	}
 	return capacity * confidence
+}
+
+func smartEstimatedNewAccountTokenCapacityRCU(cfg store.ManagerSupplyConfig) float64 {
+	unit := smartProductUnitCapacity(cfg.Product)
+	capacity := smartTokenMillionToRCU(smartDefaultAccountQuotaMillionTokens, unit)
+	confidence := smartNewAccountConfidence(cfg)
+	if confidence <= 0 {
+		confidence = 1
+	}
+	return capacity * confidence
+}
+
+func applySmartTokenCapacityDefaults(cfg store.ManagerSupplyConfig, resource *SmartResource) {
+	if resource == nil {
+		return
+	}
+	resource.TokenCapacityMode = smartTokenCapacityMode
+	resource.AccountQuotaEstimateM = smartDefaultAccountQuotaMillionTokens
+	resource.EstimatedNewAccountCapacityRCU = round2(smartEstimatedNewAccountTokenCapacityRCU(cfg))
+	resource.RiskAdjustedUnitCapacityRCU = resource.EstimatedNewAccountCapacityRCU
+}
+
+func smartEstimatedNewAccountCapacityForResource(cfg store.ManagerSupplyConfig, resource SmartResource) float64 {
+	if resource.TokenCapacityMode == smartTokenCapacityMode && resource.EstimatedNewAccountCapacityRCU > 0 {
+		return resource.EstimatedNewAccountCapacityRCU
+	}
+	return smartEstimatedNewAccountCapacityRCU(cfg)
 }
 
 func smartConsumeRCUPerMinute(rpm30 float64, rpm5Peak float64, tpm30 float64, unit float64) float64 {
@@ -2155,7 +2286,7 @@ func smartAccountCapacityRCU(values map[string]any, unit float64, remainingMinut
 		"remaining_tokens", "remainingTokens", "quota_remaining_tokens", "quotaRemainingTokens",
 		"available_tokens", "availableTokens",
 	); tokens > 0 {
-		return tokens / 1000, true
+		return tokens / 1000 / unit, true
 	}
 	if usedPercent := numberField(values, "header_quota_used_percent", "quota_used_percent", "quotaUsedPercent", "used_percent", "usage_percent"); usedPercent > 0 {
 		if usedPercent > 1 {
@@ -2165,7 +2296,7 @@ func smartAccountCapacityRCU(values map[string]any, unit float64, remainingMinut
 		if remaining < 0 {
 			remaining = 0
 		}
-		return smartEstimatedAccountCapacityRCU(unit, remainingMinutes) * remaining, true
+		return smartAccountQuotaCapacityRCU(unit, remaining), true
 	}
 	return 0, false
 }
