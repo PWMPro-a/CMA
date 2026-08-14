@@ -970,7 +970,10 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 		context := contexts[planType]
 		policy := smartQuotaPolicyForPlan(cfg, planType)
 		observed := s.smartQuotaEstimateForAt(now, planType, context.identities...)
-		hasData := smartQuotaEstimateHasValidData(observed)
+		// Historical samples for a configured type remain useful once that type
+		// appears again, but a type with zero current accounts must not raise a
+		// calibration warning or influence this pool's ordering decision.
+		hasData := context.accounts > 0 && smartQuotaEstimateHasValidData(observed)
 		observedM := 0.0
 		if hasData {
 			observedM = observed.CapacityM

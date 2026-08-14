@@ -446,6 +446,25 @@ func TestSmartQuotaPlanAdoptionRestartsConfirmationWhenCandidateShifts(t *testin
 	}
 }
 
+func TestSmartQuotaPlanWithoutCurrentAccountsKeepsFallbackQuietly(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	samples := quotaSamplesForEstimate("file:historical-free.json", "free", 2.5, now.Add(-time.Minute), 3)
+	service.smartQuotaState.samples = append(service.smartQuotaState.samples, samples...)
+	service.smartQuotaState.samplesByIdentity["file:historical-free.json"] = append([]smartQuotaCalibrationSample(nil), samples...)
+
+	items, planning := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{
+		QuotaEstimationPolicies: map[string]store.ManagerSupplyQuotaEstimationPolicy{
+			"free": {Mode: smartQuotaPolicyModeAuto, FallbackM: 10, FixedM: 10},
+		},
+	}, nil, 301, now)
+	if len(items) != 1 || items[0].AccountCount != 0 || items[0].ObservedM != 0 ||
+		items[0].AdoptedM != 10 || items[0].PendingConfirmation || items[0].OrderingBlocked ||
+		planning["free"].CapacityM != 10 || planning["free"].Source != smartQuotaEstimateSourceDefault {
+		t.Fatalf("zero-account plan estimate = items %#v planning %#v", items, planning["free"])
+	}
+}
+
 func TestSmartQuotaCalibrationPrefersWeeklySecondaryWindow(t *testing.T) {
 	base := time.Now().Truncate(time.Second)
 	primaryUsed := 80.0
