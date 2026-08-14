@@ -255,22 +255,25 @@ type SmartResource struct {
 }
 
 type SmartQuotaPlanEstimate struct {
-	PlanType            string  `json:"planType"`
-	Mode                string  `json:"mode"`
-	AccountCount        int     `json:"accountCount"`
-	FallbackM           float64 `json:"fallbackM"`
-	FixedM              float64 `json:"fixedM,omitempty"`
-	ObservedM           float64 `json:"observedM,omitempty"`
-	AdoptedM            float64 `json:"adoptedM"`
-	Source              string  `json:"source"`
-	SampleCount         int     `json:"sampleCount"`
-	UniqueAccounts      int     `json:"uniqueAccounts"`
-	DivergencePercent   float64 `json:"divergencePercent,omitempty"`
-	PendingConfirmation bool    `json:"pendingConfirmation,omitempty"`
-	ConfirmationRounds  int     `json:"confirmationRounds,omitempty"`
-	RequiredRounds      int     `json:"requiredRounds,omitempty"`
-	OrderingBlocked     bool    `json:"orderingBlocked,omitempty"`
-	LastInspectionRunID int64   `json:"lastInspectionRunId,omitempty"`
+	PlanType               string  `json:"planType"`
+	Mode                   string  `json:"mode"`
+	AccountCount           int     `json:"accountCount"`
+	FallbackM              float64 `json:"fallbackM"`
+	FixedM                 float64 `json:"fixedM,omitempty"`
+	ObservedM              float64 `json:"observedM,omitempty"`
+	AdoptedM               float64 `json:"adoptedM"`
+	Source                 string  `json:"source"`
+	SampleCount            int     `json:"sampleCount"`
+	UniqueAccounts         int     `json:"uniqueAccounts"`
+	CompleteWindowAccounts int     `json:"completeWindowAccounts,omitempty"`
+	MinimumUniqueAccounts  int     `json:"minimumUniqueAccounts,omitempty"`
+	DivergencePercent      float64 `json:"divergencePercent,omitempty"`
+	PendingConfirmation    bool    `json:"pendingConfirmation,omitempty"`
+	ConfirmationRounds     int     `json:"confirmationRounds,omitempty"`
+	RequiredRounds         int     `json:"requiredRounds,omitempty"`
+	ValidationState        string  `json:"validationState,omitempty"`
+	OrderingBlocked        bool    `json:"orderingBlocked,omitempty"`
+	LastInspectionRunID    int64   `json:"lastInspectionRunId,omitempty"`
 }
 
 type smartUsageBucket struct {

@@ -560,8 +560,9 @@ export function AccountsPage() {
   const [supplyLeaseExpiryByFile, setSupplyLeaseExpiryByFile] = useState<
     ReadonlyMap<string, number>
   >(() => new Map());
-  const [accountPoolSummary, setAccountPoolSummary] =
-    useState<SupplyAccountPoolSummary | null>(null);
+  const [accountPoolSummary, setAccountPoolSummary] = useState<SupplyAccountPoolSummary | null>(
+    null
+  );
   const oauthState = useAuthFilesOauth({
     viewMode: oauthViewMode,
     files,
@@ -1040,24 +1041,22 @@ export function AccountsPage() {
   useEffect(() => {
     const regainedVisibility = documentVisible && !previousDocumentVisibleRef.current;
     previousDocumentVisibleRef.current = documentVisible;
-    if (
-      !regainedVisibility ||
-      activeView !== 'accounts' ||
-      featureAvailability.checking ||
-      !featureAvailability.requestMonitoringAvailable ||
-      !featureAvailability.managerServiceBase
-    ) {
-      return;
-    }
-    void loadHeaderSnapshots();
-  }, [
-    activeView,
-    documentVisible,
-    featureAvailability.checking,
-    featureAvailability.managerServiceBase,
-    featureAvailability.requestMonitoringAvailable,
-    loadHeaderSnapshots,
-  ]);
+    if (!regainedVisibility || activeView !== 'accounts') return;
+
+    // A background tab can miss several pool mutations while browser timers are
+    // suspended. Refresh the live auth-file population and the shared summary as
+    // soon as the page becomes visible instead of briefly rendering an old pool.
+    void refreshAccountsWorkspace();
+  }, [activeView, documentVisible, refreshAccountsWorkspace]);
+
+  useEffect(() => {
+    if (activeView !== 'accounts') return undefined;
+    const refreshOnFocus = () => {
+      void refreshAccountsWorkspace();
+    };
+    window.addEventListener('focus', refreshOnFocus);
+    return () => window.removeEventListener('focus', refreshOnFocus);
+  }, [activeView, refreshAccountsWorkspace]);
 
   useInterval(
     () => {

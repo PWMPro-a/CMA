@@ -302,10 +302,13 @@ export interface SupplyQuotaPlanEstimate {
   source: string;
   sampleCount: number;
   uniqueAccounts: number;
+  completeWindowAccounts?: number;
+  minimumUniqueAccounts?: number;
   divergencePercent?: number;
   pendingConfirmation?: boolean;
   confirmationRounds?: number;
   requiredRounds?: number;
+  validationState?: 'fixed' | 'insufficient' | 'confirming' | 'quarantined' | 'accepted' | string;
   orderingBlocked?: boolean;
   lastInspectionRunId?: number;
 }

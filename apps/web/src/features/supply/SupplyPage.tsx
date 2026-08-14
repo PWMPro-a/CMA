@@ -593,6 +593,19 @@ export function SupplyPage() {
   }, [load]);
 
   useEffect(() => {
+    const refreshVisibleSnapshot = () => {
+      if (document.visibilityState === 'hidden') return;
+      void load(true, true);
+    };
+    document.addEventListener('visibilitychange', refreshVisibleSnapshot);
+    window.addEventListener('focus', refreshVisibleSnapshot);
+    return () => {
+      document.removeEventListener('visibilitychange', refreshVisibleSnapshot);
+      window.removeEventListener('focus', refreshVisibleSnapshot);
+    };
+  }, [load]);
+
+  useEffect(() => {
     if (!hasActiveOrder) return undefined;
     void loadActiveOrder();
     const timer = window.setInterval(() => {
@@ -1622,15 +1635,26 @@ export function SupplyPage() {
               estimate?.adoptedM ?? (mode === 'fixed' ? policy.fixedM : policy.fallbackM);
             const pending = estimate?.pendingConfirmation === true;
             const blocked = estimate?.orderingBlocked === true;
+            const validationState =
+              estimate?.validationState ??
+              (mode === 'fixed' ? 'fixed' : pending ? 'confirming' : 'accepted');
+            const insufficient = validationState === 'insufficient';
+            const quarantined = validationState === 'quarantined';
             const upwardPending =
               pending &&
               !blocked &&
+              validationState === 'confirming' &&
               (estimate?.confirmationRounds ?? 0) < (estimate?.requiredRounds ?? 2) &&
               (estimate?.observedM ?? 0) > adoptedM;
+            const showValidationNotice = pending || insufficient;
             return (
               <article
                 className={`${styles.quotaEstimateCard} ${
-                  blocked ? styles.quotaEstimateBlocked : pending ? styles.quotaEstimateWarning : ''
+                  blocked || quarantined
+                    ? styles.quotaEstimateBlocked
+                    : showValidationNotice
+                      ? styles.quotaEstimateWarning
+                      : ''
                 }`}
                 key={planType}
               >
@@ -1669,24 +1693,32 @@ export function SupplyPage() {
                   </span>
                   <span>
                     {t('supply.quota_plan_samples')}: {formatInteger(estimate?.uniqueAccounts ?? 0)}
+                    /{formatInteger(estimate?.minimumUniqueAccounts ?? 3)}
                   </span>
                   <span>
                     {t('supply.quota_plan_fallback')}:{' '}
                     {formatTokenM(estimate?.fallbackM ?? policy.fallbackM, 1)}
                   </span>
                 </div>
-                {pending ? (
+                {showValidationNotice ? (
                   <div className={blocked ? styles.quotaEstimateAlert : styles.quotaEstimateNotice}>
                     {t(
-                      blocked
-                        ? 'supply.quota_plan_warning_pending'
-                        : upwardPending
-                          ? 'supply.quota_plan_warning_upward_pending'
-                          : 'supply.quota_plan_warning_staged',
+                      insufficient
+                        ? 'supply.quota_plan_warning_insufficient'
+                        : quarantined
+                          ? 'supply.quota_plan_warning_quarantined'
+                          : blocked
+                            ? 'supply.quota_plan_warning_pending'
+                            : upwardPending
+                              ? 'supply.quota_plan_warning_upward_pending'
+                              : 'supply.quota_plan_warning_staged',
                       {
                         divergence: formatNumber(estimate?.divergencePercent, 1),
                         current: estimate?.confirmationRounds ?? 0,
                         required: estimate?.requiredRounds ?? 2,
+                        observedAccounts: estimate?.uniqueAccounts ?? 0,
+                        minimumAccounts: estimate?.minimumUniqueAccounts ?? 3,
+                        completeAccounts: estimate?.completeWindowAccounts ?? 0,
                       }
                     )}
                   </div>
