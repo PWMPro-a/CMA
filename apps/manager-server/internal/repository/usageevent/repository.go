@@ -425,6 +425,7 @@ func (r *repository) ListSupplyQuotaCalibrationEvents(ctx context.Context, since
 		coalesce(reasoning_tokens, 0),
 		coalesce(total_tokens, 0),
 		coalesce(failed, 0),
+		coalesce(response_metadata_json, ''),
 		header_quota_used_percent,
 		coalesce(header_quota_recover_at_ms, 0),
 		coalesce(header_quota_plan_type, '')
@@ -440,6 +441,7 @@ func (r *repository) ListSupplyQuotaCalibrationEvents(ctx context.Context, since
 				reasoning_tokens,
 				total_tokens,
 				failed,
+				response_metadata_json,
 				header_quota_used_percent,
 				header_quota_recover_at_ms,
 				header_quota_plan_type
@@ -473,6 +475,7 @@ func (r *repository) ListSupplyQuotaCalibrationEvents(ctx context.Context, since
 			&event.ReasoningTokens,
 			&event.TotalTokens,
 			&failed,
+			&event.ResponseMetadataJSON,
 			&usedPercent,
 			&event.HeaderQuotaRecoverAtMS,
 			&event.HeaderQuotaPlanType,

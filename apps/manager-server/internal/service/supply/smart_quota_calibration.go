@@ -1,6 +1,7 @@
 package supply
 
 import (
+	"encoding/json"
 	"math"
 	"sort"
 	"strings"
@@ -81,6 +82,13 @@ type smartQuotaWeightedPoint struct {
 	weight    float64
 }
 
+type smartQuotaWindowEvidence struct {
+	fraction    float64
+	recoverAtMS int64
+	planType    string
+	concrete    bool
+}
+
 func newSmartQuotaCalibrationState() smartQuotaCalibrationState {
 	return smartQuotaCalibrationState{
 		observations: make(map[string]smartQuotaCalibrationObservation),
@@ -145,6 +153,94 @@ func smartQuotaCalibrationEventTokens(event usage.Event) int64 {
 	return maxInt64(event.TotalTokens, event.InputTokens+event.OutputTokens+event.ReasoningTokens)
 }
 
+func smartQuotaCalibrationEventEvidence(event usage.Event) (smartQuotaWindowEvidence, bool) {
+	metadata := event.ResponseMetadata
+	if metadata == nil && strings.TrimSpace(event.ResponseMetadataJSON) != "" {
+		var decoded usage.ResponseHeaderMetadata
+		if err := json.Unmarshal([]byte(event.ResponseMetadataJSON), &decoded); err == nil {
+			metadata = &decoded
+		}
+	}
+	if metadata != nil && metadata.Quota != nil {
+		quota := metadata.Quota
+		// Codex exposes a short primary window and a 7-day secondary window.
+		// The flattened header fields intentionally summarize whichever window
+		// is currently more consumed, so they can switch between 5H and 7D from
+		// one request to the next. Always prefer the longest concrete window for
+		// total-account capacity inference; otherwise cumulative Token history is
+		// divided by unrelated percentages and collapses toward one-request size.
+		if window := longestSmartQuotaWindow(quota.Primary, quota.Secondary); window != nil && window.UsedPercent != nil {
+			fraction, ok := normalizeSmartQuotaFraction(*window.UsedPercent)
+			if ok {
+				return smartQuotaWindowEvidence{
+					fraction:    fraction,
+					recoverAtMS: smartQuotaWindowRecoverAtMS(window, event.TimestampMS),
+					planType:    strings.ToLower(strings.TrimSpace(quota.PlanType)),
+					concrete:    true,
+				}, true
+			}
+		}
+		if quota.UsedPercent != nil {
+			fraction, ok := normalizeSmartQuotaFraction(*quota.UsedPercent)
+			if ok {
+				return smartQuotaWindowEvidence{
+					fraction:    fraction,
+					recoverAtMS: quota.RecoverAtMS,
+					planType:    strings.ToLower(strings.TrimSpace(quota.PlanType)),
+					concrete:    strings.EqualFold(strings.TrimSpace(quota.SummaryWindowKind), "weekly"),
+				}, true
+			}
+		}
+	}
+	if event.HeaderQuotaUsedPercent == nil {
+		return smartQuotaWindowEvidence{}, false
+	}
+	fraction, ok := normalizeSmartQuotaFraction(*event.HeaderQuotaUsedPercent)
+	if !ok {
+		return smartQuotaWindowEvidence{}, false
+	}
+	return smartQuotaWindowEvidence{
+		fraction:    fraction,
+		recoverAtMS: event.HeaderQuotaRecoverAtMS,
+		planType:    strings.ToLower(strings.TrimSpace(event.HeaderQuotaPlanType)),
+		concrete:    false,
+	}, true
+}
+
+func longestSmartQuotaWindow(windows ...*usage.HeaderQuotaWindow) *usage.HeaderQuotaWindow {
+	var best *usage.HeaderQuotaWindow
+	bestMinutes := -1.0
+	for _, window := range windows {
+		if window == nil || window.UsedPercent == nil {
+			continue
+		}
+		minutes := 0.0
+		if window.WindowMinutes != nil && *window.WindowMinutes > 0 {
+			minutes = *window.WindowMinutes
+		}
+		// Secondary is normally weekly. If providers omit window_minutes, later
+		// candidates win so the longer secondary window remains preferred.
+		if best == nil || minutes >= bestMinutes {
+			best = window
+			bestMinutes = minutes
+		}
+	}
+	return best
+}
+
+func smartQuotaWindowRecoverAtMS(window *usage.HeaderQuotaWindow, eventTimestampMS int64) int64 {
+	if window == nil {
+		return 0
+	}
+	if window.ResetAtMS > 0 {
+		return window.ResetAtMS
+	}
+	if window.ResetAfterSeconds != nil && *window.ResetAfterSeconds > 0 && eventTimestampMS > 0 {
+		return eventTimestampMS + int64(*window.ResetAfterSeconds*1000)
+	}
+	return 0
+}
+
 func (s *Service) recordSmartQuotaCalibrationEventsLocked(events []usage.Event, now time.Time) {
 	if s == nil || len(events) == 0 {
 		return
@@ -159,7 +255,8 @@ func (s *Service) recordSmartQuotaCalibrationEventsLocked(events []usage.Event, 
 		}
 		// Header-less events are retained after an observation has started so
 		// their Token usage is not lost before the next percentage update.
-		if event.HeaderQuotaUsedPercent == nil && smartQuotaCalibrationEventTokens(event) <= 0 {
+		evidence, hasQuotaEvidence := smartQuotaCalibrationEventEvidence(event)
+		if (!hasQuotaEvidence || !evidence.concrete) && smartQuotaCalibrationEventTokens(event) <= 0 {
 			continue
 		}
 		ordered = append(ordered, event)
@@ -187,7 +284,8 @@ func (s *Service) recordSmartQuotaCalibrationEventLocked(event usage.Event, now 
 		tokens = maxInt64(0, smartQuotaCalibrationEventTokens(event))
 	}
 	observation, found := s.smartQuotaState.observations[identity]
-	if event.HeaderQuotaUsedPercent == nil {
+	evidence, hasQuotaEvidence := smartQuotaCalibrationEventEvidence(event)
+	if !hasQuotaEvidence || !evidence.concrete {
 		windowExpired := found && observation.recoverAtMS > 0 && ts >= observation.recoverAtMS
 		gapExpired := found && observation.recoverAtMS <= 0 &&
 			(ts-observation.lastEventMS) > smartQuotaCalibrationMaxObservationGap.Milliseconds()
@@ -199,17 +297,14 @@ func (s *Service) recordSmartQuotaCalibrationEventLocked(event usage.Event, now 
 		s.smartQuotaState.observations[identity] = observation
 		return
 	}
-	fraction, ok := normalizeSmartQuotaFraction(*event.HeaderQuotaUsedPercent)
-	if !ok {
-		return
-	}
-	planType := strings.ToLower(strings.TrimSpace(event.HeaderQuotaPlanType))
-	gapReset := found && observation.recoverAtMS <= 0 && event.HeaderQuotaRecoverAtMS <= 0 &&
+	fraction := evidence.fraction
+	planType := evidence.planType
+	gapReset := found && observation.recoverAtMS <= 0 && evidence.recoverAtMS <= 0 &&
 		(ts-observation.lastEventMS) > smartQuotaCalibrationMaxObservationGap.Milliseconds()
 	windowExpired := found && observation.recoverAtMS > 0 && ts >= observation.recoverAtMS
 	reset := !found || gapReset || windowExpired ||
 		fraction+smartQuotaCalibrationMinDelta < observation.lastFraction ||
-		(event.HeaderQuotaRecoverAtMS > 0 && observation.recoverAtMS > 0 && event.HeaderQuotaRecoverAtMS != observation.recoverAtMS) ||
+		(evidence.recoverAtMS > 0 && observation.recoverAtMS > 0 && evidence.recoverAtMS != observation.recoverAtMS) ||
 		(planType != "" && observation.planType != "" && planType != observation.planType)
 	if reset {
 		observation = smartQuotaCalibrationObservation{}
@@ -217,8 +312,8 @@ func (s *Service) recordSmartQuotaCalibrationEventLocked(event usage.Event, now 
 	observation.windowTokens += tokens
 	observation.lastEventMS = ts
 	observation.lastFraction = fraction
-	if event.HeaderQuotaRecoverAtMS > 0 {
-		observation.recoverAtMS = event.HeaderQuotaRecoverAtMS
+	if evidence.recoverAtMS > 0 {
+		observation.recoverAtMS = evidence.recoverAtMS
 	}
 	if planType != "" {
 		observation.planType = planType

@@ -26,6 +26,7 @@ func smartQuotaCalibrationFixture(identity, plan string, start time.Time, capaci
 			HeaderQuotaRecoverAtMS: start.Add(5 * time.Hour).UnixMilli(),
 			HeaderQuotaPlanType:    plan,
 			TotalTokens:            tokens,
+			ResponseMetadata:       smartQuotaWeeklyMetadata(plan, usedPercent, start.Add(5*time.Hour).UnixMilli()),
 		})
 	}
 	return events
@@ -67,6 +68,7 @@ func TestSmartQuotaCalibrationUsesWindowHistoryAndRemainingPercentage(t *testing
 			HeaderQuotaUsedPercent: floatPtr(90),
 			HeaderQuotaRecoverAtMS: recoverAt,
 			HeaderQuotaPlanType:    "team",
+			ResponseMetadata:       smartQuotaWeeklyMetadata("team", 90, recoverAt),
 		},
 		{
 			TimestampMS:            now.UnixMilli(),
@@ -76,6 +78,7 @@ func TestSmartQuotaCalibrationUsesWindowHistoryAndRemainingPercentage(t *testing
 			HeaderQuotaRecoverAtMS: recoverAt,
 			HeaderQuotaPlanType:    "team",
 			TotalTokens:            3_000_000,
+			ResponseMetadata:       smartQuotaWeeklyMetadata("team", 95, recoverAt),
 		},
 	}
 	service.recordSmartUsageEvents(events, now)
@@ -88,6 +91,18 @@ func TestSmartQuotaCalibrationUsesWindowHistoryAndRemainingPercentage(t *testing
 	if observation.windowTokens != 57_400_000 || observation.lastFraction != 0.95 {
 		t.Fatalf("window observation = %#v", observation)
 	}
+}
+
+func smartQuotaWeeklyMetadata(plan string, usedPercent float64, recoverAtMS int64) *usage.ResponseHeaderMetadata {
+	windowMinutes := 10_080.0
+	return &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+		PlanType: plan,
+		Secondary: &usage.HeaderQuotaWindow{
+			UsedPercent:   &usedPercent,
+			ResetAtMS:     recoverAtMS,
+			WindowMinutes: &windowMinutes,
+		},
+	}}
 }
 
 func TestEstimateSmartQuotaSamplesDropsHighestAndLowest(t *testing.T) {
@@ -161,6 +176,124 @@ func TestNormalizeSmartQuotaFractionTreatsSubOneValuesAsPercent(t *testing.T) {
 	}
 	if _, ok := normalizeSmartQuotaFraction(100.01); ok {
 		t.Fatal("quota percentage above 100 must be rejected")
+	}
+}
+
+func TestSmartQuotaCalibrationPrefersWeeklySecondaryWindow(t *testing.T) {
+	base := time.Now().Truncate(time.Second)
+	primaryUsed := 80.0
+	primaryMinutes := 300.0
+	secondaryUsed := 95.0
+	secondaryMinutes := 10_080.0
+	secondaryReset := base.Add(7 * 24 * time.Hour).UnixMilli()
+	evidence, ok := smartQuotaCalibrationEventEvidence(usage.Event{
+		TimestampMS:            base.UnixMilli(),
+		HeaderQuotaUsedPercent: floatPtr(primaryUsed),
+		HeaderQuotaRecoverAtMS: base.Add(5 * time.Hour).UnixMilli(),
+		ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+			PlanType: "team",
+			Primary: &usage.HeaderQuotaWindow{
+				UsedPercent:   &primaryUsed,
+				ResetAtMS:     base.Add(5 * time.Hour).UnixMilli(),
+				WindowMinutes: &primaryMinutes,
+			},
+			Secondary: &usage.HeaderQuotaWindow{
+				UsedPercent:   &secondaryUsed,
+				ResetAtMS:     secondaryReset,
+				WindowMinutes: &secondaryMinutes,
+			},
+		}},
+	})
+	if !ok || !evidence.concrete || evidence.fraction != 0.95 || evidence.recoverAtMS != secondaryReset || evidence.planType != "team" {
+		t.Fatalf("weekly evidence = %#v/%v", evidence, ok)
+	}
+}
+
+func TestSmartQuotaCalibrationKeepsHistoryWhenSummaryWindowSwitches(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	weeklyReset := now.Add(7 * 24 * time.Hour).UnixMilli()
+	primaryMinutes := 300.0
+	weeklyMinutes := 10_080.0
+	primary80, primary10 := 80.0, 10.0
+	weekly90, weekly95 := 90.0, 95.0
+	events := []usage.Event{
+		{
+			TimestampMS:            now.Add(-time.Minute).UnixMilli(),
+			Provider:               "codex",
+			AuthFileSnapshot:       "switching.json",
+			HeaderQuotaUsedPercent: &primary80,
+			HeaderQuotaRecoverAtMS: now.Add(5 * time.Hour).UnixMilli(),
+			TotalTokens:            54_000_000,
+			ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+				PlanType: "team",
+				Primary: &usage.HeaderQuotaWindow{
+					UsedPercent:   &primary80,
+					ResetAtMS:     now.Add(5 * time.Hour).UnixMilli(),
+					WindowMinutes: &primaryMinutes,
+				},
+				Secondary: &usage.HeaderQuotaWindow{
+					UsedPercent:   &weekly90,
+					ResetAtMS:     weeklyReset,
+					WindowMinutes: &weeklyMinutes,
+				},
+			}},
+		},
+		{
+			TimestampMS:            now.UnixMilli(),
+			Provider:               "codex",
+			AuthFileSnapshot:       "switching.json",
+			HeaderQuotaUsedPercent: &primary10,
+			HeaderQuotaRecoverAtMS: now.Add(10 * time.Hour).UnixMilli(),
+			TotalTokens:            3_000_000,
+			ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+				PlanType: "team",
+				Primary: &usage.HeaderQuotaWindow{
+					UsedPercent:   &primary10,
+					ResetAtMS:     now.Add(10 * time.Hour).UnixMilli(),
+					WindowMinutes: &primaryMinutes,
+				},
+				Secondary: &usage.HeaderQuotaWindow{
+					UsedPercent:   &weekly95,
+					ResetAtMS:     weeklyReset,
+					WindowMinutes: &weeklyMinutes,
+				},
+			}},
+		},
+	}
+	service.recordSmartUsageEvents(events, now)
+	estimate := service.smartQuotaEstimateForAt(now, "team", "file:switching.json")
+	if estimate.CapacityM != 60 || estimate.SampleCount != 2 {
+		t.Fatalf("switching-window estimate = %#v", estimate)
+	}
+	if observation := service.smartQuotaState.observations["file:switching.json"]; observation.windowTokens != 57_000_000 || observation.recoverAtMS != weeklyReset {
+		t.Fatalf("switching-window observation = %#v", observation)
+	}
+}
+
+func TestSmartQuotaCalibrationDoesNotTreatFlattenedSummaryAsOneWindow(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	service.recordSmartUsageEvents([]usage.Event{
+		{
+			TimestampMS:            now.Add(-time.Minute).UnixMilli(),
+			Provider:               "codex",
+			AuthFileSnapshot:       "summary-only.json",
+			HeaderQuotaUsedPercent: floatPtr(80),
+			HeaderQuotaRecoverAtMS: now.Add(5 * time.Hour).UnixMilli(),
+			TotalTokens:            2_000_000,
+		},
+		{
+			TimestampMS:            now.UnixMilli(),
+			Provider:               "codex",
+			AuthFileSnapshot:       "summary-only.json",
+			HeaderQuotaUsedPercent: floatPtr(10),
+			HeaderQuotaRecoverAtMS: now.Add(10 * time.Hour).UnixMilli(),
+			TotalTokens:            2_000_000,
+		},
+	}, now)
+	if len(service.smartQuotaState.samples) != 0 {
+		t.Fatalf("flattened summary created samples: %#v", service.smartQuotaState.samples)
 	}
 }
 

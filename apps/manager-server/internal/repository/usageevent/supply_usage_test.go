@@ -60,6 +60,7 @@ func TestListSupplyQuotaCalibrationEventsReturnsMinimalQuotaHistory(t *testing.T
 	event.HeaderQuotaUsedPercent = &usedPercent
 	event.HeaderQuotaRecoverAtMS = base.Add(5 * time.Hour).UnixMilli()
 	event.HeaderQuotaPlanType = "team"
+	event.ResponseMetadataJSON = `{"quota":{"plan_type":"team","summary_window_kind":"weekly"}}`
 	repo := New(db)
 	if _, err := repo.InsertBatch(context.Background(), []usage.Event{event}); err != nil {
 		t.Fatalf("insert event: %v", err)
@@ -70,7 +71,8 @@ func TestListSupplyQuotaCalibrationEventsReturnsMinimalQuotaHistory(t *testing.T
 		t.Fatalf("list quota calibration events: %v", err)
 	}
 	if len(events) != 1 || events[0].AuthFileSnapshot != "team.json" || events[0].HeaderQuotaUsedPercent == nil ||
-		*events[0].HeaderQuotaUsedPercent != usedPercent || events[0].HeaderQuotaPlanType != "team" || events[0].TotalTokens != 4_000_000 {
+		*events[0].HeaderQuotaUsedPercent != usedPercent || events[0].HeaderQuotaPlanType != "team" || events[0].TotalTokens != 4_000_000 ||
+		events[0].ResponseMetadataJSON != event.ResponseMetadataJSON {
 		t.Fatalf("quota calibration events = %#v", events)
 	}
 }
