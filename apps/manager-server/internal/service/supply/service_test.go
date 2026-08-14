@@ -193,6 +193,72 @@ func TestAutomaticCreateCooldownIgnoresRecentRecoveryImport(t *testing.T) {
 	}
 }
 
+func TestRecentSupplyOrdersCachesDefensiveCopiesAndInvalidates(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-order-cache.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "cached-first", Product: "oauth_7d", RequestedQuantity: 1, Status: "completed",
+	}); err != nil {
+		t.Fatalf("create first order: %v", err)
+	}
+	service := New(st, nil)
+	first, err := service.recentSupplyOrders(ctx)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first cached orders = %#v, err=%v", first, err)
+	}
+	first[0].Status = "mutated-by-caller"
+	second, err := service.recentSupplyOrders(ctx)
+	if err != nil || len(second) != 1 || second[0].Status == "mutated-by-caller" {
+		t.Fatalf("cached orders must be defensively copied: %#v, err=%v", second, err)
+	}
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "cached-second", Product: "oauth_7d", RequestedQuantity: 1, Status: "completed",
+	}); err != nil {
+		t.Fatalf("create second order: %v", err)
+	}
+	stillCached, err := service.recentSupplyOrders(ctx)
+	if err != nil || len(stillCached) != 1 {
+		t.Fatalf("short-lived cache was not reused: %#v, err=%v", stillCached, err)
+	}
+	service.invalidateSupplyOrdersCache()
+	refreshed, err := service.recentSupplyOrders(ctx)
+	if err != nil || len(refreshed) != 2 {
+		t.Fatalf("invalidated cache did not reload orders: %#v, err=%v", refreshed, err)
+	}
+}
+
+func TestRemainingAutomaticDailyQuantityIgnoresRecoveryImports(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-daily-limit.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	nowMS := time.Now().UnixMilli()
+	orders := []store.SupplyOrder{
+		{OrderID: "purchase", Product: "oauth_7d", RequestedQuantity: 2, Automatic: true, Status: "completed", CreatedAtMS: nowMS},
+		{OrderID: "recovery-import", Product: "oauth_7d", RequestedQuantity: 50, Automatic: true, Strategy: "recovery", RemoteStatus: "recovery_claimed", Status: "completed", CreatedAtMS: nowMS},
+	}
+	for _, order := range orders {
+		if _, err := st.CreateSupplyOrder(ctx, order); err != nil {
+			t.Fatalf("create order %s: %v", order.OrderID, err)
+		}
+	}
+	remaining, err := New(st, nil).remainingAutomaticDailyQuantity(ctx, store.ManagerSupplyConfig{
+		DailyMaxReplenishQuantity: 5,
+	})
+	if err != nil {
+		t.Fatalf("remaining daily quantity: %v", err)
+	}
+	if remaining != 3 {
+		t.Fatalf("remaining daily quantity = %d, want 3", remaining)
+	}
+}
+
 func TestEmergencyRetryNextIntervalHonorsShortCooldown(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
@@ -567,6 +633,7 @@ func TestCustomSupplyRefillsVerifiedPoolToConfiguredHealthyFloor(t *testing.T) {
 		CapacitySource:      smartCapacitySourceInspection,
 		AvailableAccounts:   12,
 		SchedulableAccounts: 28,
+		ConsumeRCUPerMinute: 1,
 	}
 	New(nil, nil).reconcileSmartAccountPoolGuard(cfg, &resource)
 	if resource.DecisionReason != "healthy_available_accounts" ||

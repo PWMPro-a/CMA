@@ -492,6 +492,8 @@ type Service struct {
 	automaticAccountAtMS    int64
 	accountListCacheMu      sync.Mutex
 	accountListCache        supplyAccountListCache
+	supplyOrdersCacheMu     sync.Mutex
+	supplyOrdersCache       supplyOrdersCache
 }
 
 type supplyAccountListCache struct {
@@ -500,7 +502,15 @@ type supplyAccountListCache struct {
 	result    SupplyAccountList
 }
 
-const supplyAccountListCacheTTL = 15 * time.Second
+type supplyOrdersCache struct {
+	generated time.Time
+	orders    []store.SupplyOrder
+}
+
+const (
+	supplyAccountListCacheTTL = 15 * time.Second
+	supplyOrdersCacheTTL      = 5 * time.Second
+)
 
 const (
 	staleInspectionSnapshotRefreshCooldown = 30 * time.Second
@@ -806,6 +816,7 @@ func (s *Service) DismissCreateUncertain(ctx context.Context, orderID string) (S
 	if err := s.store.UpdateSupplyOrder(ctx, order); err != nil {
 		return Status{}, err
 	}
+	s.invalidateSupplyOrdersCache()
 	return s.GetStatus(ctx, 50)
 }
 
@@ -1524,8 +1535,8 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	if manualQuantity == 0 {
 		if useSmart {
 			if reason := s.automaticSupplyGuardReason(resource); reason != "" {
-				resource.EmergencyShortage = false
-				resource.EmergencyReason = ""
+	resource.EmergencyShortage = false
+			resource.EmergencyReason = ""
 				resource.SuggestedAction = smartActionSnapshotStale
 				resource.SuggestedQuantity = 0
 				resource.DecisionReason = reason
@@ -1695,6 +1706,11 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	if _, err := s.store.CreateSupplyOrder(ctx, attempt); err != nil {
 		return err
 	}
+	s.invalidateSupplyOrdersCache()
+	// A concurrent dashboard read may repopulate the cache while the remote
+	// create call is in flight. Invalidate again after the attempt reaches its
+	// final local state (created, uncertain or failed).
+	defer s.invalidateSupplyOrdersCache()
 	if attempt.Automatic {
 		s.markAutomaticCreate()
 	}
@@ -1735,6 +1751,10 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 }
 
 func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, order store.SupplyOrder) error {
+	// Every successful processOrder path may advance or finish an order. Drop
+	// the short history cache once on exit rather than relying on each status
+	// branch to remember the invalidation.
+	defer s.invalidateSupplyOrdersCache()
 	if order.Status == "taking" && order.NextPollAtMS > time.Now().UnixMilli() {
 		return nil
 	}
@@ -2041,10 +2061,19 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 			return false, nil
 		}
 		if resource.ConsumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling {
-			// Unknown request demand still blocks releasing a reservation, but it
-			// must not hide a verified healthy-account shortage from the ready
-			// order take gate above.
-			return false, nil
+			// The live-account gate above already retained this reservation for an
+			// empty or sub-critical pool. With no current traffic and the minimum
+			// floor satisfied, taking more short-lived credentials would only
+			// create expiry waste, so release the local reservation immediately.
+			resource.LockedOrderID = order.OrderID
+			resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
+			resource.EmergencyShortage = false
+			resource.EmergencyReason = ""
+			resource.SuggestedAction = smartActionReleaseLocked
+			resource.SuggestedQuantity = 0
+			resource.DecisionReason = "no_traffic_minimum_pool"
+			s.setSmartResource(resource)
+			return true, s.markAutomaticOrderReleasedLocally(ctx, order)
 		}
 		resource.LockedOrderID = order.OrderID
 		resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
@@ -4535,7 +4564,7 @@ func (s *Service) reconcileSmartAccountPoolGuard(cfg store.ManagerSupplyConfig, 
 		}
 		return
 	}
-	if smartHealthyFloorShortageEnabled(cfg) && resource.SnapshotFresh &&
+	if smartHealthyFloorShortageEnabled(cfg) && resource.ConsumeRCUPerMinute > 0 && resource.SnapshotFresh &&
 		resource.CapacitySource == smartCapacitySourceInspection &&
 		resource.AvailableAccounts < smartHealthyAvailableAccounts(cfg) {
 		resource.EmergencyShortage = true
@@ -4589,14 +4618,13 @@ func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.Mana
 	if !smartSupplyStrategyConfigured(cfg.Supply) || !smartEmergencyBypassUsageRate(cfg.Supply) {
 		return available, 0, "", true, nil
 	}
-	healthyFloorShortage := smartHealthyFloorShortageEnabled(cfg.Supply) && resource.SnapshotFresh &&
+	healthyFloorShortage := smartHealthyFloorShortageEnabled(cfg.Supply) && resource.ConsumeRCUPerMinute > 0 && resource.SnapshotFresh &&
 		resource.CapacitySource == smartCapacitySourceInspection
 	if !healthyFloorShortage && available > smartCriticalAvailableAccounts(cfg.Supply) {
 		s.clearPoolVacuum()
 		return available, 0, "", true, nil
 	}
-	if !healthyFloorShortage && available > 0 && resource.HealthyAccounts > 0 &&
-		resource.CurrentCapacityRCU > 0 && resource.ConsumeRCUPerMinute <= 0 {
+	if !healthyFloorShortage && available >= smartCriticalAvailableAccounts(cfg.Supply) && resource.ConsumeRCUPerMinute <= 0 {
 		s.clearPoolVacuum()
 		return available, 0, "", true, nil
 	}
@@ -4650,6 +4678,9 @@ func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.Mana
 		resource.PoolVacuumDurationSeconds = 0
 	}
 	quantity := smartEmergencyRefillQuantity(cfg.Supply, available)
+	if resource.ConsumeRCUPerMinute <= 0 {
+		quantity = smartIdleEmergencyRefillQuantity(cfg.Supply, available)
+	}
 	reason := resource.DecisionReason
 	if reason == "" {
 		reason = "critical_available_accounts"
@@ -4840,6 +4871,42 @@ type smartSupplyPressure struct {
 	recentWaiting      int
 }
 
+// recentSupplyOrders amortizes the two operator calculations that inspect the
+// same recent order history (supplier pressure and daily quantity usage). The
+// cache is intentionally very short and is invalidated on every local
+// supplier-purchase mutation, so it removes repeated SQLite scans from
+// dashboard/worker bursts without delaying a replenishment decision.
+func (s *Service) recentSupplyOrders(ctx context.Context) ([]store.SupplyOrder, error) {
+	if s == nil || s.store == nil {
+		return nil, nil
+	}
+	now := time.Now()
+	s.supplyOrdersCacheMu.Lock()
+	defer s.supplyOrdersCacheMu.Unlock()
+	if !s.supplyOrdersCache.generated.IsZero() && now.Sub(s.supplyOrdersCache.generated) <= supplyOrdersCacheTTL {
+		return append([]store.SupplyOrder(nil), s.supplyOrdersCache.orders...), nil
+	}
+
+	orders, err := s.store.ListSupplyOrders(ctx, 200)
+	if err != nil {
+		return nil, err
+	}
+	s.supplyOrdersCache = supplyOrdersCache{
+		generated: time.Now(),
+		orders:    append([]store.SupplyOrder(nil), orders...),
+	}
+	return orders, nil
+}
+
+func (s *Service) invalidateSupplyOrdersCache() {
+	if s == nil {
+		return
+	}
+	s.supplyOrdersCacheMu.Lock()
+	s.supplyOrdersCache = supplyOrdersCache{}
+	s.supplyOrdersCacheMu.Unlock()
+}
+
 func (s *Service) smartSupplyPressure(ctx context.Context, cfg store.ManagerSupplyConfig, inventory supplyclient.Inventory, requestedQuantity int) smartSupplyPressure {
 	quantity := max(1, requestedQuantity)
 	pressure := smartSupplyPressure{
@@ -4870,7 +4937,7 @@ func (s *Service) smartSupplyPressure(ctx context.Context, cfg store.ManagerSupp
 	if s == nil || s.store == nil {
 		return pressure
 	}
-	orders, err := s.store.ListSupplyOrders(ctx, 200)
+	orders, err := s.recentSupplyOrders(ctx)
 	if err != nil {
 		return pressure
 	}
@@ -4882,7 +4949,7 @@ func (s *Service) smartSupplyPressure(ctx context.Context, cfg store.ManagerSupp
 		if order.CreatedAtMS > 0 && order.CreatedAtMS < cutoffMS {
 			break
 		}
-		if !order.Automatic || !sameSupplyProduct(order.Product, cfg.Product) {
+		if !isSupplierPurchaseHistoryOrder(order) || !order.Automatic || !sameSupplyProduct(order.Product, cfg.Product) {
 			continue
 		}
 		switch order.Status {
@@ -5131,7 +5198,7 @@ func (s *Service) remainingAutomaticDailyQuantity(ctx context.Context, cfg store
 	if limit <= 0 {
 		return 100, nil
 	}
-	orders, err := s.store.ListSupplyOrders(ctx, 200)
+	orders, err := s.recentSupplyOrders(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -5142,7 +5209,7 @@ func (s *Service) remainingAutomaticDailyQuantity(ctx context.Context, cfg store
 		if order.CreatedAtMS > 0 && order.CreatedAtMS < dayStartMS {
 			break
 		}
-		if !order.Automatic {
+		if !isSupplierPurchaseHistoryOrder(order) || !order.Automatic {
 			continue
 		}
 		switch order.Status {
@@ -5155,6 +5222,12 @@ func (s *Service) remainingAutomaticDailyQuantity(ctx context.Context, cfg store
 		return 0, nil
 	}
 	return limit - used, nil
+}
+
+func isSupplierPurchaseHistoryOrder(order store.SupplyOrder) bool {
+	return !strings.EqualFold(strings.TrimSpace(order.Strategy), "recovery") &&
+		!strings.EqualFold(strings.TrimSpace(order.RemoteStatus), "recovery_claimed") &&
+		!strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.OrderID)), "recovery-")
 }
 
 func (s *Service) waitLockedOrder(ctx context.Context, cfg store.ManagerSupplyConfig, order *store.SupplyOrder, resource SmartResource, action string, reason string) error {

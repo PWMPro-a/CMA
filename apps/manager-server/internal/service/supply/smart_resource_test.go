@@ -1086,8 +1086,19 @@ func TestNoTrafficKeepsOnlyMinimumPoolAndCreatesNoCapacityOrder(t *testing.T) {
 	}
 	resource.AvailableAccounts = 2
 	applySmartEmergencyAvailability(cfg, &resource, time.Now())
-	if !resource.EmergencyShortage || resource.SuggestedQuantity <= 0 {
-		t.Fatalf("pool at the critical floor must receive a bounded emergency refill: %#v", resource)
+	if resource.EmergencyShortage || resource.SuggestedQuantity != 0 {
+		t.Fatalf("idle pool at the critical floor must observe without buying to healthy: %#v", resource)
+	}
+	resource.AvailableAccounts = 1
+	applySmartEmergencyAvailability(cfg, &resource, time.Now())
+	if !resource.EmergencyShortage || resource.SuggestedQuantity != 1 {
+		t.Fatalf("idle pool below critical must refill only to the critical floor: %#v", resource)
+	}
+	resource.AvailableAccounts = 0
+	resource.SuggestedQuantity = 0
+	applySmartEmergencyAvailability(cfg, &resource, time.Now())
+	if !resource.EmergencyShortage || resource.SuggestedQuantity != 5 || resource.EmergencyReason != "emergency_pool_vacuum" {
+		t.Fatalf("idle empty pool must keep a minimum emergency batch: %#v", resource)
 	}
 }
 
@@ -2498,7 +2509,7 @@ func TestSmartEmergencyAccountWaterlineKeepsAutomaticOrderWhenQuotaIsHealthy(t *
 	}
 }
 
-func TestVerifiedHealthyFloorPublishesReadyOrderTakeDecisionWithoutUsageRate(t *testing.T) {
+func TestIdleHealthyFloorReleasesReadyOrderWithoutUsageRate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet {
 			_, _ = w.Write([]byte(`{"files":[{"name":"verified.json","provider":"codex","status":"ready","remaining_rcu":2000}]}`))
@@ -2536,13 +2547,13 @@ func TestVerifiedHealthyFloorPublishesReadyOrderTakeDecisionWithoutUsageRate(t *
 	if err != nil {
 		t.Fatalf("check automatic release: %v", err)
 	}
-	if released {
-		t.Fatal("verified healthy-floor shortage must keep the ready order")
+	if !released {
+		t.Fatal("idle healthy-floor shortage must release an unnecessary ready order")
 	}
 	resource := service.currentSmartResource(cfg.Supply)
-	if resource.DecisionReason != "healthy_available_accounts" || resource.LockedOrderID != order.OrderID ||
-		resource.SuggestedQuantity != 1 || !service.smartTakeAllowed(cfg.Supply, order.OrderID) {
-		t.Fatalf("published verified healthy-floor decision = %#v", resource)
+	if resource.DecisionReason != "no_traffic_minimum_pool" || resource.SuggestedQuantity != 0 ||
+		smartResourceEmergency(resource) {
+		t.Fatalf("published idle healthy-floor decision = %#v", resource)
 	}
 }
 
@@ -2579,12 +2590,13 @@ func TestGetStatusPublishesLiveAccountEmergencyToWorkerState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get status: %v", err)
 	}
-	if status.SmartResource.AvailableAccounts != 1 || status.SmartResource.EmergencyReason != "critical_available_accounts" {
-		t.Fatalf("live status emergency = %#v", status.SmartResource)
+	if status.SmartResource.AvailableAccounts != 1 || status.SmartResource.EmergencyReason != "" ||
+		status.SmartResource.DecisionReason != "no_traffic_minimum_pool" {
+		t.Fatalf("live idle status = %#v", status.SmartResource)
 	}
 	workerState := service.currentSmartResource(cfg.Supply)
-	if workerState.AvailableAccounts != 1 || workerState.EmergencyReason != "critical_available_accounts" || !smartResourceEmergency(workerState) {
-		t.Fatalf("worker did not retain reconciled live emergency = %#v", workerState)
+	if workerState.AvailableAccounts != 1 || workerState.EmergencyReason != "" || smartResourceEmergency(workerState) {
+		t.Fatalf("worker did not retain reconciled idle floor = %#v", workerState)
 	}
 }
 

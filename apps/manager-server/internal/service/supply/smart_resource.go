@@ -1171,6 +1171,25 @@ func applySmartEmergencyAvailability(cfg store.ManagerSupplyConfig, resource *Sm
 	if resource.AvailableAccounts > critical {
 		return
 	}
+	// An idle pool only needs to avoid a true vacuum. Do not turn the
+	// configured healthy floor into a purchase target when there is no current
+	// traffic: short-lived credentials would otherwise be bought and expire
+	// unused. A positive but sub-critical pool is handled below by topping up
+	// only to the critical floor; an empty pool still receives the configured
+	// minimum emergency batch so the next request is not stranded.
+	noCurrentTraffic := resource.ConsumeRCUPerMinute <= 0
+	if noCurrentTraffic && resource.AvailableAccounts > 0 {
+		if resource.AvailableAccounts >= critical {
+			if resource.EmergencyReason == "critical_available_accounts" || resource.EmergencyReason == "emergency_pool_vacuum" {
+				resource.EmergencyShortage = false
+				resource.EmergencyReason = ""
+				resource.PoolVacuumActive = false
+				resource.PoolVacuumStartedAtMS = 0
+				resource.PoolVacuumDurationSeconds = 0
+			}
+			return
+		}
+	}
 	reason := "critical_available_accounts"
 	if resource.AvailableAccounts <= 0 {
 		reason = "emergency_pool_vacuum"
@@ -1185,7 +1204,11 @@ func applySmartEmergencyAvailability(cfg store.ManagerSupplyConfig, resource *Sm
 	resource.HealthLevel = smartHealthCritical
 	resource.SuggestedAction = smartActionEmergencyReplenish
 	resource.DecisionReason = reason
-	resource.SuggestedQuantity = max(resource.SuggestedQuantity, smartEmergencyRefillQuantity(cfg, resource.AvailableAccounts))
+	refillQuantity := smartEmergencyRefillQuantity(cfg, resource.AvailableAccounts)
+	if noCurrentTraffic {
+		refillQuantity = smartIdleEmergencyRefillQuantity(cfg, resource.AvailableAccounts)
+	}
+	resource.SuggestedQuantity = max(resource.SuggestedQuantity, refillQuantity)
 	if resource.CapacityGapRCU <= 0 && resource.ConsumeRCUPerMinute > 0 {
 		resource.CapacityGapRCU = round2(math.Max(0, resource.TargetCapacityRCU-resource.CurrentCapacityRCU-resource.PrelockedCapacityRCU))
 	}
@@ -1711,6 +1734,17 @@ func smartEmergencyMinAccounts(cfg store.ManagerSupplyConfig) int {
 func smartEmergencyRefillQuantity(cfg store.ManagerSupplyConfig, available int) int {
 	toHealthy := max(0, smartHealthyAvailableAccounts(cfg)-max(0, available))
 	return clampInt(max(smartEmergencyMinAccounts(cfg), toHealthy), 1, 100)
+}
+
+// smartIdleEmergencyRefillQuantity intentionally uses a smaller target than
+// the traffic-aware emergency path. With no current traffic, accounts below
+// the critical floor are brought only to that floor. A completely empty pool
+// still gets the configured minimum batch to preserve request availability.
+func smartIdleEmergencyRefillQuantity(cfg store.ManagerSupplyConfig, available int) int {
+	if available <= 0 {
+		return smartEmergencyMinAccounts(cfg)
+	}
+	return clampInt(max(0, smartCriticalAvailableAccounts(cfg)-available), 1, 100)
 }
 
 func smartVirtualDemandTTLMinutes(cfg store.ManagerSupplyConfig) int {
