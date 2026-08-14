@@ -1033,8 +1033,14 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 		}
 		s.quotaPolicyState[planType] = state
 
+		// A higher observed quota is safe to keep handling with the currently
+		// adopted (lower) estimate while independent inspections confirm and
+		// gradually calibrate it. Only a downward deviation can make the planner
+		// rely on more capacity per account than the latest evidence supports, so
+		// only that direction pauses automatic ordering before confirmation.
 		orderingBlocked := policy.Mode == smartQuotaPolicyModeAuto && hasData && state.pending &&
-			state.confirmationRounds < smartQuotaPolicyRequiredRounds && context.accounts > 0
+			state.confirmationRounds < smartQuotaPolicyRequiredRounds && context.accounts > 0 &&
+			observed.CapacityM < state.adoptedM
 		divergence := 0.0
 		if hasData {
 			divergence = smartQuotaRelativeDifference(observed.CapacityM, state.adoptedM) * 100

@@ -5999,7 +5999,8 @@
     "quota_plan_samples": "样本账号",
     "quota_plan_fallback": "无数据默认值",
     "quota_plan_default_scope": "有有效数据的账号使用自身估算；此默认值仅补齐无数据账号。",
-    "quota_plan_warning_pending": "观察值偏差 {{divergence}}%，独立巡检确认 {{current}}/{{required}}；确认完成前暂停自动下单。",
+    "quota_plan_warning_pending": "观察值下浮 {{divergence}}%，独立巡检确认 {{current}}/{{required}}；确认完成前暂停自动下单。",
+    "quota_plan_warning_upward_pending": "观察值上浮 {{divergence}}%，独立巡检确认 {{current}}/{{required}}；不影响自动下单，确认后逐步校准。",
     "quota_plan_warning_staged": "观察值偏差 {{divergence}}%，已通过自检；采用值每轮最多向新值移动 10%。",
     "quota_plan_config_title": "账号类型额度估算",
     "quota_plan_config_hint": "默认自动估算，也可按类型写死；自动模式的默认值仅用于缺少有效数据的账号。",
@@ -6008,7 +6009,7 @@
     "quota_plan_fallback_input": "无有效数据时默认额度（M）",
     "quota_plan_fixed_input": "固定单账号额度（M）",
     "quota_estimate_source_fixed": "类型固定值",
-    "smart_reason_quota_estimate_self_check_pending": "账号类型额度估算变化超过 10%，正在进行独立巡检自检，确认前暂停自动下单"
+    "smart_reason_quota_estimate_self_check_pending": "账号类型额度观察值下浮超过 10%，正在进行独立巡检自检，确认前暂停自动下单"
   },
   "egress_ip": {
     "card_eyebrow": "一键出口 IP",

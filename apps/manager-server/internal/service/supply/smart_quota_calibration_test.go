@@ -427,6 +427,32 @@ func TestSmartQuotaPlanAdoptionRequiresTwoInspectionRunsAndMovesTenPercent(t *te
 	}
 }
 
+func TestSmartQuotaPlanUpwardDivergenceWarnsWithoutBlockingOrdering(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	for index := 0; index < 3; index++ {
+		samples := quotaSamplesForEstimate(fmt.Sprintf("file:source-%d.json", index), "team", 72, now.Add(-time.Minute), 3)
+		service.smartQuotaState.samples = append(service.smartQuotaState.samples, samples...)
+		service.smartQuotaState.samplesByIdentity[fmt.Sprintf("file:source-%d.json", index)] = append([]smartQuotaCalibrationSample(nil), samples...)
+	}
+	results := []store.CodexInspectionResult{{FileName: "source.json", Provider: "codex", Status: "active", PlanType: "team"}}
+
+	first, _ := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 111, now)
+	if len(first) != 1 || first[0].ObservedM != 72 || first[0].AdoptedM != 60 ||
+		first[0].ConfirmationRounds != 1 || !first[0].PendingConfirmation || first[0].OrderingBlocked {
+		t.Fatalf("first upward quota adoption = %#v", first)
+	}
+	second, _ := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 112, now.Add(time.Minute))
+	if second[0].ConfirmationRounds != 2 || second[0].AdoptedM != 66 ||
+		!second[0].PendingConfirmation || second[0].OrderingBlocked {
+		t.Fatalf("second upward quota adoption = %#v", second[0])
+	}
+	third, _ := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 113, now.Add(2*time.Minute))
+	if third[0].AdoptedM != 72 || third[0].PendingConfirmation || third[0].OrderingBlocked {
+		t.Fatalf("third upward quota adoption = %#v", third[0])
+	}
+}
+
 func TestSmartQuotaPlanAdoptionRestartsConfirmationWhenCandidateShifts(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Second)

@@ -820,8 +820,7 @@ export function SupplyPage() {
     typeof value === 'number' && Number.isFinite(value) ? (value * tokenUnit) / 1000 : undefined;
   const currentCapacityTokenM =
     smart?.currentCapacityTokenM ?? rcuToTokenM(smart?.currentCapacityRcu);
-  const targetCapacityTokenM =
-    smart?.targetCapacityTokenM ?? rcuToTokenM(smart?.targetCapacityRcu);
+  const targetCapacityTokenM = smart?.targetCapacityTokenM ?? rcuToTokenM(smart?.targetCapacityRcu);
   const capacityGapTokenM = smart?.capacityGapTokenM ?? rcuToTokenM(smart?.capacityGapRcu);
   const rawCapacityTokenM =
     smart?.rawCapacityTokenM ?? rcuToTokenM(smart?.rawCapacityRcu ?? smart?.currentCapacityRcu);
@@ -1366,7 +1365,9 @@ export function SupplyPage() {
         label: (
           <span className={styles.tabLabel}>
             {t('supply.tabs_orders')}
-            {activeOrders.length > 0 ? <span className={styles.tabBadge}>{activeOrders.length}</span> : null}
+            {activeOrders.length > 0 ? (
+              <span className={styles.tabBadge}>{activeOrders.length}</span>
+            ) : null}
           </span>
         ),
       },
@@ -1531,17 +1532,17 @@ export function SupplyPage() {
         </div>
         <div className={styles.poolSummaryItem}>
           <span>{t('supply.pool_attention_accounts')}</span>
-          <strong>{poolClassificationObserved ? formatInteger(poolAccounts.needsAttention) : '-'}</strong>
-          <small>
-            {t('supply.pool_attention_accounts_hint')}
-          </small>
+          <strong>
+            {poolClassificationObserved ? formatInteger(poolAccounts.needsAttention) : '-'}
+          </strong>
+          <small>{t('supply.pool_attention_accounts_hint')}</small>
         </div>
         <div className={styles.poolSummaryItem}>
           <span>{t('supply.pool_quota_risk_accounts')}</span>
-          <strong>{poolClassificationObserved ? formatInteger(poolAccounts.quotaRisk) : '-'}</strong>
-          <small>
-            {t('supply.pool_quota_risk_accounts_hint')}
-          </small>
+          <strong>
+            {poolClassificationObserved ? formatInteger(poolAccounts.quotaRisk) : '-'}
+          </strong>
+          <small>{t('supply.pool_quota_risk_accounts_hint')}</small>
         </div>
         <div className={styles.poolSummaryItem}>
           <span>{t('supply.pool_disabled_accounts')}</span>
@@ -1550,7 +1551,9 @@ export function SupplyPage() {
         </div>
         <div className={styles.poolSummaryItem}>
           <span>{t('supply.pool_unconfirmed_accounts')}</span>
-          <strong>{poolClassificationObserved ? formatInteger(poolAccounts.unconfirmed) : '-'}</strong>
+          <strong>
+            {poolClassificationObserved ? formatInteger(poolAccounts.unconfirmed) : '-'}
+          </strong>
           <small>{t('supply.pool_unconfirmed_accounts_hint')}</small>
         </div>
       </section>
@@ -1585,6 +1588,11 @@ export function SupplyPage() {
               estimate?.adoptedM ?? (mode === 'fixed' ? policy.fixedM : policy.fallbackM);
             const pending = estimate?.pendingConfirmation === true;
             const blocked = estimate?.orderingBlocked === true;
+            const upwardPending =
+              pending &&
+              !blocked &&
+              (estimate?.confirmationRounds ?? 0) < (estimate?.requiredRounds ?? 2) &&
+              (estimate?.observedM ?? 0) > adoptedM;
             return (
               <article
                 className={`${styles.quotaEstimateCard} ${
@@ -1601,7 +1609,9 @@ export function SupplyPage() {
                       })}
                     </strong>
                   </div>
-                  <span className={`${styles.statusPill} ${pending ? styles.warning : styles.active}`}>
+                  <span
+                    className={`${styles.statusPill} ${pending ? styles.warning : styles.active}`}
+                  >
                     {t(`supply.quota_plan_mode_${mode}`, { defaultValue: mode })}
                   </span>
                 </div>
@@ -1627,7 +1637,8 @@ export function SupplyPage() {
                     {t('supply.quota_plan_samples')}: {formatInteger(estimate?.uniqueAccounts ?? 0)}
                   </span>
                   <span>
-                    {t('supply.quota_plan_fallback')}: {formatTokenM(estimate?.fallbackM ?? policy.fallbackM, 1)}
+                    {t('supply.quota_plan_fallback')}:{' '}
+                    {formatTokenM(estimate?.fallbackM ?? policy.fallbackM, 1)}
                   </span>
                 </div>
                 {pending ? (
@@ -1635,7 +1646,9 @@ export function SupplyPage() {
                     {t(
                       blocked
                         ? 'supply.quota_plan_warning_pending'
-                        : 'supply.quota_plan_warning_staged',
+                        : upwardPending
+                          ? 'supply.quota_plan_warning_upward_pending'
+                          : 'supply.quota_plan_warning_staged',
                       {
                         divergence: formatNumber(estimate?.divergencePercent, 1),
                         current: estimate?.confirmationRounds ?? 0,
@@ -1719,19 +1732,36 @@ export function SupplyPage() {
                   <div className={styles.demandMetricGrid}>
                     <div>
                       <span>{t('supply.demand_actual_1m')}</span>
-                      <strong>{formatTokenMRate(smart?.consumeTokenM1m ?? rcuToTokenM(smart?.consumeRcu1m))}</strong>
+                      <strong>
+                        {formatTokenMRate(
+                          smart?.consumeTokenM1m ?? rcuToTokenM(smart?.consumeRcu1m)
+                        )}
+                      </strong>
                     </div>
                     <div>
                       <span>{t('supply.demand_reference_5m')}</span>
-                      <strong>{formatTokenMRate(smart?.consumeTokenM5m ?? rcuToTokenM(smart?.consumeRcu5m))}</strong>
+                      <strong>
+                        {formatTokenMRate(
+                          smart?.consumeTokenM5m ?? rcuToTokenM(smart?.consumeRcu5m)
+                        )}
+                      </strong>
                     </div>
                     <div>
                       <span>{t('supply.demand_reference_10m')}</span>
-                      <strong>{formatTokenMRate(smart?.consumeTokenM10m ?? rcuToTokenM(smart?.consumeRcu10m))}</strong>
+                      <strong>
+                        {formatTokenMRate(
+                          smart?.consumeTokenM10m ?? rcuToTokenM(smart?.consumeRcu10m)
+                        )}
+                      </strong>
                     </div>
                     <div>
                       <span>{t('supply.demand_purchase_basis')}</span>
-                      <strong>{formatTokenMRate(smart?.demandPlanningTokenMPerMinute ?? rcuToTokenM(smart?.demandPlanningRcuPerMinute))}</strong>
+                      <strong>
+                        {formatTokenMRate(
+                          smart?.demandPlanningTokenMPerMinute ??
+                            rcuToTokenM(smart?.demandPlanningRcuPerMinute)
+                        )}
+                      </strong>
                     </div>
                   </div>
                 </div>
@@ -2439,7 +2469,9 @@ export function SupplyPage() {
                   disabled={activeOrders.length > 0}
                   onClick={() => void replenish()}
                 >
-                  {activeOrders.length > 0 ? t('supply.order_in_progress') : t('supply.replenish_now')}
+                  {activeOrders.length > 0
+                    ? t('supply.order_in_progress')
+                    : t('supply.replenish_now')}
                 </Button>
               </article>
 
@@ -2763,9 +2795,10 @@ export function SupplyPage() {
                       const importStageHint = t(`supply.recovery_import_${importStatus}_hint`, {
                         defaultValue: item.importMessage || '',
                       });
-                      const databaseBusy = /database (?:table )?is locked|sqlite_busy|locked \(517\)/i.test(
-                        rawFailureReason || ''
-                      );
+                      const databaseBusy =
+                        /database (?:table )?is locked|sqlite_busy|locked \(517\)/i.test(
+                          rawFailureReason || ''
+                        );
                       const failureReason = databaseBusy
                         ? t('supply.recovery_import_database_busy')
                         : rawFailureReason || importStageHint;
@@ -2908,8 +2941,7 @@ export function SupplyPage() {
                                         ? `${importItem.replacedFileName} → ${
                                             importItem.fileName || importItem.replacedFileName
                                           }`
-                                        : importItem.fileName ||
-                                          t('supply.unnamed_import_file')}
+                                        : importItem.fileName || t('supply.unnamed_import_file')}
                                     </span>
                                     {importItem.accountName ? (
                                       <small>
@@ -2974,8 +3006,7 @@ export function SupplyPage() {
                                 loading={action === 'retryRecoveryImport'}
                                 onClick={() => void retryRecoveryImport(item.recoveryId)}
                               >
-                                <IconRefreshCw size={14} />{' '}
-                                {t('supply.recovery_import_retry_now')}
+                                <IconRefreshCw size={14} /> {t('supply.recovery_import_retry_now')}
                               </Button>
                             ) : importStatus === 'not_this_pool' ? (
                               <span className={`${styles.statusPill} ${styles.warning}`}>

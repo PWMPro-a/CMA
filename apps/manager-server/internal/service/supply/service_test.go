@@ -743,6 +743,11 @@ func TestAutomaticSupplyGuardRequiresFreshBaselineAndSettledImports(t *testing.T
 	resource.SnapshotFresh = true
 	resource.SnapshotRefreshInProgress = false
 	resource.CapacitySnapshotAtMS = nowMS
+	resource.QuotaEstimatePendingPlans = 1
+	if reason := service.automaticSupplyGuardReason(resource); reason != "" {
+		t.Fatalf("upward staged quota calibration must not pause ordering, reason = %q", reason)
+	}
+	resource.QuotaEstimatePendingPlans = 0
 	resource.QuotaEstimateOrderingBlocked = true
 	if reason := service.automaticSupplyGuardReason(resource); reason != "quota_estimate_self_check_pending" {
 		t.Fatalf("quota estimate self-check guard reason = %q", reason)

@@ -534,8 +534,9 @@ const (
 )
 
 const (
-	staleInspectionSnapshotRefreshCooldown = 30 * time.Second
-	staleInspectionSnapshotRefreshTimeout  = 15 * time.Minute
+	staleInspectionSnapshotRefreshCooldown  = 30 * time.Second
+	quotaEstimateCalibrationRefreshCooldown = 2 * time.Minute
+	staleInspectionSnapshotRefreshTimeout   = 15 * time.Minute
 )
 
 type inspectionSnapshotRefreshState struct {
@@ -587,14 +588,25 @@ func (s *Service) publishSmartResource(resource SmartResource) SmartResource {
 }
 
 func (s *Service) requestStaleInspectionSnapshotRefresh() {
+	s.requestInspectionSnapshotRefresh(staleInspectionSnapshotRefreshCooldown)
+}
+
+func (s *Service) requestQuotaEstimateCalibrationRefresh() {
+	s.requestInspectionSnapshotRefresh(quotaEstimateCalibrationRefreshCooldown)
+}
+
+func (s *Service) requestInspectionSnapshotRefresh(cooldown time.Duration) {
 	if s == nil {
 		return
+	}
+	if cooldown <= 0 {
+		cooldown = staleInspectionSnapshotRefreshCooldown
 	}
 	now := time.Now()
 	s.inspectionSnapshotRefreshMu.Lock()
 	state := &s.inspectionSnapshotRefresh
 	if state.refresh == nil || state.running ||
-		(!state.lastAttempt.IsZero() && now.Sub(state.lastAttempt) < staleInspectionSnapshotRefreshCooldown) {
+		(!state.lastAttempt.IsZero() && now.Sub(state.lastAttempt) < cooldown) {
 		s.inspectionSnapshotRefreshMu.Unlock()
 		return
 	}
@@ -6878,6 +6890,12 @@ func (s *Service) automaticSupplyGuardReason(resource SmartResource) string {
 	if resource.QuotaEstimateOrderingBlocked {
 		s.requestStaleInspectionSnapshotRefresh()
 		return "quota_estimate_self_check_pending"
+	}
+	// Upward quota divergence remains a visible staged calibration but does not
+	// pause ordering. Keep collecting independent inspection rounds in the
+	// background so the adopted value can converge without operator action.
+	if resource.QuotaEstimatePendingPlans > 0 {
+		s.requestQuotaEstimateCalibrationRefresh()
 	}
 	if reason := s.automaticBaselineBlockReason(resource); reason != "" {
 		return reason
