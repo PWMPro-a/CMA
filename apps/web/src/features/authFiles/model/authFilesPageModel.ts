@@ -131,6 +131,7 @@ export type AuthFileCodexInspectionSnapshot = {
   isQuota?: boolean | null;
   errorKind?: string | null;
   inspectionAtMs?: number | null;
+  triggerType?: string | null;
 };
 
 export type AuthFileCodexStatusSources = {
@@ -556,30 +557,52 @@ export const getFreshAuthFileCodexStatusSources = (
   quota: CodexQuotaState | undefined,
   inspection?: AuthFileCodexInspectionSnapshot,
   headerSnapshot?: UsageHeaderSnapshot
-): AuthFileCodexStatusSources => ({
-  inspection:
+): AuthFileCodexStatusSources => {
+  const providerMismatch =
     inspection?.provider &&
     normalizeProviderKey(inspection.provider) !==
-      normalizeProviderKey(file.type ?? file.provider ?? '')
+      normalizeProviderKey(file.type ?? file.provider ?? '');
+  const supplySnapshotInspection =
+    String(inspection?.triggerType ?? '')
+      .trim()
+      .toLowerCase() === 'supply_snapshot';
+  const scopedQuotaObserved =
+    activeCodexQuotaMatchesAuthFile(file, quota) &&
+    (quota?.status === 'success' || quota?.status === 'error');
+  const cleanLiveRuntime =
+    file.disabled !== true &&
+    file.unavailable !== true &&
+    !String(file.statusMessage ?? file['status_message'] ?? '').trim();
+  // Supply snapshots are deliberately conservative capacity probes. They can
+  // report 401/402 for a credential that is still active under real routed
+  // traffic, so they never retire business headers and do not mark a clean
+  // live runtime as broken. Manual/scheduled health inspections keep the
+  // normal timestamp precedence below.
+  const suppressSupplyInspection =
+    supplySnapshotInspection &&
+    (Boolean(headerSnapshot) || scopedQuotaObserved || cleanLiveRuntime);
+  const currentInspection = providerMismatch || suppressSupplyInspection ? undefined : inspection;
+
+  return {
+    inspection: shouldSuppressOlderCodexStatusSource(
+      file,
+      quota,
+      currentInspection?.inspectionAtMs,
+      headerSnapshot?.timestamp_ms
+    )
       ? undefined
-      : shouldSuppressOlderCodexStatusSource(
-            file,
-            quota,
-            inspection?.inspectionAtMs,
-            headerSnapshot?.timestamp_ms
-          )
-        ? undefined
-        : inspection,
-  headerSnapshot: shouldSuppressOlderCodexStatusSource(
-    file,
-    quota,
-    headerSnapshot?.timestamp_ms,
-    inspection?.inspectionAtMs,
-    headerSnapshot
-  )
-    ? undefined
-    : headerSnapshot,
-});
+      : currentInspection,
+    headerSnapshot: shouldSuppressOlderCodexStatusSource(
+      file,
+      quota,
+      headerSnapshot?.timestamp_ms,
+      supplySnapshotInspection ? undefined : currentInspection?.inspectionAtMs,
+      headerSnapshot
+    )
+      ? undefined
+      : headerSnapshot,
+  };
+};
 
 export const getAuthFileCodexStatus = (
   file: AuthFileItem,
@@ -673,13 +696,20 @@ export const getAuthFileCodexStatus = (
   const monthlyResetLabel = isKnownResetLabel(monthlyWindow?.resetLabel)
     ? monthlyWindow.resetLabel.trim()
     : null;
-  const statusCode =
-    normalizeNumber(inspection?.statusCode) ??
-    normalizeNumber(
-      file.errorStatus ?? file['error_status'] ?? file.statusCode ?? file['status_code']
-    ) ??
-    normalizeNumber(quota?.errorStatus);
   const action = typeof inspection?.action === 'string' ? inspection.action : '';
+  const inspectionStatusCode = normalizeNumber(inspection?.statusCode);
+  const hasHealthyQuotaEvidence =
+    quota?.status === 'success' &&
+    activeCodexQuotaMatchesAuthFile(file, quota) &&
+    !isObservedAuthError(observedErrorKind, observedErrorCode);
+  const statusCode =
+    inspectionStatusCode ??
+    (hasHealthyQuotaEvidence
+      ? null
+      : normalizeNumber(
+          file.errorStatus ?? file['error_status'] ?? file.statusCode ?? file['status_code']
+        )) ??
+    normalizeNumber(quota?.errorStatus);
   const inspectionErrorKind =
     typeof inspection?.errorKind === 'string' ? inspection.errorKind.trim() : '';
   const isHttp401 = statusCode === 401;

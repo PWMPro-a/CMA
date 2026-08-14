@@ -90,7 +90,7 @@ import {
 } from '@/features/oauth/codexReauthModel';
 import {
   ACCOUNT_CODEX_STATUS_FILTERS,
-  buildAccountMetrics,
+  buildAccountMetricsWithCodexPoolSummary,
   buildAccountRows,
   findAccountRowForInspectionTarget,
   filterAccountRows,
@@ -227,6 +227,7 @@ import {
   type MonitoringAccountHistoryItem,
   type MonitoringAccountWindowUsageItem,
   type QuotaCooldownInfo,
+  type SupplyAccountPoolSummary,
   type UsageHeaderSnapshot,
 } from '@/services/api';
 import type { AuthFileItem, CodexQuotaState, XaiQuotaState } from '@/types';
@@ -559,6 +560,8 @@ export function AccountsPage() {
   const [supplyLeaseExpiryByFile, setSupplyLeaseExpiryByFile] = useState<
     ReadonlyMap<string, number>
   >(() => new Map());
+  const [accountPoolSummary, setAccountPoolSummary] =
+    useState<SupplyAccountPoolSummary | null>(null);
   const oauthState = useAuthFilesOauth({
     viewMode: oauthViewMode,
     files,
@@ -749,6 +752,7 @@ export function AccountsPage() {
   const detailEventsRequestIdRef = useRef(0);
   const detailEventsAutoLoadKeyRef = useRef<string | null>(null);
   const quotaCooldownRequestIdRef = useRef(0);
+  const accountPoolSummaryRequestIdRef = useRef(0);
   const accountHistoryAutoAbortRef = useRef<AbortController | null>(null);
   const accountHistoryTargetAbortRef = useRef<AbortController | null>(null);
   const accountHistoryRequestVersionsRef = useRef<Map<string, number>>(new Map());
@@ -854,6 +858,23 @@ export function AccountsPage() {
     }
   }, [featureAvailability.checking, headerSnapshotLoadKey, loadSharedHeaderSnapshots]);
 
+  const loadAccountPoolSummary = useCallback(async () => {
+    const requestId = accountPoolSummaryRequestIdRef.current + 1;
+    accountPoolSummaryRequestIdRef.current = requestId;
+    if (!managerStorageAvailable) {
+      setAccountPoolSummary(null);
+      return;
+    }
+    try {
+      const summary = await supplyApi.getAccountPoolSummary();
+      if (accountPoolSummaryRequestIdRef.current === requestId) {
+        setAccountPoolSummary(summary);
+      }
+    } catch {
+      // Keep the last complete pool split on transient storage/API failures.
+    }
+  }, [managerStorageAvailable]);
+
   const loadAccountActionCandidates = useCallback(async () => {
     const requestId = accountActionCandidatesReqIdRef.current + 1;
     accountActionCandidatesReqIdRef.current = requestId;
@@ -920,6 +941,7 @@ export function AccountsPage() {
     accountHistoryPendingRequestsRef.current.clear();
     accountHistoryAutoLoadKeyRef.current = null;
     accountActionCandidatesReqIdRef.current += 1;
+    accountPoolSummaryRequestIdRef.current += 1;
     accountWindowUsageReqIdRef.current += 1;
     accountWindowUsageAbortRef.current?.abort();
     accountWindowUsageAbortRef.current = null;
@@ -930,6 +952,7 @@ export function AccountsPage() {
     detailEventsRequestIdRef.current += 1;
     detailEventsAutoLoadKeyRef.current = null;
     setQuotaCooldowns(new Map());
+    setAccountPoolSummary(null);
     setAccountActionCandidates([]);
     setHeaderSnapshotLoadedKey('');
     setAccountHistoryByRowKey((current) => (current.size === 0 ? current : new Map()));
@@ -976,8 +999,8 @@ export function AccountsPage() {
     await Promise.all([loadOauthExcluded(), loadOauthModelAlias()]);
   }, [loadOauthExcluded, loadOauthModelAlias]);
   const refreshAccountsWorkspace = useCallback(async () => {
-    await Promise.all([loadFiles(), loadHeaderSnapshots()]);
-  }, [loadFiles, loadHeaderSnapshots]);
+    await Promise.all([loadFiles(), loadHeaderSnapshots(), loadAccountPoolSummary()]);
+  }, [loadAccountPoolSummary, loadFiles, loadHeaderSnapshots]);
   const refreshActiveWorkspace = useAccountsWorkspaceRefresh(activeView, {
     refreshAccounts: refreshAccountsWorkspace,
     refreshHealth: loadInspectionSummary,
@@ -1076,6 +1099,18 @@ export function AccountsPage() {
       void loadSupplyAccountLeases();
     },
     activeView === 'accounts' && documentVisible && managerStorageAvailable ? 60_000 : null
+  );
+
+  useEffect(() => {
+    if (activeView !== 'accounts' || !managerStorageAvailable) return;
+    void loadAccountPoolSummary();
+  }, [activeView, loadAccountPoolSummary, managerStorageAvailable]);
+
+  useInterval(
+    () => {
+      void loadAccountPoolSummary();
+    },
+    activeView === 'accounts' && documentVisible && managerStorageAvailable ? 15_000 : null
   );
 
   useEffect(
@@ -1382,11 +1417,15 @@ export function AccountsPage() {
   );
   const metrics = useMemo(
     () =>
-      buildAccountMetrics(rows, {
-        pendingActionsByRowKey: actionCandidatesByRowKey,
-        quotaCooldownsByRowKey,
-      }),
-    [actionCandidatesByRowKey, quotaCooldownsByRowKey, rows]
+      buildAccountMetricsWithCodexPoolSummary(
+        rows,
+        {
+          pendingActionsByRowKey: actionCandidatesByRowKey,
+          quotaCooldownsByRowKey,
+        },
+        accountPoolSummary
+      ),
+    [accountPoolSummary, actionCandidatesByRowKey, quotaCooldownsByRowKey, rows]
   );
   const providerOptions = useMemo(() => getProviderOptions(rows), [rows]);
   const planOptions = useMemo(() => getPlanOptions(rows), [rows]);

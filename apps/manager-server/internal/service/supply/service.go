@@ -78,6 +78,22 @@ type Status struct {
 	Orders        []store.SupplyOrder       `json:"orders"`
 }
 
+// AccountPoolSummary is the lightweight, operator-facing account split shared
+// by the credential and supply pages. Capacity planning intentionally remains
+// on SmartResource: a read-only supply inspection can be conservative enough
+// for purchasing without being authoritative for whether a live CPA account
+// should be shown as broken.
+type AccountPoolSummary struct {
+	CheckedAtMS            int64 `json:"checkedAtMs"`
+	Total                  int   `json:"total"`
+	Normal                 int   `json:"normal"`
+	NeedsAttention         int   `json:"needsAttention"`
+	QuotaRisk              int   `json:"quotaRisk"`
+	Disabled               int   `json:"disabled"`
+	Unconfirmed            int   `json:"unconfirmed"`
+	ClassificationObserved bool  `json:"classificationObserved"`
+}
+
 // ActiveOrderStatus is deliberately smaller than Status. The management page
 // can refresh an active reservation frequently without rebuilding the whole
 // account pool, quota snapshot and report summaries on every tick.
@@ -493,6 +509,8 @@ type Service struct {
 	quotaSnapshotMu    sync.Mutex
 	quotaRefreshMu     sync.Mutex
 	quotaSnapshot      inspectionQuotaSnapshot
+	operatorHeadersMu  sync.Mutex
+	operatorHeaders    operatorHeaderSnapshotCache
 	smartResourceState SmartResource
 	automation         AutomationExecution
 	recoveryMu         sync.Mutex
@@ -528,9 +546,16 @@ type supplyOrdersCache struct {
 	orders    []store.SupplyOrder
 }
 
+type operatorHeaderSnapshotCache struct {
+	generated time.Time
+	limit     int
+	items     []store.HeaderSnapshot
+}
+
 const (
 	supplyAccountListCacheTTL = 15 * time.Second
 	supplyOrdersCacheTTL      = 5 * time.Second
+	operatorHeaderCacheTTL    = 15 * time.Second
 )
 
 const (
@@ -780,6 +805,27 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		status.ActiveOrders = activeOrders
 	}
 	return status, nil
+}
+
+func (s *Service) GetAccountPoolSummary(ctx context.Context) (AccountPoolSummary, error) {
+	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		return AccountPoolSummary{}, err
+	}
+	stats, statsErr := s.countOperatorAccountPoolStats(ctx, cfg)
+	if statsErr != nil && !stats.liveObserved {
+		return AccountPoolSummary{}, statsErr
+	}
+	return AccountPoolSummary{
+		CheckedAtMS:            time.Now().UnixMilli(),
+		Total:                  max(0, stats.total),
+		Normal:                 max(0, stats.normal),
+		NeedsAttention:         max(0, stats.needsAttention),
+		QuotaRisk:              max(0, stats.quotaRisk),
+		Disabled:               max(0, stats.total-stats.enabled),
+		Unconfirmed:            max(0, stats.unconfirmed),
+		ClassificationObserved: stats.classificationObserved,
+	}, nil
 }
 
 // GetActiveOrderStatus refreshes only the currently open supplier order when
@@ -4835,16 +4881,22 @@ func (s *Service) countAccountPoolStats(ctx context.Context, cfg store.ManagerCo
 	return accountPoolStatsFromFiles(files), err
 }
 
-// countAccountPoolStatsWithInspection deliberately has one population source
-// and one evidence source. The current CPA auth-file set defines total,
-// enabled, disabled and schedulable; only inspection results from the same
-// completed run as the capacity snapshot may define normal/risk buckets.
-// This keeps GetStatus, manual checks and the worker on the same accounting
-// contract instead of allowing one path to reuse an older split.
+// countAccountPoolStatsWithInspection deliberately keeps capacity and operator
+// classification separate. The current CPA auth-file set defines the live
+// population, countOperatorAccountPoolStats defines the status cards, and the
+// matching SmartResource inspection remains the conservative capacity source.
 func (s *Service) countAccountPoolStatsWithInspection(
 	ctx context.Context,
 	cfg store.ManagerConfig,
 	resource SmartResource,
+) (accountPoolStats, error) {
+	stats, liveErr := s.countOperatorAccountPoolStats(ctx, cfg)
+	return reconcileAccountPoolStatsWithInspection(stats, resource), liveErr
+}
+
+func (s *Service) countOperatorAccountPoolStats(
+	ctx context.Context,
+	cfg store.ManagerConfig,
 ) (accountPoolStats, error) {
 	if strings.TrimSpace(cfg.CPAConnection.CPABaseURL) == "" || strings.TrimSpace(cfg.CPAConnection.ManagementKey) == "" {
 		return accountPoolStats{}, errors.New("CPA connection is not configured")
@@ -4859,25 +4911,66 @@ func (s *Service) countAccountPoolStatsWithInspection(
 	if !stats.liveObserved {
 		return stats, liveErr
 	}
-	if resource.CapacitySource != smartCapacitySourceInspection || resource.CapacitySnapshotRunID <= 0 {
-		return stats, liveErr
-	}
+
 	inspectionCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	inspectionSnapshot, inspectionErr := s.cachedInspectionQuotaSnapshot(inspectionCtx, cfg.Supply, false)
 	cancel()
-	if inspectionErr == nil && inspectionSnapshot.run.ID == resource.CapacitySnapshotRunID {
-		stats = accountPoolStatsFromFilesAndInspection(stats.files, inspectionSnapshot.results)
-		return reconcileAccountPoolStatsWithInspection(stats, resource), liveErr
+	now := time.Now()
+	headerCtx, cancelHeaders := context.WithTimeout(ctx, 2*time.Second)
+	headers, headerErr := s.cachedOperatorHeaderSnapshots(headerCtx, len(stats.files), now)
+	cancelHeaders()
+	if headerErr != nil && len(headers) == 0 && inspectionErr != nil {
+		return stats, liveErr
 	}
-	// The live population remains useful even when the matching evidence is
-	// not readable yet. Do not let a prior run make new or changed credentials
-	// look normal; expose them as unconfirmed until the matching run is loaded.
-	stats.classificationObserved = true
-	stats.normal = 0
-	stats.needsAttention = 0
-	stats.quotaRisk = 0
-	stats.unconfirmed = stats.enabled
-	return reconcileAccountPoolStatsWithInspection(stats, resource), liveErr
+
+	results := inspectionSnapshot.results
+	triggerType := inspectionSnapshot.run.TriggerType
+	if inspectionErr != nil {
+		results = nil
+		triggerType = ""
+	}
+	stats = accountPoolStatsFromFilesAndCurrentEvidence(
+		stats.files,
+		results,
+		headers,
+		triggerType,
+		now,
+	)
+	return stats, liveErr
+}
+
+func (s *Service) cachedOperatorHeaderSnapshots(
+	ctx context.Context,
+	fileCount int,
+	now time.Time,
+) ([]store.HeaderSnapshot, error) {
+	if s == nil || s.store == nil {
+		return nil, ErrCapacitySnapshotUnavailable
+	}
+	limit := max(1000, fileCount*2)
+	s.operatorHeadersMu.Lock()
+	defer s.operatorHeadersMu.Unlock()
+	if len(s.operatorHeaders.items) > 0 && s.operatorHeaders.limit >= limit &&
+		now.Sub(s.operatorHeaders.generated) <= operatorHeaderCacheTTL {
+		return append([]store.HeaderSnapshot(nil), s.operatorHeaders.items...), nil
+	}
+	items, err := s.store.LatestHeaderSnapshots(
+		ctx,
+		now.Add(-30*24*time.Hour).UnixMilli(),
+		limit,
+	)
+	if err != nil {
+		if len(s.operatorHeaders.items) > 0 {
+			return append([]store.HeaderSnapshot(nil), s.operatorHeaders.items...), err
+		}
+		return nil, err
+	}
+	s.operatorHeaders = operatorHeaderSnapshotCache{
+		generated: now,
+		limit:     limit,
+		items:     append([]store.HeaderSnapshot(nil), items...),
+	}
+	return items, nil
 }
 
 func accountPoolStatsFromFiles(files []cpaauthfiles.File) accountPoolStats {
@@ -4931,6 +5024,22 @@ const (
 // credential page's exclusive precedence: disabled, action/error, quota risk,
 // unconfirmed, then normally available.
 func accountPoolStatsFromFilesAndInspection(files []cpaauthfiles.File, results []store.CodexInspectionResult) accountPoolStats {
+	return accountPoolStatsFromFilesAndCurrentEvidence(
+		files,
+		results,
+		nil,
+		model.CodexInspectionTriggerManual,
+		time.Now(),
+	)
+}
+
+func accountPoolStatsFromFilesAndCurrentEvidence(
+	files []cpaauthfiles.File,
+	results []store.CodexInspectionResult,
+	headerSnapshots []store.HeaderSnapshot,
+	inspectionTriggerType string,
+	now time.Time,
+) accountPoolStats {
 	stats := accountPoolStatsFromFiles(files)
 	stats.normal = 0
 	stats.needsAttention = 0
@@ -4953,6 +5062,19 @@ func accountPoolStatsFromFilesAndInspection(files []cpaauthfiles.File, results [
 		name := strings.TrimSpace(result.FileName)
 		resultsByFile[name] = append(resultsByFile[name], result)
 	}
+	headerByCredential := make(map[string]store.HeaderSnapshot, len(headerSnapshots))
+	for _, snapshot := range headerSnapshots {
+		key := operatorHeaderCredentialKey(snapshot.AuthFileSnapshot, snapshot.AuthIndex)
+		if key == "" {
+			continue
+		}
+		current, exists := headerByCredential[key]
+		if !exists || snapshot.TimestampMS > current.TimestampMS ||
+			(snapshot.TimestampMS == current.TimestampMS && snapshot.ID > current.ID) {
+			headerByCredential[key] = snapshot
+		}
+	}
+	inspectionAuthoritative := operatorInspectionAuthoritative(inspectionTriggerType)
 
 	for _, file := range files {
 		if !isCodexAuthFile(file) || file.Disabled {
@@ -4963,11 +5085,17 @@ func accountPoolStatsFromFilesAndInspection(files []cpaauthfiles.File, results [
 			resultsByFile[strings.TrimSpace(file.Name)],
 			filesByName[strings.TrimSpace(file.Name)],
 		)
+		header, headerMatched := headerByCredential[operatorHeaderCredentialKey(file.Name, file.AuthIndex)]
+		if headerMatched && operatorHeaderSnapshotExpired(header, now) {
+			headerMatched = false
+		}
 		bucket := operatorAccountUnconfirmed
-		if matched {
-			bucket = classifyOperatorAccount(file, result)
-		} else if textField(file.Raw, "status_message", "statusMessage") != "" || smartAccountCapacityHardBlocked(file.Raw) {
+		if textField(file.Raw, "status_message", "statusMessage") != "" || smartAccountCapacityHardBlocked(file.Raw) {
 			bucket = operatorAccountNeedsAttention
+		} else if headerMatched && (!inspectionAuthoritative || !matched || header.TimestampMS > result.CreatedAtMS) {
+			bucket = classifyOperatorAccountFromHeader(header)
+		} else if matched && inspectionAuthoritative {
+			bucket = classifyOperatorAccount(file, result)
 		}
 		switch bucket {
 		case operatorAccountNormal:
@@ -4981,6 +5109,117 @@ func accountPoolStatsFromFilesAndInspection(files []cpaauthfiles.File, results [
 		}
 	}
 	return stats
+}
+
+func operatorInspectionAuthoritative(triggerType string) bool {
+	return !strings.EqualFold(strings.TrimSpace(triggerType), model.CodexInspectionTriggerSupplySnapshot)
+}
+
+func operatorHeaderCredentialKey(fileName, authIndex string) string {
+	fileName = strings.ToLower(strings.TrimSpace(fileName))
+	authIndex = strings.ToLower(strings.TrimSpace(authIndex))
+	if fileName == "" || authIndex == "" {
+		return ""
+	}
+	return fileName + "\x00" + authIndex
+}
+
+func classifyOperatorAccountFromHeader(snapshot store.HeaderSnapshot) operatorAccountBucket {
+	errorKind := strings.ToLower(strings.TrimSpace(snapshot.HeaderErrorKind))
+	errorCode := strings.ToLower(strings.TrimSpace(snapshot.HeaderErrorCode))
+	usedPercent, hasQuota := operatorHeaderSnapshotUsedPercent(snapshot)
+	if operatorHeaderSnapshotQuotaLimited(snapshot, errorKind, errorCode) {
+		return operatorAccountQuotaRisk
+	}
+	if errorKind != "" || errorCode != "" {
+		return operatorAccountNeedsAttention
+	}
+	if hasQuota && usedPercent >= (1-smartNormalAccountMinimumRemainingFraction)*100 {
+		return operatorAccountQuotaRisk
+	}
+	if hasQuota {
+		return operatorAccountNormal
+	}
+	return operatorAccountUnconfirmed
+}
+
+func operatorHeaderSnapshotQuotaLimited(snapshot store.HeaderSnapshot, errorKind, errorCode string) bool {
+	if quota := snapshot.ResponseMetadata; quota != nil && quota.Quota != nil &&
+		strings.TrimSpace(quota.Quota.RateLimitReachedType) != "" {
+		return true
+	}
+	errorText := strings.ToLower(strings.TrimSpace(errorKind + " " + errorCode))
+	for _, marker := range []string{
+		"usage_limit_reached",
+		"quota_exceeded",
+		"quota_depleted",
+		"credits_depleted",
+	} {
+		if strings.Contains(errorText, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func operatorHeaderSnapshotUsedPercent(snapshot store.HeaderSnapshot) (float64, bool) {
+	values := make([]float64, 0, 3)
+	if snapshot.HeaderQuotaUsedPercent.Valid {
+		values = append(values, snapshot.HeaderQuotaUsedPercent.Float64)
+	}
+	if quota := snapshot.ResponseMetadata; quota != nil && quota.Quota != nil {
+		if quota.Quota.UsedPercent != nil {
+			values = append(values, *quota.Quota.UsedPercent)
+		}
+		for _, window := range []*usage.HeaderQuotaWindow{quota.Quota.Primary, quota.Quota.Secondary} {
+			if window != nil && window.UsedPercent != nil {
+				values = append(values, *window.UsedPercent)
+			}
+		}
+	}
+	if len(values) == 0 {
+		return 0, false
+	}
+	usedPercent := values[0]
+	for _, value := range values[1:] {
+		if value > usedPercent {
+			usedPercent = value
+		}
+	}
+	return usedPercent, true
+}
+
+func operatorHeaderSnapshotExpired(snapshot store.HeaderSnapshot, now time.Time) bool {
+	resetStates := make([]int64, 0, 2)
+	if metadata := snapshot.ResponseMetadata; metadata != nil && metadata.Quota != nil {
+		for _, window := range []*usage.HeaderQuotaWindow{metadata.Quota.Primary, metadata.Quota.Secondary} {
+			if window == nil || (window.UsedPercent == nil && window.ResetAtMS <= 0 &&
+				(window.ResetAfterSeconds == nil || *window.ResetAfterSeconds <= 0)) {
+				continue
+			}
+			resetAtMS := window.ResetAtMS
+			if resetAtMS <= 0 && window.ResetAfterSeconds != nil && *window.ResetAfterSeconds > 0 {
+				resetAtMS = snapshot.TimestampMS + int64(*window.ResetAfterSeconds*1000)
+			}
+			resetStates = append(resetStates, resetAtMS)
+		}
+	}
+	if len(resetStates) > 0 {
+		for _, resetAtMS := range resetStates {
+			if resetAtMS <= 0 || resetAtMS > now.UnixMilli() {
+				return false
+			}
+		}
+		return true
+	}
+	if snapshot.HeaderQuotaRecoverAtMS.Valid {
+		return snapshot.HeaderQuotaRecoverAtMS.Int64 <= now.UnixMilli()
+	}
+	if metadata := snapshot.ResponseMetadata; metadata != nil && metadata.Errors != nil &&
+		metadata.Errors.RetryAfterRecoverAtMS > 0 {
+		return metadata.Errors.RetryAfterRecoverAtMS <= now.UnixMilli()
+	}
+	return false
 }
 
 func matchInspectionResultForAuthFile(file cpaauthfiles.File, candidates []store.CodexInspectionResult, sameNameFiles int) (store.CodexInspectionResult, bool) {

@@ -14,7 +14,11 @@ import {
   resolveAbsoluteQuotaReset,
 } from '@/utils/quota/formatters';
 import type { UsageHeaderSnapshot } from '@/services/api/usageService';
-import { getAuthFileSelectionKey } from '@/features/authFiles/model/authFilesPageModel';
+import {
+  getAuthFileSelectionKey,
+  getFreshAuthFileCodexStatusSources,
+  type AuthFileCodexInspectionSnapshot,
+} from '@/features/authFiles/model/authFilesPageModel';
 import {
   buildObservedCodexQuotaFromHeaderSnapshot,
   getHeaderSnapshotErrorCode,
@@ -788,7 +792,8 @@ const loadingQuota = (planType: string | null): AccountQuotaSummary => ({
 export const resolveAccountQuota = (
   file: AuthFileItem,
   stores: AccountQuotaStores,
-  overrides?: AccountQuotaOverrides
+  overrides?: AccountQuotaOverrides,
+  inspection?: AuthFileCodexInspectionSnapshot
 ): AccountQuotaSummary => {
   const provider = normalizeAccountProvider(file);
   const filePlanType = readPlanType(file);
@@ -810,7 +815,12 @@ export const resolveAccountQuota = (
     const quota =
       overrides?.codexQuotaBySelectionKey?.get(selectionKey) ??
       getCredentialScopedQuotaState(stores.codexQuota, file);
-    const headerSnapshot = overrides?.codexHeaderSnapshotBySelectionKey?.get(selectionKey);
+    const headerSnapshot = getFreshAuthFileCodexStatusSources(
+      file,
+      quota,
+      inspection,
+      overrides?.codexHeaderSnapshotBySelectionKey?.get(selectionKey)
+    ).headerSnapshot;
     const headerObservationFields = quotaObservationFieldsFromSnapshot(headerSnapshot);
     const headerPlanType = readString(getHeaderSnapshotPlanType(headerSnapshot)).toLowerCase();
     const observedPlanType = headerPlanType || filePlanType;

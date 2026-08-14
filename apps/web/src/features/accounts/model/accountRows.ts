@@ -7,13 +7,16 @@ import {
 } from '@/utils/recentRequests';
 import {
   authFileMatchesCodexStatusFilter,
+  getFreshAuthFileCodexStatusSources,
   getAuthFileCodexInspectionKey,
   getAuthFileCodexInspectionKeyForFile,
   getAuthFileCodexInspectionKeyForIdentity,
   getAuthFileSelectionKey,
+  type AuthFileCodexInspectionSnapshot,
   type AuthFileCodexStatusSummary,
 } from '@/features/authFiles/model/authFilesPageModel';
 import { resolveCodexPlanType, resolveEffectiveCodexPlanType } from '@/utils/quota/resolvers';
+import { getCredentialScopedQuotaState } from '@/utils/quota/credentialScope';
 import {
   compareQuotaResetLabels,
   compareQuotaResets,
@@ -83,6 +86,7 @@ export interface AccountRowSort {
 
 export interface AccountInspectionSummary {
   source: 'local' | 'server';
+  triggerType?: string;
   action: string;
   actionReason: string;
   actionStatus: string;
@@ -96,6 +100,7 @@ export interface AccountInspectionSummary {
 
 export type AccountInspectionResult = CodexInspectionResult & {
   inspectionSource?: 'local' | 'server';
+  inspectionTriggerType?: string;
 };
 
 export interface AccountUsageSummary {
@@ -147,6 +152,16 @@ export interface AccountMetrics {
   disabled: number;
   unconfirmed: number;
   needsInspectionAction: number;
+}
+
+export interface CodexAccountPoolMetricSummary {
+  total: number;
+  normal: number;
+  needsAttention: number;
+  quotaRisk: number;
+  disabled: number;
+  unconfirmed: number;
+  classificationObserved: boolean;
 }
 
 export interface AccountMetricOperationalContext {
@@ -292,6 +307,7 @@ const buildInspectionMap = (
     if (current && current.createdAtMs >= result.createdAtMs) return;
     map.set(key, {
       source: result.inspectionSource ?? 'server',
+      triggerType: result.inspectionTriggerType,
       action: result.action || 'keep',
       actionReason: result.actionReason || '',
       actionStatus: result.actionStatus || 'none',
@@ -318,6 +334,32 @@ const buildUsageSummary = (file: AuthFileItem): AccountUsageSummary => {
   };
 };
 
+const toCodexInspectionSnapshot = (
+  file: AuthFileItem,
+  provider: string,
+  inspection: AccountInspectionSummary | null
+): AuthFileCodexInspectionSnapshot | undefined => {
+  if (!inspection) return undefined;
+  return {
+    fileName: file.name,
+    runtimeId: typeof file.id === 'string' ? file.id : null,
+    provider,
+    authIndex: readAuthIndex(file) || null,
+    accountId:
+      (typeof file.accountId === 'string' ? file.accountId : null) ??
+      (typeof file.account_id === 'string' ? file.account_id : null),
+    accountSnapshot:
+      (typeof file.account === 'string' ? file.account : null) ??
+      (typeof file.email === 'string' ? file.email : null),
+    statusCode: inspection.statusCode,
+    action: inspection.action,
+    usedPercent: inspection.usedPercent,
+    isQuota: inspection.isQuota,
+    inspectionAtMs: inspection.createdAtMs,
+    triggerType: inspection.triggerType,
+  };
+};
+
 export const buildAccountRows = (
   files: AuthFileItem[],
   stores: AccountQuotaStores,
@@ -334,7 +376,28 @@ export const buildAccountRows = (
     const provider = normalizeAccountProvider(file);
     const authIndex = readAuthIndex(file);
     const selectionKey = getAuthFileSelectionKey(file);
-    const quota = resolveAccountQuota(file, stores, overrides);
+    const matchedInspection =
+      inspectionByFile.get(getAuthFileCodexInspectionKeyForFile(file)) ??
+      (fileNameCounts.get(file.name) === 1
+        ? inspectionByFile.get(getAuthFileCodexInspectionKey(file.name, null))
+        : undefined) ??
+      null;
+    const inspectionSnapshot = toCodexInspectionSnapshot(file, provider, matchedInspection);
+    const currentCodexSources =
+      provider === 'codex'
+        ? getFreshAuthFileCodexStatusSources(
+            file,
+            overrides?.codexQuotaBySelectionKey?.get(selectionKey) ??
+              getCredentialScopedQuotaState(stores.codexQuota, file),
+            inspectionSnapshot,
+            overrides?.codexHeaderSnapshotBySelectionKey?.get(selectionKey)
+          )
+        : null;
+    const currentInspection =
+      provider === 'codex' && inspectionSnapshot && !currentCodexSources?.inspection
+        ? null
+        : matchedInspection;
+    const quota = resolveAccountQuota(file, stores, overrides, currentCodexSources?.inspection);
     return {
       key: file.name,
       selectionKey,
@@ -359,12 +422,7 @@ export const buildAccountRows = (
       currentConcurrency: readAccountCurrentConcurrency(file),
       quota,
       usage: buildUsageSummary(file),
-      inspection:
-        inspectionByFile.get(getAuthFileCodexInspectionKeyForFile(file)) ??
-        (fileNameCounts.get(file.name) === 1
-          ? inspectionByFile.get(getAuthFileCodexInspectionKey(file.name, null))
-          : undefined) ??
-        null,
+      inspection: currentInspection,
       raw: file,
     };
   });
@@ -470,6 +528,50 @@ export const buildAccountMetrics = (
   });
 
   return metrics;
+};
+
+export const buildAccountMetricsWithCodexPoolSummary = (
+  rows: AccountRow[],
+  context: AccountMetricOperationalContext = {},
+  summary?: CodexAccountPoolMetricSummary | null
+): AccountMetrics => {
+  const local = buildAccountMetrics(rows, context);
+  if (!summary?.classificationObserved) return local;
+  const codexRows = rows.filter((row) => row.provider === 'codex');
+  const summaryValues = [
+    summary.total,
+    summary.normal,
+    summary.needsAttention,
+    summary.quotaRisk,
+    summary.disabled,
+    summary.unconfirmed,
+  ];
+  if (
+    summary.total !== codexRows.length ||
+    summaryValues.some((value) => !Number.isInteger(value) || value < 0) ||
+    summary.normal +
+      summary.needsAttention +
+      summary.quotaRisk +
+      summary.disabled +
+      summary.unconfirmed !==
+      summary.total
+  ) {
+    return local;
+  }
+
+  const nonCodex = buildAccountMetrics(
+    rows.filter((row) => row.provider !== 'codex'),
+    context
+  );
+  return {
+    total: summary.total + nonCodex.total,
+    available: summary.normal + nonCodex.available,
+    needsAttention: summary.needsAttention + nonCodex.needsAttention,
+    quotaRisk: summary.quotaRisk + nonCodex.quotaRisk,
+    disabled: summary.disabled + nonCodex.disabled,
+    unconfirmed: summary.unconfirmed + nonCodex.unconfirmed,
+    needsInspectionAction: local.needsInspectionAction,
+  };
 };
 
 const isAccountRowAvailable = (row: AccountRow): boolean =>

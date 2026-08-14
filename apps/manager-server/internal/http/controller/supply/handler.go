@@ -72,6 +72,13 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 		result, err := h.App.SupplyService.GetStatus(r.Context(), limit)
 		h.writeResult(w, result, err)
+	case "/v0/management/supply/account-pool":
+		if r.Method != http.MethodGet {
+			response.MethodNotAllowed(w)
+			return
+		}
+		result, err := h.App.SupplyService.GetAccountPoolSummary(r.Context())
+		h.writeResult(w, result, err)
 	case "/v0/management/supply/active":
 		if r.Method != http.MethodGet {
 			response.MethodNotAllowed(w)

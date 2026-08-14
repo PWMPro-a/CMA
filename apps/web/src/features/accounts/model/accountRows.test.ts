@@ -7,6 +7,7 @@ import {
 } from '@/features/authFiles/model/authFilesPageModel';
 import {
   buildAccountMetrics,
+  buildAccountMetricsWithCodexPoolSummary,
   buildAccountRows as buildAccountRowsBase,
   findAccountRowForInspectionTarget,
   filterAccountRows,
@@ -697,6 +698,172 @@ describe('accountRows', () => {
     ).toEqual(['codex-diagnostic.json']);
   });
 
+  it('retires older Codex auth diagnostics after a newer successful quota refresh', () => {
+    const file: AuthFileItem = {
+      name: 'codex-recovered.json',
+      type: 'codex',
+      authIndex: '2',
+      account: 'recovered@example.com',
+      recent_requests: [{ time: '03:20-03:30', success: 16, failed: 1 }],
+    };
+    const snapshot: UsageHeaderSnapshot = {
+      event_hash: 'old-token-revoked',
+      timestamp_ms: 1_000,
+      header_error_kind: 'auth',
+      header_error_code: 'token_revoked',
+      header_trace_id: 'trace-old-token-revoked',
+    };
+    const rows = buildAccountRows(
+      [file],
+      {
+        ...emptyStores(),
+        codexQuota: {
+          [file.name]: {
+            status: 'success',
+            fetchedAtMs: 2_000,
+            windows: [{ id: 'weekly', label: 'Weekly', usedPercent: 1, resetLabel: 'Mon' }],
+          },
+        },
+      },
+      undefined,
+      {
+        codexHeaderSnapshotBySelectionKey: new Map([[getAuthFileSelectionKey(file), snapshot]]),
+      }
+    );
+
+    expect(rows[0].quota.status).toBe('ok');
+    expect(rows[0].quota.observedErrorKind).toBeUndefined();
+    expect(rows[0].quota.observedErrorCode).toBeUndefined();
+    expect(rows[0].usage).toMatchObject({ success: 16, failure: 1 });
+    expect(buildAccountMetrics(rows)).toMatchObject({ available: 1, needsAttention: 0 });
+  });
+
+  it('retires older Codex header and inspection failures after newer healthy evidence', () => {
+    const file: AuthFileItem = {
+      name: 'codex-inspection-recovered.json',
+      type: 'codex',
+      authIndex: '3',
+      account: 'inspection-recovered@example.com',
+    };
+    const headerSnapshot: UsageHeaderSnapshot = {
+      event_hash: 'old-auth-failure',
+      timestamp_ms: 1_000,
+      header_error_kind: 'auth',
+      header_error_code: 'token_revoked',
+    };
+    const oldInspection: AccountInspectionResult = {
+      id: 11,
+      runId: 1,
+      accountKey: 'inspection-recovered',
+      fileName: file.name,
+      displayAccount: 'inspection-recovered@example.com',
+      authIndex: '3',
+      provider: 'codex',
+      disabled: false,
+      action: 'reauth',
+      actionReason: 'token revoked',
+      statusCode: 401,
+      isQuota: false,
+      createdAtMs: 1_000,
+      inspectionSource: 'server',
+    };
+    const quota: CodexQuotaState = {
+      status: 'success',
+      fetchedAtMs: 2_000,
+      windows: [{ id: 'weekly', label: 'Weekly', usedPercent: 2, resetLabel: 'Mon' }],
+    };
+    const rows = buildAccountRows(
+      [file],
+      { ...emptyStores(), codexQuota: { [file.name]: quota } },
+      [oldInspection],
+      {
+        codexHeaderSnapshotBySelectionKey: new Map([
+          [getAuthFileSelectionKey(file), headerSnapshot],
+        ]),
+      }
+    );
+
+    expect(rows[0].inspection).toBeNull();
+    expect(rows[0].quota.observedErrorCode).toBeUndefined();
+    expect(buildAccountMetrics(rows)).toMatchObject({ available: 1, needsAttention: 0 });
+  });
+
+  it('keeps a Codex auth diagnostic that is newer than the last successful quota refresh', () => {
+    const file: AuthFileItem = {
+      name: 'codex-failed-again.json',
+      type: 'codex',
+      authIndex: '4',
+      account: 'failed-again@example.com',
+    };
+    const snapshot: UsageHeaderSnapshot = {
+      event_hash: 'new-token-revoked',
+      timestamp_ms: 3_000,
+      header_error_kind: 'auth',
+      header_error_code: 'token_revoked',
+    };
+    const rows = buildAccountRows(
+      [file],
+      {
+        ...emptyStores(),
+        codexQuota: {
+          [file.name]: {
+            status: 'success',
+            fetchedAtMs: 2_000,
+            windows: [{ id: 'weekly', label: 'Weekly', usedPercent: 2, resetLabel: 'Mon' }],
+          },
+        },
+      },
+      undefined,
+      {
+        codexHeaderSnapshotBySelectionKey: new Map([[getAuthFileSelectionKey(file), snapshot]]),
+      }
+    );
+
+    expect(rows[0].quota.observedErrorCode).toBe('token_revoked');
+    expect(buildAccountMetrics(rows)).toMatchObject({ available: 0, needsAttention: 1 });
+  });
+
+  it('does not let a supply snapshot 401 override real routed quota evidence', () => {
+    const file: AuthFileItem = {
+      name: 'codex-live-after-supply-probe.json',
+      type: 'codex',
+      authIndex: 'live-after-supply-probe',
+      account: 'live-after-supply-probe@example.com',
+      status: 'active',
+    };
+    const inspection: AccountInspectionResult = {
+      id: 12,
+      runId: 2,
+      accountKey: 'live-after-supply-probe',
+      fileName: file.name,
+      displayAccount: 'live-after-supply-probe@example.com',
+      authIndex: String(file.authIndex),
+      provider: 'codex',
+      disabled: false,
+      action: 'reauth',
+      actionReason: 'read-only supply probe returned 401',
+      statusCode: 401,
+      isQuota: false,
+      createdAtMs: 3_000,
+      inspectionSource: 'server',
+      inspectionTriggerType: 'supply_snapshot',
+    };
+    const headerSnapshot: UsageHeaderSnapshot = {
+      event_hash: 'real-routed-traffic',
+      timestamp_ms: 2_000,
+      header_quota_used_percent: 25,
+    };
+    const rows = buildAccountRows([file], emptyStores(), [inspection], {
+      codexHeaderSnapshotBySelectionKey: new Map([
+        [getAuthFileSelectionKey(file), headerSnapshot],
+      ]),
+    });
+
+    expect(rows[0].inspection).toBeNull();
+    expect(rows[0].quota.status).toBe('ok');
+    expect(buildAccountMetrics(rows)).toMatchObject({ available: 1, needsAttention: 0 });
+  });
+
   it('uses Antigravity quota buckets and subscription plan in account rows', () => {
     const rows = buildAccountRows([{ name: 'antigravity.json', type: 'antigravity' }], {
       ...emptyStores(),
@@ -1281,6 +1448,43 @@ describe('accountRows', () => {
         metrics.disabled +
         metrics.unconfirmed
     ).toBe(metrics.total);
+  });
+
+  it('uses the shared server Codex pool split while retaining non-Codex metrics', () => {
+    const rows = buildAccountRows(
+      [
+        { name: 'codex.json', type: 'codex', authIndex: 'codex' },
+        { name: 'claude.json', type: 'claude' },
+      ],
+      {
+        ...emptyStores(),
+        claudeQuota: {
+          'claude.json': {
+            status: 'success',
+            windows: [{ id: 'weekly', label: 'Weekly', usedPercent: 10, resetLabel: 'Mon' }],
+          },
+        },
+      }
+    );
+
+    expect(
+      buildAccountMetricsWithCodexPoolSummary(rows, {}, {
+        total: 1,
+        normal: 0,
+        needsAttention: 0,
+        quotaRisk: 1,
+        disabled: 0,
+        unconfirmed: 0,
+        classificationObserved: true,
+      })
+    ).toMatchObject({
+      total: 2,
+      available: 1,
+      needsAttention: 0,
+      quotaRisk: 1,
+      disabled: 0,
+      unconfirmed: 0,
+    });
   });
 
   it('filters rows by quota band and search text', () => {

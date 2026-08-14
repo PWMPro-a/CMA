@@ -121,6 +121,17 @@ export interface SupplyOverview {
   lastError?: string;
 }
 
+export interface SupplyAccountPoolSummary {
+  checkedAtMs: number;
+  total: number;
+  normal: number;
+  needsAttention: number;
+  quotaRisk: number;
+  disabled: number;
+  unconfirmed: number;
+  classificationObserved: boolean;
+}
+
 export interface SupplySmartResource {
   enabled: boolean;
   healthLevel: 'healthy' | 'warning' | 'critical' | 'unknown' | string;
@@ -715,6 +726,9 @@ export interface SupplyStatus {
 
 export const supplyApi = {
   getStatus: (limit = 50): Promise<SupplyStatus> => apiClient.get('/supply', { params: { limit } }),
+
+  getAccountPoolSummary: (): Promise<SupplyAccountPoolSummary> =>
+    apiClient.get('/supply/account-pool'),
 
   getActiveOrder: (): Promise<SupplyActiveOrderStatus> => apiClient.get('/supply/active'),
 

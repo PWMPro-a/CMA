@@ -648,6 +648,36 @@ describe('auth file Codex status helpers', () => {
     expect(sources.inspection).toBeUndefined();
   });
 
+  it('treats supply snapshot failures as capacity evidence instead of live status authority', () => {
+    const file = codexFile({ status: 'active', disabled: false, unavailable: false });
+    const headerSnapshot: UsageHeaderSnapshot = {
+      event_hash: 'real-request',
+      timestamp_ms: 1_000,
+      response_metadata: {
+        quota: {
+          primary: { used_percent: 20 },
+        },
+      },
+    };
+    const sources = getFreshAuthFileCodexStatusSources(
+      file,
+      undefined,
+      {
+        fileName: file.name,
+        provider: 'codex',
+        authIndex: file.authIndex,
+        statusCode: 401,
+        action: 'reauth',
+        inspectionAtMs: 2_000,
+        triggerType: 'supply_snapshot',
+      },
+      headerSnapshot
+    );
+
+    expect(sources.inspection).toBeUndefined();
+    expect(sources.headerSnapshot).toBe(headerSnapshot);
+  });
+
   it('suppresses older Codex inspection and header status sources after a same-row quota refresh', () => {
     const file = codexFile();
     const quota = codexQuota({
@@ -686,6 +716,29 @@ describe('auth file Codex status helpers', () => {
     expect(sources.headerSnapshot).toBeUndefined();
     expect(status.needsReauth).toBe(false);
     expect(status.badges).toHaveLength(0);
+  });
+
+  it('ignores a persisted 401 after a same-row successful quota refresh', () => {
+    const file = codexFile({ error_status: 401, status_message: 'credential invalidated' });
+    const quota = codexQuota({
+      authFileKey: getAuthFileCodexInspectionKey(file.name, file.authIndex),
+      fetchedAtMs: 2_000,
+      windows: [
+        {
+          id: 'weekly',
+          label: 'Weekly limit',
+          usedPercent: 1,
+          resetLabel: '06/08 17:00',
+          limitWindowSeconds: 604_800,
+        },
+      ],
+    });
+
+    const status = getAuthFileCodexStatus(file, quota);
+
+    expect(status.isHttp401).toBe(false);
+    expect(status.needsReauth).toBe(false);
+    expect(status.badges.map((badge) => badge.kind)).not.toContain('reauth');
   });
 
   it('keeps an older quota-limited header after a same-row quota refresh', () => {

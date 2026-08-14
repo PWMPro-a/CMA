@@ -22,6 +22,7 @@ export interface CredentialInspectionTarget {
 
 export type CredentialInspectionResult = CodexInspectionResult & {
   inspectionSource: CredentialHealthInspectionMode;
+  inspectionTriggerType?: string;
 };
 
 export interface CredentialInspectionSnapshot {
@@ -63,6 +64,7 @@ const toLocalInspectionResult = (
   errorDetail: item.errorDetail,
   createdAtMs,
   inspectionSource: 'local',
+  inspectionTriggerType: 'browser',
 });
 
 const toLocalInspectionRun = (
@@ -115,7 +117,11 @@ export const createServerCredentialInspectionSnapshot = (
   source: 'server',
   completedAtMs:
     detail.run.finishedAtMs || detail.run.updatedAtMs || detail.run.startedAtMs || Date.now(),
-  results: detail.results.map((item) => ({ ...item, inspectionSource: 'server' })),
+  results: detail.results.map((item) => ({
+    ...item,
+    inspectionSource: 'server',
+    inspectionTriggerType: detail.run.triggerType,
+  })),
   runs,
 });
 

@@ -110,11 +110,13 @@ describe('credentialInspectionSnapshot', () => {
       runtimeId: 'runtime-local-1',
       accountSnapshot: 'local@example.com',
       inspectionSource: 'local',
+      inspectionTriggerType: 'browser',
       actionStatus: 'pending',
     });
     expect(server.results[0]).toMatchObject({
       fileName: 'server.json',
       inspectionSource: 'server',
+      inspectionTriggerType: 'manual',
     });
   });
 

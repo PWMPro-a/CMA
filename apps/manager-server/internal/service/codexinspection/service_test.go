@@ -2236,6 +2236,62 @@ func TestRunAutoActionEnableEnablesRecoveredDisabledAccount(t *testing.T) {
 	}
 }
 
+func TestRunAutoRecoverEnablesRuntimeInvalidatedAccountAfterHealthyProbe(t *testing.T) {
+	var patchCalled bool
+	var patchedDisabled bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"files":[{"id":"runtime-auth-1","name":"auth-a.json","auth_index":"auth-1","provider":"codex","account":"alice@example.com","disabled":true,"unavailable":true,"status":"disabled","status_message":"credential invalidated"}]}`))
+		case r.URL.Path == "/v0/management/api-call" && r.Method == http.MethodPost:
+			_, _ = w.Write([]byte(`{"status_code":200,"body":{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000},"secondary_window":{"used_percent":5,"limit_window_seconds":2592000}}}}`))
+		case strings.HasPrefix(r.URL.Path, "/v0/management/auth-files") && r.Method == http.MethodPatch:
+			patchCalled = true
+			var payload struct {
+				Name     string `json:"name"`
+				Disabled bool   `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode patch payload: %v", err)
+			}
+			if payload.Name != "runtime-auth-1" {
+				t.Fatalf("patch name = %q, want runtime-auth-1", payload.Name)
+			}
+			patchedDisabled = payload.Disabled
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	db := newCodexInspectionTestStore(t)
+	managerCfg := newCodexInspectionManagerConfig(upstream.URL)
+	managerCfg.CodexInspection.AutoActionMode = model.CodexInspectionAutoActionNone
+	managerCfg.CodexInspection.AutoRecoverEnabled = true
+	if err := db.SaveManagerConfig(context.Background(), managerCfg); err != nil {
+		t.Fatalf("save manager config: %v", err)
+	}
+	svc := newCodexInspectionTestService(t, db)
+
+	result, err := svc.Run(context.Background(), RunRequest{
+		TriggerType: "manual",
+		TriggerKey:  "manual",
+	})
+	if err != nil {
+		t.Fatalf("run inspection: %v", err)
+	}
+	if !patchCalled || patchedDisabled {
+		t.Fatalf("runtime invalidation recovery patchCalled=%v disabled=%v", patchCalled, patchedDisabled)
+	}
+	if len(result.Results) != 1 || result.Results[0].Action != "enable" ||
+		!result.Results[0].AutoRecoverEligible ||
+		result.Results[0].ActionStatus != model.CodexInspectionActionStatusSuccess ||
+		result.Results[0].Disabled {
+		t.Fatalf("runtime invalidation recovery result = %#v", result.Results)
+	}
+}
+
 func TestRunAutoRecoverSkipsManuallyDisabledAccount(t *testing.T) {
 	var patchCalled bool
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

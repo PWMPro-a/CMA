@@ -4303,18 +4303,19 @@ func toAccount(file authFile) account {
 		}
 	}
 	return account{
-		Key:             key,
-		RuntimeID:       runtimeID,
-		FileName:        fileName,
-		DisplayAccount:  displayAccount,
-		AccountSnapshot: accountSnapshot,
-		AuthIndex:       authIndex,
-		AccountID:       accountID,
-		Provider:        provider,
-		Disabled:        isDisabledAuthFile(file),
-		Status:          readString(file, "status"),
-		State:           readString(file, "state"),
-		File:            file,
+		Key:              key,
+		RuntimeID:        runtimeID,
+		FileName:         fileName,
+		DisplayAccount:   displayAccount,
+		AccountSnapshot:  accountSnapshot,
+		AuthIndex:        authIndex,
+		AccountID:        accountID,
+		Provider:         provider,
+		Disabled:         isDisabledAuthFile(file),
+		AutoRecoverOwned: isRuntimeManagedCredentialInvalidation(file),
+		Status:           readString(file, "status"),
+		State:            readString(file, "state"),
+		File:             file,
 	}
 }
 
@@ -5115,6 +5116,21 @@ func isDisabledAuthFile(file authFile) bool {
 	default:
 		return false
 	}
+}
+
+func isRuntimeManagedCredentialInvalidation(file authFile) bool {
+	if !isDisabledAuthFile(file) || !readBool(file, "unavailable") {
+		return false
+	}
+	message := strings.ToLower(firstNonEmpty(
+		readString(file, "status_message"),
+		readString(file, "statusMessage"),
+	))
+	return message == "credential invalidated" ||
+		strings.Contains(message, "token_revoked") ||
+		strings.Contains(message, "token revoked") ||
+		strings.Contains(message, "token_invalidated") ||
+		strings.Contains(message, "token invalidated")
 }
 
 func readBool(record map[string]any, keys ...string) bool {

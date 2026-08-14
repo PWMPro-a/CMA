@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
 func BenchmarkAccountPoolStatsFromFiles(b *testing.B) {
@@ -35,6 +37,36 @@ func BenchmarkAccountPoolStatsFromFilesAndInspection(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				_ = accountPoolStatsFromFilesAndInspection(files, results)
+			}
+		})
+	}
+}
+
+func BenchmarkAccountPoolStatsFromFilesAndCurrentEvidence(b *testing.B) {
+	for _, size := range []int{121, 500, 1000} {
+		files, results := benchmarkPoolFixture(size)
+		headers := make([]store.HeaderSnapshot, 0, size)
+		used := 90.0
+		for _, file := range files {
+			headers = append(headers, store.HeaderSnapshot{
+				AuthFileSnapshot: file.Name,
+				AuthIndex:        file.AuthIndex,
+				TimestampMS:      1_000,
+				ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+					Primary: &usage.HeaderQuotaWindow{UsedPercent: &used},
+				}},
+			})
+		}
+		b.Run(fmt.Sprintf("accounts_%d", size), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_ = accountPoolStatsFromFilesAndCurrentEvidence(
+					files,
+					results,
+					headers,
+					model.CodexInspectionTriggerSupplySnapshot,
+					time.UnixMilli(2_000),
+				)
 			}
 		})
 	}

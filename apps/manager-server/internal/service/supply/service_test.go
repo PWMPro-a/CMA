@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/supplyclient"
@@ -901,6 +902,150 @@ func TestAccountPoolStatsMatchesCredentialStatusBuckets(t *testing.T) {
 	}
 	if resource.NormalAccounts+resource.AtRiskAccounts+resource.DisabledAccounts != resource.TotalAccounts {
 		t.Fatalf("account bucket identity does not hold: %#v", resource)
+	}
+}
+
+func TestAccountPoolStatsUsesNewerHeaderEvidenceOverOlderInspectionFailures(t *testing.T) {
+	now := time.UnixMilli(10_000)
+	files := []cpaauthfiles.File{
+		{Name: "normal.json", Provider: "codex", AuthIndex: "normal", Raw: map[string]any{"status": "active"}},
+		{Name: "risk.json", Provider: "codex", AuthIndex: "risk", Raw: map[string]any{"status": "active"}},
+		{Name: "attention.json", Provider: "codex", AuthIndex: "attention", Raw: map[string]any{"status": "active"}},
+		{Name: "unconfirmed.json", Provider: "codex", AuthIndex: "unconfirmed", Raw: map[string]any{"status": "active"}},
+	}
+	results := []store.CodexInspectionResult{
+		{FileName: "normal.json", Provider: "codex", AuthIndex: "normal", Action: "reauth", CreatedAtMS: 1_000},
+		{FileName: "risk.json", Provider: "codex", AuthIndex: "risk", Action: "reauth", CreatedAtMS: 1_000},
+		{FileName: "attention.json", Provider: "codex", AuthIndex: "attention", Action: "keep", CreatedAtMS: 1_000},
+		{FileName: "unconfirmed.json", Provider: "codex", AuthIndex: "unconfirmed", Action: "reauth", CreatedAtMS: 1_000},
+	}
+	normalUsed := 10.0
+	riskUsed := 90.0
+	headers := []store.HeaderSnapshot{
+		{
+			ID: 1, EventHash: "normal", TimestampMS: 2_000,
+			AuthFileSnapshot: "normal.json", AuthIndex: "normal",
+			ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+				Primary: &usage.HeaderQuotaWindow{UsedPercent: &normalUsed},
+			}},
+		},
+		{
+			ID: 2, EventHash: "risk", TimestampMS: 2_000,
+			AuthFileSnapshot: "risk.json", AuthIndex: "risk",
+			ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+				Secondary: &usage.HeaderQuotaWindow{UsedPercent: &riskUsed},
+			}},
+		},
+		{
+			ID: 3, EventHash: "attention", TimestampMS: 2_000,
+			AuthFileSnapshot: "attention.json", AuthIndex: "attention",
+			HeaderErrorKind: "auth", HeaderErrorCode: "token_revoked",
+		},
+		{
+			ID: 4, EventHash: "unconfirmed", TimestampMS: 2_000,
+			AuthFileSnapshot: "unconfirmed.json", AuthIndex: "unconfirmed",
+			HeaderTraceID: "trace-only",
+		},
+	}
+
+	stats := accountPoolStatsFromFilesAndCurrentEvidence(
+		files,
+		results,
+		headers,
+		model.CodexInspectionTriggerManual,
+		now,
+	)
+	if stats.normal != 1 || stats.quotaRisk != 1 || stats.needsAttention != 1 || stats.unconfirmed != 1 {
+		t.Fatalf("header-overlaid operator account buckets = %#v", stats)
+	}
+}
+
+func TestAccountPoolStatsKeepsNewerInspectionOverOlderHeaderEvidence(t *testing.T) {
+	usedPercent := 10.0
+	files := []cpaauthfiles.File{{
+		Name: "failed-again.json", Provider: "codex", AuthIndex: "failed-again",
+		Raw: map[string]any{"status": "active"},
+	}}
+	results := []store.CodexInspectionResult{{
+		FileName: "failed-again.json", Provider: "codex", AuthIndex: "failed-again",
+		Action: "reauth", CreatedAtMS: 3_000,
+	}}
+	headers := []store.HeaderSnapshot{{
+		ID: 1, EventHash: "older-success", TimestampMS: 2_000,
+		AuthFileSnapshot: "failed-again.json", AuthIndex: "failed-again",
+		ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+			Primary: &usage.HeaderQuotaWindow{UsedPercent: &usedPercent},
+		}},
+	}}
+
+	stats := accountPoolStatsFromFilesAndCurrentEvidence(
+		files,
+		results,
+		headers,
+		model.CodexInspectionTriggerManual,
+		time.UnixMilli(10_000),
+	)
+	if stats.normal != 0 || stats.needsAttention != 1 || stats.quotaRisk != 0 || stats.unconfirmed != 0 {
+		t.Fatalf("newer inspection must remain authoritative: %#v", stats)
+	}
+}
+
+func TestAccountPoolStatsDoesNotLetSupplySnapshotOverrideLiveHeaderEvidence(t *testing.T) {
+	now := time.UnixMilli(10_000)
+	usedPercent := 35.0
+	files := []cpaauthfiles.File{
+		{Name: "healthy.json", Provider: "codex", AuthIndex: "healthy", Raw: map[string]any{"status": "active"}},
+		{Name: "unknown.json", Provider: "codex", AuthIndex: "unknown", Raw: map[string]any{"status": "active"}},
+	}
+	results := []store.CodexInspectionResult{
+		{FileName: "healthy.json", Provider: "codex", AuthIndex: "healthy", Action: "reauth", CreatedAtMS: 9_000},
+		{FileName: "unknown.json", Provider: "codex", AuthIndex: "unknown", Action: "delete", CreatedAtMS: 9_000},
+	}
+	headers := []store.HeaderSnapshot{{
+		ID: 1, EventHash: "real-traffic", TimestampMS: 2_000,
+		AuthFileSnapshot: "healthy.json", AuthIndex: "healthy",
+		ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+			Primary: &usage.HeaderQuotaWindow{UsedPercent: &usedPercent},
+		}},
+	}}
+
+	stats := accountPoolStatsFromFilesAndCurrentEvidence(
+		files,
+		results,
+		headers,
+		model.CodexInspectionTriggerSupplySnapshot,
+		now,
+	)
+	if stats.normal != 1 || stats.needsAttention != 0 || stats.quotaRisk != 0 || stats.unconfirmed != 1 {
+		t.Fatalf("supply snapshot leaked into operator buckets: %#v", stats)
+	}
+}
+
+func TestOperatorHeaderAuthErrorWinsOverUnrelatedQuotaPercent(t *testing.T) {
+	usedPercent := 90.0
+	got := classifyOperatorAccountFromHeader(store.HeaderSnapshot{
+		HeaderErrorKind: "auth",
+		HeaderErrorCode: "token_revoked",
+		ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+			Primary: &usage.HeaderQuotaWindow{UsedPercent: &usedPercent},
+		}},
+	})
+	if got != operatorAccountNeedsAttention {
+		t.Fatalf("auth error bucket = %v, want needs attention", got)
+	}
+}
+
+func TestOperatorHeaderSnapshotExpiresRecoveredRetryAfter(t *testing.T) {
+	now := time.UnixMilli(10_000)
+	snapshot := store.HeaderSnapshot{
+		ResponseMetadata: &usage.ResponseHeaderMetadata{Errors: &usage.HeaderErrorMetadata{
+			Kind:                  "rate_limit",
+			Code:                  "retry_after",
+			RetryAfterRecoverAtMS: 9_000,
+		}},
+	}
+	if !operatorHeaderSnapshotExpired(snapshot, now) {
+		t.Fatal("recovered retry-after snapshot remained active")
 	}
 }
 
