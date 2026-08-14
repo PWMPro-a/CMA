@@ -49,6 +49,7 @@ type SupplyRecovery = model.SupplyRecovery
 type SupplyRecoveryImportItem = model.SupplyRecoveryImportItem
 type CodexInspectionRun = model.CodexInspectionRun
 type CodexInspectionResult = model.CodexInspectionResult
+type CodexInspectionQuotaWindow = model.CodexInspectionQuotaWindow
 type CodexInspectionLog = model.CodexInspectionLog
 type ContainerOpsAuditEntry = model.ContainerOpsAuditEntry
 type ContainerOpsUpgradeTask = model.ContainerOpsUpgradeTask
@@ -98,6 +99,8 @@ type EventPageItem = usageevent.EventPageItem
 type EventsPage = usageevent.EventsPage
 type HeaderSnapshot = usageevent.HeaderSnapshot
 type SupplyUsageMinute = usageevent.SupplyUsageMinute
+type SupplyQuotaWindowUsageQuery = usageevent.SupplyQuotaWindowUsageQuery
+type SupplyQuotaWindowUsage = usageevent.SupplyQuotaWindowUsage
 type AccountWindowUsageQuery = usageevent.AccountWindowUsageQuery
 type AccountWindowModelStat = usageevent.AccountWindowModelStat
 type LatestAccountRequestQuery = usageevent.LatestAccountRequestQuery
@@ -668,6 +671,10 @@ func (s *Store) ListSupplyUsageMinutes(ctx context.Context, sinceMS int64) ([]Su
 
 func (s *Store) ListSupplyQuotaCalibrationEvents(ctx context.Context, sinceMS int64, limit int) ([]usage.Event, error) {
 	return s.UsageEvents.ListSupplyQuotaCalibrationEvents(ctx, sinceMS, limit)
+}
+
+func (s *Store) ListSupplyQuotaWindowUsage(ctx context.Context, targets []SupplyQuotaWindowUsageQuery) ([]SupplyQuotaWindowUsage, error) {
+	return s.UsageEvents.ListSupplyQuotaWindowUsage(ctx, targets)
 }
 
 func (s *Store) UsageCacheAccountingMigrationState(ctx context.Context) (DataMigrationState, error) {

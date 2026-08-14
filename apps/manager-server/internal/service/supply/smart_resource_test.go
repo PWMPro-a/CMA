@@ -867,6 +867,64 @@ func TestWarmSmartUsageRestoresDemandWindowAndExcludesFailedRequestRPM(t *testin
 	}
 }
 
+func TestCachedInspectionSnapshotSeedsCompleteIndependentQuotaUsage(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "independent-quota-window.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().Truncate(time.Second)
+	fileName := "active-team.json"
+	authIndex := "active-team-auth"
+	events := make([]usage.Event, 0, 4)
+	for index := 0; index < 4; index++ {
+		timestamp := now.Add(-time.Duration(4-index) * time.Minute)
+		events = append(events, usage.Event{
+			EventHash:        fmt.Sprintf("independent-window-%d", index),
+			TimestampMS:      timestamp.UnixMilli(),
+			Timestamp:        timestamp.Format(time.RFC3339Nano),
+			Provider:         "codex",
+			Model:            "gpt-test",
+			AuthFileSnapshot: fileName,
+			AuthIndex:        authIndex,
+			TotalTokens:      1_000_000,
+			CreatedAtMS:      timestamp.UnixMilli(),
+		})
+	}
+	if _, err := st.InsertEvents(context.Background(), events); err != nil {
+		t.Fatalf("insert usage events: %v", err)
+	}
+	usedPercent := 10.0
+	weeklySeconds := float64(smartQuotaWeekSeconds)
+	seedCompletedQuotaInspection(t, st, store.CodexInspectionResult{
+		AccountKey:  "active-team",
+		FileName:    fileName,
+		AuthIndex:   authIndex,
+		Provider:    "codex",
+		Status:      "active",
+		Action:      "keep",
+		PlanType:    "team",
+		UsedPercent: &usedPercent,
+		QuotaWindows: []model.CodexInspectionQuotaWindow{{
+			ID:                 "weekly",
+			UsedPercent:        &usedPercent,
+			ResetAtMS:          now.Add(6 * 24 * time.Hour).UnixMilli(),
+			LimitWindowSeconds: &weeklySeconds,
+		}},
+	})
+
+	service := New(st, nil)
+	snapshot, err := service.cachedInspectionQuotaSnapshot(context.Background(), store.ManagerSupplyConfig{}, true)
+	if err != nil || len(snapshot.results) != 1 {
+		t.Fatalf("load snapshot: results=%d err=%v", len(snapshot.results), err)
+	}
+	estimate := service.smartQuotaEstimateForInspectionResult(snapshot.results[0], defaultSmartQuotaEstimate(), time.Now())
+	if estimate.CapacityM != 40 || !estimate.IndependentAccount || estimate.Source != smartQuotaEstimateSourceCurrent {
+		t.Fatalf("independent snapshot estimate = %#v", estimate)
+	}
+}
+
 func TestSmartResourceUsesPersistedSupplyLeaseForCapacity(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Second)

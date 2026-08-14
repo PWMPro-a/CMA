@@ -124,6 +124,96 @@ func TestEstimateSmartQuotaSamplesDropsHighestAndLowest(t *testing.T) {
 	}
 }
 
+func TestSmartQuotaWindowBaselinesReplaceTruncatedTailAndTrimAccountExtremes(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	capacities := []float64{10, 59, 60, 61, 200}
+	baselines := make([]smartQuotaWindowBaseline, 0, len(capacities))
+	identities := make([]string, 0, len(capacities))
+	for index, capacityM := range capacities {
+		identity := fmt.Sprintf("file:account-%d.json", index)
+		identities = append(identities, identity)
+		service.smartQuotaState.samples = append(service.smartQuotaState.samples, smartQuotaCalibrationSample{
+			identity:     identity,
+			planType:     "team",
+			capacityM:    2.88,
+			weight:       0.05,
+			usedFraction: 1,
+			observedMS:   now.Add(-time.Minute).UnixMilli(),
+		})
+		service.smartQuotaState.observations[identity] = smartQuotaCalibrationObservation{
+			lastEventMS:        now.Add(-time.Minute).UnixMilli(),
+			lastFraction:       1,
+			lastSampleFraction: 1,
+			windowTokens:       2_880_000,
+		}
+		baselines = append(baselines, smartQuotaWindowBaseline{
+			identity:     identity,
+			planType:     "team",
+			fraction:     1,
+			observedMS:   now.UnixMilli(),
+			windowTokens: int64(capacityM * 1_000_000),
+			lastSeenMS:   now.UnixMilli(),
+		})
+	}
+
+	service.recordSmartQuotaWindowBaselines(baselines, now)
+	estimate := service.smartQuotaEstimateForAt(now, "team", identities...)
+	if estimate.CapacityM != 60 || estimate.Source != smartQuotaEstimateSourceCurrent || estimate.UniqueAccounts != 5 {
+		t.Fatalf("baseline estimate = %#v", estimate)
+	}
+	for _, identity := range identities {
+		observation := service.smartQuotaState.observations[identity]
+		if observation.windowTokens <= 2_880_000 {
+			t.Fatalf("truncated observation was not replaced for %s: %#v", identity, observation)
+		}
+	}
+}
+
+func TestSmartQuotaCompleteWindowUsesIndependentAccountFormula(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	service.recordSmartQuotaWindowBaselines([]smartQuotaWindowBaseline{{
+		identity:     "file:active.json",
+		planType:     "team",
+		fraction:     0.10,
+		observedMS:   now.UnixMilli(),
+		windowTokens: 4_000_000,
+		lastSeenMS:   now.UnixMilli(),
+	}}, now)
+
+	estimate := service.smartQuotaEstimateForInspectionResult(store.CodexInspectionResult{
+		FileName: "active.json",
+		PlanType: "team",
+	}, smartQuotaEstimate{
+		CapacityM: 60,
+		Source:    smartQuotaEstimateSourceRecentPlan,
+	}, now)
+	if estimate.CapacityM != 40 || estimate.Source != smartQuotaEstimateSourceCurrent ||
+		!estimate.IndependentAccount || estimate.CurrentEstimateM != 40 {
+		t.Fatalf("independent account estimate = %#v", estimate)
+	}
+}
+
+func TestEstimateSmartQuotaSamplesTrimsThreePointExtremes(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	samples := make([]smartQuotaCalibrationSample, 0, 3)
+	for index, capacityM := range []float64{5, 60, 300} {
+		samples = append(samples, smartQuotaCalibrationSample{
+			identity:     fmt.Sprintf("file:%d.json", index),
+			planType:     "team",
+			capacityM:    capacityM,
+			weight:       1,
+			usedFraction: 1,
+			observedMS:   now.UnixMilli(),
+		})
+	}
+	estimate, ok := estimateSmartQuotaSamplesAt(samples, smartQuotaEstimateSourceCurrent, 3, 0.1, now)
+	if !ok || estimate.CapacityM != 60 {
+		t.Fatalf("three-point trimmed estimate = %#v/%v", estimate, ok)
+	}
+}
+
 func TestSmartQuotaCalibrationRecalibratesOldRegimeAroundCurrentUsage(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Second)

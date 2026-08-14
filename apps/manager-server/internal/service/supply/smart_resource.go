@@ -276,6 +276,7 @@ type authFileSnapshot struct {
 type inspectionQuotaSnapshot struct {
 	run                store.CodexInspectionRun
 	results            []store.CodexInspectionResult
+	quotaWindowUsage   []smartQuotaWindowBaseline
 	leaseExpiresByFile map[string]int64
 	activeImportItems  []store.SupplyImportItem
 	generatedAt        time.Time
@@ -1540,6 +1541,9 @@ func (s *Service) cachedInspectionQuotaSnapshot(ctx context.Context, cfg store.M
 
 	refreshed, err := s.loadLatestInspectionQuotaSnapshot(ctx)
 	attemptedAt := time.Now()
+	if err == nil {
+		s.recordSmartQuotaWindowBaselines(refreshed.quotaWindowUsage, attemptedAt)
+	}
 	s.quotaSnapshotMu.Lock()
 	if err == nil {
 		refreshed.attemptedAt = attemptedAt
@@ -1584,6 +1588,22 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context) (inspec
 		if err != nil {
 			return inspectionQuotaSnapshot{}, err
 		}
+		quotaWindowUsage, quotaWindowTargets := smartQuotaWindowBaselinesForInspection(filtered, run)
+		if len(quotaWindowTargets) > 0 {
+			usageRows, err := s.store.ListSupplyQuotaWindowUsage(ctx, quotaWindowTargets)
+			if err != nil {
+				return inspectionQuotaSnapshot{}, err
+			}
+			usageByRequest := make(map[int]store.SupplyQuotaWindowUsage, len(usageRows))
+			for _, usageRow := range usageRows {
+				usageByRequest[usageRow.RequestIndex] = usageRow
+			}
+			for index := range quotaWindowUsage {
+				usageRow := usageByRequest[quotaWindowUsage[index].requestIndex]
+				quotaWindowUsage[index].windowTokens = usageRow.TotalTokens
+				quotaWindowUsage[index].lastSeenMS = usageRow.LastSeenMS
+			}
+		}
 		leaseExpiresByFile := make(map[string]int64, len(leaseItems))
 		for _, item := range leaseItems {
 			fileName := strings.TrimSpace(item.FileName)
@@ -1599,6 +1619,7 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context) (inspec
 		return inspectionQuotaSnapshot{
 			run:                run,
 			results:            filtered,
+			quotaWindowUsage:   quotaWindowUsage,
 			leaseExpiresByFile: leaseExpiresByFile,
 			activeImportItems:  leaseItems,
 			generatedAt:        generatedAt,
@@ -1618,6 +1639,9 @@ func cloneInspectionQuotaSnapshot(snapshot inspectionQuotaSnapshot) inspectionQu
 	results := make([]store.CodexInspectionResult, len(snapshot.results))
 	copy(results, snapshot.results)
 	snapshot.results = results
+	quotaWindowUsage := make([]smartQuotaWindowBaseline, len(snapshot.quotaWindowUsage))
+	copy(quotaWindowUsage, snapshot.quotaWindowUsage)
+	snapshot.quotaWindowUsage = quotaWindowUsage
 	items := make([]store.SupplyImportItem, len(snapshot.activeImportItems))
 	copy(items, snapshot.activeImportItems)
 	snapshot.activeImportItems = items

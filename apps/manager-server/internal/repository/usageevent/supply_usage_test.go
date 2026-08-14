@@ -131,6 +131,50 @@ func TestListSupplyQuotaCalibrationEventsLimitsToNewestHistoryInChronologicalOrd
 	}
 }
 
+func TestListSupplyQuotaWindowUsageAggregatesCompleteCredentialWindow(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "quota-window-usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	base := time.Date(2026, time.August, 7, 3, 0, 0, 0, time.UTC)
+	events := []usage.Event{
+		supplyUsageEvent("before-window", base.Add(-time.Second), 20_000_000, nil, false),
+		supplyUsageEvent("account-a-total", base.Add(time.Minute), 30_000_000, nil, false),
+		supplyUsageEvent("account-a-components", base.Add(2*time.Minute), 0, nil, false),
+		supplyUsageEvent("account-a-failed", base.Add(3*time.Minute), 100_000_000, nil, true),
+		supplyUsageEvent("account-a-other-auth", base.Add(4*time.Minute), 200_000_000, nil, false),
+		supplyUsageEvent("account-b", base.Add(5*time.Minute), 7_000_000, nil, false),
+	}
+	for index := range events {
+		events[index].AuthFileSnapshot = "account-a.json"
+		events[index].AuthIndex = "auth-a"
+	}
+	events[2].InputTokens = 10_000_000
+	events[2].OutputTokens = 5_000_000
+	events[2].ReasoningTokens = 5_000_000
+	events[4].AuthIndex = "auth-b"
+	events[5].AuthFileSnapshot = "account-b.json"
+	events[5].AuthIndex = ""
+
+	repo := New(db)
+	if _, err := repo.InsertBatch(context.Background(), events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+	rows, err := repo.ListSupplyQuotaWindowUsage(context.Background(), []SupplyQuotaWindowUsageQuery{
+		{RequestIndex: 10, AuthFileSnapshot: "ACCOUNT-A.JSON", AuthIndex: "AUTH-A", FromMS: base.UnixMilli(), ToMS: base.Add(time.Hour).UnixMilli()},
+		{RequestIndex: 20, AuthFileSnapshot: "account-b.json", FromMS: base.UnixMilli(), ToMS: base.Add(time.Hour).UnixMilli()},
+	})
+	if err != nil {
+		t.Fatalf("list quota window usage: %v", err)
+	}
+	if len(rows) != 2 || rows[0].RequestIndex != 10 || rows[0].TotalTokens != 50_000_000 ||
+		rows[1].RequestIndex != 20 || rows[1].TotalTokens != 7_000_000 {
+		t.Fatalf("quota window rows = %#v", rows)
+	}
+}
+
 func supplyUsageEvent(hash string, timestamp time.Time, tokens int64, latency *int64, failed bool) usage.Event {
 	return usage.Event{
 		EventHash:   hash,

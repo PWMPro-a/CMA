@@ -51,12 +51,13 @@ type smartQuotaCalibrationObservation struct {
 }
 
 type smartQuotaCalibrationSample struct {
-	identity     string
-	planType     string
-	capacityM    float64
-	weight       float64
-	usedFraction float64
-	observedMS   int64
+	identity       string
+	planType       string
+	capacityM      float64
+	weight         float64
+	usedFraction   float64
+	observedMS     int64
+	completeWindow bool
 }
 
 type smartQuotaCalibrationState struct {
@@ -75,6 +76,7 @@ type smartQuotaEstimate struct {
 	RecentEstimateM     float64
 	HistoricalEstimateM float64
 	DivergencePercent   float64
+	IndependentAccount  bool
 }
 
 type smartQuotaWeightedPoint struct {
@@ -87,6 +89,22 @@ type smartQuotaWindowEvidence struct {
 	recoverAtMS int64
 	planType    string
 	concrete    bool
+}
+
+// smartQuotaWindowBaseline is a complete account-scoped Token aggregate for
+// the quota window observed by one inspection result. It repairs the in-memory
+// tail sampler without carrying raw request rows into the supply planner.
+type smartQuotaWindowBaseline struct {
+	requestIndex int
+	identity     string
+	planType     string
+	fraction     float64
+	fromMS       int64
+	toMS         int64
+	recoverAtMS  int64
+	observedMS   int64
+	windowTokens int64
+	lastSeenMS   int64
 }
 
 func newSmartQuotaCalibrationState() smartQuotaCalibrationState {
@@ -239,6 +257,140 @@ func smartQuotaWindowRecoverAtMS(window *usage.HeaderQuotaWindow, eventTimestamp
 		return eventTimestampMS + int64(*window.ResetAfterSeconds*1000)
 	}
 	return 0
+}
+
+func smartQuotaWindowBaselinesForInspection(results []store.CodexInspectionResult, run store.CodexInspectionRun) ([]smartQuotaWindowBaseline, []store.SupplyQuotaWindowUsageQuery) {
+	baselines := make([]smartQuotaWindowBaseline, 0, len(results))
+	targets := make([]store.SupplyQuotaWindowUsageQuery, 0, len(results))
+	for _, result := range results {
+		fileName := strings.TrimSpace(result.FileName)
+		if fileName == "" {
+			continue
+		}
+		window, durationSeconds := longestSmartInspectionQuotaWindow(result.QuotaWindows)
+		if window == nil || window.UsedPercent == nil || durationSeconds <= 0 || durationSeconds == math.MaxFloat64 {
+			continue
+		}
+		fraction, ok := normalizeSmartQuotaFraction(*window.UsedPercent)
+		if !ok || fraction < smartQuotaCalibrationMinUsedFraction {
+			continue
+		}
+		observedMS := result.CreatedAtMS
+		if observedMS <= 0 {
+			observedMS = run.FinishedAtMS
+		}
+		if observedMS <= 0 {
+			observedMS = run.UpdatedAtMS
+		}
+		if observedMS <= 0 {
+			continue
+		}
+		durationMS := int64(durationSeconds * 1000)
+		fromMS := observedMS - durationMS
+		recoverAtMS := window.ResetAtMS
+		if recoverAtMS > observedMS && recoverAtMS-durationMS < observedMS {
+			fromMS = recoverAtMS - durationMS
+		}
+		requestIndex := len(baselines)
+		baseline := smartQuotaWindowBaseline{
+			requestIndex: requestIndex,
+			identity:     "file:" + normalizeSmartQuotaIdentity(fileName),
+			planType:     strings.ToLower(strings.TrimSpace(result.PlanType)),
+			fraction:     fraction,
+			fromMS:       fromMS,
+			toMS:         observedMS + 1,
+			recoverAtMS:  recoverAtMS,
+			observedMS:   observedMS,
+		}
+		baselines = append(baselines, baseline)
+		targets = append(targets, store.SupplyQuotaWindowUsageQuery{
+			RequestIndex:     requestIndex,
+			AuthFileSnapshot: fileName,
+			AuthIndex:        result.AuthIndex,
+			FromMS:           baseline.fromMS,
+			ToMS:             baseline.toMS,
+		})
+	}
+	return baselines, targets
+}
+
+func longestSmartInspectionQuotaWindow(windows []store.CodexInspectionQuotaWindow) (*store.CodexInspectionQuotaWindow, float64) {
+	var best *store.CodexInspectionQuotaWindow
+	bestSeconds := -1.0
+	for index := range windows {
+		window := &windows[index]
+		if inspectionQuotaWindowExcludedFromCapacity(*window) || window.UsedPercent == nil {
+			continue
+		}
+		seconds := inspectionQuotaWindowDurationSeconds(*window)
+		if seconds <= 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+			continue
+		}
+		if best == nil || seconds >= bestSeconds {
+			best = window
+			bestSeconds = seconds
+		}
+	}
+	return best, bestSeconds
+}
+
+func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBaseline, now time.Time) {
+	if s == nil || len(baselines) == 0 {
+		return
+	}
+	s.smartMu.Lock()
+	defer s.smartMu.Unlock()
+	if s.smartQuotaState.observations == nil {
+		s.smartQuotaState = newSmartQuotaCalibrationState()
+	}
+
+	for _, baseline := range baselines {
+		if baseline.identity == "" || baseline.windowTokens <= 0 || baseline.fraction < smartQuotaCalibrationMinUsedFraction {
+			continue
+		}
+		capacityM := float64(baseline.windowTokens) / baseline.fraction / 1_000_000
+		if capacityM < smartQuotaCalibrationMinCapacityM || capacityM > smartQuotaCalibrationMaxCapacityM {
+			continue
+		}
+
+		// The targeted aggregate is authoritative through observedMS. Discard
+		// samples for the same account that came from a truncated global tail,
+		// while retaining newer samples produced after this inspection.
+		kept := s.smartQuotaState.samples[:0]
+		for _, sample := range s.smartQuotaState.samples {
+			if sample.identity == baseline.identity && sample.observedMS <= baseline.observedMS {
+				continue
+			}
+			kept = append(kept, sample)
+		}
+		s.smartQuotaState.samples = kept
+
+		observation := s.smartQuotaState.observations[baseline.identity]
+		if observation.recoverAtMS > 0 && baseline.recoverAtMS > 0 && observation.recoverAtMS != baseline.recoverAtMS {
+			observation = smartQuotaCalibrationObservation{}
+		}
+		observation.windowTokens = maxInt64(observation.windowTokens, baseline.windowTokens)
+		observation.lastEventMS = maxInt64(observation.lastEventMS, maxInt64(baseline.observedMS, baseline.lastSeenMS))
+		observation.lastFraction = baseline.fraction
+		observation.lastSampleFraction = baseline.fraction
+		if baseline.recoverAtMS > 0 {
+			observation.recoverAtMS = baseline.recoverAtMS
+		}
+		if baseline.planType != "" {
+			observation.planType = baseline.planType
+		}
+		s.smartQuotaState.observations[baseline.identity] = observation
+		s.smartQuotaState.samples = append(s.smartQuotaState.samples, smartQuotaCalibrationSample{
+			identity:       baseline.identity,
+			planType:       observation.planType,
+			capacityM:      capacityM,
+			weight:         1,
+			usedFraction:   baseline.fraction,
+			observedMS:     baseline.observedMS,
+			completeWindow: true,
+		})
+	}
+	s.pruneSmartQuotaCalibrationLocked(now)
 }
 
 func (s *Service) recordSmartQuotaCalibrationEventsLocked(events []usage.Event, now time.Time) {
@@ -407,13 +559,7 @@ func (s *Service) smartQuotaEstimateForAt(now time.Time, planType string, identi
 			_, ok := normalizedIdentities[sample.identity]
 			return ok
 		})
-		currentEstimate, currentOK = estimateSmartQuotaSamplesAt(
-			currentSamples,
-			smartQuotaEstimateSourceCurrent,
-			2,
-			0.005,
-			now,
-		)
+		currentEstimate, currentOK = estimateSmartQuotaCurrentSamplesAt(currentSamples, now)
 	}
 
 	recentEstimate, recentOK := smartQuotaPlanOrGlobalEstimate(
@@ -496,7 +642,18 @@ func (s *Service) smartQuotaCurrentEstimateForAt(now time.Time, identities ...st
 		}
 	}
 	s.smartMu.RUnlock()
-	return estimateSmartQuotaSamplesAt(samples, smartQuotaEstimateSourceCurrent, 2, 0.005, now)
+	return estimateSmartQuotaCurrentSamplesAt(samples, now)
+}
+
+func estimateSmartQuotaCurrentSamplesAt(samples []smartQuotaCalibrationSample, now time.Time) (smartQuotaEstimate, bool) {
+	minSamples := 2
+	for _, sample := range samples {
+		if sample.completeWindow {
+			minSamples = 1
+			break
+		}
+	}
+	return estimateSmartQuotaSamplesAt(samples, smartQuotaEstimateSourceCurrent, minSamples, 0.005, now)
 }
 
 func smartQuotaPlanOrGlobalEstimate(
@@ -546,6 +703,12 @@ func calibrateSmartQuotaCurrentEstimate(
 		return current
 	}
 	current.DivergencePercent = round2(math.Abs(current.CapacityM-basis.CapacityM) / basis.CapacityM * 100)
+	// A complete account-window aggregate already implements the independent
+	// account formula (window Tokens / used fraction). Peer history remains
+	// diagnostic context but must not pull this account back toward an old pool.
+	if current.IndependentAccount {
+		return current
+	}
 	if current.DivergencePercent < smartQuotaCalibrationDivergencePct {
 		return current
 	}
@@ -676,6 +839,7 @@ func estimateSmartQuotaSamplesAt(samples []smartQuotaCalibrationSample, source s
 	valid := make([]smartQuotaCalibrationSample, 0, len(samples))
 	totalObservedWeight := 0.0
 	identitySet := make(map[string]struct{})
+	independentAccount := false
 	for _, sample := range samples {
 		if sample.capacityM < smartQuotaCalibrationMinCapacityM || sample.capacityM > smartQuotaCalibrationMaxCapacityM ||
 			sample.weight <= 0 || sample.observedMS <= 0 {
@@ -686,6 +850,9 @@ func estimateSmartQuotaSamplesAt(samples []smartQuotaCalibrationSample, source s
 			continue
 		}
 		valid = append(valid, sample)
+		if sample.completeWindow {
+			independentAccount = true
+		}
 		totalObservedWeight += sample.weight * recencyWeight
 		identitySet[sample.identity] = struct{}{}
 	}
@@ -737,17 +904,18 @@ func estimateSmartQuotaSamplesAt(samples []smartQuotaCalibrationSample, source s
 		confidence = smartConfidenceHigh
 	}
 	return smartQuotaEstimate{
-		CapacityM:       round2(clampFloat(median, smartQuotaCalibrationMinCapacityM, smartQuotaCalibrationMaxCapacityM)),
-		Source:          source,
-		SampleCount:     len(valid),
-		ObservedPercent: round2(totalObservedWeight * 100),
-		Confidence:      confidence,
-		UniqueAccounts:  len(identitySet),
+		CapacityM:          round2(clampFloat(median, smartQuotaCalibrationMinCapacityM, smartQuotaCalibrationMaxCapacityM)),
+		Source:             source,
+		SampleCount:        len(valid),
+		ObservedPercent:    round2(totalObservedWeight * 100),
+		Confidence:         confidence,
+		UniqueAccounts:     len(identitySet),
+		IndependentAccount: independentAccount,
 	}, true
 }
 
 func trimSmartQuotaSampleExtremes(samples []smartQuotaCalibrationSample) []smartQuotaCalibrationSample {
-	if len(samples) < 5 {
+	if len(samples) < 3 {
 		return append([]smartQuotaCalibrationSample(nil), samples...)
 	}
 	ordered := append([]smartQuotaCalibrationSample(nil), samples...)
@@ -758,7 +926,7 @@ func trimSmartQuotaSampleExtremes(samples []smartQuotaCalibrationSample) []smart
 }
 
 func trimSmartQuotaPointExtremes(points []smartQuotaWeightedPoint) []smartQuotaWeightedPoint {
-	if len(points) < 5 {
+	if len(points) < 3 {
 		return points
 	}
 	ordered := append([]smartQuotaWeightedPoint(nil), points...)

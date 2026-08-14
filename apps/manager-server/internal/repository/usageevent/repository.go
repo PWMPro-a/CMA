@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -15,6 +16,7 @@ type Repository interface {
 	ListRecent(ctx context.Context, limit int) ([]model.UsageEvent, error)
 	ListSupplyUsageMinutes(ctx context.Context, sinceMS int64) ([]SupplyUsageMinute, error)
 	ListSupplyQuotaCalibrationEvents(ctx context.Context, sinceMS int64, limit int) ([]usage.Event, error)
+	ListSupplyQuotaWindowUsage(ctx context.Context, targets []SupplyQuotaWindowUsageQuery) ([]SupplyQuotaWindowUsage, error)
 	ModelUsageSummary(ctx context.Context, limit int) (model.ModelUsageSummary, error)
 	BackfillResponseMetadata(ctx context.Context, batchLimit int) (int, error)
 	BackfillRoutingDiagnostics(ctx context.Context, batchLimit int) (int, error)
@@ -67,6 +69,23 @@ type SupplyUsageMinute struct {
 	TotalTokens    int64
 	LatencySumMS   int64
 	LatencySamples int64
+}
+
+// SupplyQuotaWindowUsageQuery identifies one credential's current provider
+// quota window. RequestIndex correlates results without exposing credential
+// details outside the repository call.
+type SupplyQuotaWindowUsageQuery struct {
+	RequestIndex     int
+	AuthFileSnapshot string
+	AuthIndex        string
+	FromMS           int64
+	ToMS             int64
+}
+
+type SupplyQuotaWindowUsage struct {
+	RequestIndex int
+	TotalTokens  int64
+	LastSeenMS   int64
 }
 
 type repository struct {
@@ -490,6 +509,72 @@ func (r *repository) ListSupplyQuotaCalibrationEvents(ctx context.Context, since
 		events = append(events, event)
 	}
 	return events, rows.Err()
+}
+
+// ListSupplyQuotaWindowUsage aggregates complete current-window usage for a
+// bounded set of credentials. The account-scoped index prevents a busy pool
+// from truncating quiet accounts or forcing a scan of the global event tail.
+func (r *repository) ListSupplyQuotaWindowUsage(ctx context.Context, targets []SupplyQuotaWindowUsageQuery) ([]SupplyQuotaWindowUsage, error) {
+	if len(targets) == 0 {
+		return []SupplyQuotaWindowUsage{}, nil
+	}
+
+	const batchSize = 400
+	result := make([]SupplyQuotaWindowUsage, 0, len(targets))
+	for start := 0; start < len(targets); start += batchSize {
+		end := min(start+batchSize, len(targets))
+		batch := targets[start:end]
+		values := make([]string, 0, len(batch))
+		args := make([]any, 0, len(batch)*5)
+		for _, target := range batch {
+			values = append(values, "(?, ?, ?, ?, ?)")
+			args = append(args,
+				target.RequestIndex,
+				strings.TrimSpace(target.AuthFileSnapshot),
+				strings.TrimSpace(target.AuthIndex),
+				target.FromMS,
+				target.ToMS,
+			)
+		}
+
+		rows, err := r.db.QueryContext(ctx, `with quota_targets(
+			request_index, auth_file_snapshot, auth_index, from_ms, to_ms
+		) as (values `+strings.Join(values, ",")+`)
+		select
+			t.request_index,
+			coalesce(sum(case when coalesce(e.failed, 0) = 0 then max(
+				coalesce(e.total_tokens, 0),
+				coalesce(e.input_tokens, 0) + coalesce(e.output_tokens, 0) + coalesce(e.reasoning_tokens, 0)
+			) else 0 end), 0),
+			coalesce(max(e.timestamp_ms), 0)
+		from quota_targets t
+		left join usage_events e indexed by idx_usage_events_latest_request_auth_file
+			on e.auth_file_snapshot = t.auth_file_snapshot collate nocase
+			and (t.auth_index = '' or e.auth_index = t.auth_index collate nocase)
+			and e.timestamp_ms >= t.from_ms
+			and e.timestamp_ms < t.to_ms
+		group by t.request_index
+		order by t.request_index`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var item SupplyQuotaWindowUsage
+			if err := rows.Scan(&item.RequestIndex, &item.TotalTokens, &item.LastSeenMS); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			result = append(result, item)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
 
 func (r *repository) ListRecent(ctx context.Context, limit int) ([]model.UsageEvent, error) {
