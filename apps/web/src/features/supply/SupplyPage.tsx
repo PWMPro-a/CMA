@@ -16,6 +16,7 @@ import {
 import {
   supplyApi,
   type SupplyAccountList,
+  type SupplyActiveOrderStatus,
   type SupplyConfig,
   type SupplyOrder,
   type SupplyReport,
@@ -40,6 +41,7 @@ const emptyConfig: SupplyConfig = {
   strategy: 'strong_supply',
   targetAvailableAccounts: 100,
   replenishBatchSize: 10,
+  maxConcurrentOrders: 2,
   checkIntervalSeconds: 60,
   pollIntervalSeconds: 3,
   defaultWebsockets: false,
@@ -163,6 +165,7 @@ const ACCOUNT_STATUS_FILTERS: Array<{ id: AccountStatusFilter; labelKey: string 
 ];
 
 const SUPPLY_AUTO_REFRESH_MS = 10_000;
+const SUPPLY_ACTIVE_ORDER_REFRESH_MS = 2_000;
 const SUPPLY_REPORT_REFRESH_MS = 60_000;
 
 const startOfLocalDay = (value: Date) => {
@@ -371,8 +374,10 @@ export function SupplyPage() {
   >(null);
   const configDirtyRef = useRef(false);
   const loadInFlightRef = useRef(false);
+  const activeOrderLoadInFlightRef = useRef(false);
   const actionInFlightRef = useRef(false);
   const refreshGenerationRef = useRef(0);
+  const hasActiveOrder = Boolean(status?.activeOrder);
 
   const updateDraft = useCallback((patch: Partial<SupplyConfig>) => {
     configDirtyRef.current = true;
@@ -426,6 +431,46 @@ export function SupplyPage() {
     },
     [applyStatus, showNotification, t]
   );
+
+  const applyActiveOrderStatus = useCallback((snapshot: SupplyActiveOrderStatus) => {
+    setStatus((current) => {
+      if (!current) return current;
+      const activeOrder = snapshot.activeOrder;
+      const activeOrders = snapshot.activeOrders ?? (activeOrder ? [activeOrder] : []);
+      let orders = current.orders ?? [];
+      for (const nextOrder of activeOrders) {
+        let replaced = false;
+        orders = orders.map((order) => {
+          if (order.orderId !== nextOrder.orderId) return order;
+          replaced = true;
+          return nextOrder;
+        });
+        if (!replaced) orders = [nextOrder, ...orders];
+      }
+      return { ...current, activeOrder, activeOrders, orders };
+    });
+  }, []);
+
+  const loadActiveOrder = useCallback(async () => {
+    if (
+      activeOrderLoadInFlightRef.current ||
+      loadInFlightRef.current ||
+      actionInFlightRef.current ||
+      !hasActiveOrder
+    ) {
+      return;
+    }
+    activeOrderLoadInFlightRef.current = true;
+    try {
+      const snapshot = await supplyApi.getActiveOrder();
+      if (!actionInFlightRef.current) applyActiveOrderStatus(snapshot);
+    } catch {
+      // The next full status poll remains the recovery path. A transient fast
+      // status error should not interrupt the operator's current workflow.
+    } finally {
+      activeOrderLoadInFlightRef.current = false;
+    }
+  }, [applyActiveOrderStatus, hasActiveOrder]);
 
   const loadRecoveries = useCallback(
     async (quiet = false) => {
@@ -512,6 +557,15 @@ export function SupplyPage() {
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [load]);
+
+  useEffect(() => {
+    if (!hasActiveOrder) return undefined;
+    void loadActiveOrder();
+    const timer = window.setInterval(() => {
+      void loadActiveOrder();
+    }, SUPPLY_ACTIVE_ORDER_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [hasActiveOrder, loadActiveOrder]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
@@ -689,6 +743,7 @@ export function SupplyPage() {
   const autoSupplyEnabled = status?.config?.enabled ?? draft.enabled ?? false;
   const smartModeEnabled = smart?.enabled ?? draft.smartEnabled !== false;
   const activeOrder = status?.activeOrder;
+  const activeOrders = status?.activeOrders ?? (activeOrder ? [activeOrder] : []);
   const latestAutomaticOrder = status?.orders?.find(
     (order) => order.automatic && order.strategy !== 'recovery'
   );
@@ -701,6 +756,22 @@ export function SupplyPage() {
   const confidence = smart?.confidence || 'low';
   const supplyPressureLevel = smart?.supplyPressureLevel || 'unknown';
   const demandTrend = smart?.demandTrend || 'unknown';
+  const concurrencySlotsLabel = smart?.concurrencyUnlimited
+    ? t('supply.concurrency_unlimited')
+    : smart?.concurrencyDemandObserved
+      ? t('supply.concurrency_slots_value', {
+          current: formatInteger(smart?.concurrencyFiniteSlots),
+          required: formatInteger(smart?.requiredConcurrencySlots),
+        })
+      : t('supply.concurrency_slots_waiting', {
+          current: formatInteger(smart?.concurrencyFiniteSlots),
+        });
+  const concurrencySlotsTitle = t('supply.concurrency_slots_hint', {
+    limited: formatInteger(smart?.concurrencyLimitedAccounts),
+    unlimited: formatInteger(smart?.concurrencyUnlimitedAccounts),
+    missing: formatInteger(smart?.concurrencyMissingAccounts),
+    deficit: formatInteger(smart?.concurrencyAccountDeficit),
+  });
   const draftStrategy = (draft.strategy || 'strong_supply') as SupplyStrategy;
   const effectiveHealthTargetMinutes =
     smart?.effectiveHealthyMinutesTarget ??
@@ -1238,7 +1309,7 @@ export function SupplyPage() {
         label: (
           <span className={styles.tabLabel}>
             {t('supply.tabs_orders')}
-            {activeOrder ? <span className={styles.tabBadge}>1</span> : null}
+            {activeOrders.length > 0 ? <span className={styles.tabBadge}>{activeOrders.length}</span> : null}
           </span>
         ),
       },
@@ -1591,6 +1662,18 @@ export function SupplyPage() {
                       })}
                     </strong>
                   </div>
+                  <div title={concurrencySlotsTitle}>
+                    <span>{t('supply.concurrency_capacity')}</span>
+                    <strong>{concurrencySlotsLabel}</strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.average_request_latency')}</span>
+                    <strong>
+                      {(smart?.averageRequestLatencyMs ?? 0) > 0
+                        ? `${formatNumber(smart?.averageRequestLatencyMs, 0)} ms`
+                        : '-'}
+                    </strong>
+                  </div>
                 </div>
               </article>
 
@@ -1741,6 +1824,16 @@ export function SupplyPage() {
                     value={draft.replenishBatchSize}
                     onChange={(event) =>
                       updateDraft({ replenishBatchSize: Number(event.target.value) })
+                    }
+                  />
+                  <Input
+                    label={t('supply.max_concurrent_orders')}
+                    type="number"
+                    min={1}
+                    max={4}
+                    value={draft.maxConcurrentOrders ?? 1}
+                    onChange={(event) =>
+                      updateDraft({ maxConcurrentOrders: Number(event.target.value) })
                     }
                   />
                   <Input
@@ -2072,10 +2165,10 @@ export function SupplyPage() {
                 <Button
                   fullWidth
                   loading={action === 'replenish'}
-                  disabled={Boolean(status?.activeOrder)}
+                  disabled={activeOrders.length > 0}
                   onClick={() => void replenish()}
                 >
-                  {status?.activeOrder ? t('supply.order_in_progress') : t('supply.replenish_now')}
+                  {activeOrders.length > 0 ? t('supply.order_in_progress') : t('supply.replenish_now')}
                 </Button>
               </article>
 
@@ -2087,12 +2180,17 @@ export function SupplyPage() {
                   </div>
                   <IconTimer size={18} />
                 </div>
-                {status?.activeOrder ? (
-                  <OrderSummary
-                    order={status.activeOrder}
-                    dismissing={action === 'dismiss'}
-                    onDismissUncertain={dismissUncertain}
-                  />
+                {activeOrders.length > 0 ? (
+                  <div className={styles.orderStack}>
+                    {activeOrders.map((order) => (
+                      <OrderSummary
+                        key={order.orderId}
+                        order={order}
+                        dismissing={action === 'dismiss'}
+                        onDismissUncertain={dismissUncertain}
+                      />
+                    ))}
+                  </div>
                 ) : (
                   <div className={styles.empty}>{t('supply.no_active_order')}</div>
                 )}
@@ -2920,6 +3018,10 @@ function OrderSummary({
         <div>
           <dt>{t('supply.next_poll')}</dt>
           <dd>{formatTime(order.nextPollAtMs)}</dd>
+        </div>
+        <div>
+          <dt>{t('supply.last_checked')}</dt>
+          <dd>{formatTime(order.updatedAtMs)}</dd>
         </div>
       </dl>
       {order.lastError ? <div className={styles.inlineError}>{order.lastError}</div> : null}

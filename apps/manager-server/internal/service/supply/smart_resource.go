@@ -92,6 +92,23 @@ type SmartResource struct {
 	WeakAccounts     int `json:"weakAccounts"`
 	TotalAccounts    int `json:"totalAccounts"`
 	DisabledAccounts int `json:"disabledAccounts"`
+	// Concurrency is an instantaneous serving constraint and remains separate
+	// from quota/expiry RCU. A zero or missing per-account limit is treated as
+	// unlimited; missing values stay visible so operators can distinguish an
+	// explicit unlimited setting from absent metadata.
+	ConcurrencyLimitedAccounts      int     `json:"concurrencyLimitedAccounts"`
+	ConcurrencyUnlimitedAccounts    int     `json:"concurrencyUnlimitedAccounts"`
+	ConcurrencyMissingAccounts      int     `json:"concurrencyMissingAccounts"`
+	ConcurrencyFiniteSlots          int     `json:"concurrencyFiniteSlots"`
+	RequiredConcurrencySlots        int     `json:"requiredConcurrencySlots"`
+	ConcurrencyHeadroomSlots        int     `json:"concurrencyHeadroomSlots"`
+	ConcurrencyAccountDeficit       int     `json:"concurrencyAccountDeficit"`
+	ConcurrencyCoverage             float64 `json:"concurrencyCoverage"`
+	ConcurrencyEffectiveCapacityRCU float64 `json:"concurrencyEffectiveCapacityRcu"`
+	AverageRequestLatencyMS         float64 `json:"averageRequestLatencyMs"`
+	ConcurrencyUnlimited            bool    `json:"concurrencyUnlimited"`
+	ConcurrencyLimited              bool    `json:"concurrencyLimited"`
+	ConcurrencyDemandObserved       bool    `json:"concurrencyDemandObserved"`
 	// Newly delivered credentials are only added as a conservative provisional
 	// capacity overlay until the next completed usability inspection verifies
 	// them. They are deliberately separate from HealthyAccounts.
@@ -188,12 +205,14 @@ type SmartResource struct {
 }
 
 type smartUsageBucket struct {
-	minuteMS    int64
-	requests    int64
-	success     int64
-	failed      int64
-	zeroTokens  int64
-	totalTokens int64
+	minuteMS       int64
+	requests       int64
+	success        int64
+	failed         int64
+	zeroTokens     int64
+	totalTokens    int64
+	latencySumMS   int64
+	latencySamples int64
 }
 
 type authFileSnapshot struct {
@@ -288,11 +307,13 @@ func (s *Service) WarmSmartUsage(ctx context.Context) error {
 			continue
 		}
 		s.smartBuckets[minute.MinuteMS] = &smartUsageBucket{
-			minuteMS:    minute.MinuteMS,
-			requests:    minute.Requests,
-			success:     minute.Successful,
-			failed:      minute.Failed,
-			totalTokens: minute.TotalTokens,
+			minuteMS:       minute.MinuteMS,
+			requests:       minute.Requests,
+			success:        minute.Successful,
+			failed:         minute.Failed,
+			totalTokens:    minute.TotalTokens,
+			latencySumMS:   minute.LatencySumMS,
+			latencySamples: minute.LatencySamples,
 		}
 	}
 	for minute := range s.smartBuckets {
@@ -332,6 +353,10 @@ func (s *Service) recordSmartUsageEvents(events []usage.Event, now time.Time) {
 			bucket.failed++
 		} else {
 			bucket.success++
+			if event.LatencyMS != nil && *event.LatencyMS > 0 {
+				bucket.latencySumMS += *event.LatencyMS
+				bucket.latencySamples++
+			}
 		}
 		if event.TotalTokens <= 0 && event.InputTokens <= 0 && event.OutputTokens <= 0 {
 			bucket.zeroTokens++
@@ -682,6 +707,7 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		resource.ExpiryWasteRiskRCU = round2(wasteRisk)
 		resource.CurrentCapacityRCU = resource.TimeLimitedCapacityRCU
 	}
+	applyAccountPoolConcurrency(&resource, accountPoolStatsFromFiles(authSnapshot.files))
 	resource.TargetCapacityRCU = round2(consumeRCUPerMinute * float64(resource.EffectiveHealthyMinutes))
 	resource.RecommendedCapacityRCU = resource.TargetCapacityRCU
 	consumeRCUPerMinute = s.applySmartDemandMemory(cfg, &resource, now, consumeRCUPerMinute)
@@ -871,10 +897,45 @@ func applySmartAccountQuantityEstimate(cfg store.ManagerSupplyConfig, resource *
 		// do not subtract every enabled-but-nearly-empty account a second time.
 		capacityDeficit = int(math.Ceil(resource.CapacityGapRCU / unit))
 	}
-	additional := max(countFloorDeficit, capacityDeficit)
+	additional := max(countFloorDeficit, max(capacityDeficit, max(0, resource.ConcurrencyAccountDeficit)))
 	resource.EstimatedRequiredAccounts = projected + additional
 	resource.ProjectedAvailableAccounts = projected
 	resource.AccountQuantityDeficit = additional
+	applySmartConcurrencyShortagePlan(cfg, resource)
+}
+
+func applySmartConcurrencyShortagePlan(cfg store.ManagerSupplyConfig, resource *SmartResource) {
+	if resource == nil || !resource.ConcurrencyDemandObserved || !resource.ConcurrencyLimited ||
+		resource.ConcurrencyAccountDeficit <= 0 || !resource.SnapshotFresh {
+		return
+	}
+	limit := smartAutomaticOrderQuantityLimit(cfg, *resource)
+	quantity := min(resource.ConcurrencyAccountDeficit, limit)
+	if resource.ConcurrencyFiniteSlots > 0 {
+		// A finite pool with some headroom left is a warning dimension, not a
+		// reason for a large one-shot order. Re-evaluate after at most three new
+		// credentials have been inspected.
+		quantity = min(quantity, 3)
+	} else {
+		// Zero finite slots with observed demand is a real serving emergency,
+		// not an ordinary observation shortage. Use the same half-waterline
+		// minimum as the account-vacuum path instead of staging one credential.
+		quantity = max(quantity, smartEmergencyMinimumOrderQuantity(cfg))
+	}
+	resource.SuggestedQuantity = max(resource.SuggestedQuantity, max(1, quantity))
+	if resource.ConcurrencyFiniteSlots <= 0 {
+		resource.EmergencyShortage = true
+		resource.EmergencyReason = "concurrency_capacity_shortage"
+		resource.HealthLevel = smartHealthCritical
+		resource.SuggestedAction = smartActionEmergencyReplenish
+		resource.DecisionReason = "concurrency_capacity_shortage"
+		return
+	}
+	if !smartResourceEmergency(*resource) {
+		resource.HealthLevel = smartHealthWarning
+		resource.SuggestedAction = smartActionPrelock
+		resource.DecisionReason = "concurrency_capacity_shortage"
+	}
 }
 
 type smartUsageAggregate struct {
@@ -896,6 +957,9 @@ type smartUsageAggregate struct {
 	tpm1           float64
 	tpm5           float64
 	tpm10          float64
+	latencySumMS   int64
+	latencySamples int64
+	avgLatencyMS   float64
 	oneMinuteReady bool
 	sampleMinutes  int
 }
@@ -933,6 +997,8 @@ func (s *Service) smartUsageSnapshot(now time.Time) smartUsageAggregate {
 		result.requests30 += bucket.requests
 		result.successful30 += bucket.success
 		result.tokens30 += bucket.totalTokens
+		result.latencySumMS += bucket.latencySumMS
+		result.latencySamples += bucket.latencySamples
 		if bucket.success > 0 && (firstMinute == 0 || minute < firstMinute) {
 			firstMinute = minute
 		}
@@ -986,6 +1052,9 @@ func (s *Service) smartUsageSnapshot(now time.Time) smartUsageAggregate {
 			result.rpm5Peak = float64(count)
 		}
 	}
+	if result.latencySamples > 0 {
+		result.avgLatencyMS = float64(result.latencySumMS) / float64(result.latencySamples)
+	}
 	return result
 }
 
@@ -1038,6 +1107,18 @@ func smartWindowConsumeRCU(rpm, tpm, unit float64) float64 {
 	return math.Max(requestRCU, tokenRCU)
 }
 
+// smartRequiredConcurrencySlots applies Little's Law to the observed request
+// rate and successful-request duration, then keeps 20% headroom for normal
+// jitter. It estimates instantaneous slots only; quota RCU remains an
+// independent capacity dimension.
+func smartRequiredConcurrencySlots(requestsPerMinute, averageLatencyMS float64) int {
+	if requestsPerMinute <= 0 || averageLatencyMS <= 0 {
+		return 0
+	}
+	concurrent := requestsPerMinute / 60 * averageLatencyMS / 1000
+	return max(1, int(math.Ceil(concurrent*1.2)))
+}
+
 func smartTokenDemandRCU(tpm, unit float64) float64 {
 	if unit <= 0 || tpm <= 0 {
 		return 0
@@ -1070,6 +1151,9 @@ func applySmartUsage(resource *SmartResource, usage smartUsageAggregate, unit fl
 	resource.TPM1M = usage.tpm1
 	resource.TPM5M = usage.tpm5
 	resource.TPM10M = usage.tpm10
+	resource.AverageRequestLatencyMS = round2(usage.avgLatencyMS)
+	resource.ConcurrencyDemandObserved = usage.avgLatencyMS > 0 && demand.requestRCU > 0
+	resource.RequiredConcurrencySlots = smartRequiredConcurrencySlots(demand.requestRCU, usage.avgLatencyMS)
 	resource.RequestDemandRCUPerMinute = round2(demand.requestRCU)
 	resource.TokenDemandRCUPerMinute = round2(demand.tokenRCU)
 	resource.DemandDriver = smartDemandDriver(demand.requestRCU, demand.tokenRCU)
@@ -1731,9 +1815,31 @@ func smartEmergencyMinAccounts(cfg store.ManagerSupplyConfig) int {
 	return clampInt(positiveOr(cfg.DefaultEmergencyMinAccounts, 5), 1, 100)
 }
 
+// smartEmergencyMinimumOrderQuantity is the lower bound for a genuine pool
+// emergency. The old path used the configured emergency minimum (or the
+// remaining critical deficit), which produced 1/2/3-account orders even when
+// the healthy account waterline was materially higher. A half-waterline batch
+// restores useful serving headroom in one guarded order without purchasing the
+// whole healthy floor when the pool is empty and traffic is still uncertain.
+func smartEmergencyMinimumOrderQuantity(cfg store.ManagerSupplyConfig) int {
+	healthy := smartHealthyAvailableAccounts(cfg)
+	if healthy <= 0 {
+		// Direct unit tests and legacy configurations can omit the new account
+		// waterline. Keep the historical emergency minimum as the fallback
+		// instead of turning a missing setting into a one-account order.
+		healthy = max(2, smartEmergencyMinAccounts(cfg)*2)
+	}
+	halfHealthy := int(math.Ceil(float64(healthy) / 2))
+	return clampInt(max(smartEmergencyMinAccounts(cfg), halfHealthy), 1, 100)
+}
+
 func smartEmergencyRefillQuantity(cfg store.ManagerSupplyConfig, available int) int {
 	toHealthy := max(0, smartHealthyAvailableAccounts(cfg)-max(0, available))
-	return clampInt(max(smartEmergencyMinAccounts(cfg), toHealthy), 1, 100)
+	minimum := smartEmergencyMinAccounts(cfg)
+	if max(0, available) <= smartCriticalAvailableAccounts(cfg) {
+		minimum = smartEmergencyMinimumOrderQuantity(cfg)
+	}
+	return clampInt(max(minimum, toHealthy), 1, 100)
 }
 
 // smartIdleEmergencyRefillQuantity intentionally uses a smaller target than
@@ -1742,9 +1848,12 @@ func smartEmergencyRefillQuantity(cfg store.ManagerSupplyConfig, available int) 
 // still gets the configured minimum batch to preserve request availability.
 func smartIdleEmergencyRefillQuantity(cfg store.ManagerSupplyConfig, available int) int {
 	if available <= 0 {
-		return smartEmergencyMinAccounts(cfg)
+		return smartEmergencyMinimumOrderQuantity(cfg)
 	}
-	return clampInt(max(0, smartCriticalAvailableAccounts(cfg)-available), 1, 100)
+	if available <= smartCriticalAvailableAccounts(cfg) {
+		return smartEmergencyMinimumOrderQuantity(cfg)
+	}
+	return 0
 }
 
 func smartVirtualDemandTTLMinutes(cfg store.ManagerSupplyConfig) int {
@@ -1849,6 +1958,11 @@ func smartAutomaticOrderQuantityLimit(cfg store.ManagerSupplyConfig, resource Sm
 		limit = min(limit, smartPrelockMaxQuantity(cfg))
 	}
 	if smartResourceEmergency(resource) {
+		// A severe account-pool shortage must not be reduced back to a 1/2/3
+		// order merely because an old prelock cap was smaller. Normal orders and
+		// manual orders retain their configured limits; this expansion applies
+		// only to the automatic emergency path and is still bounded by 100.
+		limit = max(limit, smartEmergencyMinimumOrderQuantity(cfg))
 		return max(1, limit)
 	}
 	if smartPartialInspectionCapacityDeficitAllowed(resource) || resource.CapacityGapRCU > 0 || smartResourceAtOrBelowWarning(resource) {
@@ -2181,6 +2295,21 @@ func isSupplyCapacityEvent(event usage.Event) bool {
 func numberField(values map[string]any, keys ...string) float64 {
 	value, _ := numberFieldOK(values, keys...)
 	return value
+}
+
+func smartAccountConcurrencyLimit(values map[string]any) (int, bool) {
+	value, observed := numberFieldOK(
+		values,
+		"max_concurrency",
+		"maxConcurrency",
+		"concurrency",
+		"concurrency_limit",
+		"concurrencyLimit",
+	)
+	if !observed || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+		return 0, false
+	}
+	return int(math.Floor(value)), true
 }
 
 func numberFieldOK(values map[string]any, keys ...string) (float64, bool) {

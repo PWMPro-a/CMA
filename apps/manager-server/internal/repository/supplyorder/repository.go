@@ -16,6 +16,7 @@ type Repository interface {
 	Create(ctx context.Context, order model.SupplyOrder) (model.SupplyOrder, error)
 	Get(ctx context.Context, orderID string) (model.SupplyOrder, bool, error)
 	GetOpen(ctx context.Context) (model.SupplyOrder, bool, error)
+	ListOpen(ctx context.Context, limit int) ([]model.SupplyOrder, error)
 	GetLatestAutomatic(ctx context.Context) (model.SupplyOrder, bool, error)
 	GetLatestCompletedAutomatic(ctx context.Context) (model.SupplyOrder, bool, error)
 	ActivateNextLegacyRepair(ctx context.Context) (model.SupplyOrder, bool, error)
@@ -84,7 +85,7 @@ func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model
 		item_count, imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms,
 		created_at_ms, updated_at_ms
 	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	if isOpenOrderStatus(order.Status) && isPurchaseOrder(order) {
+	if isOpenOrderStatus(order.Status) && isPurchaseOrder(order) && !isParallelPurchaseOrder(order) {
 		statement = `insert into supply_orders (
 			order_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
 			ready_quantity, progress, status_url, take_url, charged_fen, released_fen,
@@ -110,7 +111,7 @@ func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model
 	if err != nil {
 		return model.SupplyOrder{}, err
 	}
-	if isOpenOrderStatus(order.Status) && isPurchaseOrder(order) {
+	if isOpenOrderStatus(order.Status) && isPurchaseOrder(order) && !isParallelPurchaseOrder(order) {
 		affected, err := result.RowsAffected()
 		if err != nil {
 			return model.SupplyOrder{}, err
@@ -140,6 +141,27 @@ func (r *repository) GetOpen(ctx context.Context) (model.SupplyOrder, bool, erro
 		return model.SupplyOrder{}, false, nil
 	}
 	return order, err == nil, err
+}
+
+func (r *repository) ListOpen(ctx context.Context, limit int) ([]model.SupplyOrder, error) {
+	if limit <= 0 || limit > 16 {
+		limit = 4
+	}
+	rows, err := r.db.QueryContext(ctx, orderSelect+` where status in (`+openOrderStatusClause+`)
+		and `+supplyPurchaseOrderPredicate+` order by created_at_ms asc, id asc limit ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	orders := make([]model.SupplyOrder, 0, limit)
+	for rows.Next() {
+		order, err := scanOrder(rows)
+		if err != nil {
+			return nil, err
+		}
+		orders = append(orders, order)
+	}
+	return orders, rows.Err()
 }
 
 func (r *repository) GetLatestAutomatic(ctx context.Context) (model.SupplyOrder, bool, error) {
@@ -805,6 +827,12 @@ func isPurchaseOrder(order model.SupplyOrder) bool {
 	return !strings.EqualFold(strings.TrimSpace(order.Strategy), "recovery") &&
 		!strings.EqualFold(strings.TrimSpace(order.RemoteStatus), "recovery_claimed") &&
 		!strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.OrderID)), "recovery-")
+}
+
+// Parallel automatic reservations are explicitly marked by the service. Keep
+// the legacy single-open-order guard for manual and older automatic rows.
+func isParallelPurchaseOrder(order model.SupplyOrder) bool {
+	return order.Automatic && strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.TriggerReason)), "parallel_")
 }
 
 func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {

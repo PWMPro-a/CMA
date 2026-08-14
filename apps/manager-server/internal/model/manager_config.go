@@ -31,15 +31,18 @@ type ManagerExternalUsageServiceConfig struct {
 }
 
 type ManagerSupplyConfig struct {
-	Enabled                     *bool   `json:"enabled,omitempty"`
-	BaseURL                     string  `json:"baseUrl"`
-	Username                    string  `json:"username"`
-	Password                    string  `json:"password,omitempty"`
-	PasswordConfigured          bool    `json:"passwordConfigured,omitempty"`
-	Product                     string  `json:"product"`
-	Strategy                    string  `json:"strategy,omitempty"`
-	TargetAvailableAccounts     int     `json:"targetAvailableAccounts"`
-	ReplenishBatchSize          int     `json:"replenishBatchSize"`
+	Enabled                 *bool  `json:"enabled,omitempty"`
+	BaseURL                 string `json:"baseUrl"`
+	Username                string `json:"username"`
+	Password                string `json:"password,omitempty"`
+	PasswordConfigured      bool   `json:"passwordConfigured,omitempty"`
+	Product                 string `json:"product"`
+	Strategy                string `json:"strategy,omitempty"`
+	TargetAvailableAccounts int    `json:"targetAvailableAccounts"`
+	ReplenishBatchSize      int    `json:"replenishBatchSize"`
+	// MaxConcurrentOrders bounds parallel automatic reservations. A zero value
+	// keeps the legacy single-order behavior for existing configurations.
+	MaxConcurrentOrders         int     `json:"maxConcurrentOrders,omitempty"`
 	CheckIntervalSeconds        int     `json:"checkIntervalSeconds"`
 	PollIntervalSeconds         int     `json:"pollIntervalSeconds"`
 	DefaultWebsockets           bool    `json:"defaultWebsockets"`

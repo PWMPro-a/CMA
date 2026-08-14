@@ -381,6 +381,23 @@ func (s *Store) InsertCodexInspectionLog(ctx context.Context, entry CodexInspect
 	return s.CodexInspections.InsertLog(ctx, entry)
 }
 
+func (s *Store) InsertCodexInspectionLogs(ctx context.Context, entries []CodexInspectionLog) ([]CodexInspectionLog, error) {
+	if inserter, ok := s.CodexInspections.(interface {
+		InsertLogs(context.Context, []CodexInspectionLog) ([]CodexInspectionLog, error)
+	}); ok {
+		return inserter.InsertLogs(ctx, entries)
+	}
+	stored := make([]CodexInspectionLog, 0, len(entries))
+	for _, entry := range entries {
+		item, err := s.CodexInspections.InsertLog(ctx, entry)
+		if err != nil {
+			return nil, err
+		}
+		stored = append(stored, item)
+	}
+	return stored, nil
+}
+
 func (s *Store) ListCodexInspectionRuns(ctx context.Context, limit int) ([]CodexInspectionRun, error) {
 	return s.CodexInspections.ListRuns(ctx, limit)
 }
@@ -439,6 +456,10 @@ func (s *Store) GetSupplyOrder(ctx context.Context, orderID string) (SupplyOrder
 
 func (s *Store) GetOpenSupplyOrder(ctx context.Context) (SupplyOrder, bool, error) {
 	return s.SupplyOrders.GetOpen(ctx)
+}
+
+func (s *Store) ListOpenSupplyOrders(ctx context.Context, limit int) ([]SupplyOrder, error) {
+	return s.SupplyOrders.ListOpen(ctx, limit)
 }
 
 func (s *Store) GetLatestAutomaticSupplyOrder(ctx context.Context) (SupplyOrder, bool, error) {

@@ -49,6 +49,18 @@ func TestRecoveryImportDoesNotBlockPurchaseOrder(t *testing.T) {
 	}); err == nil || !strings.Contains(err.Error(), "open order already exists") {
 		t.Fatalf("second purchase error = %v", err)
 	}
+
+	parallel, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "56814", Product: "oauth_7d", RequestedQuantity: 2, Automatic: true,
+		TriggerReason: "parallel_emergency_capacity_shortage", Status: "waiting_inventory",
+	})
+	if err != nil {
+		t.Fatalf("parallel purchase should be accepted: %v", err)
+	}
+	open, err := st.ListOpenSupplyOrders(ctx, 10)
+	if err != nil || len(open) != 2 || open[0].OrderID != purchase.OrderID || open[1].OrderID != parallel.OrderID {
+		t.Fatalf("parallel open purchases = %#v err=%v", open, err)
+	}
 }
 
 func TestPurchaseQueriesExcludeRecoveryImportRows(t *testing.T) {

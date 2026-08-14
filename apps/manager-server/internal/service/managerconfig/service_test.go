@@ -92,6 +92,29 @@ func TestNormalizeSupplyConfigDefaultsRecoveryControls(t *testing.T) {
 	}
 }
 
+func TestNormalizeSupplyConfigBoundsParallelAutomaticOrders(t *testing.T) {
+	defaulted := NormalizeSupplyConfig(store.ManagerSupplyConfig{}, store.ManagerSupplyConfig{})
+	if defaulted.MaxConcurrentOrders != 1 {
+		t.Fatalf("default max concurrent orders = %d, want 1", defaulted.MaxConcurrentOrders)
+	}
+
+	configured := NormalizeSupplyConfig(
+		store.ManagerSupplyConfig{MaxConcurrentOrders: 3},
+		defaulted,
+	)
+	if configured.MaxConcurrentOrders != 3 {
+		t.Fatalf("configured max concurrent orders = %d, want 3", configured.MaxConcurrentOrders)
+	}
+
+	capped := NormalizeSupplyConfig(
+		store.ManagerSupplyConfig{MaxConcurrentOrders: 99},
+		configured,
+	)
+	if capped.MaxConcurrentOrders != 4 {
+		t.Fatalf("capped max concurrent orders = %d, want 4", capped.MaxConcurrentOrders)
+	}
+}
+
 func TestNormalizeSupplyConfigAppliesSupplyStrategyPresets(t *testing.T) {
 	tests := []struct {
 		strategy                               string

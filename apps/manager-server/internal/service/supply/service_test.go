@@ -58,6 +58,58 @@ func TestAutomationExecutionTracksScheduledAndCompletedCycles(t *testing.T) {
 	}
 }
 
+func TestGetActiveOrderStatusUsesFastRemotePollAndHonorsRetryAfter(t *testing.T) {
+	var statusCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case "/api/customer/pickup/orders/order-fast":
+			statusCalls.Add(1)
+			_, _ = w.Write([]byte(`{"id":"order-fast","status":"waiting_inventory","retry_after_seconds":30}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "active-order.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		Supply: store.ManagerSupplyConfig{
+			BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_7d",
+			PollIntervalSeconds: 60,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "order-fast", Product: "oauth_7d", RequestedQuantity: 2,
+		Automatic: true, Status: "waiting_inventory", NextPollAtMS: 0,
+	}); err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	first, err := service.GetActiveOrderStatus(context.Background())
+	if err != nil || !first.PollAttempted || first.ActiveOrder == nil {
+		t.Fatalf("first active status = %#v err=%v", first, err)
+	}
+	if first.ActiveOrder.RemoteStatus != "waiting_inventory" || first.ActiveOrder.SupplierRetryUntilMS <= time.Now().UnixMilli() {
+		t.Fatalf("retry-after was not persisted: %#v", first.ActiveOrder)
+	}
+	second, err := service.GetActiveOrderStatus(context.Background())
+	if err != nil || second.PollAttempted {
+		t.Fatalf("second active status should wait for supplier deadline = %#v err=%v", second, err)
+	}
+	if statusCalls.Load() != 1 {
+		t.Fatalf("remote status calls = %d, want 1", statusCalls.Load())
+	}
+}
+
 func createRecoverySourceOrder(t *testing.T, st *store.Store, orderID string) {
 	t.Helper()
 	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
@@ -469,6 +521,49 @@ func TestAccountPoolStatsKeepsPopulationIdentityAcrossLiveAndInspectionBuckets(t
 	if resource.NormalAccounts+resource.NeedsAttentionAccounts+resource.QuotaRiskAccounts+
 		resource.UnconfirmedAccounts+resource.DisabledAccounts != resource.TotalAccounts {
 		t.Fatalf("exclusive account identity does not hold: %#v", resource)
+	}
+}
+
+func TestAccountPoolStatsParsesConcurrencyAliasesWithoutConstrainingUnlimitedAccounts(t *testing.T) {
+	files := []cpaauthfiles.File{
+		{Name: "finite.json", Provider: "codex", Raw: map[string]any{"max_concurrency": 2}},
+		{Name: "explicit-unlimited.json", Provider: "codex", Raw: map[string]any{"maxConcurrency": 0}},
+		{Name: "missing.json", Provider: "codex", Raw: map[string]any{}},
+		{Name: "disabled.json", Provider: "codex", Disabled: true, Raw: map[string]any{"concurrency_limit": 50}},
+	}
+	stats := accountPoolStatsFromFiles(files)
+	if stats.schedulable != 3 || stats.concurrencyLimited != 1 || stats.concurrencyFiniteSlots != 2 ||
+		stats.concurrencyUnlimited != 2 || stats.concurrencyMissing != 1 {
+		t.Fatalf("concurrency pool statistics = %#v", stats)
+	}
+	resource := SmartResource{
+		CurrentCapacityRCU:        1_000,
+		RequiredConcurrencySlots:  20,
+		ConcurrencyDemandObserved: true,
+	}
+	applyAccountPoolStats(&resource, stats)
+	if !resource.ConcurrencyUnlimited || resource.ConcurrencyLimited || resource.ConcurrencyAccountDeficit != 0 ||
+		resource.ConcurrencyCoverage != 100 || resource.ConcurrencyEffectiveCapacityRCU != 1_000 {
+		t.Fatalf("unlimited concurrency must not constrain capacity: %#v", resource)
+	}
+}
+
+func TestAccountPoolStatsPublishesFiniteConcurrencyShortage(t *testing.T) {
+	files := []cpaauthfiles.File{
+		{Name: "one.json", Provider: "codex", Raw: map[string]any{"concurrency": 1}},
+		{Name: "two.json", Provider: "codex", Raw: map[string]any{"concurrencyLimit": "2"}},
+	}
+	stats := accountPoolStatsFromFiles(files)
+	resource := SmartResource{
+		CurrentCapacityRCU:        1_000,
+		RequiredConcurrencySlots:  8,
+		ConcurrencyDemandObserved: true,
+	}
+	applyAccountPoolStats(&resource, stats)
+	if !resource.ConcurrencyLimited || resource.ConcurrencyUnlimited || resource.ConcurrencyFiniteSlots != 3 ||
+		resource.ConcurrencyHeadroomSlots != -5 || resource.ConcurrencyAccountDeficit != 3 ||
+		resource.ConcurrencyCoverage != 37.5 || resource.ConcurrencyEffectiveCapacityRCU != 375 {
+		t.Fatalf("finite concurrency shortage = %#v", resource)
 	}
 }
 
@@ -1760,6 +1855,207 @@ func TestManualReplenishmentRejectsConcurrentOrder(t *testing.T) {
 	_, err = service.Replenish(context.Background(), 2)
 	if err != ErrOrderInProgress {
 		t.Fatalf("replenish error = %v, want %v", err, ErrOrderInProgress)
+	}
+}
+
+func TestAutomaticReplenishmentCreatesParallelOrderWhileSupplierRetryIsActive(t *testing.T) {
+	var createCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":50,"missing":0,"estimated_total_fen":500}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
+		case r.URL.Path == "/api/customer/pickup/orders" && r.Method == http.MethodPost:
+			createCalls.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"order":{"id":"parallel-order","status":"waiting_inventory","quantity":5,"retry_after_seconds":30}}`))
+		case strings.HasPrefix(r.URL.Path, "/api/customer/pickup/orders/"):
+			t.Fatalf("an existing supplier retry-after deadline must not be polled: %s", r.URL.Path)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "parallel-supply.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	smartDisabled := false
+	managerCfg := store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, SmartEnabled: &smartDisabled,
+			BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_7d",
+			TargetAvailableAccounts: 10, ReplenishBatchSize: 5, MaxConcurrentOrders: 2,
+		},
+	}
+	if err := st.SaveManagerConfig(context.Background(), managerCfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "waiting-order", Product: "oauth_7d", RequestedQuantity: 3, Automatic: true,
+		Status: "waiting_inventory", SupplierRetryUntilMS: time.Now().Add(time.Minute).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("create waiting order: %v", err)
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("create parallel order: %v", err)
+	}
+	orders, err := st.ListOpenSupplyOrders(context.Background(), 10)
+	if err != nil || len(orders) != 2 {
+		t.Fatalf("open orders=%#v err=%v", orders, err)
+	}
+	if orders[1].OrderID != "parallel-order" || orders[1].TriggerReason != "parallel_automatic" {
+		t.Fatalf("parallel order = %#v", orders[1])
+	}
+
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("max-concurrency run: %v", err)
+	}
+	orders, err = st.ListOpenSupplyOrders(context.Background(), 10)
+	if err != nil || len(orders) != 2 || createCalls.Load() != 1 {
+		t.Fatalf("parallel cap failed: orders=%#v createCalls=%d err=%v", orders, createCalls.Load(), err)
+	}
+
+	managerCfg.Supply.MaxConcurrentOrders = 1
+	if err := st.SaveManagerConfig(context.Background(), managerCfg); err != nil {
+		t.Fatalf("lower parallel limit: %v", err)
+	}
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("run after lowering parallel limit: %v", err)
+	}
+	orders, err = st.ListOpenSupplyOrders(context.Background(), 10)
+	if err != nil || len(orders) != 2 || createCalls.Load() != 1 {
+		t.Fatalf("lowered limit must preserve existing orders without adding another: orders=%#v createCalls=%d err=%v", orders, createCalls.Load(), err)
+	}
+}
+
+func TestSmartSuggestedCreateQuantitySubtractsAggregatePrelockedCapacity(t *testing.T) {
+	off := false
+	cfg := store.ManagerSupplyConfig{
+		Product: "oauth_7d", NewAccountConfidence: 1,
+		PrelockEnabled: &off, PrelockMaxQuantity: 10, ReplenishBatchSize: 10,
+	}
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	service := New(nil, nil)
+
+	covered := SmartResource{
+		SuggestedQuantity: 4, CapacityGapRCU: 4 * unit, PrelockedCapacityRCU: 4 * unit,
+		AccountQuantityDeficit: 4, UnitCapacityRCU: smartProductUnitCapacity(cfg.Product),
+	}
+	if quantity := service.smartSuggestedCreateQuantity(cfg, covered); quantity != 0 {
+		t.Fatalf("covered aggregate capacity created %d extra accounts", quantity)
+	}
+
+	partial := SmartResource{
+		SuggestedQuantity: 7, CapacityGapRCU: 7 * unit, PrelockedCapacityRCU: 4 * unit,
+		AccountQuantityDeficit: 7, UnitCapacityRCU: smartProductUnitCapacity(cfg.Product),
+	}
+	if quantity := service.smartSuggestedCreateQuantity(cfg, partial); quantity != 3 {
+		t.Fatalf("remaining aggregate deficit quantity = %d, want 3", quantity)
+	}
+}
+
+func TestParallelSupplyCreatePlanningCompetesOnWaitingOrdersAndStopsOnCommittedStock(t *testing.T) {
+	off := false
+	cfg := store.ManagerSupplyConfig{
+		Product: "oauth_7d", NewAccountConfidence: 1,
+		PrelockEnabled: &off, PrelockMaxQuantity: 10, ReplenishBatchSize: 10,
+	}
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	resource := SmartResource{
+		SuggestedQuantity: 7, CapacityGapRCU: 7 * unit, PrelockedCapacityRCU: 4 * unit,
+		AccountQuantityDeficit: 7, UnitCapacityRCU: smartProductUnitCapacity(cfg.Product),
+		EmergencyShortage: true, HealthLevel: smartHealthCritical,
+	}
+	waiting := store.SupplyOrder{
+		OrderID: "waiting", RequestedQuantity: 4, Automatic: true, Status: "waiting_inventory",
+	}
+	planning := supplyCreatePlanningResource(cfg, resource, []store.SupplyOrder{waiting}, true)
+	if planning.PrelockedCapacityRCU != 0 {
+		t.Fatalf("waiting reservation planning capacity = %.2f, want 0", planning.PrelockedCapacityRCU)
+	}
+	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, planning); quantity != 7 {
+		t.Fatalf("parallel waiting-order quantity = %d, want 7", quantity)
+	}
+	if !openOrdersAllowParallelCreate([]store.SupplyOrder{waiting}) {
+		t.Fatal("waiting-inventory order should keep the competition window open")
+	}
+
+	ready := waiting
+	ready.OrderID = "ready"
+	ready.Status = "ready"
+	ready.ReadyQuantity = 4
+	planning = supplyCreatePlanningResource(cfg, resource, []store.SupplyOrder{ready}, true)
+	if planning.PrelockedCapacityRCU != 4*unit {
+		t.Fatalf("ready order planning capacity = %.2f, want %.2f", planning.PrelockedCapacityRCU, 4*unit)
+	}
+	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, planning); quantity != 3 {
+		t.Fatalf("quantity after committed stock = %d, want 3", quantity)
+	}
+	if openOrdersAllowParallelCreate([]store.SupplyOrder{ready}) {
+		t.Fatal("ready order should close the competition window")
+	}
+}
+
+func TestReadySupplyOrderTakeBudgetIgnoresWaitingReservations(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{Product: "oauth_7d", NewAccountConfidence: 1}
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	ready := store.SupplyOrder{
+		ID: 1, OrderID: "ready", RequestedQuantity: 5, ReadyQuantity: 5,
+		Automatic: true, Status: "ready", CreatedAtMS: 1,
+	}
+	waiting := store.SupplyOrder{
+		ID: 2, OrderID: "waiting", RequestedQuantity: 100,
+		Automatic: true, Status: "waiting_inventory", CreatedAtMS: 2,
+	}
+	if !readySupplyOrderAccepted(cfg, []store.SupplyOrder{ready, waiting}, &ready, 5*unit, unit) {
+		t.Fatal("a waiting-inventory reservation displaced the ready order")
+	}
+}
+
+func TestReadySupplyOrderTakeBudgetKeepsRequiredOrdersAndReleasesSurplus(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{Product: "oauth_7d", NewAccountConfidence: 1}
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	orders := []store.SupplyOrder{
+		{ID: 1, OrderID: "ready-oldest", RequestedQuantity: 5, ReadyQuantity: 5, Automatic: true, Status: "ready", CreatedAtMS: 1},
+		{ID: 2, OrderID: "ready-middle", RequestedQuantity: 5, ReadyQuantity: 5, Automatic: true, Status: "ready", CreatedAtMS: 2},
+		{ID: 3, OrderID: "ready-surplus", RequestedQuantity: 5, ReadyQuantity: 5, Automatic: true, Status: "ready", CreatedAtMS: 3},
+	}
+	need := 6 * unit
+	allowance := unit
+	if !readySupplyOrderAccepted(cfg, orders, &orders[0], need, allowance) ||
+		!readySupplyOrderAccepted(cfg, orders, &orders[1], need, allowance) {
+		t.Fatal("orders required to cross the take target were rejected")
+	}
+	if readySupplyOrderAccepted(cfg, orders, &orders[2], need, allowance) {
+		t.Fatal("surplus ready order exceeded the aggregate take budget")
+	}
+}
+
+func TestReadySupplyOrderTakeBudgetReleasesLaterOrderWhenFirstAlreadyCoversTarget(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{Product: "oauth_7d", NewAccountConfidence: 1}
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	orders := []store.SupplyOrder{
+		{ID: 1, OrderID: "ready-first", RequestedQuantity: 5, ReadyQuantity: 5, Automatic: true, Status: "ready", CreatedAtMS: 1},
+		{ID: 2, OrderID: "ready-later", RequestedQuantity: 5, ReadyQuantity: 5, Automatic: true, Status: "ready", CreatedAtMS: 2},
+	}
+	need := 4 * unit
+	if !readySupplyOrderAccepted(cfg, orders, &orders[0], need, unit) {
+		t.Fatal("the first ready order should satisfy the target")
+	}
+	if readySupplyOrderAccepted(cfg, orders, &orders[1], need, unit) {
+		t.Fatal("the later ready order should be released as aggregate surplus")
 	}
 }
 

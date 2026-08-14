@@ -115,6 +115,54 @@ func requireInspectionLogDetail(t *testing.T, entry model.CodexInspectionLog) ma
 	return detail
 }
 
+func TestInspectionProbeLogBatchFlushesBeforeLifecycleLog(t *testing.T) {
+	db := newCodexInspectionTestStore(t)
+	run, err := db.CreateCodexInspectionRun(context.Background(), model.CodexInspectionRun{
+		TriggerType: model.CodexInspectionTriggerManual,
+		Status:      model.CodexInspectionStatusCompleted,
+		Settings:    model.DefaultCodexInspectionConfig(),
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	service := New(db, nil)
+	logger := runLogger{service: service, runID: run.ID}
+	logger.success(context.Background(), "账号探测完成", map[string]any{"index": 1})
+	logger.success(context.Background(), "账号探测完成", map[string]any{"index": 2})
+	logger.info(context.Background(), "巡检生命周期完成", nil)
+
+	logs, err := db.ListCodexInspectionLogs(context.Background(), run.ID)
+	if err != nil || len(logs) != 3 {
+		t.Fatalf("logs=%#v err=%v", logs, err)
+	}
+	if logs[0].Message != "账号探测完成" || logs[1].Message != "账号探测完成" ||
+		logs[2].Message != "巡检生命周期完成" {
+		t.Fatalf("unexpected log order: %#v", logs)
+	}
+}
+
+func TestInspectionLogRequeueRemainsBounded(t *testing.T) {
+	service := &Service{logBuffer: make([]model.CodexInspectionLog, inspectionLogBufferLimit-4)}
+	batch := make([]model.CodexInspectionLog, inspectionLogBatchSize)
+	for index := range batch {
+		batch[index] = model.CodexInspectionLog{RunID: 1, Message: fmt.Sprintf("retry-%d", index)}
+	}
+	service.requeueInspectionLogBatch(batch)
+	service.logMu.Lock()
+	if service.logFlushTimer != nil {
+		service.logFlushTimer.Stop()
+		service.logFlushTimer = nil
+	}
+	buffer := append([]model.CodexInspectionLog(nil), service.logBuffer...)
+	service.logMu.Unlock()
+	if len(buffer) != inspectionLogBufferLimit {
+		t.Fatalf("requeued log buffer length = %d, want %d", len(buffer), inspectionLogBufferLimit)
+	}
+	if buffer[0].Message != "retry-0" || buffer[inspectionLogBatchSize-1].Message != "retry-31" {
+		t.Fatalf("retry batch lost priority at queue head: %#v", buffer[:inspectionLogBatchSize])
+	}
+}
+
 func TestToAccountBuildsStableDistinctFallbackKeys(t *testing.T) {
 	first := toAccount(authFile{
 		"name":     "shared.json",

@@ -13,6 +13,7 @@ export interface SupplyConfig {
   strategy?: SupplyStrategy | string;
   targetAvailableAccounts: number;
   replenishBatchSize: number;
+  maxConcurrentOrders?: number;
   checkIntervalSeconds: number;
   pollIntervalSeconds: number;
   defaultWebsockets: boolean;
@@ -87,9 +88,19 @@ export interface SupplyOrder {
   importedCount: number;
   lastError?: string;
   nextPollAtMs?: number;
+  supplierRetryUntilMs?: number;
   completedAtMs?: number;
   createdAtMs: number;
   updatedAtMs: number;
+}
+
+export interface SupplyActiveOrderStatus {
+  checkedAtMs: number;
+  activeOrder?: SupplyOrder;
+  activeOrders?: SupplyOrder[];
+  pollAttempted: boolean;
+  pollInProgress: boolean;
+  pollError?: string;
 }
 
 export interface SupplyOverview {
@@ -132,6 +143,19 @@ export interface SupplySmartResource {
   weakAccounts: number;
   totalAccounts?: number;
   disabledAccounts?: number;
+  concurrencyLimitedAccounts?: number;
+  concurrencyUnlimitedAccounts?: number;
+  concurrencyMissingAccounts?: number;
+  concurrencyFiniteSlots?: number;
+  requiredConcurrencySlots?: number;
+  concurrencyHeadroomSlots?: number;
+  concurrencyAccountDeficit?: number;
+  concurrencyCoverage?: number;
+  concurrencyEffectiveCapacityRcu?: number;
+  averageRequestLatencyMs?: number;
+  concurrencyUnlimited?: boolean;
+  concurrencyLimited?: boolean;
+  concurrencyDemandObserved?: boolean;
   pendingInspectionAccounts?: number;
   pendingInspectionCapacityRcu?: number;
   estimatedRequiredAccounts?: number;
@@ -619,11 +643,14 @@ export interface SupplyStatus {
   automation?: SupplyAutomationExecution;
   recovery?: SupplyRecoverySummary;
   activeOrder?: SupplyOrder;
+  activeOrders?: SupplyOrder[];
   orders: SupplyOrder[];
 }
 
 export const supplyApi = {
   getStatus: (limit = 50): Promise<SupplyStatus> => apiClient.get('/supply', { params: { limit } }),
+
+  getActiveOrder: (): Promise<SupplyActiveOrderStatus> => apiClient.get('/supply/active'),
 
   saveConfig: (config: SupplyConfig): Promise<SupplyStatus> =>
     apiClient.put('/supply/config', { config }),

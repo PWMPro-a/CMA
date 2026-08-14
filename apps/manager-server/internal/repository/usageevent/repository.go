@@ -59,11 +59,13 @@ type Repository interface {
 // replenishment. It intentionally contains only aggregate values so warming
 // the in-memory planner never loads individual request records.
 type SupplyUsageMinute struct {
-	MinuteMS    int64
-	Requests    int64
-	Successful  int64
-	Failed      int64
-	TotalTokens int64
+	MinuteMS       int64
+	Requests       int64
+	Successful     int64
+	Failed         int64
+	TotalTokens    int64
+	LatencySumMS   int64
+	LatencySamples int64
 }
 
 type repository struct {
@@ -355,7 +357,9 @@ func (r *repository) ListSupplyUsageMinutes(ctx context.Context, sinceMS int64) 
 		sum(case
 			when total_tokens > input_tokens + output_tokens + reasoning_tokens then total_tokens
 			else input_tokens + output_tokens + reasoning_tokens
-		end) as total_tokens
+		end) as total_tokens,
+		sum(case when failed = 0 and latency_ms > 0 then latency_ms else 0 end) as latency_sum_ms,
+		sum(case when failed = 0 and latency_ms > 0 then 1 else 0 end) as latency_samples
 		from usage_events
 		where timestamp_ms >= ?
 			and (
@@ -381,7 +385,15 @@ func (r *repository) ListSupplyUsageMinutes(ctx context.Context, sinceMS int64) 
 	minutes := make([]SupplyUsageMinute, 0, 30)
 	for rows.Next() {
 		var minute SupplyUsageMinute
-		if err := rows.Scan(&minute.MinuteMS, &minute.Requests, &minute.Successful, &minute.Failed, &minute.TotalTokens); err != nil {
+		if err := rows.Scan(
+			&minute.MinuteMS,
+			&minute.Requests,
+			&minute.Successful,
+			&minute.Failed,
+			&minute.TotalTokens,
+			&minute.LatencySumMS,
+			&minute.LatencySamples,
+		); err != nil {
 			return nil, err
 		}
 		minutes = append(minutes, minute)

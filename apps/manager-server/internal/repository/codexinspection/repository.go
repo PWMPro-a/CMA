@@ -288,14 +288,7 @@ func (r *repository) InsertResult(ctx context.Context, result model.CodexInspect
 }
 
 func (r *repository) InsertLog(ctx context.Context, entry model.CodexInspectionLog) (model.CodexInspectionLog, error) {
-	if entry.CreatedAtMS <= 0 {
-		entry.CreatedAtMS = time.Now().UnixMilli()
-	}
-	if entry.DetailJSON == "" && entry.Detail != nil {
-		if data, err := json.Marshal(entry.Detail); err == nil {
-			entry.DetailJSON = string(data)
-		}
-	}
+	entry = normalizeLog(entry)
 	var id int64
 	err := withSQLiteBusyRetry(ctx, func() error {
 		return r.db.QueryRowContext(
@@ -315,6 +308,61 @@ func (r *repository) InsertLog(ctx context.Context, entry model.CodexInspectionL
 	}
 	entry.ID = id
 	return entry, nil
+}
+
+// InsertLogs writes ordinary probe logs in one SQLite transaction. The
+// repository interface keeps InsertLog for lifecycle compatibility; callers
+// can discover this optional batch capability without changing test doubles or
+// external repository implementations.
+func (r *repository) InsertLogs(ctx context.Context, entries []model.CodexInspectionLog) ([]model.CodexInspectionLog, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	prepared := make([]model.CodexInspectionLog, len(entries))
+	for index, entry := range entries {
+		prepared[index] = normalizeLog(entry)
+	}
+	err := withSQLiteBusyRetry(ctx, func() error {
+		tx, err := r.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		stmt, err := tx.PrepareContext(ctx, `insert into codex_inspection_logs(run_id, level, message, detail_json, created_at_ms)
+			values(?, ?, ?, ?, ?)`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for index := range prepared {
+			result, err := stmt.ExecContext(ctx, prepared[index].RunID, prepared[index].Level, prepared[index].Message,
+				nullString(prepared[index].DetailJSON), prepared[index].CreatedAtMS)
+			if err != nil {
+				return err
+			}
+			prepared[index].ID, err = result.LastInsertId()
+			if err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return prepared, nil
+}
+
+func normalizeLog(entry model.CodexInspectionLog) model.CodexInspectionLog {
+	if entry.CreatedAtMS <= 0 {
+		entry.CreatedAtMS = time.Now().UnixMilli()
+	}
+	if entry.DetailJSON == "" && entry.Detail != nil {
+		if data, err := json.Marshal(entry.Detail); err == nil {
+			entry.DetailJSON = string(data)
+		}
+	}
+	return entry
 }
 
 func (r *repository) ListRuns(ctx context.Context, limit int) ([]model.CodexInspectionRun, error) {

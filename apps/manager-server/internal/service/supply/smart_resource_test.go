@@ -705,7 +705,7 @@ func TestEmergencyRetryUsesSmallBatchOnlyAfterDefiniteZeroDeliveryFailure(t *tes
 		Status: "cancelled", CompletedAtMS: now.Add(-20 * time.Second).UnixMilli(),
 	}
 	plan := smartEmergencyRetryPlanForOrder(cfg, resource, cancelled, now)
-	if !plan.active || plan.quantityLimit != 3 || plan.reason != "emergency_retry_after_cancelled" || plan.cooldown != 10*time.Second {
+	if !plan.active || plan.quantityLimit != 10 || plan.reason != "emergency_retry_after_cancelled" || plan.cooldown != 10*time.Second {
 		t.Fatalf("cancelled retry plan = %#v", plan)
 	}
 
@@ -714,7 +714,7 @@ func TestEmergencyRetryUsesSmallBatchOnlyAfterDefiniteZeroDeliveryFailure(t *tes
 	retried.TriggerReason = "emergency_retry_after_cancelled"
 	retried.LastError = "inventory unavailable"
 	plan = smartEmergencyRetryPlanForOrder(cfg, resource, retried, now)
-	if !plan.active || plan.quantityLimit != 1 || plan.reason != "emergency_retry_inventory_shortage" {
+	if plan.active {
 		t.Fatalf("repeated retry plan = %#v", plan)
 	}
 
@@ -1091,7 +1091,7 @@ func TestNoTrafficKeepsOnlyMinimumPoolAndCreatesNoCapacityOrder(t *testing.T) {
 	}
 	resource.AvailableAccounts = 1
 	applySmartEmergencyAvailability(cfg, &resource, time.Now())
-	if !resource.EmergencyShortage || resource.SuggestedQuantity != 1 {
+	if !resource.EmergencyShortage || resource.SuggestedQuantity != 5 {
 		t.Fatalf("idle pool below critical must refill only to the critical floor: %#v", resource)
 	}
 	resource.AvailableAccounts = 0
@@ -2254,8 +2254,8 @@ func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *t
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if createQuantity.Load() != 3 {
-		t.Fatalf("quota-capacity shortage should create one staged batch of three, quantity=%d", createQuantity.Load())
+	if createQuantity.Load() != 5 {
+		t.Fatalf("quota-capacity shortage should create one healthy-floor batch, quantity=%d", createQuantity.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
 	if err != nil {
@@ -2266,7 +2266,7 @@ func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *t
 		status.SmartResource.DecisionReason != "emergency_capacity_shortage" {
 		t.Fatalf("smart resource = %#v", status.SmartResource)
 	}
-	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "emergency_refill_to_healthy" || status.Orders[0].RequestedQuantity != 3 {
+	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "emergency_refill_to_healthy" || status.Orders[0].RequestedQuantity != 5 {
 		t.Fatalf("staged order = %#v", status.Orders)
 	}
 }
@@ -2332,8 +2332,8 @@ func TestSmartAutomaticUsesQuotaSizedBatchWhenSupplyIsScarce(t *testing.T) {
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if createQuantity.Load() != 3 {
-		t.Fatalf("scarce supply must still use the staged capacity batch, quantity=%d", createQuantity.Load())
+	if createQuantity.Load() != 5 {
+		t.Fatalf("scarce supply must still use the healthy-floor batch, quantity=%d", createQuantity.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
 	if err != nil {
@@ -2344,7 +2344,7 @@ func TestSmartAutomaticUsesQuotaSizedBatchWhenSupplyIsScarce(t *testing.T) {
 		status.SmartResource.DecisionReason != "emergency_capacity_shortage" {
 		t.Fatalf("smart resource = %#v", status.SmartResource)
 	}
-	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "emergency_refill_to_healthy" || status.Orders[0].RequestedQuantity != 3 {
+	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "emergency_refill_to_healthy" || status.Orders[0].RequestedQuantity != 5 {
 		t.Fatalf("staged scarce order = %#v", status.Orders)
 	}
 }
@@ -2968,7 +2968,7 @@ func TestSmartEmergencyShortageOverridesTrendObservation(t *testing.T) {
 	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, falling); got != 1 {
 		t.Fatalf("falling emergency quantity=%d, want 1", got)
 	}
-	if got, reason := smartPrelockQuantityForSupplyPressure(cfg, falling, smartSupplyPressure{level: smartSupplyPressurePlenty}, 10); got != 3 || reason != "emergency_refill_to_healthy" {
+	if got, reason := smartPrelockQuantityForSupplyPressure(cfg, falling, smartSupplyPressure{level: smartSupplyPressurePlenty}, 10); got != 5 || reason != "emergency_refill_to_healthy" {
 		t.Fatalf("capacity emergency pressure adjustment=%d/%q, want healthy refill", got, reason)
 	}
 
@@ -2977,8 +2977,8 @@ func TestSmartEmergencyShortageOverridesTrendObservation(t *testing.T) {
 	rising.ConsumeRCUPerMinute = 1_000
 	rising.DemandTrend = smartDemandTrendRising
 	recalculateSmartResourceCapacityPlan(cfg, &rising)
-	if !rising.EmergencyShortage || rising.SuggestedQuantity != 3 || rising.SuggestedAction != smartActionEmergencyReplenish {
-		t.Fatalf("rising capacity emergency should retain the staged three-account cap: %#v", rising)
+	if !rising.EmergencyShortage || rising.SuggestedQuantity != 5 || rising.SuggestedAction != smartActionEmergencyReplenish {
+		t.Fatalf("rising capacity emergency should retain the healthy-floor batch: %#v", rising)
 	}
 }
 
@@ -3015,5 +3015,68 @@ func TestSmartResourceTreatsCompletedZeroMinuteAsFallingDemand(t *testing.T) {
 		resource.SuggestedAction != smartActionObserveDemand || resource.DecisionReason != "demand_falling_observe" ||
 		resource.SuggestedQuantity != 0 {
 		t.Fatalf("completed zero minute must be an observable falling-demand pause, got %#v", resource)
+	}
+}
+
+func TestSmartRequiredConcurrencySlotsUsesObservedDurationAndHeadroom(t *testing.T) {
+	if got := smartRequiredConcurrencySlots(120, 5_000); got != 12 {
+		t.Fatalf("required concurrency slots = %d, want 12", got)
+	}
+	if got := smartRequiredConcurrencySlots(0, 5_000); got != 0 {
+		t.Fatalf("zero traffic slots = %d, want 0", got)
+	}
+	if got := smartRequiredConcurrencySlots(120, 0); got != 0 {
+		t.Fatalf("missing latency slots = %d, want 0", got)
+	}
+}
+
+func TestSmartUsageTracksSuccessfulRequestLatencyForConcurrencyDemand(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Minute).Add(10 * time.Second)
+	latencyOne := int64(1_000)
+	latencyThree := int64(3_000)
+	failedLatency := int64(20_000)
+	service.recordSmartUsageEvents([]usage.Event{
+		{TimestampMS: now.Add(-time.Minute).UnixMilli(), Provider: "codex", AuthIndex: "one", LatencyMS: &latencyOne},
+		{TimestampMS: now.Add(-time.Minute).UnixMilli(), Provider: "codex", AuthIndex: "two", LatencyMS: &latencyThree},
+		{TimestampMS: now.Add(-time.Minute).UnixMilli(), Provider: "codex", AuthIndex: "failed", LatencyMS: &failedLatency, Failed: true},
+	}, now)
+
+	usageSnapshot := service.smartUsageSnapshot(now)
+	resource := SmartResource{}
+	applySmartUsage(&resource, usageSnapshot, 80)
+	if usageSnapshot.latencySamples != 2 || usageSnapshot.avgLatencyMS != 2_000 ||
+		resource.AverageRequestLatencyMS != 2_000 || !resource.ConcurrencyDemandObserved ||
+		resource.RequiredConcurrencySlots != 1 {
+		t.Fatalf("latency-backed concurrency demand = usage %#v, resource %#v", usageSnapshot, resource)
+	}
+}
+
+func TestConcurrencyShortageStagesSmallOrderWithoutChangingQuotaCapacity(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Product:                  "oauth_7d",
+		ReplenishBatchSize:       10,
+		PrelockMaxQuantity:       10,
+		HealthyAvailableAccounts: 1,
+	}
+	resource := SmartResource{
+		SnapshotFresh:                   true,
+		HealthLevel:                     smartHealthHealthy,
+		SuggestedAction:                 smartActionHealthy,
+		DecisionReason:                  "capacity_healthy",
+		CurrentCapacityRCU:              9_000,
+		ConcurrencyEffectiveCapacityRCU: 3_000,
+		AvailableAccounts:               4,
+		ConcurrencyDemandObserved:       true,
+		ConcurrencyLimited:              true,
+		ConcurrencyFiniteSlots:          4,
+		RequiredConcurrencySlots:        10,
+		ConcurrencyAccountDeficit:       6,
+	}
+	applySmartAccountQuantityEstimate(cfg, &resource)
+	if resource.CurrentCapacityRCU != 9_000 || resource.ConcurrencyEffectiveCapacityRCU != 3_000 ||
+		resource.AccountQuantityDeficit != 6 || resource.SuggestedQuantity != 3 ||
+		resource.SuggestedAction != smartActionPrelock || resource.DecisionReason != "concurrency_capacity_shortage" {
+		t.Fatalf("concurrency shortage plan = %#v", resource)
 	}
 }

@@ -74,7 +74,20 @@ type Status struct {
 	Automation    AutomationExecution       `json:"automation"`
 	Recovery      RecoverySummary           `json:"recovery"`
 	ActiveOrder   *store.SupplyOrder        `json:"activeOrder,omitempty"`
+	ActiveOrders  []store.SupplyOrder       `json:"activeOrders,omitempty"`
 	Orders        []store.SupplyOrder       `json:"orders"`
+}
+
+// ActiveOrderStatus is deliberately smaller than Status. The management page
+// can refresh an active reservation frequently without rebuilding the whole
+// account pool, quota snapshot and report summaries on every tick.
+type ActiveOrderStatus struct {
+	CheckedAtMS    int64               `json:"checkedAtMs"`
+	ActiveOrder    *store.SupplyOrder  `json:"activeOrder,omitempty"`
+	ActiveOrders   []store.SupplyOrder `json:"activeOrders,omitempty"`
+	PollAttempted  bool                `json:"pollAttempted"`
+	PollInProgress bool                `json:"pollInProgress"`
+	PollError      string              `json:"pollError,omitempty"`
 }
 
 // AutomationExecution is the in-memory execution timeline for the automatic
@@ -703,13 +716,13 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	active, found, err := s.store.GetOpenSupplyOrder(ctx)
+	activeOrders, err := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
 	if err != nil {
 		return Status{}, err
 	}
-	if found {
-		resource.PrelockedCapacityRCU = estimatedSupplyOrderCapacityRCU(cfg.Supply, active.RequestedQuantity)
-		resource.LockedOrderID = active.OrderID
+	if len(activeOrders) > 0 {
+		resource.PrelockedCapacityRCU = totalSupplyOrderCapacityRCU(cfg.Supply, activeOrders)
+		resource.LockedOrderID = activeOrders[0].OrderID
 	} else {
 		resource.PrelockedCapacityRCU = 0
 		resource.LockedOrderID = ""
@@ -740,10 +753,168 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		Recovery:      s.currentRecoverySummary(ctx, cfg.Supply),
 		Orders:        orders,
 	}
-	if found {
-		status.ActiveOrder = &active
+	if len(activeOrders) > 0 {
+		status.ActiveOrder = &activeOrders[0]
+		status.ActiveOrders = activeOrders
 	}
 	return status, nil
+}
+
+// GetActiveOrderStatus refreshes only the currently open supplier order when
+// its local poll deadline has elapsed. It is used by the operations page as a
+// fast path while an order is waiting for inventory. The method never bypasses
+// a supplier-provided retry-after deadline and never performs the potentially
+// long take/import side effects from processOrder.
+func (s *Service) GetActiveOrderStatus(ctx context.Context) (ActiveOrderStatus, error) {
+	result := ActiveOrderStatus{CheckedAtMS: time.Now().UnixMilli()}
+	if s == nil || s.store == nil {
+		return result, nil
+	}
+	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		return ActiveOrderStatus{}, err
+	}
+	orders, err := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
+	if err != nil {
+		return ActiveOrderStatus{}, err
+	}
+	if len(orders) == 0 {
+		return result, nil
+	}
+	order := selectSupplyOrderToProcess(orders, time.Now().UnixMilli())
+	result.ActiveOrder = &order
+	result.ActiveOrders = orders
+	if !s.activeOrderStatusPollDue(order, time.Now().UnixMilli()) {
+		return result, nil
+	}
+
+	// The worker and an operator-triggered status read share the same mutex.
+	// A busy worker remains the source of truth; the fast endpoint reports that
+	// fact instead of starting a second supplier request.
+	if !s.runMu.TryLock() {
+		result.PollInProgress = true
+		return result, nil
+	}
+	defer s.runMu.Unlock()
+
+	orders, err = s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
+	if err != nil {
+		return ActiveOrderStatus{}, err
+	}
+	if len(orders) == 0 {
+		result.ActiveOrder = nil
+		result.ActiveOrders = nil
+		return result, nil
+	}
+	order = selectSupplyOrderToProcess(orders, time.Now().UnixMilli())
+	result.ActiveOrder = &order
+	result.ActiveOrders = orders
+	if !s.activeOrderStatusPollDue(order, time.Now().UnixMilli()) {
+		return result, nil
+	}
+
+	result.PollAttempted = true
+	if err := s.refreshActiveOrderRemoteStatus(ctx, cfg, &order); err != nil {
+		result.PollError = safeError(err)
+	}
+	latestOrders, latestErr := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
+	if latestErr != nil {
+		return ActiveOrderStatus{}, latestErr
+	}
+	if len(latestOrders) > 0 {
+		latest := selectSupplyOrderToProcess(latestOrders, time.Now().UnixMilli())
+		result.ActiveOrder = &latest
+		result.ActiveOrders = latestOrders
+	} else {
+		result.ActiveOrder = nil
+		result.ActiveOrders = nil
+	}
+	result.CheckedAtMS = time.Now().UnixMilli()
+	return result, nil
+}
+
+func (s *Service) activeOrderStatusPollDue(order store.SupplyOrder, nowMS int64) bool {
+	if order.SupplierRetryUntilMS > nowMS {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(order.Status)) {
+	case "creating", "create_uncertain", "importing", "partial", "recovery_importing", "recovery_partial":
+		// These states are progressed by their dedicated local workflows. The
+		// fast status endpoint must not duplicate create or import side effects.
+		return false
+	}
+	deadline := supplyOrderPollDeadline(order)
+	return deadline <= 0 || deadline <= nowMS
+}
+
+const maxActiveOrderPollInterval = 3 * time.Second
+
+func supplyPollIntervalSeconds(cfg store.ManagerSupplyConfig) int {
+	seconds := cfg.PollIntervalSeconds
+	if seconds <= 0 {
+		seconds = int(maxActiveOrderPollInterval / time.Second)
+	}
+	// A local poll interval larger than this value makes the management page
+	// show a stale reservation even when the supplier has already prepared it.
+	// Supplier retry-after remains authoritative and is handled separately.
+	if seconds > int(maxActiveOrderPollInterval/time.Second) {
+		seconds = int(maxActiveOrderPollInterval / time.Second)
+	}
+	return seconds
+}
+
+func isFastSupplyOrderStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "created", "waiting_inventory", "ready":
+		return true
+	default:
+		return false
+	}
+}
+
+func supplyOrderPollDeadline(order store.SupplyOrder) int64 {
+	deadline := order.NextPollAtMS
+	if deadline <= 0 {
+		return 0
+	}
+	if !isFastSupplyOrderStatus(order.Status) || order.UpdatedAtMS <= 0 {
+		return deadline
+	}
+	// Older orders may have been persisted with a 60-second local deadline.
+	// Once the supplier retry-after window is over, use a three-second local
+	// cadence from the last persisted remote observation instead of waiting for
+	// that stale configuration value.
+	fastDeadline := order.UpdatedAtMS + maxActiveOrderPollInterval.Milliseconds()
+	if fastDeadline < deadline {
+		return fastDeadline
+	}
+	return deadline
+}
+
+func (s *Service) refreshActiveOrderRemoteStatus(ctx context.Context, cfg store.ManagerConfig, order *store.SupplyOrder) error {
+	if s == nil || order == nil {
+		return nil
+	}
+	credentials := credentialsFromConfig(cfg.Supply)
+	remote, err := s.supplyClient.GetOrder(ctx, credentials, order.OrderID, order.StatusURL)
+	if err != nil {
+		if isHTTPStatus(err, http.StatusConflict) {
+			return s.cancelOrder(ctx, order, err)
+		}
+		return s.updateOrderError(ctx, order, err, cfg.Supply)
+	}
+	applyRemoteOrder(order, remote, cfg.Supply)
+	if isTerminalRemoteStatus(remote.Status) && !isSuccessfulRemoteStatus(remote.Status) {
+		order.Status = localOrderStatus(remote.Status)
+		order.CompletedAtMS = time.Now().UnixMilli()
+		return s.store.UpdateSupplyOrder(ctx, *order)
+	}
+	if isReadyForTake(remote.Status) {
+		order.Status = "ready"
+	} else if strings.TrimSpace(remote.Status) != "" {
+		order.Status = "waiting_inventory"
+	}
+	return s.store.UpdateSupplyOrder(ctx, *order)
 }
 
 func (s *Service) newerCompletedSmartInspectionAvailable(ctx context.Context, currentRunID int64) bool {
@@ -1400,7 +1571,8 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 	if err != nil {
 		return 30 * time.Second
 	}
-	if order, found, err := s.store.GetOpenSupplyOrder(ctx); err == nil && found {
+	if orders, err := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders); err == nil && len(orders) > 0 {
+		order := selectSupplyOrderToProcess(orders, time.Now().UnixMilli())
 		if order.Status == "creating" || order.Status == "create_uncertain" {
 			return s.withRecoveryInterval(time.Minute, cfg.Supply)
 		}
@@ -1416,16 +1588,17 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 			// reconciliation responsive without spinning the worker.
 			return s.withRecoveryInterval(3*time.Second, cfg.Supply)
 		}
-		if wait := time.Until(time.UnixMilli(order.NextPollAtMS)); wait > 0 {
+		if deadline := supplyOrderPollDeadline(order); deadline > 0 {
+			wait := time.Until(time.UnixMilli(deadline))
+			if wait <= 0 {
+				return s.withRecoveryInterval(time.Second, cfg.Supply)
+			}
 			if wait > time.Minute {
 				return s.withRecoveryInterval(time.Minute, cfg.Supply)
 			}
 			return s.withRecoveryInterval(wait, cfg.Supply)
 		}
-		seconds := cfg.Supply.PollIntervalSeconds
-		if seconds <= 0 {
-			seconds = 3
-		}
+		seconds := supplyPollIntervalSeconds(cfg.Supply)
 		return s.withRecoveryInterval(time.Duration(seconds)*time.Second, cfg.Supply)
 	}
 	if !managerconfigsvc.SupplyEnabled(cfg.Supply) {
@@ -1449,6 +1622,100 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 	return s.withRecoveryInterval(time.Duration(seconds)*time.Second, cfg.Supply)
 }
 
+func maxConcurrentSupplyOrders(cfg store.ManagerSupplyConfig) int {
+	if cfg.MaxConcurrentOrders <= 0 {
+		return 1
+	}
+	return clampInt(cfg.MaxConcurrentOrders, 1, 4)
+}
+
+const maxTrackedOpenSupplyOrders = 16
+
+func parallelSupplyTriggerReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "automatic"
+	}
+	if strings.HasPrefix(strings.ToLower(reason), "parallel_") {
+		return reason
+	}
+	return "parallel_" + reason
+}
+
+func unwrappedSupplyTriggerReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	for strings.HasPrefix(strings.ToLower(reason), "parallel_") {
+		reason = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(reason), "parallel_"))
+	}
+	return reason
+}
+
+func supplyOrderStatusPriority(status string) int {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "importing", "partial":
+		return 0
+	case "ready":
+		return 1
+	case "taking":
+		return 2
+	case "waiting_inventory", "created":
+		return 3
+	case "creating", "create_uncertain":
+		return 4
+	default:
+		return 5
+	}
+}
+
+func selectSupplyOrderToProcess(orders []store.SupplyOrder, nowMS int64) store.SupplyOrder {
+	if len(orders) == 0 {
+		return store.SupplyOrder{}
+	}
+	selected := orders[0]
+	selectedDue := selected.SupplierRetryUntilMS <= nowMS && supplyOrderPollDeadline(selected) <= nowMS
+	for _, candidate := range orders[1:] {
+		candidateDue := candidate.SupplierRetryUntilMS <= nowMS && supplyOrderPollDeadline(candidate) <= nowMS
+		if candidateDue && !selectedDue {
+			selected, selectedDue = candidate, true
+			continue
+		}
+		if candidateDue != selectedDue {
+			continue
+		}
+		selectedRank := supplyOrderStatusPriority(selected.Status)
+		candidateRank := supplyOrderStatusPriority(candidate.Status)
+		selectedDeadline := supplyOrderPollDeadline(selected)
+		candidateDeadline := supplyOrderPollDeadline(candidate)
+		if candidateRank < selectedRank ||
+			(candidateRank == selectedRank && (candidateDeadline < selectedDeadline ||
+				(candidateDeadline == selectedDeadline && candidate.CreatedAtMS < selected.CreatedAtMS))) {
+			selected = candidate
+		}
+	}
+	return selected
+}
+
+func openOrdersAllowParallelCreate(orders []store.SupplyOrder) bool {
+	if len(orders) == 0 {
+		return false
+	}
+	for _, order := range orders {
+		if isSupplyOrderCapacityCommitted(order) {
+			// Stock has already been secured for this order. Stop expanding the
+			// competition window and let the aggregate take budget settle it first.
+			return false
+		}
+		switch strings.ToLower(strings.TrimSpace(order.Status)) {
+		case "created", "waiting_inventory":
+			// These orders are waiting for supplier inventory and are the only
+			// states where another reservation can improve the抢货 success rate.
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int, force bool) error {
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
@@ -1470,14 +1737,16 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	} else if restoredFound {
 		return s.processOrder(ctx, cfg, restored)
 	}
-	active, found, err := s.store.GetOpenSupplyOrder(ctx)
+	openOrders, err := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
 	if err != nil {
 		return err
 	}
-	if found {
+	parallelEligible := false
+	if len(openOrders) > 0 {
 		if manualQuantity > 0 {
 			return ErrOrderInProgress
 		}
+		active := selectSupplyOrderToProcess(openOrders, time.Now().UnixMilli())
 		switch active.Status {
 		case "creating", "create_uncertain", "importing", "partial":
 		default:
@@ -1488,14 +1757,41 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		nowMS := time.Now().UnixMilli()
 		// retry_after_seconds is a supplier contract, not a local cooldown. A
 		// manual check may refresh the dashboard but must not poll the order
-		// ahead of this deadline either.
-		if active.SupplierRetryUntilMS > nowMS {
+		// ahead of this deadline either. It only delays polling this reservation;
+		// another waiting-inventory reservation may still be created to compete
+		// for stock when the configured parallel window has room.
+		pollAllowed := active.SupplierRetryUntilMS <= nowMS
+		if pollAllowed && !force && supplyOrderPollDeadline(active) > nowMS &&
+			!s.emergencyOrderProcessingAllowed(cfg.Supply, active, s.currentSmartResource(cfg.Supply)) {
+			pollAllowed = false
+		}
+		if pollAllowed {
+			if err := s.processOrder(ctx, cfg, active); err != nil {
+				return err
+			}
+			if !allowCreate {
+				return nil
+			}
+			// Processing may turn waiting_inventory into ready, complete/release an
+			// order, or change its supplier retry deadline. Re-read the open set so
+			// creation decisions never use the stale pre-processing snapshot.
+			openOrders, err = s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
+			if err != nil {
+				return err
+			}
+			if len(openOrders) == 0 {
+				// Keep one supplier lifecycle action per worker turn. A terminal
+				// order is followed by a fresh shortage calculation on the next turn
+				// instead of being replaced from the pre-processing demand snapshot.
+				return nil
+			}
+		}
+		parallelEligible = allowCreate && manualQuantity == 0 &&
+			len(openOrders) > 0 && len(openOrders) < maxConcurrentSupplyOrders(supplyCfg) &&
+			openOrdersAllowParallelCreate(openOrders)
+		if len(openOrders) > 0 && !parallelEligible {
 			return nil
 		}
-		if !force && active.NextPollAtMS > nowMS && !s.emergencyOrderProcessingAllowed(cfg.Supply, active, s.currentSmartResource(cfg.Supply)) {
-			return nil
-		}
-		return s.processOrder(ctx, cfg, active)
 	}
 	if repaired, repairedFound, err := s.store.ActivateNextLegacySupplyRepair(ctx); err != nil {
 		return err
@@ -1519,6 +1815,11 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		resource, err = s.smartResource(ctx, cfg, force)
 		if err != nil {
 			return err
+		}
+		if len(openOrders) > 0 {
+			resource.PrelockedCapacityRCU = totalSupplyOrderCapacityRCU(supplyCfg, openOrders)
+			resource.LockedOrderID = openOrders[0].OrderID
+			applySmartRefillProjection(supplyCfg, &resource)
 		}
 		if poolAvailable, emergencyQuantity, emergencyReason, accountLoaded, err := s.smartEmergencyAvailability(ctx, cfg, &resource); err != nil {
 			return err
@@ -1557,7 +1858,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		}
 		if recent, recentFound, err := s.store.GetLatestCompletedAutomaticSupplyOrder(ctx); err != nil {
 			return err
-		} else if recentFound && time.Since(time.UnixMilli(recent.CompletedAtMS)) < automaticSettleWindow(supplyCfg) {
+		} else if recentFound && time.Since(time.UnixMilli(recent.CompletedAtMS)) < automaticSettleWindow(supplyCfg) && !parallelEligible {
 			if useSmart {
 				resource.EmergencyShortage = false
 				resource.SuggestedAction = smartActionObserveDemand
@@ -1576,7 +1877,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			if err != nil {
 				return err
 			}
-			if cooldownActive {
+			if cooldownActive && !parallelEligible {
 				resource.SuggestedAction = smartActionObserveDemand
 				if isSmartEmergencyRetryReason(resource.DecisionReason) {
 					resource.DecisionReason = "emergency_retry_cooldown"
@@ -1595,8 +1896,9 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	quantity := manualQuantity
 	if quantity == 0 {
 		if useSmart {
+			planningResource := supplyCreatePlanningResource(supplyCfg, resource, openOrders, parallelEligible)
 			if smartResourceEmergency(resource) {
-				quantity = s.smartSuggestedCreateQuantity(supplyCfg, resource)
+				quantity = s.smartSuggestedCreateQuantity(supplyCfg, planningResource)
 			} else if !resource.SnapshotFresh && !smartPartialInspectionCapacityDeficitAllowed(resource) {
 				return nil
 			} else if resource.DecisionReason == "usage_rate_not_ready" || resource.ConsumeRCUPerMinute <= 0 {
@@ -1606,7 +1908,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			} else if resource.SuggestedAction == smartActionHealthy || resource.HealthLevel == smartHealthHealthy {
 				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
 			} else {
-				quantity = s.smartSuggestedCreateQuantity(supplyCfg, resource)
+				quantity = s.smartSuggestedCreateQuantity(supplyCfg, planningResource)
 			}
 		} else {
 			deficit := supplyCfg.TargetAvailableAccounts - available
@@ -1699,21 +2001,26 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			return nil
 		}
 		resource.SuggestedQuantity = quantity
-		resource.PrelockedCapacityRCU = estimatedSupplyOrderCapacityRCU(supplyCfg, quantity)
+		resource.PrelockedCapacityRCU = round2(resource.PrelockedCapacityRCU + estimatedSupplyOrderCapacityRCU(supplyCfg, quantity))
 		applySmartRefillProjection(supplyCfg, &resource)
 		s.setSmartResource(resource)
 	}
 
+	triggerReason := supplyOrderTriggerReason(resource, manualQuantity == 0)
+	if manualQuantity == 0 && len(openOrders) > 0 && maxConcurrentSupplyOrders(supplyCfg) > 1 {
+		triggerReason = parallelSupplyTriggerReason(triggerReason)
+	}
 	attempt := store.SupplyOrder{
 		OrderID:           newCreateAttemptID(),
 		Product:           supplyCfg.Product,
 		RequestedQuantity: quantity,
 		Automatic:         manualQuantity == 0,
 		Strategy:          supplyOrderStrategy(supplyCfg, manualQuantity == 0),
-		TriggerReason:     supplyOrderTriggerReason(resource, manualQuantity == 0),
+		TriggerReason:     triggerReason,
 		Status:            "creating",
 	}
-	if _, err := s.store.CreateSupplyOrder(ctx, attempt); err != nil {
+	attempt, err = s.store.CreateSupplyOrder(ctx, attempt)
+	if err != nil {
 		return err
 	}
 	s.invalidateSupplyOrdersCache()
@@ -2012,6 +2319,7 @@ func (s *Service) retryUncertainCreate(ctx context.Context, cfg store.ManagerCon
 
 func supplyOrderFromCreateResponse(attempt store.SupplyOrder, remote supplyclient.Order, cfg store.ManagerSupplyConfig) store.SupplyOrder {
 	return store.SupplyOrder{
+		ID:                   attempt.ID,
 		OrderID:              remote.ID,
 		Product:              attempt.Product,
 		RequestedQuantity:    attempt.RequestedQuantity,
@@ -2028,6 +2336,7 @@ func supplyOrderFromCreateResponse(attempt store.SupplyOrder, remote supplyclien
 		ReleasedFen:          remote.ReleasedFen,
 		NextPollAtMS:         nextPollAt(cfg, remote.RetryAfterSeconds),
 		SupplierRetryUntilMS: supplierRetryUntilMS(remote.RetryAfterSeconds),
+		CreatedAtMS:          attempt.CreatedAtMS,
 	}
 }
 
@@ -2058,6 +2367,18 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 		_, emergencyQuantity, emergencyReason, accountLoaded, err := s.smartEmergencyAvailability(ctx, cfg, &resource)
 		if err != nil {
 			return false, err
+		}
+		if release, reason, err := s.shouldReleaseOversizedOpenOrder(ctx, cfg.Supply, resource, order); err != nil {
+			return false, err
+		} else if release {
+			resource.LockedOrderID = order.OrderID
+			resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
+			resource.EmergencyShortage = false
+			resource.EmergencyReason = ""
+			resource.SuggestedAction = smartActionReleaseLocked
+			resource.DecisionReason = reason
+			s.setSmartResource(resource)
+			return true, s.markAutomaticOrderReleasedLocally(ctx, order)
 		}
 		if accountLoaded && emergencyQuantity > 0 {
 			resource.LockedOrderID = order.OrderID
@@ -2128,6 +2449,47 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 		return false, nil
 	}
 	return true, s.markAutomaticOrderReleasedLocally(ctx, order)
+}
+
+func (s *Service) shouldReleaseOversizedOpenOrder(
+	ctx context.Context,
+	cfg store.ManagerSupplyConfig,
+	resource SmartResource,
+	order *store.SupplyOrder,
+) (bool, string, error) {
+	if s == nil || order == nil || !order.Automatic {
+		return false, "", nil
+	}
+	if order.ReadyQuantity <= 0 && !isReadyForTake(order.RemoteStatus) &&
+		!isReadyForTake(order.Status) {
+		// Keep parallel reservations alive while they are still competing for
+		// supplier inventory. The aggregate cap is enforced when an order is
+		// actually ready to take, where the total ready/in-flight capacity is
+		// known and a surplus reservation can be left to expire.
+		return false, "", nil
+	}
+	orders, err := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
+	if err != nil {
+		return false, "", err
+	}
+	need := math.Max(0, resource.CapacityGapRCU)
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	accountDeficit := max(0, resource.AccountQuantityDeficit)
+	accountDeficit = max(accountDeficit, max(0, resource.ConcurrencyAccountDeficit))
+	if unit > 0 && accountDeficit > 0 {
+		need = math.Max(need, float64(accountDeficit)*unit)
+	}
+	if need <= 0 {
+		return false, "", nil
+	}
+	// One account-equivalent or 15% of the required capacity is a small
+	// tolerance for parallel抢货. Anything beyond that is held as an avoidable
+	// reservation and should be allowed to expire locally before taking.
+	allowance := math.Max(unit, need*0.15)
+	if readySupplyOrderAccepted(cfg, orders, order, need, allowance) {
+		return false, "", nil
+	}
+	return true, "parallel_capacity_overage", nil
 }
 
 func (s *Service) markAutomaticOrderReleasedLocally(ctx context.Context, order *store.SupplyOrder) error {
@@ -3058,7 +3420,7 @@ func buildSupplyReport(req ReportRequest, orders []store.SupplyOrder, recoveries
 	for _, order := range orders {
 		source := reportOrderSource(order)
 		strategy := reportKey(firstNonEmptyString(order.Strategy, source))
-		triggerReason := reportKey(order.TriggerReason)
+		triggerReason := reportKey(unwrappedSupplyTriggerReason(order.TriggerReason))
 		product := reportKey(order.Product)
 		status := reportKey(order.Status)
 		quantity := order.RequestedQuantity
@@ -4157,6 +4519,10 @@ type accountPoolStats struct {
 	needsAttention         int
 	quotaRisk              int
 	unconfirmed            int
+	concurrencyLimited     int
+	concurrencyUnlimited   int
+	concurrencyMissing     int
+	concurrencyFiniteSlots int
 	classificationObserved bool
 	liveObserved           bool
 	inspectionObserved     bool
@@ -4236,6 +4602,20 @@ func accountPoolStatsFromFiles(files []cpaauthfiles.File) accountPoolStats {
 		}
 		if isAvailableCodexFile(file) {
 			stats.schedulable++
+			limit, observed := smartAccountConcurrencyLimit(file.Raw)
+			switch {
+			case !observed:
+				// CPA versions predating the concurrency field have no per-account
+				// limit. Runtime scheduling treats that as unlimited; preserve that
+				// behavior while reporting the missing metadata separately.
+				stats.concurrencyUnlimited++
+				stats.concurrencyMissing++
+			case limit <= 0:
+				stats.concurrencyUnlimited++
+			default:
+				stats.concurrencyLimited++
+				stats.concurrencyFiniteSlots += limit
+			}
 		}
 	}
 	return stats
@@ -4484,6 +4864,61 @@ func applyAccountPoolStats(resource *SmartResource, stats accountPoolStats) {
 		resource.HealthyAccounts = resource.AvailableAccounts
 	}
 	applySmartAccountCountBreakdown(resource)
+	applyAccountPoolConcurrency(resource, stats)
+}
+
+func applyAccountPoolConcurrency(resource *SmartResource, stats accountPoolStats) {
+	if resource == nil || !stats.liveObserved {
+		return
+	}
+	resource.ConcurrencyLimitedAccounts = max(0, stats.concurrencyLimited)
+	resource.ConcurrencyUnlimitedAccounts = max(0, stats.concurrencyUnlimited)
+	resource.ConcurrencyMissingAccounts = max(0, stats.concurrencyMissing)
+	resource.ConcurrencyFiniteSlots = max(0, stats.concurrencyFiniteSlots)
+	resource.ConcurrencyUnlimited = resource.ConcurrencyUnlimitedAccounts > 0
+	recalculateAccountPoolConcurrency(resource)
+}
+
+func recalculateAccountPoolConcurrency(resource *SmartResource) {
+	if resource == nil {
+		return
+	}
+	resource.ConcurrencyLimited = false
+	resource.ConcurrencyAccountDeficit = 0
+	resource.ConcurrencyEffectiveCapacityRCU = round2(resource.CurrentCapacityRCU)
+
+	required := max(0, resource.RequiredConcurrencySlots)
+	if required <= 0 {
+		resource.ConcurrencyCoverage = 100
+		if !resource.ConcurrencyUnlimited {
+			resource.ConcurrencyHeadroomSlots = resource.ConcurrencyFiniteSlots
+		} else {
+			resource.ConcurrencyHeadroomSlots = 0
+		}
+		return
+	}
+	if resource.ConcurrencyUnlimited {
+		resource.ConcurrencyCoverage = 100
+		resource.ConcurrencyHeadroomSlots = 0
+		return
+	}
+
+	resource.ConcurrencyHeadroomSlots = resource.ConcurrencyFiniteSlots - required
+	coverage := clampFloat(float64(resource.ConcurrencyFiniteSlots)/float64(required), 0, 1)
+	resource.ConcurrencyCoverage = round2(coverage * 100)
+	resource.ConcurrencyEffectiveCapacityRCU = round2(resource.CurrentCapacityRCU * coverage)
+	resource.ConcurrencyLimited = resource.ConcurrencyFiniteSlots < required
+	if !resource.ConcurrencyLimited {
+		return
+	}
+
+	unitSlots := 1
+	if resource.ConcurrencyLimitedAccounts > 0 && resource.ConcurrencyFiniteSlots > 0 {
+		unitSlots = max(1, int(math.Ceil(float64(resource.ConcurrencyFiniteSlots)/float64(resource.ConcurrencyLimitedAccounts))))
+	}
+	resource.ConcurrencyAccountDeficit = int(math.Ceil(
+		float64(required-resource.ConcurrencyFiniteSlots) / float64(unitSlots),
+	))
 }
 
 // applySmartAccountCountBreakdown keeps the two account-counting dimensions
@@ -4521,6 +4956,7 @@ func reconcileSmartCapacityWithAccountPool(resource *SmartResource, inspectedAva
 			resource.TimeLimitedCapacityRCU = 0
 			resource.PendingInspectionCapacityRCU = 0
 			resource.PendingInspectionAccounts = 0
+			recalculateAccountPoolConcurrency(resource)
 			return true
 		}
 		return false
@@ -4551,6 +4987,9 @@ func reconcileSmartCapacityWithAccountPool(resource *SmartResource, inspectedAva
 			resource.PendingInspectionCapacityRCU = round2(resource.PendingInspectionCapacityRCU * float64(maximumPending) / float64(previousPending))
 		}
 		changed = true
+	}
+	if changed {
+		recalculateAccountPoolConcurrency(resource)
 	}
 	return changed
 }
@@ -5049,8 +5488,11 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 	if smartResourceEmergency(resource) {
 		limit := smartAutomaticOrderQuantityLimit(cfg, resource)
 		minimum := min(smartPrelockMinQuantity(cfg), limit)
+		if smartAccountAvailabilityEmergency(resource) {
+			minimum = min(smartEmergencyMinimumOrderQuantity(cfg), limit)
+		}
 		if isSmartEmergencyRetryReason(resource.DecisionReason) {
-			return clampInt(quantity, minimum, min(limit, 3)), resource.DecisionReason
+			return clampInt(quantity, minimum, limit), resource.DecisionReason
 		}
 		reason := firstNonEmptyString(resource.EmergencyReason, resource.DecisionReason)
 		if reason == "" {
@@ -5163,6 +5605,26 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	if quantity <= 0 {
 		return 0
 	}
+	if resource.PrelockedCapacityRCU > 0 && resource.CapacityGapRCU > 0 {
+		unit := smartEstimatedNewAccountCapacityRCU(cfg)
+		if unit <= 0 {
+			unit = resource.UnitCapacityRCU
+		}
+		if unit > 0 {
+			pendingCapacityAccounts := int(math.Ceil(resource.PrelockedCapacityRCU / unit))
+			remainingAccountDeficit := max(0, resource.AccountQuantityDeficit-pendingCapacityAccounts)
+			remainingCapacity := math.Max(0, resource.CapacityGapRCU-resource.PrelockedCapacityRCU)
+			if remainingCapacity <= 0 && remainingAccountDeficit <= 0 {
+				return 0
+			}
+			if remainingCapacity > 0 {
+				quantity = min(quantity, int(math.Ceil(remainingCapacity/unit)))
+			}
+		}
+	}
+	if quantity <= 0 {
+		return 0
+	}
 	accountQuantityLimit := 0
 	applySmartAccountQuantityEstimate(cfg, &resource)
 	if resource.EstimatedRequiredAccounts > 0 {
@@ -5174,6 +5636,12 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	}
 	limit := smartAutomaticOrderQuantityLimit(cfg, resource)
 	quantity = min(quantity, limit)
+	if smartAccountAvailabilityEmergency(resource) && resource.PrelockedCapacityRCU <= 0 {
+		// Account-vacuum orders are deliberately not reduced to the configured
+		// prelock minimum. The live pool is already at/below the critical line,
+		// so one half-waterline batch is the smallest useful recovery attempt.
+		quantity = max(quantity, min(smartEmergencyMinimumOrderQuantity(cfg), limit))
+	}
 	if smartPrelockEnabled(cfg) {
 		minimumQuantity := min(smartPrelockMinQuantity(cfg), limit)
 		if accountQuantityLimit > 0 {
@@ -5196,6 +5664,141 @@ func estimatedSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, quantity int
 	}
 	unit := smartEstimatedNewAccountCapacityRCU(cfg)
 	return round2(float64(quantity) * unit)
+}
+
+func supplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, order store.SupplyOrder) float64 {
+	quantity := max(0, order.RequestedQuantity)
+	if order.ReadyQuantity > quantity {
+		quantity = order.ReadyQuantity
+	}
+	return estimatedSupplyOrderCapacityRCU(cfg, quantity)
+}
+
+func totalSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, orders []store.SupplyOrder) float64 {
+	total := 0.0
+	for _, order := range orders {
+		total += supplyOrderCapacityRCU(cfg, order)
+	}
+	return round2(total)
+}
+
+func totalCommittedSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, orders []store.SupplyOrder) float64 {
+	total := 0.0
+	for _, order := range orders {
+		if isSupplyOrderCapacityCommitted(order) {
+			total += supplyOrderCapacityRCU(cfg, order)
+		}
+	}
+	return round2(total)
+}
+
+// supplyCreatePlanningResource separates reservations that are merely
+// competing for supplier stock from capacity that is already secured. Waiting
+// orders remain visible in the aggregate prelock/financial view, but they do
+// not erase the shortage used to size a parallel抢货 order. Once any order is
+// ready or being imported, its committed capacity is deducted normally.
+func supplyCreatePlanningResource(
+	cfg store.ManagerSupplyConfig,
+	resource SmartResource,
+	orders []store.SupplyOrder,
+	parallel bool,
+) SmartResource {
+	if !parallel {
+		return resource
+	}
+	resource.PrelockedCapacityRCU = totalCommittedSupplyOrderCapacityRCU(cfg, orders)
+	applySmartAccountQuantityEstimate(cfg, &resource)
+	applySmartRefillProjection(cfg, &resource)
+	return resource
+}
+
+// readySupplyOrderAccepted applies a deterministic take budget to all orders
+// that have actually secured stock. Taking/importing orders are irreversible
+// commitments; remaining ready orders are admitted oldest first until the
+// current capacity deficit is covered. A small allowance absorbs measurement
+// jitter, while an indivisible order is still accepted when rejecting it would
+// leave the pool below the required capacity.
+func readySupplyOrderAccepted(
+	cfg store.ManagerSupplyConfig,
+	orders []store.SupplyOrder,
+	current *store.SupplyOrder,
+	need float64,
+	allowance float64,
+) bool {
+	committed := make([]store.SupplyOrder, 0, len(orders)+1)
+	currentIncluded := false
+	for _, order := range orders {
+		if current != nil && order.OrderID == current.OrderID {
+			order = *current
+			currentIncluded = true
+		}
+		if !isSupplyOrderCapacityCommitted(order) {
+			continue
+		}
+		committed = append(committed, order)
+	}
+	if current != nil && !currentIncluded && isSupplyOrderCapacityCommitted(*current) {
+		committed = append(committed, *current)
+	}
+	if current == nil || len(committed) == 0 {
+		return false
+	}
+
+	acceptedCapacity := 0.0
+	currentAccepted := false
+	ready := make([]store.SupplyOrder, 0, len(committed))
+	for _, order := range committed {
+		if isSupplyOrderCapacityIrreversible(order) {
+			acceptedCapacity += supplyOrderCapacityRCU(cfg, order)
+			if order.OrderID == current.OrderID {
+				currentAccepted = true
+			}
+			continue
+		}
+		ready = append(ready, order)
+	}
+	sort.SliceStable(ready, func(i, j int) bool {
+		if ready[i].CreatedAtMS != ready[j].CreatedAtMS {
+			return ready[i].CreatedAtMS < ready[j].CreatedAtMS
+		}
+		if ready[i].ID != ready[j].ID {
+			return ready[i].ID < ready[j].ID
+		}
+		return ready[i].OrderID < ready[j].OrderID
+	})
+	capWithAllowance := math.Max(0, need) + math.Max(0, allowance)
+	for _, order := range ready {
+		capacity := supplyOrderCapacityRCU(cfg, order)
+		accept := acceptedCapacity < need || acceptedCapacity+capacity <= capWithAllowance
+		if accept {
+			acceptedCapacity += capacity
+			if order.OrderID == current.OrderID {
+				currentAccepted = true
+			}
+		}
+	}
+	return currentAccepted
+}
+
+func isSupplyOrderCapacityCommitted(order store.SupplyOrder) bool {
+	if order.ReadyQuantity > 0 || isReadyForTake(order.RemoteStatus) {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(order.Status)) {
+	case "ready", "taking", "importing", "partial":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSupplyOrderCapacityIrreversible(order store.SupplyOrder) bool {
+	switch strings.ToLower(strings.TrimSpace(order.Status)) {
+	case "taking", "importing", "partial":
+		return true
+	default:
+		return false
+	}
 }
 
 func supplyOrderStrategy(cfg store.ManagerSupplyConfig, automatic bool) string {
@@ -5291,12 +5894,77 @@ func (s *Service) automaticCreateCooldownActive(ctx context.Context, cfg store.M
 		if retry := smartEmergencyRetryPlanForOrder(cfg, resource, latest, time.Now()); retry.active {
 			seconds = max(1, int(retry.cooldown/time.Second))
 			last = maxInt64(last, smartSupplyOrderTerminalAtMS(latest))
+		} else if automaticOrderHasNoDeliveredCapacity(latest) {
+			// A failed/cancelled zero-delivery attempt still needs a short
+			// duplicate guard. It does not represent usable capacity, so do not
+			// let the normal "recent order covers the gap" branch hide it.
+			last = maxInt64(last, smartSupplyOrderTerminalAtMS(latest))
+		} else if !recentAutomaticOrderCoversCurrentShortage(cfg, resource, latest) {
+			// A completed order must not become a blanket cooldown. If demand has
+			// grown beyond the capacity just delivered, allow the next guarded
+			// order immediately; otherwise a recent purchase can make the pool
+			// fall behind while the worker appears healthy.
+			return false, nil
 		}
 	}
 	if seconds <= 0 || last <= 0 {
 		return false, nil
 	}
 	return time.Since(time.UnixMilli(last)) < time.Duration(seconds)*time.Second, nil
+}
+
+func automaticOrderHasNoDeliveredCapacity(order store.SupplyOrder) bool {
+	switch strings.ToLower(strings.TrimSpace(order.Status)) {
+	case "failed", "cancelled", "dismissed", "released":
+		return true
+	}
+	return automaticOrderDeliveredQuantity(order) <= 0
+}
+
+func automaticOrderDeliveredQuantity(order store.SupplyOrder) int {
+	if order.ImportedCount > 0 {
+		return order.ImportedCount
+	}
+	if order.ItemCount > 0 {
+		return order.ItemCount
+	}
+	if order.ReadyQuantity > 0 {
+		return order.ReadyQuantity
+	}
+	if strings.EqualFold(strings.TrimSpace(order.Status), "completed") && order.RequestedQuantity > 0 {
+		return order.RequestedQuantity
+	}
+	return 0
+}
+
+func recentAutomaticOrderCoversCurrentShortage(
+	cfg store.ManagerSupplyConfig,
+	resource SmartResource,
+	order store.SupplyOrder,
+) bool {
+	if !order.Automatic || strings.EqualFold(strings.TrimSpace(order.Strategy), "recovery") ||
+		!isSupplierPurchaseHistoryOrder(order) || automaticOrderHasNoDeliveredCapacity(order) {
+		return false
+	}
+
+	required := math.Max(0, resource.CapacityGapRCU)
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	if unit <= 0 && resource.UnitCapacityRCU > 0 {
+		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
+	}
+	accountDeficit := max(0, resource.AccountQuantityDeficit)
+	accountDeficit = max(accountDeficit, max(0, resource.ConcurrencyAccountDeficit))
+	if unit > 0 && accountDeficit > 0 {
+		required = math.Max(required, float64(accountDeficit)*unit)
+	}
+	if required <= 0 {
+		return true
+	}
+	if resource.PrelockedCapacityRCU >= required {
+		return true
+	}
+	deliveredCapacity := estimatedSupplyOrderCapacityRCU(cfg, automaticOrderDeliveredQuantity(order))
+	return deliveredCapacity >= required
 }
 
 func (s *Service) applySmartEmergencyRetryPlan(ctx context.Context, cfg store.ManagerSupplyConfig, resource *SmartResource) (smartEmergencyRetryPlan, error) {
@@ -5314,6 +5982,9 @@ func (s *Service) applySmartEmergencyRetryPlan(ctx context.Context, cfg store.Ma
 	quantity := s.smartSuggestedCreateQuantity(cfg, *resource)
 	if quantity <= 0 {
 		quantity = resource.SuggestedQuantity
+	}
+	if smartAccountAvailabilityEmergency(*resource) {
+		quantity = max(quantity, smartEmergencyMinimumOrderQuantity(cfg))
 	}
 	resource.SuggestedQuantity = clampInt(quantity, 1, plan.quantityLimit)
 	resource.DecisionReason = plan.reason
@@ -5359,9 +6030,15 @@ func smartEmergencyRetryPlanForOrder(cfg store.ManagerSupplyConfig, resource Sma
 		return smartEmergencyRetryPlan{}
 	}
 
-	limit := 3
 	if isSmartEmergencyRetryReason(order.TriggerReason) {
-		limit = 1
+		// A failed small retry is not a useful descending-quantity strategy.
+		// Leave the order under the regular emergency duplicate guard; the next
+		// eligible cycle will recalculate a full shortage-based quantity.
+		return smartEmergencyRetryPlan{}
+	}
+	limit := smartAutomaticOrderQuantityLimit(cfg, resource)
+	if smartAccountAvailabilityEmergency(resource) {
+		limit = max(limit, smartEmergencyMinimumOrderQuantity(cfg))
 	}
 	return smartEmergencyRetryPlan{active: true, reason: reason, quantityLimit: limit, cooldown: 10 * time.Second}
 }
@@ -5391,6 +6068,7 @@ func smartSupplyOrderTerminalAtMS(order store.SupplyOrder) int64 {
 }
 
 func isSmartEmergencyRetryReason(reason string) bool {
+	reason = unwrappedSupplyTriggerReason(reason)
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(reason)), "emergency_retry_") &&
 		!strings.EqualFold(strings.TrimSpace(reason), "emergency_retry_cooldown")
 }
@@ -6446,10 +7124,10 @@ func supplyTakeRetryDelay(cfg store.ManagerSupplyConfig) time.Duration {
 func nextPollAt(cfg store.ManagerSupplyConfig, retryAfterSeconds int) int64 {
 	seconds := retryAfterSeconds
 	if seconds <= 0 {
-		seconds = cfg.PollIntervalSeconds
+		seconds = supplyPollIntervalSeconds(cfg)
 	}
 	if seconds <= 0 {
-		seconds = 3
+		seconds = int(maxActiveOrderPollInterval / time.Second)
 	}
 	return time.Now().Add(time.Duration(seconds) * time.Second).UnixMilli()
 }

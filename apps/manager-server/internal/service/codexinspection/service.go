@@ -46,7 +46,6 @@ const (
 	resultWriteTimeout        = 2 * time.Second
 	resultPersistenceTimeout  = 8 * time.Second
 	cancelledPersistTimeout   = 2 * time.Second
-	processLogQueueWait       = 10 * time.Millisecond
 	minimumInspectionLease    = time.Millisecond
 	userCancelRequestReason   = "用户请求取消巡检"
 	userCancelledReason       = "用户主动取消巡检"
@@ -92,7 +91,9 @@ type Service struct {
 	heartbeatInterval              time.Duration
 	manualActionPersistenceTimeout time.Duration
 	logMu                          sync.Mutex
-	logGate                        chan struct{}
+	logFlushMu                     sync.Mutex
+	logBuffer                      []model.CodexInspectionLog
+	logFlushTimer                  *time.Timer
 }
 
 type ServiceOptions struct {
@@ -326,7 +327,7 @@ func NewWithOptions(st *store.Store, managerConfigService *managerconfig.Service
 		leaseDuration:                  leaseDuration,
 		heartbeatInterval:              heartbeatInterval,
 		manualActionPersistenceTimeout: resultPersistenceTimeout,
-		logGate:                        make(chan struct{}, 1),
+		logBuffer:                      make([]model.CodexInspectionLog, 0, 32),
 	}
 }
 
@@ -1255,6 +1256,11 @@ func (s *Service) StopAndWait(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer func() {
+		flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(ctx), processLogWriteTimeout)
+		s.flushInspectionLogs(flushCtx)
+		cancelFlush()
+	}()
 	var task *localRun
 	for {
 		s.mu.Lock()
@@ -1396,6 +1402,11 @@ func (s *Service) GetRun(ctx context.Context, id int64) (RunDetail, error) {
 	if err != nil {
 		return RunDetail{}, err
 	}
+	// A probe log may still be waiting in the bounded batch queue. Flush before
+	// serving the detail endpoint so a completed run's UI remains complete.
+	flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(ctx), processLogWriteTimeout)
+	s.flushInspectionLogs(flushCtx)
+	cancelFlush()
 	logs, err := s.store.ListCodexInspectionLogs(ctx, id)
 	if err != nil {
 		return RunDetail{}, err
@@ -2806,39 +2817,139 @@ func (l runLogger) log(ctx context.Context, level string, message string, detail
 	if l.service == nil || l.runID <= 0 {
 		return
 	}
-	// Keep inspection log writes serialized, but do not let a blocked SQLite
-	// writer make every probe wait behind it. Process logs are best-effort; a
-	// saturated gate drops the ordinary log and leaves lifecycle cleanup free
-	// to continue.
-	releaseGate := func() {}
-	if l.service.logGate != nil {
-		select {
-		case l.service.logGate <- struct{}{}:
-			releaseGate = func() { <-l.service.logGate }
-		case <-time.After(processLogQueueWait):
-			log.Printf("drop codex inspection log run %d: SQLite log writer is busy", l.runID)
-			return
-		}
-	} else {
-		l.service.logMu.Lock()
-		releaseGate = l.service.logMu.Unlock
+	entry := model.CodexInspectionLog{
+		RunID:       l.runID,
+		Level:       level,
+		Message:     message,
+		Detail:      sanitizeDetail(detail),
+		CreatedAtMS: time.Now().UnixMilli(),
 	}
-	defer releaseGate()
-	// Keep the write independent from a cancelled probe context and bounded so
-	// a transient database lock cannot stall the inspection indefinitely.
+	if message == "账号探测完成" {
+		l.service.enqueueInspectionLog(entry)
+		return
+	}
+	l.service.writeInspectionLog(ctx, entry)
+}
+
+const (
+	inspectionLogBatchSize   = 32
+	inspectionLogBufferLimit = 4096
+)
+
+func (s *Service) writeInspectionLog(ctx context.Context, entry model.CodexInspectionLog) {
+	if s == nil || s.store == nil {
+		return
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	logCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), processLogWriteTimeout)
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), processLogWriteTimeout)
 	defer cancel()
-	if _, err := l.service.store.InsertCodexInspectionLog(logCtx, model.CodexInspectionLog{
-		RunID:   l.runID,
-		Level:   level,
-		Message: message,
-		Detail:  sanitizeDetail(detail),
-	}); err != nil {
-		log.Printf("write codex inspection log run %d: %v", l.runID, err)
+	s.logFlushMu.Lock()
+	defer s.logFlushMu.Unlock()
+	// Preserve lifecycle ordering: probe-complete entries are buffered, so drain
+	// them before writing the following synchronous run-level event.
+	s.flushInspectionLogsLocked(writeCtx)
+	if _, err := s.store.InsertCodexInspectionLog(writeCtx, entry); err != nil {
+		log.Printf("write codex inspection log run %d: %v", entry.RunID, err)
 	}
+}
+
+func (s *Service) enqueueInspectionLog(entry model.CodexInspectionLog) {
+	if s == nil || s.store == nil {
+		return
+	}
+	s.logMu.Lock()
+	if len(s.logBuffer) >= inspectionLogBufferLimit {
+		s.logMu.Unlock()
+		log.Printf("drop codex inspection log run %d: batch queue is full", entry.RunID)
+		return
+	}
+	s.logBuffer = append(s.logBuffer, entry)
+	flushNow := len(s.logBuffer) >= inspectionLogBatchSize
+	if !flushNow && s.logFlushTimer == nil {
+		s.logFlushTimer = time.AfterFunc(25*time.Millisecond, func() {
+			s.flushInspectionLogs(context.Background())
+		})
+	}
+	s.logMu.Unlock()
+	if flushNow {
+		ctx, cancel := context.WithTimeout(context.Background(), processLogWriteTimeout)
+		s.flushInspectionLogs(ctx)
+		cancel()
+	}
+}
+
+func (s *Service) takeInspectionLogBatchLocked() []model.CodexInspectionLog {
+	if len(s.logBuffer) == 0 {
+		return nil
+	}
+	count := min(len(s.logBuffer), inspectionLogBatchSize)
+	batch := append([]model.CodexInspectionLog(nil), s.logBuffer[:count]...)
+	s.logBuffer = append(s.logBuffer[:0], s.logBuffer[count:]...)
+	if len(s.logBuffer) == 0 && s.logFlushTimer != nil {
+		s.logFlushTimer.Stop()
+		s.logFlushTimer = nil
+	}
+	return batch
+}
+
+func (s *Service) flushInspectionLogs(ctx context.Context) {
+	if s == nil || s.store == nil {
+		return
+	}
+	s.logFlushMu.Lock()
+	defer s.logFlushMu.Unlock()
+	s.flushInspectionLogsLocked(ctx)
+}
+
+func (s *Service) flushInspectionLogsLocked(ctx context.Context) {
+	for {
+		s.logMu.Lock()
+		batch := s.takeInspectionLogBatchLocked()
+		s.logMu.Unlock()
+		if len(batch) == 0 {
+			return
+		}
+		if err := s.persistInspectionLogBatchWithContext(ctx, batch); err != nil {
+			s.requeueInspectionLogBatch(batch)
+			return
+		}
+	}
+}
+
+func (s *Service) persistInspectionLogBatchWithContext(ctx context.Context, batch []model.CodexInspectionLog) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, err := s.store.InsertCodexInspectionLogs(ctx, batch); err != nil {
+		log.Printf("write codex inspection log batch (%d entries): %v", len(batch), err)
+		return err
+	}
+	return nil
+}
+
+func (s *Service) requeueInspectionLogBatch(batch []model.CodexInspectionLog) {
+	if len(batch) == 0 {
+		return
+	}
+	s.logMu.Lock()
+	next := make([]model.CodexInspectionLog, 0, len(batch)+len(s.logBuffer))
+	next = append(next, batch...)
+	next = append(next, s.logBuffer...)
+	if len(next) > inspectionLogBufferLimit {
+		next = next[:inspectionLogBufferLimit]
+	}
+	s.logBuffer = next
+	if s.logFlushTimer == nil {
+		s.logFlushTimer = time.AfterFunc(100*time.Millisecond, func() {
+			s.flushInspectionLogs(context.Background())
+		})
+	}
+	s.logMu.Unlock()
 }
 
 func resolveProbeAction(item account, statusCode int, bodyText string, rateLimit *codexRateLimit, usedPercent *float64, isQuota bool, threshold float64, planTypes ...string) inspectionDecision {

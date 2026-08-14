@@ -72,6 +72,40 @@ func TestResultRoundTripPreservesAccountSnapshot(t *testing.T) {
 	}
 }
 
+func TestInsertLogsPersistsBatchInOrder(t *testing.T) {
+	db, err := sqlite.Open(filepath.Join(t.TempDir(), "logs.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repository := New(db)
+	ctx := context.Background()
+	run, err := repository.CreateRun(ctx, model.CodexInspectionRun{
+		TriggerType: "manual", Status: model.CodexInspectionStatusCompleted,
+		StartedAtMS: 1, Settings: model.DefaultCodexInspectionConfig(),
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	batch, ok := repository.(interface {
+		InsertLogs(context.Context, []model.CodexInspectionLog) ([]model.CodexInspectionLog, error)
+	})
+	if !ok {
+		t.Fatal("repository does not expose batch log insertion")
+	}
+	stored, err := batch.InsertLogs(ctx, []model.CodexInspectionLog{
+		{RunID: run.ID, Level: "info", Message: "first", Detail: map[string]any{"index": 1}},
+		{RunID: run.ID, Level: "success", Message: "second", Detail: map[string]any{"index": 2}},
+	})
+	if err != nil || len(stored) != 2 || stored[0].ID <= 0 || stored[1].ID <= stored[0].ID {
+		t.Fatalf("stored batch = %#v err=%v", stored, err)
+	}
+	logs, err := repository.ListLogs(ctx, run.ID)
+	if err != nil || len(logs) != 2 || logs[0].Message != "first" || logs[1].Message != "second" {
+		t.Fatalf("listed logs = %#v err=%v", logs, err)
+	}
+}
+
 func TestDisableOwnershipCRUD(t *testing.T) {
 	db, err := sqlite.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
