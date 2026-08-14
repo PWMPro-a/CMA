@@ -1137,6 +1137,145 @@ func TestSupplyAccountLeaseMetadataUsesSupplierDeadline(t *testing.T) {
 	}
 }
 
+func TestDisableExpiredSupplyAccountsUsesCurrentRuntimeIdentityAndRefreshesPool(t *testing.T) {
+	var expiredDisabled atomic.Bool
+	var patchCalls atomic.Int32
+	now := time.Now().Truncate(time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer management-key" {
+			http.Error(w, "missing management key", http.StatusUnauthorized)
+			return
+		}
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"id": "runtime-expired", "name": "expired.json", "auth_index": "auth-expired",
+					"provider": "codex", "status": "ready", "disabled": expiredDisabled.Load(),
+					"supply_lease_expires_at_ms": now.Add(-time.Minute).UnixMilli(),
+				},
+				{
+					"id": "runtime-active", "name": "active.json", "auth_index": "auth-active",
+					"provider": "codex", "status": "ready", "disabled": false,
+					"supply_lease_expires_at_ms": now.Add(time.Hour).UnixMilli(),
+				},
+			})
+		case "PATCH /v0/management/auth-files/status":
+			var payload struct {
+				Name      string `json:"name"`
+				AuthIndex string `json:"auth_index"`
+				Disabled  bool   `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if payload.Name != "runtime-expired" || payload.AuthIndex != "auth-expired" || !payload.Disabled {
+				t.Fatalf("unexpected expired-account patch: %#v", payload)
+			}
+			patchCalls.Add(1)
+			expiredDisabled.Store(true)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "expired-supply.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "expired-supply", Product: "oauth_30d", RequestedQuantity: 2, Status: "importing",
+	}); err != nil {
+		t.Fatalf("create supply order: %v", err)
+	}
+	if _, err := st.InsertSupplyImportItems(context.Background(), "expired-supply", []store.SupplyImportItem{
+		{ItemKey: "expired", FileName: "expired.json", PayloadJSON: `{}`, LeaseExpiresAtMS: now.Add(-time.Minute).UnixMilli()},
+		{ItemKey: "active", FileName: "active.json", PayloadJSON: `{}`, LeaseExpiresAtMS: now.Add(time.Hour).UnixMilli()},
+	}); err != nil {
+		t.Fatalf("insert supply items: %v", err)
+	}
+	items, err := st.ListPendingSupplyImportItems(context.Background(), "expired-supply", now.UnixMilli(), 10)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("pending supply items=%#v err=%v", items, err)
+	}
+	for _, item := range items {
+		if err := st.MarkSupplyImportItemImported(context.Background(), item.ID, now.UnixMilli()); err != nil {
+			t.Fatalf("mark imported: %v", err)
+		}
+	}
+
+	cfg := store.ManagerConfig{CPAConnection: store.ManagerCPAConnectionConfig{
+		CPABaseURL: server.URL, ManagementKey: "management-key",
+	}}
+	service := New(st, nil, server.Client())
+	disabled, err := service.disableExpiredSupplyAccounts(context.Background(), cfg, now)
+	if err != nil || disabled != 1 || patchCalls.Load() != 1 || !expiredDisabled.Load() {
+		t.Fatalf("disable result disabled=%d patch=%d state=%t err=%v", disabled, patchCalls.Load(), expiredDisabled.Load(), err)
+	}
+	stats, err := service.countAccountPoolStats(context.Background(), cfg)
+	if err != nil || stats.total != 2 || stats.enabled != 1 || stats.schedulable != 1 {
+		t.Fatalf("pool did not refresh after expired disable: stats=%#v err=%v", stats, err)
+	}
+}
+
+func TestDisableExpiredSupplyAccountsIgnoresSupersededLeaseForReauthorizedFile(t *testing.T) {
+	var patchCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			patchCalls.Add(1)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer server.Close()
+	now := time.Now().Truncate(time.Second)
+	st, err := store.Open(filepath.Join(t.TempDir(), "reauthorized-lease.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	for index, candidate := range []struct {
+		orderID string
+		lease   int64
+	}{
+		{orderID: "old-lease", lease: now.Add(-time.Minute).UnixMilli()},
+		{orderID: "new-lease", lease: now.Add(time.Hour).UnixMilli()},
+	} {
+		if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+			OrderID: candidate.orderID, Product: "oauth_30d", RequestedQuantity: 1, Status: "completed",
+		}); err != nil {
+			t.Fatalf("create supply order: %v", err)
+		}
+		if _, err := st.InsertSupplyImportItems(context.Background(), candidate.orderID, []store.SupplyImportItem{{
+			ItemKey: fmt.Sprintf("item-%d", index), FileName: "same.json", PayloadJSON: `{}`, LeaseExpiresAtMS: candidate.lease,
+		}}); err != nil {
+			t.Fatalf("insert supply item: %v", err)
+		}
+		items, err := st.ListPendingSupplyImportItems(context.Background(), candidate.orderID, now.UnixMilli(), 10)
+		if err != nil || len(items) != 1 {
+			t.Fatalf("pending supply item=%#v err=%v", items, err)
+		}
+		if err := st.MarkSupplyImportItemImported(context.Background(), items[0].ID, now.Add(time.Duration(index)*time.Second).UnixMilli()); err != nil {
+			t.Fatalf("mark imported: %v", err)
+		}
+	}
+
+	current, err := st.ListCurrentImportedSupplyLeaseItems(context.Background())
+	if err != nil || len(current) != 1 || current[0].FileName != "same.json" || current[0].LeaseExpiresAtMS <= now.UnixMilli() {
+		t.Fatalf("current replacement lease=%#v err=%v", current, err)
+	}
+	service := New(st, nil, server.Client())
+	disabled, err := service.disableExpiredSupplyAccounts(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+	}, now)
+	if err != nil || disabled != 0 || patchCalls.Load() != 0 {
+		t.Fatalf("reauthorized file was treated as expired: disabled=%d patch=%d err=%v", disabled, patchCalls.Load(), err)
+	}
+}
+
 func TestInspectionVerifiedCapacityOverridesMisleadingLiveActiveCount(t *testing.T) {
 	resource := SmartResource{
 		CapacitySource:       smartCapacitySourceInspection,

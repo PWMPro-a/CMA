@@ -512,6 +512,55 @@ func TestSmartResourceIncludesRecentImportedCapacityUntilNextInspection(t *testi
 	}
 }
 
+func TestLoadLatestInspectionQuotaSnapshotKeepsExpiredLeaseEvidenceOutOfActiveOverlay(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "lease-snapshot.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	now := time.Now().Truncate(time.Second)
+	usedPercent := 0.0
+	seedCompletedQuotaInspection(t, st, store.CodexInspectionResult{
+		AccountKey: "expired", FileName: "expired.json", Provider: "codex", Action: "keep", UsedPercent: &usedPercent,
+	})
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "lease-evidence", Product: "oauth_30d", RequestedQuantity: 2, Status: "importing",
+	}); err != nil {
+		t.Fatalf("create supply order: %v", err)
+	}
+	if _, err := st.InsertSupplyImportItems(context.Background(), "lease-evidence", []store.SupplyImportItem{
+		{ItemKey: "expired", FileName: "expired.json", PayloadJSON: `{}`, LeaseExpiresAtMS: now.Add(-time.Minute).UnixMilli()},
+		{ItemKey: "active", FileName: "active.json", PayloadJSON: `{}`, LeaseExpiresAtMS: now.Add(30 * time.Minute).UnixMilli()},
+	}); err != nil {
+		t.Fatalf("insert supply items: %v", err)
+	}
+	pending, err := st.ListPendingSupplyImportItems(context.Background(), "lease-evidence", time.Now().UnixMilli(), 10)
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("pending supply items=%#v err=%v", pending, err)
+	}
+	for _, item := range pending {
+		if err := st.MarkSupplyImportItemImported(context.Background(), item.ID, time.Now().Add(time.Second).UnixMilli()); err != nil {
+			t.Fatalf("mark imported: %v", err)
+		}
+	}
+
+	service := New(st, nil)
+	snapshot, err := service.loadLatestInspectionQuotaSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	if snapshot.leaseExpiresByFile["expired.json"] <= 0 || snapshot.leaseExpiresByFile["active.json"] <= now.UnixMilli() {
+		t.Fatalf("snapshot did not retain current lease evidence: %#v", snapshot.leaseExpiresByFile)
+	}
+	if len(snapshot.activeImportItems) != 1 || snapshot.activeImportItems[0].FileName != "active.json" {
+		t.Fatalf("active overlay must contain only the unexpired import: %#v", snapshot.activeImportItems)
+	}
+	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{Product: "oauth_30d"}, snapshot, now)
+	if resource.AvailableAccounts != 1 || resource.PendingInspectionAccounts != 1 || resource.RawCapacityRCU <= 0 {
+		t.Fatalf("expired inspection result must be excluded while the active overlay remains: %#v", resource)
+	}
+}
+
 func TestLoadLatestInspectionQuotaSnapshotAcceptsTrustedEmptySupplySnapshot(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "empty-supply-snapshot.sqlite"))
 	if err != nil {
@@ -962,26 +1011,71 @@ func TestSmartResourceUsesPersistedSupplyLeaseForCapacity(t *testing.T) {
 	}
 }
 
-func TestSmartResourceUsesLiveQuotaProbeAfterSupplyLeaseExpires(t *testing.T) {
+func TestSmartResourceExcludesExpiredSupplyLeaseEvenWhenQuotaProbeSucceeds(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	usedPercent := 0.0
 	statusCode := http.StatusOK
 	service := New(nil, nil)
+	fileName := "codex-supply-expired-lease.json"
 	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
 		Product: "oauth_30d",
 	}, inspectionQuotaSnapshot{
 		run: store.CodexInspectionRun{ProbeSetCount: 1, SampledCount: 1, FinishedAtMS: now.UnixMilli()},
 		results: []store.CodexInspectionResult{{
-			AccountKey: "missing-lease", FileName: "codex-supply-missing-lease.json", Provider: "codex", Action: "keep",
+			AccountKey: "expired-lease", FileName: fileName, Provider: "codex", Action: "keep",
 			Status: "error", StatusCode: &statusCode, UsedPercent: &usedPercent,
+		}},
+		leaseExpiresByFile: map[string]int64{fileName: now.Add(-time.Minute).UnixMilli()},
+		generatedAt:        now,
+	}, now)
+
+	if !resource.SnapshotFresh || resource.CapacityLifetimeCoverage != 0 || resource.RawCapacityRCU != 0 ||
+		resource.CurrentCapacityRCU != 0 || resource.RawCapacityTokenM != 0 || resource.CurrentCapacityTokenM != 0 ||
+		resource.AvailableAccounts != 0 || resource.HealthyAccounts != 0 || resource.SchedulableAccounts != 0 ||
+		resource.EnabledAccounts != 0 || resource.DisabledAccounts != 1 {
+		t.Fatalf("an expired supplier lease must contribute no capacity: %#v", resource)
+	}
+}
+
+func TestSmartResourceKeepsUnrelatedLegacyCredentialAfterUsefulLeaseWindow(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	usedPercent := 0.0
+	resource := New(nil, nil).buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product: "oauth_30d",
+	}, inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{ProbeSetCount: 1, SampledCount: 1, FinishedAtMS: now.UnixMilli()},
+		results: []store.CodexInspectionResult{{
+			AccountKey: "legacy", FileName: "legacy-unmanaged.json", Provider: "codex", Action: "keep", UsedPercent: &usedPercent,
 		}},
 		generatedAt: now,
 	}, now)
 
-	if !resource.SnapshotFresh || resource.CapacityLifetimeCoverage != 100 || resource.RawCapacityRCU != 125 ||
-		resource.CurrentCapacityRCU != 125 || resource.RawCapacityTokenM != 10 || resource.CurrentCapacityTokenM != 10 ||
-		resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 || resource.WeakAccounts != 0 {
-		t.Fatalf("a current successful quota probe must retain capacity after the delivery lease expires: %#v", resource)
+	if resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 || resource.RawCapacityRCU <= 0 {
+		t.Fatalf("an account without a supplier lease remains governed by current quota evidence: %#v", resource)
+	}
+}
+
+func TestSmartResourceFallbackExcludesExpiredLeaseMetadata(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	resource := New(nil, nil).buildSmartResourceFromSnapshots(store.ManagerSupplyConfig{
+		Product: "oauth_30d",
+	}, authFileSnapshot{
+		generatedAt: now,
+		files: []cpaauthfiles.File{{
+			Name:     "expired-fallback.json",
+			Provider: "codex",
+			Raw: map[string]any{
+				"status":                     "ready",
+				"remaining_rcu":              125,
+				"supply_lease_expires_at_ms": now.Add(-time.Minute).UnixMilli(),
+			},
+		}},
+	}, now)
+
+	if resource.AvailableAccounts != 0 || resource.HealthyAccounts != 0 || resource.SchedulableAccounts != 0 ||
+		resource.EnabledAccounts != 0 || resource.DisabledAccounts != 1 ||
+		resource.RawCapacityRCU != 0 || resource.CurrentCapacityRCU != 0 {
+		t.Fatalf("fallback capacity must exclude an explicitly expired supplier lease: %#v", resource)
 	}
 }
 

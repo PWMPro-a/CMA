@@ -534,6 +534,10 @@ func (s *Store) ListActiveImportedSupplyItems(ctx context.Context, nowMS int64) 
 	return s.SupplyOrders.ListActiveImportedItems(ctx, nowMS)
 }
 
+func (s *Store) ListCurrentImportedSupplyLeaseItems(ctx context.Context) ([]SupplyImportItem, error) {
+	return s.SupplyOrders.ListCurrentImportedLeaseItems(ctx)
+}
+
 func (s *Store) MarkSupplyImportItemImported(ctx context.Context, id int64, importedAtMS int64) error {
 	return s.SupplyOrders.MarkItemImported(ctx, id, importedAtMS)
 }

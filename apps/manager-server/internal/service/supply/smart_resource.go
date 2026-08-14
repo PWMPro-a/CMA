@@ -544,15 +544,29 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		if !isSmartCapacityInspectionResult(result) {
 			continue
 		}
+		fileName := strings.TrimSpace(result.FileName)
+		leaseExpiresAtMS, suppliedAccount := snapshot.leaseExpiresByFile[fileName]
+		expiredSupplyLease := suppliedAccount && leaseExpiresAtMS <= now.UnixMilli()
 		resource.TotalAccounts++
-		if !result.Disabled {
+		if !result.Disabled && !expiredSupplyLease {
 			resource.EnabledAccounts++
 		}
-		if fileName := strings.TrimSpace(result.FileName); fileName != "" {
+		if fileName != "" {
 			inspectedFiles[fileName] = struct{}{}
 		}
 		if inspectionResultCapacityExcluded(result) {
 			continue
+		}
+		if suppliedAccount {
+			leaseRequired++
+			// Supplier delivery leases are a hard ownership boundary. A quota
+			// endpoint may continue to answer briefly after the purchased lease
+			// ends, but that response must not extend paid capacity or suppress
+			// replenishment.
+			if leaseExpiresAtMS <= now.UnixMilli() {
+				continue
+			}
+			withActiveLease++
 		}
 		eligible++
 		usabilityRequired++
@@ -572,20 +586,9 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		resource.AvailableAccounts++
 		remainingMinutes := float64(smartUsefulAccountLifetimeMinutes())
 		hasActiveLease := false
-		if leaseExpiresAtMS, found := snapshot.leaseExpiresByFile[result.FileName]; found {
-			leaseRequired++
-			if leaseExpiresAtMS > now.UnixMilli() {
-				withActiveLease++
-				hasActiveLease = true
-				remainingMinutes = clampFloat(time.UnixMilli(leaseExpiresAtMS).Sub(now).Minutes(), 0, float64(smartUsefulAccountLifetimeMinutes()))
-			}
-			// A successful current quota probe is stronger evidence than the
-			// historical delivery lease. Supplier leases are useful for limiting
-			// freshly imported credentials before their first inspection, but an
-			// older credential that still returns a 2xx quota response must retain
-			// its verified capacity. Keep the missing lease visible through
-			// CapacityLifetimeCoverage instead of turning a working credential into
-			// zero capacity.
+		if suppliedAccount {
+			hasActiveLease = true
+			remainingMinutes = clampFloat(time.UnixMilli(leaseExpiresAtMS).Sub(now).Minutes(), 0, float64(smartUsefulAccountLifetimeMinutes()))
 		}
 		if !hasCapacityQuota && hasActiveLease {
 			withQuotaEvidence++
@@ -794,7 +797,9 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 			continue
 		}
 		resource.TotalAccounts++
-		if !file.Disabled {
+		leaseExpiresAt, suppliedAccount := smartSupplyLeaseExpiry(file.Raw, now)
+		expiredSupplyLease := suppliedAccount && !leaseExpiresAt.After(now)
+		if !file.Disabled && !expiredSupplyLease {
 			resource.EnabledAccounts++
 			if textField(file.Raw, "status_message", "statusMessage") != "" || smartAccountCapacityHardBlocked(file.Raw) {
 				resource.NeedsAttentionAccounts++
@@ -803,6 +808,10 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 			}
 		}
 		if !isSmartCapacityCodexFile(file) {
+			resource.DisabledAccounts++
+			continue
+		}
+		if expiredSupplyLease {
 			resource.DisabledAccounts++
 			continue
 		}
@@ -1665,10 +1674,12 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context) (inspec
 		if len(filtered) == 0 && !smartInspectionRunIsTrustedEmptySupplySnapshot(run) {
 			continue
 		}
-		leaseItems, err := s.store.ListActiveImportedSupplyItems(ctx, time.Now().UnixMilli())
+		nowMS := time.Now().UnixMilli()
+		leaseItems, err := s.store.ListCurrentImportedSupplyLeaseItems(ctx)
 		if err != nil {
 			return inspectionQuotaSnapshot{}, err
 		}
+		activeLeaseItems := make([]store.SupplyImportItem, 0, len(leaseItems))
 		quotaWindowUsage, quotaWindowTargets := smartQuotaWindowBaselinesForInspection(filtered, run)
 		if len(quotaWindowTargets) > 0 {
 			usageRows, err := s.store.ListSupplyQuotaWindowUsage(ctx, quotaWindowTargets)
@@ -1692,6 +1703,9 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context) (inspec
 				continue
 			}
 			leaseExpiresByFile[fileName] = maxInt64(leaseExpiresByFile[fileName], item.LeaseExpiresAtMS)
+			if item.LeaseExpiresAtMS > nowMS {
+				activeLeaseItems = append(activeLeaseItems, item)
+			}
 		}
 		generatedAt := time.UnixMilli(run.FinishedAtMS)
 		if run.FinishedAtMS <= 0 {
@@ -1702,7 +1716,7 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context) (inspec
 			results:            filtered,
 			quotaWindowUsage:   quotaWindowUsage,
 			leaseExpiresByFile: leaseExpiresByFile,
-			activeImportItems:  leaseItems,
+			activeImportItems:  activeLeaseItems,
 			generatedAt:        generatedAt,
 		}, nil
 	}
@@ -2559,12 +2573,8 @@ func smartAccountRemainingMinutes(values map[string]any, now time.Time, fallback
 	if seconds, ok := numberFieldOK(values, "expires_in", "expiresIn", "expire_in", "expireIn"); ok {
 		return clampFloat(seconds/60, 0, float64(smartAccountLifetimeMinutes()))
 	}
-	for _, key := range []string{"supply_lease_expires_at_ms", "supplyLeaseExpiresAtMs", "supply_lease_expires_at", "supplyLeaseExpiresAt"} {
-		if raw, ok := values[key]; ok && raw != nil {
-			if expiry, parsed := parseSmartExpiryTime(raw, now); parsed {
-				return clampFloat(expiry.Sub(now).Minutes(), 0, float64(smartAccountLifetimeMinutes()))
-			}
-		}
+	if expiry, ok := smartSupplyLeaseExpiry(values, now); ok {
+		return clampFloat(expiry.Sub(now).Minutes(), 0, float64(smartAccountLifetimeMinutes()))
 	}
 	for _, key := range []string{"expired", "expires_at", "expiresAt", "expire_at", "expireAt", "valid_until", "validUntil"} {
 		raw, ok := values[key]
@@ -2576,6 +2586,17 @@ func smartAccountRemainingMinutes(values map[string]any, now time.Time, fallback
 		}
 	}
 	return float64(fallbackMinutes)
+}
+
+func smartSupplyLeaseExpiry(values map[string]any, now time.Time) (time.Time, bool) {
+	for _, key := range []string{"supply_lease_expires_at_ms", "supplyLeaseExpiresAtMs", "supply_lease_expires_at", "supplyLeaseExpiresAt"} {
+		if raw, ok := values[key]; ok && raw != nil {
+			if expiry, parsed := parseSmartExpiryTime(raw, now); parsed {
+				return expiry, true
+			}
+		}
+	}
+	return time.Time{}, false
 }
 
 func parseSmartExpiryTime(value any, now time.Time) (time.Time, bool) {

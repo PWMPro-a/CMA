@@ -34,6 +34,7 @@ type Repository interface {
 	ListImportedItemsOverlapping(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyImportItem, error)
 	ListPendingItems(ctx context.Context, orderID string, nowMS int64, limit int) ([]model.SupplyImportItem, error)
 	ListActiveImportedItems(ctx context.Context, nowMS int64) ([]model.SupplyImportItem, error)
+	ListCurrentImportedLeaseItems(ctx context.Context) ([]model.SupplyImportItem, error)
 	MarkItemImported(ctx context.Context, id int64, importedAtMS int64) error
 	MarkItemFailed(ctx context.Context, id int64, lastError string, nextRetryAtMS int64) error
 	UpdateItemFileName(ctx context.Context, id int64, fileName string) error
@@ -652,6 +653,30 @@ func (r *repository) ListActiveImportedItems(ctx context.Context, nowMS int64) (
 	for rows.Next() {
 		var item model.SupplyImportItem
 		if err := rows.Scan(&item.FileName, &item.ImportedAtMS, &item.LeaseExpiresAtMS); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+// ListCurrentImportedLeaseItems returns the current supplier lease attached to
+// every imported file, including leases that have already expired. Capacity
+// planning needs the expired rows as negative evidence; filtering them here
+// makes an expired supplied credential look like an unrelated legacy account.
+func (r *repository) ListCurrentImportedLeaseItems(ctx context.Context) ([]model.SupplyImportItem, error) {
+	rows, err := r.db.QueryContext(ctx, `select id, file_name, imported_at_ms, effective_from_ms, lease_expires_at_ms
+		from supply_import_items
+		where status = 'imported' and lease_expires_at_ms > 0 and coalesce(superseded_at_ms, 0) = 0
+		order by lease_expires_at_ms asc, id asc`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]model.SupplyImportItem, 0)
+	for rows.Next() {
+		var item model.SupplyImportItem
+		if err := rows.Scan(&item.ID, &item.FileName, &item.ImportedAtMS, &item.EffectiveFromMS, &item.LeaseExpiresAtMS); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

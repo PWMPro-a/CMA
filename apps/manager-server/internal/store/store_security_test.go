@@ -141,6 +141,10 @@ func TestStoreListsOnlyActiveSupplyImportLeases(t *testing.T) {
 	if err != nil || len(active) != 1 || active[0].FileName != "codex-supply-active.json" || active[0].ImportedAtMS != now {
 		t.Fatalf("active leases = %#v err=%v", active, err)
 	}
+	current, err := db.ListCurrentImportedSupplyLeaseItems(context.Background())
+	if err != nil || len(current) != 2 || current[0].FileName != "codex-supply-expired.json" || current[1].FileName != "codex-supply-active.json" {
+		t.Fatalf("current leases = %#v err=%v", current, err)
+	}
 }
 
 func TestStoreReadsLegacyPlaintextSecretsAndRewritesEncrypted(t *testing.T) {
