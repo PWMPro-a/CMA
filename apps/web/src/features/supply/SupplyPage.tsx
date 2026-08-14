@@ -1362,9 +1362,9 @@ export function SupplyPage() {
         </div>
         <div className={styles.poolSummaryItem}>
           <span>{t('supply.pool_available_accounts')}</span>
-          <strong>{formatInteger(poolAccounts.healthy)}</strong>
+          <strong>{formatInteger(poolAccounts.normal)}</strong>
           <small>
-            {t('supply.pool_normal_accounts_hint', { value: formatInteger(poolAccounts.healthy) })}
+            {t('supply.pool_normal_accounts_hint', { value: formatInteger(poolAccounts.normal) })}
           </small>
         </div>
         <div className={styles.poolSummaryItem}>

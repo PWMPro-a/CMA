@@ -6,7 +6,7 @@ const resource = (values: Partial<SupplySmartResource>): SupplySmartResource =>
   values as SupplySmartResource;
 
 describe('resolveSupplyPoolAccountStats', () => {
-  it('keeps healthy and at-risk counts exclusive inside the live schedulable pool', () => {
+  it('keeps normal and at-risk counts exclusive inside the live schedulable pool', () => {
     expect(
       resolveSupplyPoolAccountStats(
         resource({
@@ -23,7 +23,8 @@ describe('resolveSupplyPoolAccountStats', () => {
       )
     ).toEqual({
       schedulable: 13,
-      healthy: 7,
+      normal: 7,
+      capacityHealthy: 8,
       needsAttention: undefined,
       quotaRisk: undefined,
       unconfirmed: undefined,
@@ -52,7 +53,8 @@ describe('resolveSupplyPoolAccountStats', () => {
       )
     ).toEqual({
       schedulable: 17,
-      healthy: 9,
+      normal: 9,
+      capacityHealthy: 14,
       needsAttention: 2,
       quotaRisk: 3,
       unconfirmed: 0,
@@ -76,7 +78,8 @@ describe('resolveSupplyPoolAccountStats', () => {
       )
     ).toEqual({
       schedulable: 14,
-      healthy: 6,
+      normal: 6,
+      capacityHealthy: 9,
       needsAttention: undefined,
       quotaRisk: undefined,
       unconfirmed: undefined,
@@ -101,10 +104,35 @@ describe('resolveSupplyPoolAccountStats', () => {
       )
     ).toMatchObject({
       schedulable: 14,
-      healthy: undefined,
+      normal: undefined,
+      capacityHealthy: 14,
       atRisk: 14,
       total: 75,
       disabled: 61,
+    });
+  });
+
+  it('does not fall back to capacity health when a classification snapshot omits the normal bucket', () => {
+    expect(
+      resolveSupplyPoolAccountStats(
+        resource({
+          availableAccounts: 14,
+          schedulableAccounts: 23,
+          healthyAccounts: 14,
+          accountClassificationObserved: true,
+          totalAccounts: 95,
+          enabledAccounts: 23,
+          disabledAccounts: 72,
+        }),
+        undefined
+      )
+    ).toMatchObject({
+      schedulable: 23,
+      normal: undefined,
+      capacityHealthy: 14,
+      atRisk: 23,
+      total: 95,
+      disabled: 72,
     });
   });
 
@@ -126,7 +154,8 @@ describe('resolveSupplyPoolAccountStats', () => {
         undefined
       )
     ).toMatchObject({
-      healthy: undefined,
+      normal: undefined,
+      capacityHealthy: 6,
       needsAttention: undefined,
       quotaRisk: undefined,
       unconfirmed: undefined,
@@ -138,7 +167,8 @@ describe('resolveSupplyPoolAccountStats', () => {
   it('keeps the overview fallback for cold-start responses', () => {
     expect(resolveSupplyPoolAccountStats(undefined, 4)).toEqual({
       schedulable: 4,
-      healthy: undefined,
+      normal: undefined,
+      capacityHealthy: undefined,
       needsAttention: undefined,
       quotaRisk: undefined,
       unconfirmed: undefined,
