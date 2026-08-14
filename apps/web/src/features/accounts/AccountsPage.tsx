@@ -35,6 +35,7 @@ import {
   IconSettings,
   IconShield,
   IconSlidersHorizontal,
+  IconTimer,
   IconTrash2,
   IconX,
 } from '@/components/ui/icons';
@@ -143,7 +144,6 @@ import {
   formatPercent,
   formatQuotaResetDisplay,
   formatQuotaResetTooltipParams,
-  formatTimestamp,
   formatTimestampTitle,
   getAccountHistoryTitle,
   getAccountSortFieldOption,
@@ -176,6 +176,10 @@ import {
 import { resolveAccountReauthAction } from '@/features/accounts/model/accountReauth';
 import { beginAccountQuotaRequest } from '@/features/accounts/model/accountQuotaRequestGate';
 import { buildAccountOperationalItemsByRowKey } from '@/features/accounts/model/accountOperationalScope';
+import {
+  buildAccountExpiryPresentation,
+  type AccountExpiryPresentation,
+} from '@/features/accounts/model/accountExpiryPresentation';
 import {
   DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE,
   readAccountsWorkspaceUiState,
@@ -318,6 +322,90 @@ const getRemainingBarClass = (row: AccountRow) => {
   return styles.quotaBarNeutral;
 };
 
+const getAccountExpiryToneClass = (presentation: AccountExpiryPresentation) => {
+  switch (presentation.tone) {
+    case 'expired':
+      return styles.accountExpiryBadgeExpired;
+    case 'critical':
+      return styles.accountExpiryBadgeCritical;
+    case 'warning':
+      return styles.accountExpiryBadgeWarning;
+    case 'soon':
+      return styles.accountExpiryBadgeSoon;
+    case 'normal':
+      return styles.accountExpiryBadgeNormal;
+    default:
+      return styles.accountExpiryBadgeUnknown;
+  }
+};
+
+const getAccountExpiryLabel = (presentation: AccountExpiryPresentation, t: TFunction) => {
+  switch (presentation.label.kind) {
+    case 'expired':
+      return t('accounts.account_expired');
+    case 'unknown':
+      return t('accounts.account_expiry_unknown');
+    case 'seconds':
+      return t('accounts.account_expires_in_seconds', {
+        value: `${String(presentation.label.minutes).padStart(2, '0')}:${String(
+          presentation.label.seconds
+        ).padStart(2, '0')}`,
+      });
+    case 'minutes':
+      return t('accounts.account_expires_in_minutes', { count: presentation.label.count });
+    case 'hours':
+      return presentation.label.minutes === 0
+        ? t('accounts.account_expires_in_hours_exact', { hours: presentation.label.hours })
+        : t('accounts.account_expires_in_hours', {
+            hours: presentation.label.hours,
+            minutes: presentation.label.minutes,
+          });
+    case 'days':
+      return presentation.label.hours === 0
+        ? t('accounts.account_expires_in_days_exact', { days: presentation.label.days })
+        : t('accounts.account_expires_in_days', {
+            days: presentation.label.days,
+            hours: presentation.label.hours,
+          });
+  }
+};
+
+const AccountExpiryBadge = ({
+  expiresAtMs,
+  locale,
+  t,
+}: {
+  expiresAtMs?: number | null;
+  locale: string;
+  t: TFunction;
+}) => {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const presentation = useMemo(
+    () => buildAccountExpiryPresentation(expiresAtMs, nowMs),
+    [expiresAtMs, nowMs]
+  );
+  const label = getAccountExpiryLabel(presentation, t);
+
+  useEffect(() => {
+    if (presentation.tone === 'unknown') return;
+    const refreshMs = presentation.tone === 'critical' ? 1_000 : 30_000;
+    const timer = setInterval(() => setNowMs(Date.now()), refreshMs);
+    return () => clearInterval(timer);
+  }, [presentation.tone]);
+
+  return (
+    <span
+      className={`${styles.accountExpiryBadge} ${getAccountExpiryToneClass(presentation)}`}
+      title={formatTimestampTitle(expiresAtMs ?? null, locale) ?? label}
+      aria-label={`${t('accounts.account_expires_at')} ${label}`}
+      data-account-expiry-tone={presentation.tone}
+    >
+      <IconTimer size={13} />
+      <strong>{label}</strong>
+    </span>
+  );
+};
+
 async function refreshQuotaWithConfig<TState, TData>({
   config,
   file,
@@ -431,9 +519,9 @@ export function AccountsPage() {
   } = useAuthFilesData({ connectionFingerprint });
 
   const [oauthViewMode, setOauthViewMode] = useState<'diagram' | 'list'>('list');
-  const [supplyLeaseExpiryByFile, setSupplyLeaseExpiryByFile] = useState<ReadonlyMap<string, number>>(
-    () => new Map()
-  );
+  const [supplyLeaseExpiryByFile, setSupplyLeaseExpiryByFile] = useState<
+    ReadonlyMap<string, number>
+  >(() => new Map());
   const oauthState = useAuthFilesOauth({
     viewMode: oauthViewMode,
     files,
@@ -4046,6 +4134,11 @@ export function AccountsPage() {
                     {item.identity.planType ? (
                       <span className={styles.accountMetaPill}>{item.identity.planType}</span>
                     ) : null}
+                    <AccountExpiryBadge
+                      expiresAtMs={row.expiresAtMs}
+                      locale={i18n.language}
+                      t={t}
+                    />
                   </div>
                   <div className={styles.accountIdentityCopyLine}>
                     <button
@@ -4091,23 +4184,6 @@ export function AccountsPage() {
                       </span>
                     ) : null}
                   </div>
-                  <div
-                    className={styles.accountExpiryMeta}
-                    data-account-expiry={row.selectionKey}
-                    title={formatTimestampTitle(row.expiresAtMs, i18n.language)}
-                  >
-                    <span>{t('accounts.account_expires_at')}</span>
-                    <strong>
-                      {row.expiresAtMs
-                        ? formatTimestamp(row.expiresAtMs, i18n.language)
-                        : t('accounts.account_expiry_unknown')}
-                    </strong>
-                    <span className={styles.accountMetaSeparator} aria-hidden="true">
-                      ·
-                    </span>
-                    <span>{t('accounts.account_concurrency')}</span>
-                    <strong>{row.concurrency ?? t('accounts.account_concurrency_default')}</strong>
-                  </div>
                 </div>
 
                 <div className={styles.accountCardHealth}>
@@ -4120,6 +4196,19 @@ export function AccountsPage() {
                     </span>
                   </div>
                   <div className={styles.accountHealthMetaRow}>
+                    <div
+                      className={`${styles.accountConcurrencyBadge} ${
+                        row.concurrency === null || row.concurrency === undefined
+                          ? styles.accountConcurrencyBadgeDefault
+                          : styles.accountConcurrencyBadgeConfigured
+                      }`}
+                      title={t('accounts.account_concurrency')}
+                    >
+                      <span>{t('accounts.account_concurrency')}</span>
+                      <strong>
+                        {row.concurrency ?? t('accounts.account_concurrency_default')}
+                      </strong>
+                    </div>
                     <span
                       className={
                         item.identity.priorityIsNegative

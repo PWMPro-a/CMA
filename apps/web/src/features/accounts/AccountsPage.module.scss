@@ -468,6 +468,7 @@
 }
 
 .accountIdentityBadgeRow {
+  flex-wrap: wrap;
   gap: 6px;
 }
 
@@ -500,32 +501,82 @@
   white-space: nowrap;
 }
 
-.accountExpiryMeta {
-  display: flex;
+.accountExpiryBadge {
+  box-sizing: border-box;
+  display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
-  min-width: 0;
-  color: var(--text-tertiary, var(--text-secondary));
-  font-size: 10px;
-  line-height: 1.2;
+  min-height: 24px;
+  max-width: 100%;
+  padding: 0 9px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 850;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 
-  span {
+  :global(svg) {
     flex: 0 0 auto;
   }
 
   strong {
     min-width: 0;
     overflow: hidden;
-    color: var(--text-secondary);
-    font-size: 10px;
-    font-weight: 800;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 }
 
-.accountMetaSeparator {
-  color: var(--border-color);
+.accountExpiryBadgeExpired,
+.accountExpiryBadgeCritical {
+  border-color: color-mix(in srgb, var(--accounts-danger) 42%, transparent);
+  background: color-mix(in srgb, var(--accounts-danger) 15%, var(--accounts-surface));
+  color: var(--accounts-danger);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accounts-danger) 8%, transparent);
+}
+
+.accountExpiryBadgeCritical {
+  animation: accountExpiryPulse 1.8s ease-in-out infinite;
+}
+
+.accountExpiryBadgeWarning {
+  border-color: color-mix(in srgb, var(--accounts-warning) 42%, transparent);
+  background: color-mix(in srgb, var(--accounts-warning) 15%, var(--accounts-surface));
+  color: var(--accounts-warning);
+}
+
+.accountExpiryBadgeSoon {
+  border-color: color-mix(in srgb, var(--accounts-indigo) 38%, transparent);
+  background: color-mix(in srgb, var(--accounts-indigo) 12%, var(--accounts-surface));
+  color: var(--accounts-indigo);
+}
+
+.accountExpiryBadgeNormal {
+  border-color: color-mix(in srgb, var(--accounts-success) 30%, transparent);
+  background: color-mix(in srgb, var(--accounts-success) 10%, var(--accounts-surface));
+  color: var(--accounts-success);
+}
+
+.accountExpiryBadgeUnknown {
+  border-color: color-mix(in srgb, var(--accounts-border) 82%, transparent);
+  background: color-mix(in srgb, var(--accounts-muted-surface) 76%, var(--accounts-surface));
+  color: var(--accounts-muted);
+}
+
+@keyframes accountExpiryPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accounts-danger) 8%, transparent);
+  }
+
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accounts-danger) 14%, transparent);
+  }
 }
 
 .accountIdentityCopyLine {
@@ -738,6 +789,60 @@
     font-weight: 700;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+}
+
+.accountConcurrencyBadge {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  min-width: 78px;
+  min-height: 36px;
+  max-width: 100%;
+  padding: 4px 9px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+
+  span {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    font-size: 10px;
+    font-weight: 800;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  strong {
+    flex: 0 0 auto;
+    font-size: 17px;
+    font-weight: 900;
+    letter-spacing: -0.02em;
+  }
+}
+
+.accountConcurrencyBadgeConfigured {
+  border-color: color-mix(in srgb, var(--accounts-info) 42%, transparent);
+  background: color-mix(in srgb, var(--accounts-info) 13%, var(--accounts-surface));
+  color: var(--accounts-info);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accounts-info) 6%, transparent);
+}
+
+.accountConcurrencyBadgeDefault {
+  border-color: color-mix(in srgb, var(--accounts-indigo) 40%, transparent);
+  background: color-mix(in srgb, var(--accounts-indigo) 12%, var(--accounts-surface));
+  color: var(--accounts-indigo);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accounts-indigo) 6%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .accountExpiryBadgeCritical {
+    animation: none;
   }
 }
 
