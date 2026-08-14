@@ -12,9 +12,9 @@ export type AccountExpiryLabel =
   | { kind: 'expired' }
   | { kind: 'unknown' }
   | { kind: 'seconds'; minutes: number; seconds: number }
-  | { kind: 'minutes'; count: number }
-  | { kind: 'hours'; hours: number; minutes: number }
-  | { kind: 'days'; days: number; hours: number };
+  | { kind: 'minutes'; count: number; seconds: number }
+  | { kind: 'hours'; hours: number; minutes: number; seconds: number }
+  | { kind: 'days'; days: number; hours: number; minutes: number; seconds: number };
 
 export interface AccountExpiryPresentation {
   tone: AccountExpiryTone;
@@ -48,26 +48,28 @@ export const buildAccountExpiryPresentation = (
           ? 'soon'
           : 'normal';
 
+  const totalSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+  const seconds = totalSeconds % 60;
+
   if (remainingMs <= ACCOUNT_EXPIRY_CRITICAL_MS) {
-    const totalSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
     return {
       tone,
       remainingMs,
       label: {
         kind: 'seconds',
         minutes: Math.floor(totalSeconds / 60),
-        seconds: totalSeconds % 60,
+        seconds,
       },
     };
   }
 
-  const totalMinutes = Math.max(1, Math.ceil(remainingMs / MINUTE_MS));
+  const totalMinutes = Math.floor(totalSeconds / 60);
 
   if (remainingMs <= HOUR_MS) {
     return {
       tone,
       remainingMs,
-      label: { kind: 'minutes', count: totalMinutes },
+      label: { kind: 'minutes', count: totalMinutes, seconds },
     };
   }
 
@@ -77,8 +79,9 @@ export const buildAccountExpiryPresentation = (
       remainingMs,
       label: {
         kind: 'hours',
-        hours: Math.floor(totalMinutes / 60),
+        hours: Math.floor(totalSeconds / 3600),
         minutes: totalMinutes % 60,
+        seconds,
       },
     };
   }
@@ -88,8 +91,10 @@ export const buildAccountExpiryPresentation = (
     remainingMs,
     label: {
       kind: 'days',
-      days: Math.floor(totalMinutes / (24 * 60)),
-      hours: Math.floor((totalMinutes % (24 * 60)) / 60),
+      days: Math.floor(totalSeconds / (24 * 60 * 60)),
+      hours: Math.floor((totalSeconds % (24 * 60 * 60)) / 3600),
+      minutes: totalMinutes % 60,
+      seconds,
     },
   };
 };

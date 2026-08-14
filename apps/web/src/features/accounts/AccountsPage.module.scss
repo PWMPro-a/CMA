@@ -795,16 +795,16 @@
 .accountConcurrencyBadge {
   box-sizing: border-box;
   display: inline-flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: center;
-  gap: 6px;
-  min-width: 78px;
-  min-height: 36px;
+  gap: 4px;
+  min-width: 58px;
+  min-height: 22px;
   max-width: 100%;
-  padding: 4px 9px;
+  padding: 2px 7px;
   overflow: hidden;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: 999px;
   font-variant-numeric: tabular-nums;
   line-height: 1;
 
@@ -812,7 +812,7 @@
     flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
-    font-size: 10px;
+    font-size: 9px;
     font-weight: 800;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -820,9 +820,9 @@
 
   strong {
     flex: 0 0 auto;
-    font-size: 17px;
-    font-weight: 900;
-    letter-spacing: -0.02em;
+    font-size: 12px;
+    font-weight: 850;
+    letter-spacing: 0;
   }
 }
 

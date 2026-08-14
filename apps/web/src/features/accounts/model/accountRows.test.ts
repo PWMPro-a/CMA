@@ -77,6 +77,15 @@ describe('accountRows', () => {
     expect(row.expiresAtMs).toBe(expiresAtMs);
     expect(row.concurrency).toBe(8);
   });
+
+  it('preserves zero max concurrency as the unlimited sentinel', () => {
+    const [row] = buildAccountRows(
+      [{ name: 'unlimited.json', type: 'codex', max_concurrency: 0 }],
+      emptyStores()
+    );
+    expect(row.concurrency).toBe(0);
+  });
+
   it('normalizes Codex quota usage into remaining percent and risk status', () => {
     const files: AuthFileItem[] = [
       {

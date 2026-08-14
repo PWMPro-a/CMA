@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import type { KeyboardEvent, MouseEvent as ReactMouseEvent } from 'react';
 import { createPortal } from 'react-dom';
 import type { TFunction } from 'i18next';
@@ -352,23 +360,58 @@ const getAccountExpiryLabel = (presentation: AccountExpiryPresentation, t: TFunc
         ).padStart(2, '0')}`,
       });
     case 'minutes':
-      return t('accounts.account_expires_in_minutes', { count: presentation.label.count });
+      return t('accounts.account_expires_in_minutes', {
+        count: presentation.label.count,
+        seconds: presentation.label.seconds,
+      });
     case 'hours':
-      return presentation.label.minutes === 0
-        ? t('accounts.account_expires_in_hours_exact', { hours: presentation.label.hours })
-        : t('accounts.account_expires_in_hours', {
-            hours: presentation.label.hours,
-            minutes: presentation.label.minutes,
-          });
+      return t('accounts.account_expires_in_hours', {
+        hours: presentation.label.hours,
+        minutes: presentation.label.minutes,
+        seconds: presentation.label.seconds,
+      });
     case 'days':
-      return presentation.label.hours === 0
-        ? t('accounts.account_expires_in_days_exact', { days: presentation.label.days })
-        : t('accounts.account_expires_in_days', {
-            days: presentation.label.days,
-            hours: presentation.label.hours,
-          });
+      return t('accounts.account_expires_in_days', {
+        days: presentation.label.days,
+        hours: presentation.label.hours,
+        minutes: presentation.label.minutes,
+        seconds: presentation.label.seconds,
+      });
   }
 };
+
+type AccountExpiryClockListener = () => void;
+
+const accountExpiryClockListeners = new Set<AccountExpiryClockListener>();
+let accountExpiryClockNowMs = Date.now();
+let accountExpiryClockTimer: ReturnType<typeof setInterval> | null = null;
+
+const subscribeAccountExpiryClock = (listener: AccountExpiryClockListener) => {
+  accountExpiryClockNowMs = Date.now();
+  accountExpiryClockListeners.add(listener);
+  if (accountExpiryClockTimer === null) {
+    accountExpiryClockTimer = setInterval(() => {
+      accountExpiryClockNowMs = Date.now();
+      accountExpiryClockListeners.forEach((currentListener) => currentListener());
+    }, 1_000);
+  }
+  return () => {
+    accountExpiryClockListeners.delete(listener);
+    if (accountExpiryClockListeners.size === 0 && accountExpiryClockTimer !== null) {
+      clearInterval(accountExpiryClockTimer);
+      accountExpiryClockTimer = null;
+    }
+  };
+};
+
+const getAccountExpiryClockSnapshot = () => accountExpiryClockNowMs;
+
+const useAccountExpiryClock = () =>
+  useSyncExternalStore(
+    subscribeAccountExpiryClock,
+    getAccountExpiryClockSnapshot,
+    getAccountExpiryClockSnapshot
+  );
 
 const AccountExpiryBadge = ({
   expiresAtMs,
@@ -379,19 +422,12 @@ const AccountExpiryBadge = ({
   locale: string;
   t: TFunction;
 }) => {
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const nowMs = useAccountExpiryClock();
   const presentation = useMemo(
     () => buildAccountExpiryPresentation(expiresAtMs, nowMs),
     [expiresAtMs, nowMs]
   );
   const label = getAccountExpiryLabel(presentation, t);
-
-  useEffect(() => {
-    if (presentation.tone === 'unknown') return;
-    const refreshMs = presentation.tone === 'critical' ? 1_000 : 30_000;
-    const timer = setInterval(() => setNowMs(Date.now()), refreshMs);
-    return () => clearInterval(timer);
-  }, [presentation.tone]);
 
   return (
     <span
@@ -4198,15 +4234,23 @@ export function AccountsPage() {
                   <div className={styles.accountHealthMetaRow}>
                     <div
                       className={`${styles.accountConcurrencyBadge} ${
-                        row.concurrency === null || row.concurrency === undefined
-                          ? styles.accountConcurrencyBadgeDefault
-                          : styles.accountConcurrencyBadgeConfigured
+                        row.concurrency !== null &&
+                        row.concurrency !== undefined &&
+                        row.concurrency > 0
+                          ? styles.accountConcurrencyBadgeConfigured
+                          : styles.accountConcurrencyBadgeDefault
                       }`}
-                      title={t('accounts.account_concurrency')}
+                      title={
+                        row.concurrency === 0
+                          ? t('accounts.max_concurrency_hint')
+                          : t('accounts.account_concurrency')
+                      }
                     >
                       <span>{t('accounts.account_concurrency')}</span>
                       <strong>
-                        {row.concurrency ?? t('accounts.account_concurrency_default')}
+                        {row.concurrency === 0
+                          ? t('accounts.account_concurrency_unlimited')
+                          : (row.concurrency ?? t('accounts.account_concurrency_default'))}
                       </strong>
                     </div>
                     <span
