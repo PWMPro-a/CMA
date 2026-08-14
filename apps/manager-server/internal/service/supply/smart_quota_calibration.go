@@ -1117,6 +1117,15 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 			divergence = smartQuotaRelativeDifference(observedM, state.adoptedM) * 100
 		}
 		source := observed.Source
+		sampleCount := observed.SampleCount
+		uniqueAccounts := observed.UniqueAccounts
+		completeWindowAccounts := observed.CompleteWindowAccounts
+		if context.accounts == 0 {
+			source = smartQuotaEstimateSourceDefault
+			sampleCount = 0
+			uniqueAccounts = 0
+			completeWindowAccounts = 0
+		}
 		if policy.Mode == smartQuotaPolicyModeFixed {
 			source = smartQuotaPolicyModeFixed
 		}
@@ -1129,9 +1138,9 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 			ObservedM:              round2(observedM),
 			AdoptedM:               round2(state.adoptedM),
 			Source:                 source,
-			SampleCount:            observed.SampleCount,
-			UniqueAccounts:         observed.UniqueAccounts,
-			CompleteWindowAccounts: observed.CompleteWindowAccounts,
+			SampleCount:            sampleCount,
+			UniqueAccounts:         uniqueAccounts,
+			CompleteWindowAccounts: completeWindowAccounts,
 			MinimumUniqueAccounts:  smartQuotaPolicyMinUniqueAccounts,
 			DivergencePercent:      round2(divergence),
 			PendingConfirmation:    state.pending,

@@ -639,6 +639,8 @@ func TestSmartQuotaPlanWithoutCurrentAccountsKeepsFallbackQuietly(t *testing.T) 
 	}, nil, 301, now)
 	if len(items) != 1 || items[0].AccountCount != 0 || items[0].ObservedM != 0 ||
 		items[0].AdoptedM != 10 || items[0].PendingConfirmation || items[0].OrderingBlocked ||
+		items[0].Source != smartQuotaEstimateSourceDefault || items[0].SampleCount != 0 ||
+		items[0].UniqueAccounts != 0 || items[0].CompleteWindowAccounts != 0 ||
 		planning["free"].CapacityM != 10 || planning["free"].Source != smartQuotaEstimateSourceDefault {
 		t.Fatalf("zero-account plan estimate = items %#v planning %#v", items, planning["free"])
 	}
