@@ -255,8 +255,10 @@ func (s *Service) recordSmartQuotaCalibrationEventsLocked(events []usage.Event, 
 		}
 		// Header-less events are retained after an observation has started so
 		// their Token usage is not lost before the next percentage update.
-		evidence, hasQuotaEvidence := smartQuotaCalibrationEventEvidence(event)
-		if (!hasQuotaEvidence || !evidence.concrete) && smartQuotaCalibrationEventTokens(event) <= 0 {
+		hasRawQuotaEvidence := event.ResponseMetadata != nil ||
+			strings.TrimSpace(event.ResponseMetadataJSON) != "" ||
+			event.HeaderQuotaUsedPercent != nil
+		if !hasRawQuotaEvidence && smartQuotaCalibrationEventTokens(event) <= 0 {
 			continue
 		}
 		ordered = append(ordered, event)
