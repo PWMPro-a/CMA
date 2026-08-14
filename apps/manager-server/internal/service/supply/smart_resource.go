@@ -176,6 +176,12 @@ type SmartResource struct {
 	SupplyNeedsProduction           bool    `json:"supplyNeedsProduction,omitempty"`
 	SupplyAvgFulfillSeconds         int     `json:"supplyAvgFulfillSeconds,omitempty"`
 	SupplyRecentWaiting             int     `json:"supplyRecentWaiting,omitempty"`
+	SupplyRecentOrders              int     `json:"supplyRecentOrders,omitempty"`
+	SupplyRecentCancelled           int     `json:"supplyRecentCancelled,omitempty"`
+	SupplyRecentZeroDelivery        int     `json:"supplyRecentZeroDelivery,omitempty"`
+	SupplyRecentRequestedQuantity   int     `json:"supplyRecentRequestedQuantity,omitempty"`
+	SupplyRecentDeliveredQuantity   int     `json:"supplyRecentDeliveredQuantity,omitempty"`
+	SupplyFulfillmentRate           float64 `json:"supplyFulfillmentRate,omitempty"`
 	UsageSampleMinutes              int     `json:"usageSampleMinutes"`
 	AccountCacheAgeSeconds          int     `json:"accountCacheAgeSeconds"`
 	LockedOrderID                   string  `json:"lockedOrderId,omitempty"`
@@ -1949,9 +1955,10 @@ func smartReplenishBatchLimit(cfg store.ManagerSupplyConfig) int {
 	return clampInt(positiveOr(cfg.ReplenishBatchSize, smartPrelockMaxQuantity(cfg)), 1, 100)
 }
 
-// smartAutomaticOrderQuantityLimit lets a verified emergency recover toward
-// the healthy waterline in one guarded order. Ordinary target deficits and
-// partial inspection evidence remain staged at three credentials or fewer.
+// smartAutomaticOrderQuantityLimit lets a verified capacity deficit recover
+// toward the healthy waterline in one guarded order. Only incomplete
+// inspection evidence remains staged at three credentials or fewer; a fresh
+// stable snapshot must not force a real five-account shortage back to 1/2/3.
 func smartAutomaticOrderQuantityLimit(cfg store.ManagerSupplyConfig, resource SmartResource) int {
 	limit := smartReplenishBatchLimit(cfg)
 	if smartPrelockEnabled(cfg) {
@@ -1965,7 +1972,7 @@ func smartAutomaticOrderQuantityLimit(cfg store.ManagerSupplyConfig, resource Sm
 		limit = max(limit, smartEmergencyMinimumOrderQuantity(cfg))
 		return max(1, limit)
 	}
-	if smartPartialInspectionCapacityDeficitAllowed(resource) || resource.CapacityGapRCU > 0 || smartResourceAtOrBelowWarning(resource) {
+	if smartPartialInspectionCapacityDeficitAllowed(resource) {
 		limit = min(limit, 3)
 	}
 	return max(1, limit)

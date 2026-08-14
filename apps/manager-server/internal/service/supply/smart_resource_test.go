@@ -622,8 +622,8 @@ func TestSmartQuotaLowWaterRefillsToHealthyAndKeepsShortCooldown(t *testing.T) {
 	healthy := warning
 	healthy.EstimatedSustainMinutes = 30
 	healthy.CapacityGapRCU = 1
-	if got := smartAutomaticOrderQuantityLimit(cfg, healthy); got != 3 {
-		t.Fatalf("ordinary capacity-deficit batch limit=%d, want 3", got)
+	if got := smartAutomaticOrderQuantityLimit(cfg, healthy); got != 7 {
+		t.Fatalf("ordinary verified capacity-deficit batch limit=%d, want 7", got)
 	}
 	if got := smartCreateCooldownForResource(cfg, healthy); got != 120 {
 		t.Fatalf("healthy cooldown=%d, want 120", got)
@@ -690,7 +690,7 @@ func TestEmergencyCapacityGapRefillsToHealthyWaterline(t *testing.T) {
 	}
 }
 
-func TestEmergencyRetryUsesSmallBatchOnlyAfterDefiniteZeroDeliveryFailure(t *testing.T) {
+func TestShortageRetryUsesFullBatchAfterDefiniteZeroDeliveryFailure(t *testing.T) {
 	now := time.Now()
 	cfg := store.ManagerSupplyConfig{Product: "oauth_30d"}
 	resource := SmartResource{
@@ -714,8 +714,18 @@ func TestEmergencyRetryUsesSmallBatchOnlyAfterDefiniteZeroDeliveryFailure(t *tes
 	retried.TriggerReason = "emergency_retry_after_cancelled"
 	retried.LastError = "inventory unavailable"
 	plan = smartEmergencyRetryPlanForOrder(cfg, resource, retried, now)
-	if plan.active {
-		t.Fatalf("repeated retry plan = %#v", plan)
+	if !plan.active || plan.quantityLimit != 10 || plan.cooldown != 10*time.Second {
+		t.Fatalf("repeated zero-delivery retry plan = %#v", plan)
+	}
+
+	warning := resource
+	warning.EmergencyShortage = false
+	warning.SnapshotFresh = true
+	warning.HealthLevel = smartHealthWarning
+	warning.DemandTrend = smartDemandTrendStable
+	plan = smartEmergencyRetryPlanForOrder(cfg, warning, cancelled, now)
+	if !plan.active || plan.quantityLimit != 10 || plan.cooldown != 10*time.Second {
+		t.Fatalf("warning shortage retry plan = %#v", plan)
 	}
 
 	blocked := []store.SupplyOrder{
@@ -2119,7 +2129,7 @@ func TestStrongSupplyRunwayUsesActualPoolQuotaInsteadOfRequestThreshold(t *testi
 	if resource.CurrentCapacityRCU != 45_380.8 || resource.EstimatedSustainMinutes != 44.1 {
 		t.Fatalf("actual quota runway was altered by 401 thresholds: %#v", resource)
 	}
-	if resource.HealthLevel != smartHealthWarning || resource.SuggestedQuantity != 3 ||
+	if resource.HealthLevel != smartHealthWarning || resource.SuggestedQuantity != 4 ||
 		resource.EstimatedRequiredAccounts != 42 || resource.AccountQuantityDeficit != 4 {
 		t.Fatalf("38-account quota plan = %#v", resource)
 	}

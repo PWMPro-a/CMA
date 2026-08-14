@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -245,6 +246,27 @@ func TestAutomaticCreateCooldownIgnoresRecentRecoveryImport(t *testing.T) {
 	}
 }
 
+func TestRecentAutomaticSettlementOnlyBlocksWhenDeliveryCoversCurrentShortage(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{Product: "oauth_7d", NewAccountConfidence: 1}
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	resource := SmartResource{
+		CapacityGapRCU: 5 * unit, AccountQuantityDeficit: 5,
+		UnitCapacityRCU: smartProductUnitCapacity(cfg.Product),
+	}
+	recent := store.SupplyOrder{
+		OrderID: "recent", Product: cfg.Product, Automatic: true,
+		Status: "completed", RequestedQuantity: 3, ImportedCount: 3,
+	}
+	if recentAutomaticOrderCoversCurrentShortage(cfg, resource, recent) {
+		t.Fatal("a recent three-account delivery must not hide a five-account current shortage")
+	}
+	recent.RequestedQuantity = 5
+	recent.ImportedCount = 5
+	if !recentAutomaticOrderCoversCurrentShortage(cfg, resource, recent) {
+		t.Fatal("a recent delivery that covers the full current shortage should retain the settlement window")
+	}
+}
+
 func TestRecentSupplyOrdersCachesDefensiveCopiesAndInvalidates(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "supply-order-cache.sqlite"))
 	if err != nil {
@@ -420,6 +442,45 @@ func TestEmergencyRetryNextIntervalExcludesUnsafeFailures(t *testing.T) {
 				t.Fatalf("unsafe failure interval = %s, want normal configured pacing", interval)
 			}
 		})
+	}
+}
+
+func TestSmartSupplyPressureUsesRealizedFulfillmentInsteadOfInventorySnapshot(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-fulfillment-pressure.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	now := time.Now()
+	for index := 0; index < 4; index++ {
+		createdAt := now.Add(-time.Duration(index+2) * time.Minute).UnixMilli()
+		if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+			OrderID: fmt.Sprintf("cancelled-%d", index), Product: "oauth_7d",
+			RequestedQuantity: 5, Automatic: true, Status: "cancelled",
+			CreatedAtMS: createdAt, CompletedAtMS: createdAt + 1_000,
+		}); err != nil {
+			t.Fatalf("create cancelled order: %v", err)
+		}
+	}
+	createdAt := now.Add(-time.Minute).UnixMilli()
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "completed-1", Product: "oauth_7d", RequestedQuantity: 5,
+		Automatic: true, Status: "completed", ImportedCount: 5,
+		CreatedAtMS: createdAt, CompletedAtMS: createdAt + 1_000,
+	}); err != nil {
+		t.Fatalf("create completed order: %v", err)
+	}
+
+	service := New(st, nil)
+	pressure := service.smartSupplyPressure(context.Background(), store.ManagerSupplyConfig{Product: "oauth_7d"}, supplyclient.Inventory{
+		Available: 100,
+	}, 5)
+	if pressure.level != smartSupplyPressureScarce || pressure.reason != "supply_history_low_fulfillment" {
+		t.Fatalf("pressure=%#v, want scarce realized fulfillment", pressure)
+	}
+	if pressure.recentOrders != 5 || pressure.recentCancelled != 4 || pressure.recentZeroDelivery != 4 ||
+		pressure.requestedQuantity != 25 || pressure.deliveredQuantity != 5 || pressure.fulfillmentRate != 20 {
+		t.Fatalf("fulfillment pressure metrics=%#v", pressure)
 	}
 }
 

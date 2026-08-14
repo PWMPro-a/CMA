@@ -1703,6 +1703,21 @@ export function SupplyPage() {
                     <span>{t('supply.estimated_total')}</span>
                     <strong>{inventory ? formatMoney(inventory.estimatedTotalFen) : '-'}</strong>
                   </div>
+                  <div>
+                    <span>{t('supply.recent_fulfillment')}</span>
+                    <strong>
+                      {(smart?.supplyRecentRequestedQuantity ?? 0) > 0
+                        ? `${formatInteger(smart?.supplyRecentDeliveredQuantity)} / ${formatInteger(smart?.supplyRecentRequestedQuantity)} (${formatNumber(smart?.supplyFulfillmentRate, 1)}%)`
+                        : '-'}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.recent_cancelled_orders')}</span>
+                    <strong>
+                      {formatInteger(smart?.supplyRecentCancelled)} /{' '}
+                      {formatInteger(smart?.supplyRecentOrders)}
+                    </strong>
+                  </div>
                 </div>
               </article>
 

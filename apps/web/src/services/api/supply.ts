@@ -210,6 +210,12 @@ export interface SupplySmartResource {
   supplyNeedsProduction?: boolean;
   supplyAvgFulfillSeconds?: number;
   supplyRecentWaiting?: number;
+  supplyRecentOrders?: number;
+  supplyRecentCancelled?: number;
+  supplyRecentZeroDelivery?: number;
+  supplyRecentRequestedQuantity?: number;
+  supplyRecentDeliveredQuantity?: number;
+  supplyFulfillmentRate?: number;
   usageSampleMinutes: number;
   lockedOrderId?: string;
   lockedOrderAgeSeconds?: number;

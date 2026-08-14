@@ -735,6 +735,11 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	overview := s.overview
 	running := s.running
 	s.stateMu.RUnlock()
+	if overview.Inventory != nil {
+		pressure := smartSupplyPressureFromOrders(cfg.Supply, *overview.Inventory, max(1, resource.SuggestedQuantity), orders)
+		applySmartSupplyPressure(&resource, pressure)
+		s.setSmartResource(resource)
+	}
 	if overviewAvailable >= 0 {
 		overview.CPAAvailable = overviewAvailable
 	}
@@ -1858,7 +1863,9 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		}
 		if recent, recentFound, err := s.store.GetLatestCompletedAutomaticSupplyOrder(ctx); err != nil {
 			return err
-		} else if recentFound && time.Since(time.UnixMilli(recent.CompletedAtMS)) < automaticSettleWindow(supplyCfg) && !parallelEligible {
+		} else if settlementPending := recentFound &&
+			time.Since(time.UnixMilli(recent.CompletedAtMS)) < automaticSettleWindow(supplyCfg) &&
+			!parallelEligible && (!useSmart || recentAutomaticOrderCoversCurrentShortage(supplyCfg, resource, recent)); settlementPending {
 			if useSmart {
 				resource.EmergencyShortage = false
 				resource.SuggestedAction = smartActionObserveDemand
@@ -5010,6 +5017,12 @@ func preserveSmartResourceRuntimeState(resource *SmartResource, previous SmartRe
 		resource.SupplyNeedsProduction = previous.SupplyNeedsProduction
 		resource.SupplyAvgFulfillSeconds = previous.SupplyAvgFulfillSeconds
 		resource.SupplyRecentWaiting = previous.SupplyRecentWaiting
+		resource.SupplyRecentOrders = previous.SupplyRecentOrders
+		resource.SupplyRecentCancelled = previous.SupplyRecentCancelled
+		resource.SupplyRecentZeroDelivery = previous.SupplyRecentZeroDelivery
+		resource.SupplyRecentRequestedQuantity = previous.SupplyRecentRequestedQuantity
+		resource.SupplyRecentDeliveredQuantity = previous.SupplyRecentDeliveredQuantity
+		resource.SupplyFulfillmentRate = previous.SupplyFulfillmentRate
 	}
 }
 
@@ -5340,6 +5353,12 @@ type smartSupplyPressure struct {
 	needsProduction    bool
 	avgFulfillSeconds  int
 	recentWaiting      int
+	recentOrders       int
+	recentCancelled    int
+	recentZeroDelivery int
+	requestedQuantity  int
+	deliveredQuantity  int
+	fulfillmentRate    float64
 }
 
 // recentSupplyOrders amortizes the two operator calculations that inspect the
@@ -5379,6 +5398,17 @@ func (s *Service) invalidateSupplyOrdersCache() {
 }
 
 func (s *Service) smartSupplyPressure(ctx context.Context, cfg store.ManagerSupplyConfig, inventory supplyclient.Inventory, requestedQuantity int) smartSupplyPressure {
+	if s == nil || s.store == nil {
+		return smartSupplyPressureFromOrders(cfg, inventory, requestedQuantity, nil)
+	}
+	orders, err := s.recentSupplyOrders(ctx)
+	if err != nil {
+		return smartSupplyPressureFromOrders(cfg, inventory, requestedQuantity, nil)
+	}
+	return smartSupplyPressureFromOrders(cfg, inventory, requestedQuantity, orders)
+}
+
+func smartSupplyPressureFromOrders(cfg store.ManagerSupplyConfig, inventory supplyclient.Inventory, requestedQuantity int, orders []store.SupplyOrder) smartSupplyPressure {
 	quantity := max(1, requestedQuantity)
 	pressure := smartSupplyPressure{
 		level:              smartSupplyPressureUnknown,
@@ -5405,13 +5435,6 @@ func (s *Service) smartSupplyPressure(ctx context.Context, cfg store.ManagerSupp
 		pressure.reason = "supply_inventory_unknown"
 	}
 
-	if s == nil || s.store == nil {
-		return pressure
-	}
-	orders, err := s.recentSupplyOrders(ctx)
-	if err != nil {
-		return pressure
-	}
 	nowMS := time.Now().UnixMilli()
 	cutoffMS := nowMS - int64((24*time.Hour)/time.Millisecond)
 	fulfillSamples := 0
@@ -5423,11 +5446,25 @@ func (s *Service) smartSupplyPressure(ctx context.Context, cfg store.ManagerSupp
 		if !isSupplierPurchaseHistoryOrder(order) || !order.Automatic || !sameSupplyProduct(order.Product, cfg.Product) {
 			continue
 		}
+		delivered := automaticOrderDeliveredQuantity(order)
 		switch order.Status {
 		case "completed":
+			pressure.recentOrders++
+			pressure.requestedQuantity += max(0, order.RequestedQuantity)
+			pressure.deliveredQuantity += delivered
 			if order.CompletedAtMS > order.CreatedAtMS {
 				totalFulfillMS += order.CompletedAtMS - order.CreatedAtMS
 				fulfillSamples++
+			}
+		case "cancelled", "failed", "dismissed":
+			pressure.recentOrders++
+			pressure.requestedQuantity += max(0, order.RequestedQuantity)
+			pressure.deliveredQuantity += delivered
+			if order.Status == "cancelled" {
+				pressure.recentCancelled++
+			}
+			if delivered <= 0 {
+				pressure.recentZeroDelivery++
 			}
 		case "released":
 			if order.CompletedAtMS > order.CreatedAtMS && (order.ReadyQuantity > 0 || order.Progress >= 100) {
@@ -5439,12 +5476,26 @@ func (s *Service) smartSupplyPressure(ctx context.Context, cfg store.ManagerSupp
 				pressure.recentWaiting++
 			}
 		}
-		if fulfillSamples >= 20 {
-			break
-		}
 	}
 	if fulfillSamples > 0 {
 		pressure.avgFulfillSeconds = int(math.Round(float64(totalFulfillMS) / float64(fulfillSamples) / 1000))
+	}
+	if pressure.requestedQuantity > 0 {
+		pressure.fulfillmentRate = round1(clampFloat(
+			float64(pressure.deliveredQuantity)/float64(pressure.requestedQuantity)*100,
+			0,
+			100,
+		))
+	}
+	// Supplier inventory snapshots are momentary and can report available while
+	// competing orders are repeatedly cancelled. Treat the recent realized
+	// delivery rate as the stronger signal so the next attempt uses the full
+	// shortage-sized batch instead of repeating ineffective 1/2/3 probes.
+	if pressure.recentOrders >= 3 &&
+		(pressure.recentCancelled >= 2 || pressure.recentZeroDelivery >= 2 || pressure.fulfillmentRate < 50) {
+		pressure.level = smartSupplyPressureScarce
+		pressure.reason = "supply_history_low_fulfillment"
+		return pressure
 	}
 	if pressure.level == smartSupplyPressurePlenty {
 		return pressure
@@ -5479,11 +5530,22 @@ func applySmartSupplyPressure(resource *SmartResource, pressure smartSupplyPress
 	resource.SupplyNeedsProduction = pressure.needsProduction
 	resource.SupplyAvgFulfillSeconds = pressure.avgFulfillSeconds
 	resource.SupplyRecentWaiting = pressure.recentWaiting
+	resource.SupplyRecentOrders = pressure.recentOrders
+	resource.SupplyRecentCancelled = pressure.recentCancelled
+	resource.SupplyRecentZeroDelivery = pressure.recentZeroDelivery
+	resource.SupplyRecentRequestedQuantity = pressure.requestedQuantity
+	resource.SupplyRecentDeliveredQuantity = pressure.deliveredQuantity
+	resource.SupplyFulfillmentRate = pressure.fulfillmentRate
 }
 
 func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resource SmartResource, pressure smartSupplyPressure, quantity int) (int, string) {
 	if quantity <= 0 {
 		return quantity, ""
+	}
+	if isSmartEmergencyRetryReason(resource.DecisionReason) && !smartResourceEmergency(resource) {
+		limit := smartAutomaticOrderQuantityLimit(cfg, resource)
+		minimum := min(smartPrelockMinQuantity(cfg), limit)
+		return clampInt(quantity, minimum, limit), resource.DecisionReason
 	}
 	if smartResourceEmergency(resource) {
 		limit := smartAutomaticOrderQuantityLimit(cfg, resource)
@@ -5968,7 +6030,7 @@ func recentAutomaticOrderCoversCurrentShortage(
 }
 
 func (s *Service) applySmartEmergencyRetryPlan(ctx context.Context, cfg store.ManagerSupplyConfig, resource *SmartResource) (smartEmergencyRetryPlan, error) {
-	if s == nil || s.store == nil || resource == nil || !smartResourceEmergency(*resource) {
+	if s == nil || s.store == nil || resource == nil || !smartShortageFastRetryAllowed(*resource) {
 		return smartEmergencyRetryPlan{}, nil
 	}
 	latest, found, err := s.store.GetLatestAutomaticSupplyOrder(ctx)
@@ -5993,7 +6055,7 @@ func (s *Service) applySmartEmergencyRetryPlan(ctx context.Context, cfg store.Ma
 }
 
 func smartEmergencyRetryPlanForOrder(cfg store.ManagerSupplyConfig, resource SmartResource, order store.SupplyOrder, now time.Time) smartEmergencyRetryPlan {
-	if !smartResourceEmergency(resource) || !order.Automatic ||
+	if !smartShortageFastRetryAllowed(resource) || !order.Automatic ||
 		(strings.TrimSpace(cfg.Product) != "" && !sameSupplyProduct(order.Product, cfg.Product)) ||
 		strings.EqualFold(strings.TrimSpace(order.Strategy), "recovery") ||
 		strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.OrderID)), "recovery-") ||
@@ -6030,17 +6092,22 @@ func smartEmergencyRetryPlanForOrder(cfg store.ManagerSupplyConfig, resource Sma
 		return smartEmergencyRetryPlan{}
 	}
 
-	if isSmartEmergencyRetryReason(order.TriggerReason) {
-		// A failed small retry is not a useful descending-quantity strategy.
-		// Leave the order under the regular emergency duplicate guard; the next
-		// eligible cycle will recalculate a full shortage-based quantity.
-		return smartEmergencyRetryPlan{}
-	}
 	limit := smartAutomaticOrderQuantityLimit(cfg, resource)
 	if smartAccountAvailabilityEmergency(resource) {
 		limit = max(limit, smartEmergencyMinimumOrderQuantity(cfg))
 	}
 	return smartEmergencyRetryPlan{active: true, reason: reason, quantityLimit: limit, cooldown: 10 * time.Second}
+}
+
+func smartShortageFastRetryAllowed(resource SmartResource) bool {
+	if smartResourceEmergency(resource) {
+		return true
+	}
+	if !resource.SnapshotFresh || resource.DemandTrend == smartDemandTrendFalling {
+		return false
+	}
+	return resource.CapacityGapRCU > 0 || resource.AccountQuantityDeficit > 0 ||
+		resource.ConcurrencyAccountDeficit > 0 || smartResourceAtOrBelowWarning(resource)
 }
 
 func smartAutomaticFailureBlocksFastRetry(lastError string) bool {
