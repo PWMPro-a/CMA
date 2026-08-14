@@ -1737,6 +1737,88 @@ func openOrdersAllowParallelCreate(orders []store.SupplyOrder) bool {
 	return true
 }
 
+type parallelSupplyCompetition struct {
+	anchor              store.SupplyOrder
+	attempts            int
+	attemptedQuantities map[int]struct{}
+}
+
+func isParallelSupplyOrder(order store.SupplyOrder) bool {
+	return order.Automatic && strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.TriggerReason)), "parallel_")
+}
+
+// parallelSupplyCompetitionForOrders keeps a bounded 10/5/2-style ladder
+// attached to the oldest non-parallel reservation that is still waiting for
+// stock. Terminal parallel attempts remain part of that ladder: cancelling a
+// quantity-5 competitor must not immediately create another quantity-5 order
+// while the original quantity-10 reservation is still active.
+func parallelSupplyCompetitionForOrders(
+	cfg store.ManagerSupplyConfig,
+	openOrders []store.SupplyOrder,
+	history []store.SupplyOrder,
+) (parallelSupplyCompetition, bool) {
+	var anchor store.SupplyOrder
+	found := false
+	for _, order := range openOrders {
+		if !order.Automatic || isParallelSupplyOrder(order) || !isSupplierPurchaseHistoryOrder(order) ||
+			(strings.TrimSpace(cfg.Product) != "" && !sameSupplyProduct(order.Product, cfg.Product)) {
+			continue
+		}
+		if !found || order.CreatedAtMS < anchor.CreatedAtMS ||
+			(order.CreatedAtMS == anchor.CreatedAtMS && order.ID < anchor.ID) {
+			anchor = order
+			found = true
+		}
+	}
+	if !found {
+		return parallelSupplyCompetition{}, false
+	}
+	competition := parallelSupplyCompetition{
+		anchor:              anchor,
+		attemptedQuantities: make(map[int]struct{}, 2),
+	}
+	seen := make(map[string]struct{}, len(openOrders)+len(history))
+	add := func(order store.SupplyOrder) {
+		if !isParallelSupplyOrder(order) || !isSupplierPurchaseHistoryOrder(order) ||
+			(strings.TrimSpace(cfg.Product) != "" && !sameSupplyProduct(order.Product, cfg.Product)) ||
+			(anchor.CreatedAtMS > 0 && order.CreatedAtMS > 0 && order.CreatedAtMS < anchor.CreatedAtMS) {
+			return
+		}
+		key := strings.TrimSpace(order.OrderID)
+		if key == "" {
+			key = fmt.Sprintf("id:%d", order.ID)
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		competition.attempts++
+		if order.RequestedQuantity > 0 {
+			competition.attemptedQuantities[order.RequestedQuantity] = struct{}{}
+		}
+	}
+	for _, order := range history {
+		add(order)
+	}
+	for _, order := range openOrders {
+		add(order)
+	}
+	return competition, true
+}
+
+func (s *Service) parallelSupplyCompetition(
+	ctx context.Context,
+	cfg store.ManagerSupplyConfig,
+	openOrders []store.SupplyOrder,
+) (parallelSupplyCompetition, bool, error) {
+	history, err := s.recentSupplyOrders(ctx)
+	if err != nil {
+		return parallelSupplyCompetition{}, false, err
+	}
+	competition, found := parallelSupplyCompetitionForOrders(cfg, openOrders, history)
+	return competition, found, nil
+}
+
 func (s *Service) automaticParallelCreateEligible(
 	ctx context.Context,
 	cfg store.ManagerSupplyConfig,
@@ -1748,6 +1830,13 @@ func (s *Service) automaticParallelCreateEligible(
 	}
 	resource := s.currentSmartResource(cfg)
 	if !smartResourceEmergency(resource) && !isSmartEmergencyRetryReason(resource.DecisionReason) {
+		return false, nil
+	}
+	competition, found, err := s.parallelSupplyCompetition(ctx, cfg, orders)
+	if err != nil {
+		return false, err
+	}
+	if !found || competition.attempts >= max(0, maxConcurrentSupplyOrders(cfg)-1) {
 		return false, nil
 	}
 	blocked, err := s.automaticParallelCreateBlocked(ctx, cfg)
@@ -2039,13 +2128,29 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		// of 10 accounts, the three possible reservations are 10, 5 and 2.
 		// Existing ready/take admission still evaluates aggregate capacity, so a
 		// smaller reservation can win without making every full-sized order paid.
-		if stagedQuantity := emergencyParallelOrderQuantity(resource, quantity, openOrders, parallelEligible); stagedQuantity != quantity {
-			quantity = stagedQuantity
-			inventory, balance, err = s.fetchSupplyOverview(ctx, supplyCfg, quantity)
-			if err != nil {
-				return err
+		if parallelEligible {
+			competition, found, competitionErr := s.parallelSupplyCompetition(ctx, supplyCfg, openOrders)
+			if competitionErr != nil {
+				return competitionErr
 			}
-			applySmartSupplyPressure(&resource, s.smartSupplyPressure(ctx, supplyCfg, inventory, quantity))
+			stagedQuantity := emergencyParallelOrderQuantity(resource, quantity, competition, found)
+			switch {
+			case stagedQuantity <= 0:
+				quantity = 0
+				resource.SuggestedAction = smartActionWaitLocked
+				resource.DecisionReason = "parallel_ladder_exhausted"
+				resource.SuggestedQuantity = 0
+				if found {
+					resource.LockedOrderID = competition.anchor.OrderID
+				}
+			case stagedQuantity != quantity:
+				quantity = stagedQuantity
+				inventory, balance, err = s.fetchSupplyOverview(ctx, supplyCfg, quantity)
+				if err != nil {
+					return err
+				}
+				applySmartSupplyPressure(&resource, s.smartSupplyPressure(ctx, supplyCfg, inventory, quantity))
+			}
 		}
 	}
 	s.setOverview(Overview{
@@ -2056,6 +2161,11 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		Inventory:    &inventory,
 		Balance:      &balance,
 	})
+	if quantity <= 0 {
+		s.setSmartResource(resource)
+		s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
+		return nil
+	}
 	if inventory.EstimatedTotalFen > 0 && balance.AvailableFen < inventory.EstimatedTotalFen {
 		if useSmart {
 			resource.SuggestedAction = smartActionBalanceBlocked
@@ -2474,6 +2584,20 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 			s.setSmartResource(resource)
 			return false, nil
 		}
+		if !isSupplyOrderCapacityCommitted(*order) {
+			// A waiting supplier reservation is still useful even when the latest
+			// pool snapshot temporarily recovers. The supplier has no cancellation
+			// endpoint; marking it released locally forgets the reservation and can
+			// create another identical order a few seconds later. Keep polling this
+			// order until it becomes ready or reaches a supplier terminal state.
+			resource.LockedOrderID = order.OrderID
+			resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
+			resource.SuggestedAction = smartActionWaitLocked
+			resource.SuggestedQuantity = 0
+			resource.DecisionReason = "waiting_inventory_reservation"
+			s.setSmartResource(resource)
+			return false, nil
+		}
 		if resource.ConsumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling {
 			// The live-account gate above already retained this reservation for an
 			// empty or sub-critical pool. With no current traffic and the minimum
@@ -2519,6 +2643,9 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 		resource.DecisionReason = "capacity_recovered_before_take"
 		s.setSmartResource(resource)
 		return true, s.markAutomaticOrderReleasedLocally(ctx, order)
+	}
+	if !isSupplyOrderCapacityCommitted(*order) {
+		return false, nil
 	}
 	if cfg.Supply.TargetAvailableAccounts <= 0 {
 		return false, nil
@@ -5806,8 +5933,15 @@ func estimatedSupplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, resource Sma
 
 func supplyOrderCapacityRCU(cfg store.ManagerSupplyConfig, resource SmartResource, order store.SupplyOrder) float64 {
 	quantity := max(0, order.RequestedQuantity)
-	if order.ReadyQuantity > quantity {
-		quantity = order.ReadyQuantity
+	if isSupplyOrderCapacityCommitted(order) {
+		// Once stock is secured, use the quantity the supplier has actually made
+		// ready (or that the importer has materialized), not the original request.
+		// A 30-account order with six ready accounts contributes six accounts to
+		// the final take budget and must not hide another real capacity deficit.
+		actual := max(order.ReadyQuantity, max(order.ItemCount, order.ImportedCount))
+		if actual > 0 {
+			quantity = actual
+		}
 	}
 	return estimatedSupplyOrderCapacityRCU(cfg, resource, quantity)
 }
@@ -5851,37 +5985,43 @@ func supplyCreatePlanningResource(
 }
 
 // emergencyParallelOrderQuantity returns the next bounded quantity in the
-// emergency抢货 ladder. The first order keeps the complete calculated shortage;
-// one existing waiting order selects half, and two select one fifth. Three
-// orders are the hard concurrency ceiling, so no further stage is produced.
+// emergency抢货 ladder. The primary order keeps the complete calculated
+// shortage; its first and second competitors use one half and one fifth. The
+// stage is based on all attempts in the current primary-order cycle, including
+// cancelled rows, so a failed quantity is never submitted repeatedly.
 func emergencyParallelOrderQuantity(
 	resource SmartResource,
 	quantity int,
-	openOrders []store.SupplyOrder,
+	competition parallelSupplyCompetition,
 	parallel bool,
 ) int {
 	if quantity <= 0 || !parallel ||
 		(!smartResourceEmergency(resource) && !isSmartEmergencyRetryReason(resource.DecisionReason)) {
 		return quantity
 	}
-	divisor := 1
-	switch len(openOrders) {
-	case 1:
-		divisor = 2
-	case 2:
-		divisor = 5
-	default:
-		return quantity
+	divisors := [...]int{2, 5}
+	if competition.attempts < 0 || competition.attempts >= len(divisors) {
+		return 0
 	}
-	return clampInt(int(math.Ceil(float64(quantity)/float64(divisor))), 1, quantity)
+	baseQuantity := max(quantity, competition.anchor.RequestedQuantity)
+	candidate := clampInt(
+		int(math.Ceil(float64(baseQuantity)/float64(divisors[competition.attempts]))),
+		1,
+		quantity,
+	)
+	if _, duplicate := competition.attemptedQuantities[candidate]; duplicate {
+		return 0
+	}
+	return candidate
 }
 
-// readySupplyOrderAccepted applies a deterministic take budget to all orders
-// that have actually secured stock. Taking/importing orders are irreversible
-// commitments; remaining ready orders are admitted oldest first until the
-// current capacity deficit is covered. A small allowance absorbs measurement
-// jitter, while an indivisible order is still accepted when rejecting it would
-// leave the pool below the required capacity.
+// readySupplyOrderAccepted applies a deterministic aggregate take budget to
+// all orders that have actually secured stock. Taking/importing orders are
+// irreversible commitments. The remaining ready orders are selected as a
+// small subset whose combined capacity covers the current deficit with the
+// least overage; if no subset can cover it, the largest useful underfill wins.
+// This prevents an older large order from displacing a newer, better-fitting
+// order while still counting every in-progress import before another take.
 func readySupplyOrderAccepted(
 	cfg store.ManagerSupplyConfig,
 	resource SmartResource,
@@ -5909,14 +6049,13 @@ func readySupplyOrderAccepted(
 		return false
 	}
 
-	acceptedCapacity := 0.0
-	currentAccepted := false
+	fixedCapacity := 0.0
 	ready := make([]store.SupplyOrder, 0, len(committed))
 	for _, order := range committed {
 		if isSupplyOrderCapacityIrreversible(order) {
-			acceptedCapacity += supplyOrderCapacityRCU(cfg, resource, order)
+			fixedCapacity += supplyOrderCapacityRCU(cfg, resource, order)
 			if order.OrderID == current.OrderID {
-				currentAccepted = true
+				return true
 			}
 			continue
 		}
@@ -5931,18 +6070,73 @@ func readySupplyOrderAccepted(
 		}
 		return ready[i].OrderID < ready[j].OrderID
 	})
-	capWithAllowance := math.Max(0, need) + math.Max(0, allowance)
-	for _, order := range ready {
-		capacity := supplyOrderCapacityRCU(cfg, resource, order)
-		accept := acceptedCapacity < need || acceptedCapacity+capacity <= capWithAllowance
-		if accept {
-			acceptedCapacity += capacity
-			if order.OrderID == current.OrderID {
-				currentAccepted = true
+	need = math.Max(0, need)
+	if fixedCapacity >= need || len(ready) == 0 {
+		return false
+	}
+	// The open purchase window is normally three orders. Keep a defensive cap
+	// for corrupted/legacy state so subset enumeration remains bounded.
+	if len(ready) > maxTrackedOpenSupplyOrders {
+		ready = ready[:maxTrackedOpenSupplyOrders]
+	}
+	capWithAllowance := need + math.Max(0, allowance)
+	bestMask := 0
+	bestCategory := 3
+	bestTotal := 0.0
+	bestCount := 0
+	maskLimit := 1 << len(ready)
+	for mask := 1; mask < maskLimit; mask++ {
+		total := fixedCapacity
+		count := 0
+		for index, order := range ready {
+			if mask&(1<<index) == 0 {
+				continue
 			}
+			total += supplyOrderCapacityRCU(cfg, resource, order)
+			count++
+		}
+		category := 1
+		switch {
+		case total >= need && total <= capWithAllowance:
+			category = 0
+		case total >= need:
+			// Prefer a useful underfill over an unnecessarily large take when a
+			// closer order is still available. If every candidate is oversized,
+			// the minimum-overage subset is a fallback only for a real emergency;
+			// normal/warning capacity may wait for a better-sized reservation.
+			category = 2
+		}
+		if category == 2 && !smartResourceEmergency(resource) {
+			continue
+		}
+		better := false
+		switch {
+		case category < bestCategory:
+			better = true
+		case category > bestCategory:
+			better = false
+		case category == 0 || category == 2:
+			overage := total - need
+			bestOverage := bestTotal - need
+			better = overage < bestOverage ||
+				(overage == bestOverage && (count < bestCount || (count == bestCount && mask < bestMask)))
+		default:
+			better = total > bestTotal ||
+				(total == bestTotal && (count < bestCount || (count == bestCount && mask < bestMask)))
+		}
+		if better {
+			bestMask = mask
+			bestCategory = category
+			bestTotal = total
+			bestCount = count
 		}
 	}
-	return currentAccepted
+	for index, order := range ready {
+		if order.OrderID == current.OrderID {
+			return bestMask&(1<<index) != 0
+		}
+	}
+	return false
 }
 
 func isSupplyOrderCapacityCommitted(order store.SupplyOrder) bool {
@@ -7423,7 +7617,7 @@ func newCreateAttemptID() string {
 
 func localOrderStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "ready", "ready_for_pickup":
+	case "ready", "ready_for_pickup", "ready_partial", "partial_ready", "partially_ready":
 		return "ready"
 	case "completed", "done", "taken", "delivered":
 		return "ready"
@@ -7456,7 +7650,8 @@ func isSuccessfulRemoteStatus(status string) bool {
 
 func isReadyForTake(status string) bool {
 	status = strings.ToLower(strings.TrimSpace(status))
-	return status == "ready" || status == "ready_for_pickup" || isSuccessfulRemoteStatus(status)
+	return status == "ready" || status == "ready_for_pickup" || status == "ready_partial" ||
+		status == "partial_ready" || status == "partially_ready" || isSuccessfulRemoteStatus(status)
 }
 
 func supplyTakeLeaseDuration(cfg store.ManagerSupplyConfig) time.Duration {
