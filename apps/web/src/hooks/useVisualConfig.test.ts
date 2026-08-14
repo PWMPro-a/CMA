@@ -498,9 +498,9 @@ describe('useVisualConfig', () => {
       harness.getCurrent().setVisualValues({ redisUsageQueueRetentionSeconds: '0' });
     });
 
-    expect(
-      harness.getCurrent().visualValidationErrors.redisUsageQueueRetentionSeconds
-    ).toBe('retention_seconds_range');
+    expect(harness.getCurrent().visualValidationErrors.redisUsageQueueRetentionSeconds).toBe(
+      'retention_seconds_range'
+    );
     harness.unmount();
   });
 
@@ -732,6 +732,105 @@ describe('useVisualConfig', () => {
     harness.unmount();
   });
 
+  it('reads camelCase Codex cache affinity and writes canonical YAML while preserving unknown keys', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = [
+      'codex:',
+      '  identity-confuse: true',
+      '  future-option: preserve-me',
+      '  cacheAffinity:',
+      '    enabled: true',
+      '    shadow: true',
+      '    maxEntries: 4096',
+      '    maxRetryCredentials: 3',
+      '    websocketPoolSlots: 12',
+      '    maxSessionRequests: 80',
+      '    maxSessionDuration: 8m',
+      '    quotaPreemptUsedRatio: 0.96',
+      '    quotaHardStopUsedRatio: 1',
+      '    future-affinity-option: preserve-affinity',
+      '',
+    ].join('\n');
+
+    act(() => {
+      expect(harness.getCurrent().loadVisualValuesFromYaml(yaml).ok).toBe(true);
+    });
+
+    expect(harness.getCurrent().visualValues).toEqual(
+      expect.objectContaining({
+        codexCacheAffinityEnabled: true,
+        codexCacheAffinityShadow: true,
+        codexCacheAffinityMaxEntries: '4096',
+        codexCacheAffinityMaxRetryCredentials: '3',
+        codexCacheAffinityWebsocketPoolSlots: '12',
+        codexCacheAffinityMaxSessionRequests: '80',
+        codexCacheAffinityMaxSessionDuration: '8m',
+        codexCacheAffinityQuotaPreemptPercent: '96',
+        codexCacheAffinityQuotaHardStopPercent: '100',
+      })
+    );
+
+    act(() => {
+      harness.getCurrent().setVisualValues({
+        codexCacheAffinityShadow: false,
+        codexCacheAffinityMaxEntries: '65536',
+        codexCacheAffinityMaxRetryCredentials: '2',
+        codexCacheAffinityWebsocketPoolSlots: '8',
+        codexCacheAffinityMaxSessionRequests: '50',
+        codexCacheAffinityMaxSessionDuration: '5m',
+        codexCacheAffinityQuotaPreemptPercent: '97',
+        codexCacheAffinityQuotaHardStopPercent: '100',
+      });
+    });
+
+    const parsed = parseYaml(harness.getCurrent().applyVisualChangesToYaml(yaml)) as {
+      codex?: {
+        cacheAffinity?: unknown;
+        'future-option'?: string;
+        'cache-affinity'?: Record<string, unknown>;
+      };
+    };
+    expect(parsed.codex?.cacheAffinity).toBeUndefined();
+    expect(parsed.codex?.['future-option']).toBe('preserve-me');
+    expect(parsed.codex?.['cache-affinity']).toEqual({
+      enabled: true,
+      shadow: false,
+      'max-entries': 65536,
+      'max-retry-credentials': 2,
+      'websocket-pool-slots': 8,
+      'max-session-requests': 50,
+      'max-session-duration': '5m',
+      'quota-preempt-used-ratio': 0.97,
+      'quota-hard-stop-used-ratio': 1,
+      'future-affinity-option': 'preserve-affinity',
+    });
+
+    harness.unmount();
+  });
+
+  it('validates Codex cache-affinity bounds and quota threshold ordering', () => {
+    const errors = getVisualConfigValidationErrors({
+      ...DEFAULT_VISUAL_VALUES,
+      codexCacheAffinityEnabled: true,
+      codexCacheAffinityMaxEntries: '0',
+      codexCacheAffinityMaxRetryCredentials: '-1',
+      codexCacheAffinityWebsocketPoolSlots: '31',
+      codexCacheAffinityMaxSessionRequests: '0',
+      codexCacheAffinityMaxSessionDuration: 'five minutes',
+      codexCacheAffinityQuotaPreemptPercent: '97',
+      codexCacheAffinityQuotaHardStopPercent: '97',
+    });
+
+    expect(errors).toMatchObject({
+      codexCacheAffinityMaxEntries: 'positive_integer',
+      codexCacheAffinityMaxRetryCredentials: 'positive_integer',
+      codexCacheAffinityWebsocketPoolSlots: 'cache_affinity_websocket_slots_range',
+      codexCacheAffinityMaxSessionRequests: 'positive_integer',
+      codexCacheAffinityMaxSessionDuration: 'positive_duration',
+      codexCacheAffinityQuotaHardStopPercent: 'cache_affinity_hard_stop_percent_range',
+    });
+  });
+
   it('validates Codex tail-burst trigger percentage and collector concurrency', () => {
     const harness = mountUseVisualConfig();
 
@@ -790,5 +889,4 @@ describe('useVisualConfig', () => {
 
     harness.unmount();
   });
-
 });

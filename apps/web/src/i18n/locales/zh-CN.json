@@ -3700,7 +3700,27 @@
           "tail_burst_collector_timeout": "额度采集超时",
           "tail_burst_duration_hint": "Go duration 格式，例如 45s、1m。",
           "tail_burst_tool_injection": "自动注入工具调用声明",
-          "tail_burst_tool_injection_desc": "对没有工具声明的 Codex 请求补充工具调用声明，帮助额度超限并发调度保持协议一致。"
+          "tail_burst_tool_injection_desc": "对没有工具声明的 Codex 请求补充工具调用声明，帮助额度超限并发调度保持协议一致。",
+          "cache_affinity_title": "Codex 缓存亲和",
+          "cache_affinity_desc": "稳定同一会话的账号、上游缓存标识与 WebSocket 槽位，在不增加网络请求的情况下提高提示词缓存命中率。",
+          "cache_affinity_enabled": "启用缓存亲和调度",
+          "cache_affinity_enabled_desc": "启用独立亲和协调器；关闭影子模式后，亲和结果会参与实际账号调度。",
+          "cache_affinity_shadow": "影子观察模式",
+          "cache_affinity_shadow_desc": "只计算并记录亲和决策，不改变实际账号调度；用于上线前观察效果。",
+          "cache_affinity_max_entries": "最大亲和记录数",
+          "cache_affinity_max_entries_hint": "本地会话亲和缓存的容量上限；默认 65536。",
+          "cache_affinity_max_retry_credentials": "最大重试账号数",
+          "cache_affinity_max_retry_credentials_hint": "单次请求失败时最多尝试的不同账号数量；默认 2。",
+          "cache_affinity_websocket_pool_slots": "WebSocket 池槽位数",
+          "cache_affinity_websocket_pool_slots_hint": "将稳定会话映射到固定连接槽位；范围 1–30，默认 8。",
+          "cache_affinity_max_session_requests": "单会话最大请求数",
+          "cache_affinity_max_session_requests_hint": "达到此请求数后允许会话重新绑定，避免长期固定到单个账号；默认 50。",
+          "cache_affinity_max_session_duration": "单会话最长持续时间",
+          "cache_affinity_duration_hint": "Go duration 格式，例如 5m、30s、1h。",
+          "cache_affinity_preempt_percent": "新会话避让阈值 (%)",
+          "cache_affinity_preempt_percent_hint": "账号使用率达到此值后不再接收新的冷会话，已预热会话仍可继续；默认 97。",
+          "cache_affinity_hard_stop_percent": "硬停止阈值 (%)",
+          "cache_affinity_hard_stop_percent_hint": "账号使用率达到此值后，已预热会话也会迁移；必须高于避让阈值且不超过 100。"
         },
         "streaming": {
           "title": "流式传输配置",
@@ -3824,7 +3844,12 @@
         "tail_burst_collector_concurrency_range": "请输入 1 到 16 之间的整数",
         "payload_invalid_number": "请输入有效数字",
         "payload_invalid_boolean": "请选择 true 或 false",
-        "payload_invalid_json": "请输入有效的 JSON"
+        "payload_invalid_json": "请输入有效的 JSON",
+        "positive_integer": "请输入大于等于 1 的整数",
+        "cache_affinity_websocket_slots_range": "请输入 1 到 30 之间的整数",
+        "cache_affinity_preempt_percent_range": "请输入大于 0 且小于 100 的百分比",
+        "cache_affinity_hard_stop_percent_range": "硬停止阈值必须高于避让阈值且不超过 100",
+        "positive_duration": "请输入大于 0 的 Go duration，例如 30s、5m 或 1h"
       },
       "common": {
         "edit": "编辑",

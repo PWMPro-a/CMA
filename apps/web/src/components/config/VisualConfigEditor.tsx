@@ -242,6 +242,34 @@ export function VisualConfigEditor({
     t,
     validationErrors?.codexTailBurstCollectorMaxConcurrency
   );
+  const codexCacheAffinityMaxEntriesError = getValidationMessage(
+    t,
+    validationErrors?.codexCacheAffinityMaxEntries
+  );
+  const codexCacheAffinityMaxRetryCredentialsError = getValidationMessage(
+    t,
+    validationErrors?.codexCacheAffinityMaxRetryCredentials
+  );
+  const codexCacheAffinityWebsocketPoolSlotsError = getValidationMessage(
+    t,
+    validationErrors?.codexCacheAffinityWebsocketPoolSlots
+  );
+  const codexCacheAffinityMaxSessionRequestsError = getValidationMessage(
+    t,
+    validationErrors?.codexCacheAffinityMaxSessionRequests
+  );
+  const codexCacheAffinityMaxSessionDurationError = getValidationMessage(
+    t,
+    validationErrors?.codexCacheAffinityMaxSessionDuration
+  );
+  const codexCacheAffinityQuotaPreemptPercentError = getValidationMessage(
+    t,
+    validationErrors?.codexCacheAffinityQuotaPreemptPercent
+  );
+  const codexCacheAffinityQuotaHardStopPercentError = getValidationMessage(
+    t,
+    validationErrors?.codexCacheAffinityQuotaHardStopPercent
+  );
   const codexClientMinVersionError = getValidationMessage(
     t,
     validationErrors?.codexClientMinVersion
@@ -351,6 +379,13 @@ export function VisualConfigEditor({
         description: t('config_management.visual.sections.quota.description'),
         icon: IconTimer,
         errorCount: countErrors([
+          'codexCacheAffinityMaxEntries',
+          'codexCacheAffinityMaxRetryCredentials',
+          'codexCacheAffinityWebsocketPoolSlots',
+          'codexCacheAffinityMaxSessionRequests',
+          'codexCacheAffinityMaxSessionDuration',
+          'codexCacheAffinityQuotaPreemptPercent',
+          'codexCacheAffinityQuotaHardStopPercent',
           'codexTailBurstTriggerUsedPercent',
           'codexTailBurstCollectorMaxConcurrency',
         ]),
@@ -744,9 +779,7 @@ export function VisualConfigEditor({
                       variant="secondary"
                       size="xs"
                       disabled={disabled || values.rmSecretKeyAction === 'unchanged'}
-                      onClick={() =>
-                        onChange({ rmSecretKey: '', rmSecretKeyAction: 'unchanged' })
-                      }
+                      onClick={() => onChange({ rmSecretKey: '', rmSecretKeyAction: 'unchanged' })}
                     >
                       {t('config_management.visual.sections.remote.secret_key_keep')}
                     </Button>
@@ -1118,9 +1151,7 @@ export function VisualConfigEditor({
                   value={values.gptImage2BaseModel}
                   onChange={(e) => onChange({ gptImage2BaseModel: e.target.value })}
                   disabled={disabled}
-                  hint={t(
-                    'config_management.visual.sections.network.gpt_image_2_base_model_hint'
-                  )}
+                  hint={t('config_management.visual.sections.network.gpt_image_2_base_model_hint')}
                 />
                 <Input
                   label={t('config_management.visual.sections.network.video_result_auth_cache_ttl')}
@@ -1357,9 +1388,7 @@ export function VisualConfigEditor({
                       value={values.codexClientMinVersion}
                       disabled={disabled}
                       error={codexClientMinVersionError}
-                      onChange={(event) =>
-                        onChange({ codexClientMinVersion: event.target.value })
-                      }
+                      onChange={(event) => onChange({ codexClientMinVersion: event.target.value })}
                     />
                     <Input
                       label={t('config_management.visual.sections.quota.codex_client_max_version')}
@@ -1367,9 +1396,7 @@ export function VisualConfigEditor({
                       value={values.codexClientMaxVersion}
                       disabled={disabled}
                       error={codexClientMaxVersionError}
-                      onChange={(event) =>
-                        onChange({ codexClientMaxVersion: event.target.value })
-                      }
+                      onChange={(event) => onChange({ codexClientMaxVersion: event.target.value })}
                     />
                   </SectionGrid>
                   <ToggleRow
@@ -1429,6 +1456,161 @@ export function VisualConfigEditor({
                       onChange={(codexClientBlacklist) => onChange({ codexClientBlacklist })}
                     />
                   </SectionSubsection>
+                </SectionStack>
+              </SectionSubsection>
+
+              <SectionSubsection
+                title={t('config_management.visual.sections.quota.cache_affinity_title')}
+                description={t('config_management.visual.sections.quota.cache_affinity_desc')}
+              >
+                <SectionStack>
+                  <SectionGrid>
+                    <ToggleRow
+                      title={t('config_management.visual.sections.quota.cache_affinity_enabled')}
+                      description={t(
+                        'config_management.visual.sections.quota.cache_affinity_enabled_desc'
+                      )}
+                      checked={values.codexCacheAffinityEnabled}
+                      disabled={disabled}
+                      onChange={(codexCacheAffinityEnabled) =>
+                        onChange({ codexCacheAffinityEnabled })
+                      }
+                    />
+                    <ToggleRow
+                      title={t('config_management.visual.sections.quota.cache_affinity_shadow')}
+                      description={t(
+                        'config_management.visual.sections.quota.cache_affinity_shadow_desc'
+                      )}
+                      checked={values.codexCacheAffinityShadow}
+                      disabled={disabled || !values.codexCacheAffinityEnabled}
+                      onChange={(codexCacheAffinityShadow) =>
+                        onChange({ codexCacheAffinityShadow })
+                      }
+                    />
+                  </SectionGrid>
+                  <SectionGrid>
+                    <Input
+                      label={t(
+                        'config_management.visual.sections.quota.cache_affinity_max_entries'
+                      )}
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={values.codexCacheAffinityMaxEntries}
+                      onChange={(event) =>
+                        onChange({ codexCacheAffinityMaxEntries: event.target.value })
+                      }
+                      disabled={disabled || !values.codexCacheAffinityEnabled}
+                      hint={t(
+                        'config_management.visual.sections.quota.cache_affinity_max_entries_hint'
+                      )}
+                      error={codexCacheAffinityMaxEntriesError}
+                    />
+                    <Input
+                      label={t(
+                        'config_management.visual.sections.quota.cache_affinity_max_retry_credentials'
+                      )}
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={values.codexCacheAffinityMaxRetryCredentials}
+                      onChange={(event) =>
+                        onChange({
+                          codexCacheAffinityMaxRetryCredentials: event.target.value,
+                        })
+                      }
+                      disabled={disabled || !values.codexCacheAffinityEnabled}
+                      hint={t(
+                        'config_management.visual.sections.quota.cache_affinity_max_retry_credentials_hint'
+                      )}
+                      error={codexCacheAffinityMaxRetryCredentialsError}
+                    />
+                    <Input
+                      label={t(
+                        'config_management.visual.sections.quota.cache_affinity_websocket_pool_slots'
+                      )}
+                      type="number"
+                      min="1"
+                      max="30"
+                      step="1"
+                      value={values.codexCacheAffinityWebsocketPoolSlots}
+                      onChange={(event) =>
+                        onChange({ codexCacheAffinityWebsocketPoolSlots: event.target.value })
+                      }
+                      disabled={disabled || !values.codexCacheAffinityEnabled}
+                      hint={t(
+                        'config_management.visual.sections.quota.cache_affinity_websocket_pool_slots_hint'
+                      )}
+                      error={codexCacheAffinityWebsocketPoolSlotsError}
+                    />
+                    <Input
+                      label={t(
+                        'config_management.visual.sections.quota.cache_affinity_max_session_requests'
+                      )}
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={values.codexCacheAffinityMaxSessionRequests}
+                      onChange={(event) =>
+                        onChange({ codexCacheAffinityMaxSessionRequests: event.target.value })
+                      }
+                      disabled={disabled || !values.codexCacheAffinityEnabled}
+                      hint={t(
+                        'config_management.visual.sections.quota.cache_affinity_max_session_requests_hint'
+                      )}
+                      error={codexCacheAffinityMaxSessionRequestsError}
+                    />
+                    <Input
+                      label={t(
+                        'config_management.visual.sections.quota.cache_affinity_max_session_duration'
+                      )}
+                      value={values.codexCacheAffinityMaxSessionDuration}
+                      onChange={(event) =>
+                        onChange({ codexCacheAffinityMaxSessionDuration: event.target.value })
+                      }
+                      disabled={disabled || !values.codexCacheAffinityEnabled}
+                      hint={t(
+                        'config_management.visual.sections.quota.cache_affinity_duration_hint'
+                      )}
+                      error={codexCacheAffinityMaxSessionDurationError}
+                    />
+                    <Input
+                      label={t(
+                        'config_management.visual.sections.quota.cache_affinity_preempt_percent'
+                      )}
+                      type="number"
+                      min="0.01"
+                      max="99.99"
+                      step="0.01"
+                      value={values.codexCacheAffinityQuotaPreemptPercent}
+                      onChange={(event) =>
+                        onChange({ codexCacheAffinityQuotaPreemptPercent: event.target.value })
+                      }
+                      disabled={disabled || !values.codexCacheAffinityEnabled}
+                      hint={t(
+                        'config_management.visual.sections.quota.cache_affinity_preempt_percent_hint'
+                      )}
+                      error={codexCacheAffinityQuotaPreemptPercentError}
+                    />
+                    <Input
+                      label={t(
+                        'config_management.visual.sections.quota.cache_affinity_hard_stop_percent'
+                      )}
+                      type="number"
+                      min="0.01"
+                      max="100"
+                      step="0.01"
+                      value={values.codexCacheAffinityQuotaHardStopPercent}
+                      onChange={(event) =>
+                        onChange({ codexCacheAffinityQuotaHardStopPercent: event.target.value })
+                      }
+                      disabled={disabled || !values.codexCacheAffinityEnabled}
+                      hint={t(
+                        'config_management.visual.sections.quota.cache_affinity_hard_stop_percent_hint'
+                      )}
+                      error={codexCacheAffinityQuotaHardStopPercentError}
+                    />
+                  </SectionGrid>
                 </SectionStack>
               </SectionSubsection>
 

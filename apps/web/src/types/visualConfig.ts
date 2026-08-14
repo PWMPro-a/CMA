@@ -21,6 +21,13 @@ export type VisualConfigFieldPath =
   | 'authAutoRefreshWorkers'
   | 'codexTailBurstTriggerUsedPercent'
   | 'codexTailBurstCollectorMaxConcurrency'
+  | 'codexCacheAffinityMaxEntries'
+  | 'codexCacheAffinityMaxRetryCredentials'
+  | 'codexCacheAffinityWebsocketPoolSlots'
+  | 'codexCacheAffinityMaxSessionRequests'
+  | 'codexCacheAffinityMaxSessionDuration'
+  | 'codexCacheAffinityQuotaPreemptPercent'
+  | 'codexCacheAffinityQuotaHardStopPercent'
   | 'codexClientMinVersion'
   | 'codexClientMaxVersion'
   | 'streaming.keepaliveSeconds'
@@ -34,6 +41,11 @@ export type VisualConfigValidationErrorCode =
   | 'retention_seconds_range'
   | 'codex_version'
   | 'codex_version_range'
+  | 'positive_integer'
+  | 'cache_affinity_websocket_slots_range'
+  | 'positive_duration'
+  | 'cache_affinity_preempt_percent_range'
+  | 'cache_affinity_hard_stop_percent_range'
   | 'tail_burst_trigger_percent_range'
   | 'tail_burst_collector_concurrency_range';
 
@@ -180,6 +192,15 @@ export type VisualConfigValues = {
   codexClientWhitelist: CodexClientRestrictionEntry[];
   codexClientBlacklist: CodexClientRestrictionEntry[];
   codexClientFingerprintSignals: CodexEngineFingerprintSignal[];
+  codexCacheAffinityEnabled: boolean;
+  codexCacheAffinityShadow: boolean;
+  codexCacheAffinityMaxEntries: string;
+  codexCacheAffinityMaxRetryCredentials: string;
+  codexCacheAffinityWebsocketPoolSlots: string;
+  codexCacheAffinityMaxSessionRequests: string;
+  codexCacheAffinityMaxSessionDuration: string;
+  codexCacheAffinityQuotaPreemptPercent: string;
+  codexCacheAffinityQuotaHardStopPercent: string;
   codexTailBurstEnabled: boolean;
   codexTailBurstTriggerUsedPercent: string;
   codexTailBurstSnapshotTtl: string;
@@ -290,13 +311,19 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
     {
       id: 'codex-fingerprint-body',
       type: 'body_path',
-      match: [
-        'client_metadata.x-codex-window-id',
-        'client_metadata.x-codex-installation-id',
-      ],
+      match: ['client_metadata.x-codex-window-id', 'client_metadata.x-codex-installation-id'],
       required: true,
     },
   ],
+  codexCacheAffinityEnabled: false,
+  codexCacheAffinityShadow: false,
+  codexCacheAffinityMaxEntries: '65536',
+  codexCacheAffinityMaxRetryCredentials: '2',
+  codexCacheAffinityWebsocketPoolSlots: '8',
+  codexCacheAffinityMaxSessionRequests: '50',
+  codexCacheAffinityMaxSessionDuration: '5m',
+  codexCacheAffinityQuotaPreemptPercent: '97',
+  codexCacheAffinityQuotaHardStopPercent: '99',
   codexTailBurstEnabled: false,
   codexTailBurstTriggerUsedPercent: '98',
   codexTailBurstSnapshotTtl: '90s',

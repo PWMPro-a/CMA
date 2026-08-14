@@ -3700,7 +3700,27 @@
           "tail_burst_collector_timeout": "額度採集逾時",
           "tail_burst_duration_hint": "Go duration 格式，例如 45s、1m。",
           "tail_burst_tool_injection": "自動注入工具呼叫宣告",
-          "tail_burst_tool_injection_desc": "對沒有工具宣告的 Codex 請求補充工具呼叫宣告，協助額度超限併發調度保持協議一致。"
+          "tail_burst_tool_injection_desc": "對沒有工具宣告的 Codex 請求補充工具呼叫宣告，協助額度超限併發調度保持協議一致。",
+          "cache_affinity_title": "Codex 快取親和",
+          "cache_affinity_desc": "穩定同一工作階段的帳號、上游快取識別與 WebSocket 槽位，在不增加網路請求的情況下提升提示詞快取命中率。",
+          "cache_affinity_enabled": "啟用快取親和排程",
+          "cache_affinity_enabled_desc": "啟用獨立親和協調器；關閉影子模式後，親和結果會參與實際帳號排程。",
+          "cache_affinity_shadow": "影子觀察模式",
+          "cache_affinity_shadow_desc": "只計算並記錄親和決策，不改變實際帳號排程；適合上線前觀察效果。",
+          "cache_affinity_max_entries": "最大親和記錄數",
+          "cache_affinity_max_entries_hint": "本機工作階段親和快取的容量上限；預設 65536。",
+          "cache_affinity_max_retry_credentials": "最大重試帳號數",
+          "cache_affinity_max_retry_credentials_hint": "單次請求失敗時最多嘗試的不同帳號數量；預設 2。",
+          "cache_affinity_websocket_pool_slots": "WebSocket 池槽位數",
+          "cache_affinity_websocket_pool_slots_hint": "將穩定工作階段映射到固定連線槽位；範圍 1–30，預設 8。",
+          "cache_affinity_max_session_requests": "單一工作階段最大請求數",
+          "cache_affinity_max_session_requests_hint": "達到此請求數後允許工作階段重新綁定，避免長期固定到單一帳號；預設 50。",
+          "cache_affinity_max_session_duration": "單一工作階段最長持續時間",
+          "cache_affinity_duration_hint": "Go duration 格式，例如 5m、30s、1h。",
+          "cache_affinity_preempt_percent": "新工作階段避讓門檻 (%)",
+          "cache_affinity_preempt_percent_hint": "帳號使用率達到此值後不再接收新的冷工作階段，已預熱工作階段仍可繼續；預設 97。",
+          "cache_affinity_hard_stop_percent": "硬停止門檻 (%)",
+          "cache_affinity_hard_stop_percent_hint": "帳號使用率達到此值後，已預熱工作階段也會遷移；必須高於避讓門檻且不超過 100。"
         },
         "streaming": {
           "title": "串流傳輸設定",
@@ -3824,7 +3844,12 @@
         "tail_burst_collector_concurrency_range": "請輸入 1 到 16 之間的整數",
         "payload_invalid_number": "請輸入有效數字",
         "payload_invalid_boolean": "請選擇 true 或 false",
-        "payload_invalid_json": "請輸入有效的 JSON"
+        "payload_invalid_json": "請輸入有效的 JSON",
+        "positive_integer": "請輸入大於或等於 1 的整數",
+        "cache_affinity_websocket_slots_range": "請輸入 1 到 30 之間的整數",
+        "cache_affinity_preempt_percent_range": "請輸入大於 0 且小於 100 的百分比",
+        "cache_affinity_hard_stop_percent_range": "硬停止門檻必須高於避讓門檻且不超過 100",
+        "positive_duration": "請輸入大於 0 的 Go duration，例如 30s、5m 或 1h"
       },
       "common": {
         "edit": "編輯",

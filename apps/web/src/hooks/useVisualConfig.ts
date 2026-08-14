@@ -102,9 +102,7 @@ function parseCodexClientRestrictionEntries(raw: unknown): CodexClientRestrictio
   }, []);
 }
 
-function parseCodexEngineFingerprintSignals(
-  raw: unknown
-): CodexEngineFingerprintSignal[] | null {
+function parseCodexEngineFingerprintSignals(raw: unknown): CodexEngineFingerprintSignal[] | null {
   if (!Array.isArray(raw)) return null;
   return raw.reduce<CodexEngineFingerprintSignal[]>((result, value) => {
     const signal = asRecord(value);
@@ -286,6 +284,34 @@ function migrateLegacyCodexClientRestriction(doc: YamlDocument): void {
 
   doc.setIn(canonicalPath, doc.createNode(merged));
   doc.deleteIn(legacyPath);
+}
+
+function migrateLegacyCodexCacheAffinity(doc: YamlDocument): void {
+  const legacyPath = ['codex', 'cacheAffinity'];
+  const canonicalPath = ['codex', 'cache-affinity'];
+  const legacy = yamlValueAsRecord(doc.getIn(legacyPath, true));
+  const canonical = yamlValueAsRecord(doc.getIn(canonicalPath, true));
+  if (!legacy && !canonical) return;
+
+  const keyAliases: Record<string, string> = {
+    maxEntries: 'max-entries',
+    maxRetryCredentials: 'max-retry-credentials',
+    websocketPoolSlots: 'websocket-pool-slots',
+    maxSessionRequests: 'max-session-requests',
+    maxSessionDuration: 'max-session-duration',
+    quotaPreemptUsedRatio: 'quota-preempt-used-ratio',
+    quotaHardStopUsedRatio: 'quota-hard-stop-used-ratio',
+  };
+  const merged: Record<string, unknown> = {};
+  Object.entries(legacy ?? {}).forEach(([key, value]) => {
+    merged[keyAliases[key] ?? key] = value;
+  });
+  Object.entries(canonical ?? {}).forEach(([key, value]) => {
+    merged[keyAliases[key] ?? key] = value;
+  });
+
+  doc.setIn(canonicalPath, doc.createNode(merged));
+  if (docHas(doc, legacyPath)) doc.deleteIn(legacyPath);
 }
 
 function deleteIfMapEmpty(doc: YamlDocument, path: YamlPath): void {
@@ -492,6 +518,13 @@ function getNonNegativeIntegerError(value: string): 'non_negative_integer' | und
   return Number(trimmed) >= 0 ? undefined : 'non_negative_integer';
 }
 
+function getPositiveIntegerError(value: string): 'positive_integer' | undefined {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return 'positive_integer';
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) && parsed >= 1 ? undefined : 'positive_integer';
+}
+
 function getIntegerError(value: string): 'integer' | undefined {
   const trimmed = value.trim();
   if (!trimmed) return undefined;
@@ -546,6 +579,46 @@ function getTailBurstTriggerPercentError(
     : 'tail_burst_trigger_percent_range';
 }
 
+function getCacheAffinityWebsocketSlotsError(
+  value: string
+): 'cache_affinity_websocket_slots_range' | undefined {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return 'cache_affinity_websocket_slots_range';
+  const parsed = Number(trimmed);
+  return parsed >= 1 && parsed <= 30 ? undefined : 'cache_affinity_websocket_slots_range';
+}
+
+function getPositiveDurationError(value: string): 'positive_duration' | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return 'positive_duration';
+  return /^(?:\d+(?:\.\d+)?(?:ns|us|µs|μs|ms|s|m|h))+$/.test(trimmed) && /[1-9]/.test(trimmed)
+    ? undefined
+    : 'positive_duration';
+}
+
+function getCacheAffinityPreemptPercentError(
+  value: string
+): 'cache_affinity_preempt_percent_range' | undefined {
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) && parsed > 0 && parsed < 100
+    ? undefined
+    : 'cache_affinity_preempt_percent_range';
+}
+
+function getCacheAffinityHardStopPercentError(
+  hardStopValue: string,
+  preemptValue: string
+): 'cache_affinity_hard_stop_percent_range' | undefined {
+  const hardStop = Number(hardStopValue.trim());
+  const preempt = Number(preemptValue.trim());
+  return Number.isFinite(hardStop) &&
+    Number.isFinite(preempt) &&
+    hardStop > preempt &&
+    hardStop <= 100
+    ? undefined
+    : 'cache_affinity_hard_stop_percent_range';
+}
+
 function getCodexVersionError(value: string): 'codex_version' | undefined {
   const trimmed = value.trim();
   if (!trimmed) return undefined;
@@ -572,6 +645,20 @@ function readTailBurstDuration(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() ? value : fallback;
 }
 
+function readRatioPercent(value: unknown, fallback: string, allowOne: boolean): string {
+  const ratio = Number(value);
+  const valid = Number.isFinite(ratio) && ratio > 0 && (allowOne ? ratio <= 1 : ratio < 1);
+  if (!valid) return fallback;
+  return String(Number((ratio * 100).toFixed(4)));
+}
+
+function setRatioPercentInDoc(doc: YamlDocument, path: YamlPath, value: string): void {
+  const percent = Number(value.trim());
+  if (Number.isFinite(percent) && percent > 0 && percent <= 100) {
+    doc.setIn(path, percent / 100);
+  }
+}
+
 function setTailBurstTriggerRatioInDoc(doc: YamlDocument, path: YamlPath, value: string): void {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -594,10 +681,8 @@ export function getVisualConfigValidationErrors(
     !maxVersionError &&
     values.codexClientMinVersion.trim() &&
     values.codexClientMaxVersion.trim() &&
-    compareCodexVersions(
-      values.codexClientMaxVersion.trim(),
-      values.codexClientMinVersion.trim()
-    ) < 0
+    compareCodexVersions(values.codexClientMaxVersion.trim(), values.codexClientMinVersion.trim()) <
+      0
       ? 'codex_version_range'
       : undefined;
   return {
@@ -614,6 +699,30 @@ export function getVisualConfigValidationErrors(
     authAutoRefreshWorkers: getNonNegativeIntegerError(values.authAutoRefreshWorkers),
     codexClientMinVersion: minVersionError,
     codexClientMaxVersion: maxVersionError ?? versionRangeError,
+    codexCacheAffinityMaxEntries: values.codexCacheAffinityEnabled
+      ? getPositiveIntegerError(values.codexCacheAffinityMaxEntries)
+      : undefined,
+    codexCacheAffinityMaxRetryCredentials: values.codexCacheAffinityEnabled
+      ? getPositiveIntegerError(values.codexCacheAffinityMaxRetryCredentials)
+      : undefined,
+    codexCacheAffinityWebsocketPoolSlots: values.codexCacheAffinityEnabled
+      ? getCacheAffinityWebsocketSlotsError(values.codexCacheAffinityWebsocketPoolSlots)
+      : undefined,
+    codexCacheAffinityMaxSessionRequests: values.codexCacheAffinityEnabled
+      ? getPositiveIntegerError(values.codexCacheAffinityMaxSessionRequests)
+      : undefined,
+    codexCacheAffinityMaxSessionDuration: values.codexCacheAffinityEnabled
+      ? getPositiveDurationError(values.codexCacheAffinityMaxSessionDuration)
+      : undefined,
+    codexCacheAffinityQuotaPreemptPercent: values.codexCacheAffinityEnabled
+      ? getCacheAffinityPreemptPercentError(values.codexCacheAffinityQuotaPreemptPercent)
+      : undefined,
+    codexCacheAffinityQuotaHardStopPercent: values.codexCacheAffinityEnabled
+      ? getCacheAffinityHardStopPercentError(
+          values.codexCacheAffinityQuotaHardStopPercent,
+          values.codexCacheAffinityQuotaPreemptPercent
+        )
+      : undefined,
     codexTailBurstTriggerUsedPercent: values.codexTailBurstEnabled
       ? getTailBurstTriggerPercentError(values.codexTailBurstTriggerUsedPercent)
       : undefined,
@@ -741,6 +850,15 @@ function getNextDirtyFields(
       'codexClientMinVersion',
       'codexClientMaxVersion',
       'codexClientAllowAppServer',
+      'codexCacheAffinityEnabled',
+      'codexCacheAffinityShadow',
+      'codexCacheAffinityMaxEntries',
+      'codexCacheAffinityMaxRetryCredentials',
+      'codexCacheAffinityWebsocketPoolSlots',
+      'codexCacheAffinityMaxSessionRequests',
+      'codexCacheAffinityMaxSessionDuration',
+      'codexCacheAffinityQuotaPreemptPercent',
+      'codexCacheAffinityQuotaHardStopPercent',
       'codexTailBurstEnabled',
       'codexTailBurstTriggerUsedPercent',
       'codexTailBurstSnapshotTtl',
@@ -1066,6 +1184,7 @@ export function useVisualConfig() {
       const codexClientRestriction = asRecord(
         codex?.['client-restriction'] ?? codex?.clientRestriction
       );
+      const codexCacheAffinity = asRecord(codex?.['cache-affinity'] ?? codex?.cacheAffinity);
       const codexTailBurst = asRecord(codex?.['tail-burst'] ?? codex?.tailBurst);
       const codexTailBurstCollector = asRecord(
         codexTailBurst?.['quota-collector'] ?? codexTailBurst?.quotaCollector
@@ -1177,8 +1296,7 @@ export function useVisualConfig() {
             : '',
         codexIdentityConfuse: Boolean(codex?.['identity-confuse'] ?? codex?.identityConfuse),
         codexClientForceAllow: Boolean(
-          codexClientRestriction?.['force-codex-cli'] ??
-            codexClientRestriction?.forceCodexCli
+          codexClientRestriction?.['force-codex-cli'] ?? codexClientRestriction?.forceCodexCli
         ),
         codexClientMinVersion:
           typeof codexClientRestriction?.['min-codex-version'] === 'string'
@@ -1194,19 +1312,51 @@ export function useVisualConfig() {
               : '',
         codexClientAllowAppServer: Boolean(
           codexClientRestriction?.['allow-app-server-clients'] ??
-            codexClientRestriction?.allowAppServerClients
+          codexClientRestriction?.allowAppServerClients
         ),
-        codexClientWhitelist: parseCodexClientRestrictionEntries(
-          codexClientRestriction?.whitelist
-        ),
-        codexClientBlacklist: parseCodexClientRestrictionEntries(
-          codexClientRestriction?.blacklist
-        ),
+        codexClientWhitelist: parseCodexClientRestrictionEntries(codexClientRestriction?.whitelist),
+        codexClientBlacklist: parseCodexClientRestrictionEntries(codexClientRestriction?.blacklist),
         codexClientFingerprintSignals:
           parseCodexEngineFingerprintSignals(
             codexClientRestriction?.['engine-fingerprint-signals'] ??
               codexClientRestriction?.engineFingerprintSignals
           ) ?? deepClone(DEFAULT_VISUAL_VALUES.codexClientFingerprintSignals),
+        codexCacheAffinityEnabled: Boolean(codexCacheAffinity?.enabled),
+        codexCacheAffinityShadow: Boolean(codexCacheAffinity?.shadow),
+        codexCacheAffinityMaxEntries: String(
+          codexCacheAffinity?.['max-entries'] ?? codexCacheAffinity?.maxEntries ?? 65536
+        ),
+        codexCacheAffinityMaxRetryCredentials: String(
+          codexCacheAffinity?.['max-retry-credentials'] ??
+            codexCacheAffinity?.maxRetryCredentials ??
+            2
+        ),
+        codexCacheAffinityWebsocketPoolSlots: String(
+          codexCacheAffinity?.['websocket-pool-slots'] ??
+            codexCacheAffinity?.websocketPoolSlots ??
+            8
+        ),
+        codexCacheAffinityMaxSessionRequests: String(
+          codexCacheAffinity?.['max-session-requests'] ??
+            codexCacheAffinity?.maxSessionRequests ??
+            50
+        ),
+        codexCacheAffinityMaxSessionDuration: readTailBurstDuration(
+          codexCacheAffinity?.['max-session-duration'] ?? codexCacheAffinity?.maxSessionDuration,
+          '5m'
+        ),
+        codexCacheAffinityQuotaPreemptPercent: readRatioPercent(
+          codexCacheAffinity?.['quota-preempt-used-ratio'] ??
+            codexCacheAffinity?.quotaPreemptUsedRatio,
+          '97',
+          false
+        ),
+        codexCacheAffinityQuotaHardStopPercent: readRatioPercent(
+          codexCacheAffinity?.['quota-hard-stop-used-ratio'] ??
+            codexCacheAffinity?.quotaHardStopUsedRatio,
+          '99',
+          true
+        ),
         codexTailBurstEnabled: Boolean(codexTailBurst?.enabled),
         codexTailBurstTriggerUsedPercent: readTailBurstTriggerPercent(
           codexTailBurst?.['trigger-used-ratio'] ?? codexTailBurst?.triggerUsedRatio
@@ -1444,14 +1594,16 @@ export function useVisualConfig() {
         if (isDirty('passthroughHeaders')) {
           setBooleanInDoc(doc, ['passthrough-headers'], values.passthroughHeaders);
         }
-        if (isDirty('requestRetry')) setIntFromStringInDoc(doc, ['request-retry'], values.requestRetry);
+        if (isDirty('requestRetry'))
+          setIntFromStringInDoc(doc, ['request-retry'], values.requestRetry);
         if (isDirty('maxRetryCredentials')) {
           setIntFromStringInDoc(doc, ['max-retry-credentials'], values.maxRetryCredentials);
         }
         if (isDirty('maxRetryInterval')) {
           setIntFromStringInDoc(doc, ['max-retry-interval'], values.maxRetryInterval);
         }
-        if (isDirty('disableCooling')) setBooleanInDoc(doc, ['disable-cooling'], values.disableCooling);
+        if (isDirty('disableCooling'))
+          setBooleanInDoc(doc, ['disable-cooling'], values.disableCooling);
         if (isDirty('saveCooldownStatus')) {
           setBooleanInDoc(doc, ['save-cooldown-status'], values.saveCooldownStatus);
         }
@@ -1651,6 +1803,79 @@ export function useVisualConfig() {
           }
         }
 
+        const codexCacheAffinityDirty =
+          isDirty('codexCacheAffinityEnabled') ||
+          isDirty('codexCacheAffinityShadow') ||
+          isDirty('codexCacheAffinityMaxEntries') ||
+          isDirty('codexCacheAffinityMaxRetryCredentials') ||
+          isDirty('codexCacheAffinityWebsocketPoolSlots') ||
+          isDirty('codexCacheAffinityMaxSessionRequests') ||
+          isDirty('codexCacheAffinityMaxSessionDuration') ||
+          isDirty('codexCacheAffinityQuotaPreemptPercent') ||
+          isDirty('codexCacheAffinityQuotaHardStopPercent');
+        if (codexCacheAffinityDirty) {
+          ensureMapInDoc(doc, ['codex']);
+          migrateLegacyCodexCacheAffinity(doc);
+          ensureMapInDoc(doc, ['codex', 'cache-affinity']);
+          if (isDirty('codexCacheAffinityEnabled')) {
+            doc.setIn(['codex', 'cache-affinity', 'enabled'], values.codexCacheAffinityEnabled);
+          }
+          if (isDirty('codexCacheAffinityShadow')) {
+            doc.setIn(['codex', 'cache-affinity', 'shadow'], values.codexCacheAffinityShadow);
+          }
+          if (isDirty('codexCacheAffinityMaxEntries')) {
+            setIntFromStringInDoc(
+              doc,
+              ['codex', 'cache-affinity', 'max-entries'],
+              values.codexCacheAffinityMaxEntries
+            );
+          }
+          if (isDirty('codexCacheAffinityMaxRetryCredentials')) {
+            setIntFromStringInDoc(
+              doc,
+              ['codex', 'cache-affinity', 'max-retry-credentials'],
+              values.codexCacheAffinityMaxRetryCredentials
+            );
+          }
+          if (isDirty('codexCacheAffinityWebsocketPoolSlots')) {
+            setIntFromStringInDoc(
+              doc,
+              ['codex', 'cache-affinity', 'websocket-pool-slots'],
+              values.codexCacheAffinityWebsocketPoolSlots
+            );
+          }
+          if (isDirty('codexCacheAffinityMaxSessionRequests')) {
+            setIntFromStringInDoc(
+              doc,
+              ['codex', 'cache-affinity', 'max-session-requests'],
+              values.codexCacheAffinityMaxSessionRequests
+            );
+          }
+          if (isDirty('codexCacheAffinityMaxSessionDuration')) {
+            setStringInDoc(
+              doc,
+              ['codex', 'cache-affinity', 'max-session-duration'],
+              values.codexCacheAffinityMaxSessionDuration
+            );
+          }
+          if (isDirty('codexCacheAffinityQuotaPreemptPercent')) {
+            setRatioPercentInDoc(
+              doc,
+              ['codex', 'cache-affinity', 'quota-preempt-used-ratio'],
+              values.codexCacheAffinityQuotaPreemptPercent
+            );
+          }
+          if (isDirty('codexCacheAffinityQuotaHardStopPercent')) {
+            setRatioPercentInDoc(
+              doc,
+              ['codex', 'cache-affinity', 'quota-hard-stop-used-ratio'],
+              values.codexCacheAffinityQuotaHardStopPercent
+            );
+          }
+          deleteIfMapEmpty(doc, ['codex', 'cache-affinity']);
+          deleteIfMapEmpty(doc, ['codex']);
+        }
+
         const codexTailBurstDirty =
           isDirty('codexTailBurstEnabled') ||
           isDirty('codexTailBurstTriggerUsedPercent') ||
@@ -1723,16 +1948,17 @@ export function useVisualConfig() {
         const writeQuotaSwitchProject = isDirty('quotaSwitchProject');
         const writeQuotaSwitchPreviewModel = isDirty('quotaSwitchPreviewModel');
         const writeQuotaAntigravityCredits = isDirty('quotaAntigravityCredits');
-        if (writeQuotaSwitchProject || writeQuotaSwitchPreviewModel || writeQuotaAntigravityCredits) {
+        if (
+          writeQuotaSwitchProject ||
+          writeQuotaSwitchPreviewModel ||
+          writeQuotaAntigravityCredits
+        ) {
           ensureMapInDoc(doc, ['quota-exceeded']);
           if (writeQuotaSwitchProject) {
             doc.setIn(['quota-exceeded', 'switch-project'], values.quotaSwitchProject);
           }
           if (writeQuotaSwitchPreviewModel) {
-            doc.setIn(
-              ['quota-exceeded', 'switch-preview-model'],
-              values.quotaSwitchPreviewModel
-            );
+            doc.setIn(['quota-exceeded', 'switch-preview-model'], values.quotaSwitchPreviewModel);
           }
           if (writeQuotaAntigravityCredits) {
             doc.setIn(['quota-exceeded', 'antigravity-credits'], values.quotaAntigravityCredits);

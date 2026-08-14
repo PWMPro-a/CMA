@@ -3700,7 +3700,27 @@
           "tail_burst_collector_timeout": "Тайм-аут сбора квоты",
           "tail_burst_duration_hint": "Формат Go duration, например 45s или 1m.",
           "tail_burst_tool_injection": "Добавлять объявление вызова инструмента",
-          "tail_burst_tool_injection_desc": "Добавляет объявление вызова инструмента в запросы Codex без него, чтобы сохранить единый формат протокола для tail-burst планирования."
+          "tail_burst_tool_injection_desc": "Добавляет объявление вызова инструмента в запросы Codex без него, чтобы сохранить единый формат протокола для tail-burst планирования.",
+          "cache_affinity_title": "Привязка кэша Codex",
+          "cache_affinity_desc": "Закрепляет сеанс за учётными данными, идентификатором upstream-кэша и слотом WebSocket, повышая попадания в кэш без дополнительных сетевых запросов.",
+          "cache_affinity_enabled": "Включить маршрутизацию с привязкой кэша",
+          "cache_affinity_enabled_desc": "Включает независимый координатор привязки. При выключенном теневом режиме решения влияют на выбор учётных данных.",
+          "cache_affinity_shadow": "Теневой режим наблюдения",
+          "cache_affinity_shadow_desc": "Рассчитывает и записывает решения, не меняя фактическую маршрутизацию; удобно для проверки перед включением.",
+          "cache_affinity_max_entries": "Максимум записей привязки",
+          "cache_affinity_max_entries_hint": "Ёмкость локального кэша привязки сеансов; по умолчанию 65536.",
+          "cache_affinity_max_retry_credentials": "Максимум учётных данных для повтора",
+          "cache_affinity_max_retry_credentials_hint": "Максимальное число разных учётных данных после ошибки запроса; по умолчанию 2.",
+          "cache_affinity_websocket_pool_slots": "Слоты пула WebSocket",
+          "cache_affinity_websocket_pool_slots_hint": "Стабильно сопоставляет сеансы слотам соединений; диапазон 1–30, по умолчанию 8.",
+          "cache_affinity_max_session_requests": "Максимум запросов на сеанс",
+          "cache_affinity_max_session_requests_hint": "После этого числа запросов разрешает перепривязку, чтобы не закреплять одну учётную запись навсегда; по умолчанию 50.",
+          "cache_affinity_max_session_duration": "Максимальная длительность сеанса",
+          "cache_affinity_duration_hint": "Формат Go duration, например 5m, 30s или 1h.",
+          "cache_affinity_preempt_percent": "Порог отвода новых сеансов (%)",
+          "cache_affinity_preempt_percent_hint": "При этом уровне использования новые холодные сеансы не назначаются, а прогретые могут продолжить работу; по умолчанию 97.",
+          "cache_affinity_hard_stop_percent": "Порог жёсткой остановки (%)",
+          "cache_affinity_hard_stop_percent_hint": "При этом уровне перемещаются и прогретые сеансы. Значение должно быть выше порога отвода и не больше 100."
         },
         "streaming": {
           "title": "Настройки стриминга",
@@ -3824,7 +3844,12 @@
         "tail_burst_collector_concurrency_range": "Введите целое число от 1 до 16",
         "payload_invalid_number": "Введите корректное число",
         "payload_invalid_boolean": "Выберите true или false",
-        "payload_invalid_json": "Введите корректный JSON"
+        "payload_invalid_json": "Введите корректный JSON",
+        "positive_integer": "Введите целое число не меньше 1",
+        "cache_affinity_websocket_slots_range": "Введите целое число от 1 до 30",
+        "cache_affinity_preempt_percent_range": "Введите процент больше 0 и меньше 100",
+        "cache_affinity_hard_stop_percent_range": "Порог жёсткой остановки должен быть выше порога отвода и не больше 100",
+        "positive_duration": "Введите положительную длительность Go, например 30s, 5m или 1h"
       },
       "common": {
         "edit": "Изменить",

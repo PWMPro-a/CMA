@@ -3700,7 +3700,27 @@
           "tail_burst_collector_timeout": "Quota collection timeout",
           "tail_burst_duration_hint": "Go duration format, for example 45s or 1m.",
           "tail_burst_tool_injection": "Inject tool-call declaration",
-          "tail_burst_tool_injection_desc": "Add a tool-call declaration to Codex requests without one so tail-burst scheduling keeps a consistent protocol shape."
+          "tail_burst_tool_injection_desc": "Add a tool-call declaration to Codex requests without one so tail-burst scheduling keeps a consistent protocol shape.",
+          "cache_affinity_title": "Codex cache affinity",
+          "cache_affinity_desc": "Keeps each session on stable credentials, upstream cache identities, and WebSocket slots to improve prompt-cache hits without extra network work.",
+          "cache_affinity_enabled": "Enable cache-affinity routing",
+          "cache_affinity_enabled_desc": "Enables the independent affinity coordinator. With shadow mode off, affinity decisions affect credential routing.",
+          "cache_affinity_shadow": "Shadow observation mode",
+          "cache_affinity_shadow_desc": "Computes and records affinity decisions without changing actual credential routing; useful before activation.",
+          "cache_affinity_max_entries": "Maximum affinity entries",
+          "cache_affinity_max_entries_hint": "Capacity of the local session-affinity cache; default 65536.",
+          "cache_affinity_max_retry_credentials": "Maximum retry credentials",
+          "cache_affinity_max_retry_credentials_hint": "Maximum distinct credentials tried after a request failure; default 2.",
+          "cache_affinity_websocket_pool_slots": "WebSocket pool slots",
+          "cache_affinity_websocket_pool_slots_hint": "Maps stable sessions to fixed connection slots; range 1–30, default 8.",
+          "cache_affinity_max_session_requests": "Maximum requests per session",
+          "cache_affinity_max_session_requests_hint": "Allows rebinding after this many requests to avoid pinning one credential indefinitely; default 50.",
+          "cache_affinity_max_session_duration": "Maximum session duration",
+          "cache_affinity_duration_hint": "Go duration format, for example 5m, 30s, or 1h.",
+          "cache_affinity_preempt_percent": "New-session preemption threshold (%)",
+          "cache_affinity_preempt_percent_hint": "At this usage level, the credential stops accepting new cold sessions while warm sessions may continue; default 97.",
+          "cache_affinity_hard_stop_percent": "Hard-stop threshold (%)",
+          "cache_affinity_hard_stop_percent_hint": "At this usage level, warm sessions are moved too. Must exceed the preemption threshold and be at most 100."
         },
         "streaming": {
           "title": "Streaming Configuration",
@@ -3824,7 +3844,12 @@
         "tail_burst_collector_concurrency_range": "Enter an integer between 1 and 16",
         "payload_invalid_number": "Enter a valid number",
         "payload_invalid_boolean": "Choose true or false",
-        "payload_invalid_json": "Enter valid JSON"
+        "payload_invalid_json": "Enter valid JSON",
+        "positive_integer": "Enter an integer greater than or equal to 1",
+        "cache_affinity_websocket_slots_range": "Enter an integer from 1 to 30",
+        "cache_affinity_preempt_percent_range": "Enter a percentage greater than 0 and less than 100",
+        "cache_affinity_hard_stop_percent_range": "The hard-stop threshold must exceed the preemption threshold and be at most 100",
+        "positive_duration": "Enter a positive Go duration such as 30s, 5m, or 1h"
       },
       "common": {
         "edit": "Edit",
