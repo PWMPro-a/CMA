@@ -820,6 +820,7 @@ export function SupplyPage() {
     typeof value === 'number' && Number.isFinite(value) ? (value * tokenUnit) / 1000 : undefined;
   const currentCapacityTokenM =
     smart?.currentCapacityTokenM ?? rcuToTokenM(smart?.currentCapacityRcu);
+  const timeLimitedCapacityTokenM = smart?.timeLimitedCapacityTokenM ?? currentCapacityTokenM;
   const targetCapacityTokenM = smart?.targetCapacityTokenM ?? rcuToTokenM(smart?.targetCapacityRcu);
   const capacityGapTokenM = smart?.capacityGapTokenM ?? rcuToTokenM(smart?.capacityGapRcu);
   const rawCapacityTokenM =
@@ -828,9 +829,30 @@ export function SupplyPage() {
     smart?.expiryWasteRiskTokenM ?? rcuToTokenM(smart?.expiryWasteRiskRcu ?? 0);
   const consumeTokenMPerMinute =
     smart?.consumeTokenMPerMinute ?? rcuToTokenM(smart?.consumeRcuPerMinute);
+  const planningTokenMPerMinute =
+    smart?.demandPlanningTokenMPerMinute ?? rcuToTokenM(smart?.demandPlanningRcuPerMinute);
+  const forecastTokenMPerMinute = Math.max(
+    consumeTokenMPerMinute ?? 0,
+    planningTokenMPerMinute ?? 0
+  );
+  const forecastSustainMinutes =
+    smart?.forecastSustainMinutes ??
+    (forecastTokenMPerMinute > 0 && (timeLimitedCapacityTokenM ?? 0) > 0
+      ? (timeLimitedCapacityTokenM ?? 0) / forecastTokenMPerMinute
+      : undefined);
+  const forecastConsumptionTokenM = (minutes: number) =>
+    forecastTokenMPerMinute > 0 ? forecastTokenMPerMinute * minutes : 0;
+  const forecastPressureTone = (minutes: number) => {
+    const usable = timeLimitedCapacityTokenM ?? 0;
+    const projected = forecastConsumptionTokenM(minutes);
+    if (usable <= 0 || projected <= 0) return '';
+    if (projected >= usable) return styles.forecastCritical;
+    if (projected >= usable * 0.6) return styles.forecastWarning;
+    return styles.forecastHealthy;
+  };
   const capacityPercent = smart
     ? clampPercent(
-        ((currentCapacityTokenM ?? 0) / Math.max(0.001, targetCapacityTokenM ?? 0.001)) * 100
+        ((timeLimitedCapacityTokenM ?? 0) / Math.max(0.001, targetCapacityTokenM ?? 0.001)) * 100
       )
     : 0;
   const snapshotLabel = t(snapshotLabelKey(smart), {
@@ -1251,9 +1273,10 @@ export function SupplyPage() {
       return [
         {
           label: t('supply.effective_capacity_1h'),
-          value: formatTokenM(currentCapacityTokenM),
+          value: formatTokenM(rawCapacityTokenM),
           detail: t('supply.raw_capacity_waste_detail', {
             raw: formatNumber(rawCapacityTokenM),
+            usable: formatNumber(timeLimitedCapacityTokenM),
             waste: formatNumber(expiryWasteRiskTokenM ?? 0),
             accountQuota: formatNumber(smart?.accountQuotaEstimateM, 2),
             source: t(
@@ -1344,7 +1367,6 @@ export function SupplyPage() {
   }, [
     balance,
     consumeTokenMPerMinute,
-    currentCapacityTokenM,
     draft.healthyMinutesTarget,
     draft.smartEnabled,
     draft.targetAvailableAccounts,
@@ -1352,6 +1374,7 @@ export function SupplyPage() {
     inventory,
     overview,
     rawCapacityTokenM,
+    timeLimitedCapacityTokenM,
     smart,
     t,
   ]);
@@ -1678,6 +1701,65 @@ export function SupplyPage() {
         ))}
       </section>
 
+      {smart?.enabled ? (
+        <section
+          className={styles.consumptionForecast}
+          aria-label={t('supply.consumption_forecast_title')}
+        >
+          <div className={styles.consumptionForecastHeader}>
+            <div>
+              <strong>{t('supply.consumption_forecast_title')}</strong>
+              <span>{t('supply.consumption_forecast_hint')}</span>
+            </div>
+            <span className={`${styles.statusPill} ${styles.active}`}>
+              {t('supply.forecast_rate_basis', {
+                value: formatTokenMRate(forecastTokenMPerMinute),
+              })}
+            </span>
+          </div>
+          <div className={styles.consumptionForecastGrid}>
+            <article className={`${styles.consumptionForecastItem} ${styles.forecastRate}`}>
+              <span>{t('supply.forecast_current_rate')}</span>
+              <strong>{formatTokenMRate(consumeTokenMPerMinute)}</strong>
+              <small>
+                {t('supply.forecast_current_rate_hint', {
+                  minutes: smart?.usageSampleMinutes ?? 0,
+                })}
+              </small>
+            </article>
+            {[10, 30, 60].map((minutes) => (
+              <article
+                className={`${styles.consumptionForecastItem} ${forecastPressureTone(minutes)}`}
+                key={minutes}
+              >
+                <span>{t('supply.forecast_consumption_window', { minutes })}</span>
+                <strong>{formatTokenM(forecastConsumptionTokenM(minutes))}</strong>
+                <small>
+                  {t('supply.forecast_consumption_hint', {
+                    rate: formatTokenMRate(forecastTokenMPerMinute),
+                  })}
+                </small>
+              </article>
+            ))}
+            <article className={`${styles.consumptionForecastItem} ${styles.forecastBalance}`}>
+              <span>{t('supply.forecast_usable_balance')}</span>
+              <strong>{formatTokenM(timeLimitedCapacityTokenM)}</strong>
+              <small>
+                {t('supply.forecast_usable_balance_hint', {
+                  raw: formatTokenM(rawCapacityTokenM),
+                  waste: formatTokenM(expiryWasteRiskTokenM ?? 0),
+                })}
+              </small>
+            </article>
+            <article className={`${styles.consumptionForecastItem} ${styles.forecastRunway}`}>
+              <span>{t('supply.forecast_runway')}</span>
+              <strong>{formatMinutes(forecastSustainMinutes)}</strong>
+              <small>{t('supply.forecast_runway_hint')}</small>
+            </article>
+          </div>
+        </section>
+      ) : null}
+
       {overview?.lastError ? <div className={styles.errorBanner}>{overview.lastError}</div> : null}
 
       <section className={styles.workspace}>
@@ -1845,7 +1927,7 @@ export function SupplyPage() {
                 <div className={styles.capacityOverview}>
                   <div>
                     <span>{t('supply.current_capacity')}</span>
-                    <strong>{formatTokenM(currentCapacityTokenM)}</strong>
+                    <strong>{formatTokenM(timeLimitedCapacityTokenM)}</strong>
                   </div>
                   <div>
                     <span>{t('supply.target_capacity')}</span>

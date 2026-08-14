@@ -8,6 +8,7 @@
 .hero,
 .panel,
 .metricCard,
+.consumptionForecast,
 .workspace {
   border: 1px solid color-mix(in srgb, var(--border-color) 88%, transparent);
   border-radius: var(--app-radius-md);
@@ -359,6 +360,101 @@
   color: var(--text-primary);
   font-size: 23px;
   line-height: 1;
+}
+
+.consumptionForecast {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+  background:
+    radial-gradient(circle at 92% 0, color-mix(in srgb, #3182ce 9%, transparent), transparent 34%),
+    color-mix(in srgb, var(--bg-primary) 95%, var(--surface-subtle));
+}
+
+.consumptionForecastHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.consumptionForecastHeader > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.consumptionForecastHeader strong {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 790;
+}
+
+.consumptionForecastHeader span {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.consumptionForecastGrid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.consumptionForecastItem {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--bg-primary) 79%, var(--surface-subtle));
+}
+
+.consumptionForecastItem span,
+.consumptionForecastItem small {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.consumptionForecastItem strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 18px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.forecastRate {
+  border-color: color-mix(in srgb, #ea7b20 35%, var(--border-color));
+  background: color-mix(in srgb, #ea7b20 7%, var(--bg-primary));
+}
+
+.forecastHealthy,
+.forecastBalance {
+  border-color: color-mix(in srgb, #0d9488 30%, var(--border-color));
+  background: color-mix(in srgb, #0d9488 6%, var(--bg-primary));
+}
+
+.forecastWarning {
+  border-color: color-mix(in srgb, #f59e0b 42%, var(--border-color));
+  background: color-mix(in srgb, #f59e0b 8%, var(--bg-primary));
+}
+
+.forecastCritical {
+  border-color: color-mix(in srgb, #e5484d 46%, var(--border-color));
+  background: color-mix(in srgb, #e5484d 8%, var(--bg-primary));
+}
+
+.forecastRunway {
+  border-color: color-mix(in srgb, #3182ce 38%, var(--border-color));
+  background: color-mix(in srgb, #3182ce 7%, var(--bg-primary));
 }
 
 .teal {
@@ -1291,6 +1387,10 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .consumptionForecastGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .quotaEstimateGrid,
   .quotaPolicyConfigGrid {
     grid-template-columns: 1fr;
@@ -1329,6 +1429,10 @@
   .riskBucketGrid,
   .dimensionGrid {
     grid-template-columns: 1fr;
+  }
+
+  .consumptionForecastGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .quotaPolicyFields {
@@ -1377,6 +1481,11 @@
     flex-direction: column;
   }
 
+  .consumptionForecastHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .quotaEstimateHeader,
   .quotaEstimateCardHeader,
   .quotaPolicyConfigHeader {
@@ -1387,6 +1496,10 @@
   .quotaPolicyConfigHeader span {
     max-width: none;
     text-align: left;
+  }
+
+  .consumptionForecastGrid {
+    grid-template-columns: 1fr;
   }
 
   .strategyDescription {

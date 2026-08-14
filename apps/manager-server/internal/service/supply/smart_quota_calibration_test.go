@@ -176,9 +176,9 @@ func TestSmartQuotaCompleteWindowUsesIndependentAccountFormula(t *testing.T) {
 	service.recordSmartQuotaWindowBaselines([]smartQuotaWindowBaseline{{
 		identity:     "file:active.json",
 		planType:     "team",
-		fraction:     0.10,
+		fraction:     0.11,
 		observedMS:   now.UnixMilli(),
-		windowTokens: 4_000_000,
+		windowTokens: 4_400_000,
 		lastSeenMS:   now.UnixMilli(),
 	}}, now)
 
@@ -192,6 +192,64 @@ func TestSmartQuotaCompleteWindowUsesIndependentAccountFormula(t *testing.T) {
 	if estimate.CapacityM != 40 || estimate.Source != smartQuotaEstimateSourceCurrent ||
 		!estimate.IndependentAccount || estimate.CurrentEstimateM != 40 {
 		t.Fatalf("independent account estimate = %#v", estimate)
+	}
+}
+
+func TestSmartQuotaCalibrationRequiresStrictlyMoreThanTenPercentUsed(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	service.recordSmartQuotaWindowBaselines([]smartQuotaWindowBaseline{
+		{
+			identity:     "file:exact-ten.json",
+			planType:     "team",
+			fraction:     0.10,
+			observedMS:   now.UnixMilli(),
+			windowTokens: 4_000_000,
+			lastSeenMS:   now.UnixMilli(),
+		},
+		{
+			identity:     "file:above-ten.json",
+			planType:     "team",
+			fraction:     0.11,
+			observedMS:   now.UnixMilli(),
+			windowTokens: 4_400_000,
+			lastSeenMS:   now.UnixMilli(),
+		},
+	}, now)
+
+	if _, ok := service.smartQuotaState.directSamples["file:exact-ten.json"]; ok {
+		t.Fatalf("an account at exactly 10%% entered direct calibration")
+	}
+	if sample, ok := service.smartQuotaState.directSamples["file:above-ten.json"]; !ok || sample.capacityM != 40 {
+		t.Fatalf("account above 10%% was not calibrated: %#v/%v", sample, ok)
+	}
+	if _, ok := estimateSmartQuotaSamplesAt([]smartQuotaCalibrationSample{{
+		identity: "file:exact-ten.json", planType: "team", capacityM: 40,
+		weight: 1, usedFraction: 0.10, observedMS: now.UnixMilli(),
+	}}, smartQuotaEstimateSourceCurrent, 1, 0.1, now); ok {
+		t.Fatalf("an in-memory sample at exactly 10%% entered estimation")
+	}
+}
+
+func TestSmartQuotaCompleteWindowOverridesRuntimeDeltasForSameAccount(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	samples := []smartQuotaCalibrationSample{
+		{
+			identity: "file:active.json", planType: "team", capacityM: 60,
+			weight: 1, usedFraction: 0.20, observedMS: now.UnixMilli(), completeWindow: true,
+		},
+		{
+			identity: "file:active.json", planType: "team", capacityM: 6,
+			weight: 0.01, usedFraction: 0.18, observedMS: now.Add(-time.Second).UnixMilli(),
+		},
+		{
+			identity: "file:active.json", planType: "team", capacityM: 7,
+			weight: 0.01, usedFraction: 0.19, observedMS: now.Add(-500 * time.Millisecond).UnixMilli(),
+		},
+	}
+	estimate, ok := estimateSmartQuotaSamplesAt(samples, smartQuotaEstimateSourceCurrent, 1, 0.1, now)
+	if !ok || estimate.CapacityM != 60 || estimate.SampleCount != 1 || !estimate.IndependentAccount {
+		t.Fatalf("complete-window precedence estimate = %#v/%v", estimate, ok)
 	}
 }
 

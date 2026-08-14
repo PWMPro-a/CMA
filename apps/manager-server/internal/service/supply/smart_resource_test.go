@@ -888,14 +888,14 @@ func TestCachedInspectionSnapshotSeedsCompleteIndependentQuotaUsage(t *testing.T
 			Model:            "gpt-test",
 			AuthFileSnapshot: fileName,
 			AuthIndex:        authIndex,
-			TotalTokens:      1_000_000,
+			TotalTokens:      1_100_000,
 			CreatedAtMS:      timestamp.UnixMilli(),
 		})
 	}
 	if _, err := st.InsertEvents(context.Background(), events); err != nil {
 		t.Fatalf("insert usage events: %v", err)
 	}
-	usedPercent := 10.0
+	usedPercent := 11.0
 	weeklySeconds := float64(smartQuotaWeekSeconds)
 	seedCompletedQuotaInspection(t, st, store.CodexInspectionResult{
 		AccountKey:  "active-team",

@@ -173,6 +173,13 @@ func normalizeSmartQuotaFraction(value float64) (float64, bool) {
 	return value / 100, true
 }
 
+func smartQuotaCalibrationUsedFractionEligible(fraction float64) bool {
+	// Ten percent is still too sensitive to provider percentage rounding. An
+	// account becomes calibration evidence only after it has moved strictly past
+	// the 10% mark.
+	return fraction > smartQuotaCalibrationMinUsedFraction
+}
+
 func smartQuotaCalibrationEventIdentity(event usage.Event) string {
 	if value := normalizeSmartQuotaIdentity(event.AuthFileSnapshot); value != "" {
 		return "file:" + value
@@ -322,7 +329,7 @@ func smartQuotaWindowBaselinesForInspection(results []store.CodexInspectionResul
 			continue
 		}
 		fraction, ok := normalizeSmartQuotaFraction(*window.UsedPercent)
-		if !ok || fraction < smartQuotaCalibrationMinUsedFraction {
+		if !ok || !smartQuotaCalibrationUsedFractionEligible(fraction) {
 			continue
 		}
 		observedMS := result.CreatedAtMS
@@ -393,7 +400,8 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 	s.ensureSmartQuotaCalibrationStateLocked()
 
 	for _, baseline := range baselines {
-		if baseline.identity == "" || baseline.windowTokens <= 0 || baseline.fraction < smartQuotaCalibrationMinUsedFraction {
+		if baseline.identity == "" || baseline.windowTokens <= 0 ||
+			!smartQuotaCalibrationUsedFractionEligible(baseline.fraction) {
 			continue
 		}
 		capacityM := float64(baseline.windowTokens) / baseline.fraction / 1_000_000
@@ -531,7 +539,7 @@ func (s *Service) recordSmartQuotaCalibrationEventLocked(event usage.Event, now 
 
 	delta := fraction - observation.lastSampleFraction
 	deltaTokens := observation.windowTokens - observation.lastSampleTokens
-	if deltaTokens > 0 && fraction >= smartQuotaCalibrationMinUsedFraction && delta >= smartQuotaCalibrationMinDelta {
+	if deltaTokens > 0 && smartQuotaCalibrationUsedFractionEligible(fraction) && delta >= smartQuotaCalibrationMinDelta {
 		// Runtime events are valid only as an observed delta. Dividing a partial
 		// post-restart Token tail by an absolute 10%+ quota percentage creates the
 		// false 8M/30M account estimates seen in production. Complete inspection
@@ -1120,8 +1128,9 @@ func (s *Service) smartQuotaEstimateForInspectionResult(result store.CodexInspec
 	// A fixed policy is an explicit operator override. Automatic policies are
 	// different: their adopted value is only the default for accounts that do
 	// not yet have enough account-scoped evidence. Once this exact account has a
-	// valid >=10% sample, use its independent estimate directly and never blend
-	// it with the plan default.
+	// valid >10% sample, use its independent estimate directly and never blend
+	// it with the plan default. Consumption must be strictly above 10% so an
+	// integer-rounded 10% header never becomes account-capacity evidence.
 	if fallback.Source == smartQuotaPolicyModeFixed && fallback.CapacityM > 0 {
 		return fallback
 	}
@@ -1159,7 +1168,7 @@ func estimateSmartQuotaSamplesAt(samples []smartQuotaCalibrationSample, source s
 	for _, sample := range samples {
 		if sample.capacityM < smartQuotaCalibrationMinCapacityM || sample.capacityM > smartQuotaCalibrationMaxCapacityM ||
 			sample.weight <= 0 || sample.observedMS <= 0 ||
-			sample.usedFraction < smartQuotaCalibrationMinUsedFraction {
+			!smartQuotaCalibrationUsedFractionEligible(sample.usedFraction) {
 			continue
 		}
 		recencyWeight := smartQuotaSampleRecencyWeight(now, sample.observedMS)
@@ -1183,6 +1192,17 @@ func estimateSmartQuotaSamplesAt(samples []smartQuotaCalibrationSample, source s
 	}
 	accountPoints := make([]smartQuotaWeightedPoint, 0, len(grouped))
 	for _, identitySamples := range grouped {
+		// A complete account-window sample is the requested history/used-percent
+		// formula for that exact account. Do not mix it with small runtime delta
+		// samples from the same identity: integer percentage headers can turn a
+		// one-point transition into a false 5M/10M estimate and overwhelm the
+		// authoritative complete-window value during extreme trimming.
+		completeWindowSamples := filterSmartQuotaSamples(identitySamples, func(sample smartQuotaCalibrationSample) bool {
+			return sample.completeWindow
+		})
+		if len(completeWindowSamples) > 0 {
+			identitySamples = completeWindowSamples
+		}
 		// Explicitly discard the highest and lowest estimate for an account once
 		// enough observations exist. Percentage rounding, delayed header updates,
 		// and a single abnormal response therefore cannot pull the account budget.
