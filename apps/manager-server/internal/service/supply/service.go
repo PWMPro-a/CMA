@@ -484,6 +484,7 @@ type Service struct {
 
 	smartMu            sync.RWMutex
 	smartBuckets       map[int64]*smartUsageBucket
+	smartQuotaState    smartQuotaCalibrationState
 	authCacheMu        sync.Mutex
 	authRefreshMu      sync.Mutex
 	authCache          authFileSnapshot
@@ -553,6 +554,7 @@ func New(st *store.Store, managerConfig *managerconfigsvc.Service, httpClient ..
 		supplyClient:          supplyclient.New(client),
 		authFiles:             cpaauthfiles.New(client),
 		smartBuckets:          make(map[int64]*smartUsageBucket),
+		smartQuotaState:       newSmartQuotaCalibrationState(),
 		criticalConfirmRounds: make(map[string]int),
 	}
 }

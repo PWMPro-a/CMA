@@ -666,6 +666,10 @@ func (s *Store) ListSupplyUsageMinutes(ctx context.Context, sinceMS int64) ([]Su
 	return s.UsageEvents.ListSupplyUsageMinutes(ctx, sinceMS)
 }
 
+func (s *Store) ListSupplyQuotaCalibrationEvents(ctx context.Context, sinceMS int64, limit int) ([]usage.Event, error) {
+	return s.UsageEvents.ListSupplyQuotaCalibrationEvents(ctx, sinceMS, limit)
+}
+
 func (s *Store) UsageCacheAccountingMigrationState(ctx context.Context) (DataMigrationState, error) {
 	state, found, err := s.DataMigrations.UsageCacheAccountingState(ctx)
 	if err != nil {

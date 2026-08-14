@@ -220,6 +220,10 @@ type SmartResource struct {
 	// consistent.
 	TokenCapacityMode                  string  `json:"tokenCapacityMode,omitempty"`
 	AccountQuotaEstimateM              float64 `json:"accountQuotaEstimateM,omitempty"`
+	AccountQuotaEstimateSource         string  `json:"accountQuotaEstimateSource,omitempty"`
+	AccountQuotaCalibrationConfidence  string  `json:"accountQuotaCalibrationConfidence,omitempty"`
+	AccountQuotaCalibrationSamples     int     `json:"accountQuotaCalibrationSamples,omitempty"`
+	AccountQuotaCalibrationObservedPct float64 `json:"accountQuotaCalibrationObservedPercent,omitempty"`
 	RawCapacityTokenM                  float64 `json:"rawCapacityTokenM,omitempty"`
 	CurrentCapacityTokenM              float64 `json:"currentCapacityTokenM,omitempty"`
 	TimeLimitedCapacityTokenM          float64 `json:"timeLimitedCapacityTokenM,omitempty"`
@@ -233,6 +237,7 @@ type SmartResource struct {
 	ConsumeTokenM10M                   float64 `json:"consumeTokenM10m,omitempty"`
 	ConsumeTokenMPerMinute             float64 `json:"consumeTokenMPerMinute,omitempty"`
 	DemandPlanningTokenMPerMinute      float64 `json:"demandPlanningTokenMPerMinute,omitempty"`
+	ForecastSustainMinutes             float64 `json:"forecastSustainMinutes,omitempty"`
 	TargetCapacityTokenM               float64 `json:"targetCapacityTokenM,omitempty"`
 	CapacityGapTokenM                  float64 `json:"capacityGapTokenM,omitempty"`
 	EstimatedNewAccountCapacityTokenM  float64 `json:"estimatedNewAccountCapacityTokenM,omitempty"`
@@ -334,6 +339,12 @@ func (s *Service) WarmSmartUsage(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	quotaEvents, err := s.store.ListSupplyQuotaCalibrationEvents(
+		ctx,
+		now.Add(-smartQuotaCalibrationWarmWindow).UnixMilli(),
+		100_000,
+	)
+	quotaWarmErr := err
 	oldestMinute := now.Add(-180*time.Minute).UnixMilli() / 60000 * 60000
 	s.smartMu.Lock()
 	defer s.smartMu.Unlock()
@@ -359,7 +370,10 @@ func (s *Service) WarmSmartUsage(ctx context.Context) error {
 			delete(s.smartBuckets, minute)
 		}
 	}
-	return nil
+	if quotaWarmErr == nil {
+		s.recordSmartQuotaCalibrationEventsLocked(quotaEvents, now)
+	}
+	return quotaWarmErr
 }
 
 func (s *Service) recordSmartUsageEvents(events []usage.Event, now time.Time) {
@@ -406,6 +420,7 @@ func (s *Service) recordSmartUsageEvents(events []usage.Event, now time.Time) {
 			delete(s.smartBuckets, minute)
 		}
 	}
+	s.recordSmartQuotaCalibrationEventsLocked(events, now)
 }
 
 func (s *Service) smartResource(ctx context.Context, cfg store.ManagerConfig, forceAuthRefresh bool) (SmartResource, error) {
@@ -453,7 +468,8 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 
 	usageStats := s.smartUsageSnapshot(now)
 	resource.UnitCapacityRCU = smartProductUnitCapacity(cfg.Product)
-	applySmartTokenCapacityDefaults(cfg, &resource)
+	poolQuotaEstimate := s.smartQuotaEstimateFor(dominantSmartQuotaPlan(snapshot.results))
+	s.applySmartQuotaEstimate(cfg, &resource, poolQuotaEstimate)
 	consumeRCUPerMinute := applySmartUsage(&resource, usageStats, resource.UnitCapacityRCU)
 
 	if !smartInspectionSnapshotComplete(snapshot) {
@@ -524,15 +540,16 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			withQuotaEvidence++
 		}
 		capacity := 0.0
+		accountQuotaEstimate := s.smartQuotaEstimateForInspectionResult(result, poolQuotaEstimate)
 		switch {
 		case hasCapacityQuota:
-			capacity = smartAccountQuotaCapacityRCU(resource.UnitCapacityRCU, remaining)
+			capacity = smartAccountQuotaCapacityRCU(resource.UnitCapacityRCU, accountQuotaEstimate.CapacityM, remaining)
 		case hasActiveLease:
 			// The completed probe proved that the credential works, while the
 			// supplier's delivery record bounds how long it can remain usable.
 			// This is intentionally a conservative lease estimate, not a
 			// conversion of the excluded monthly allowance.
-			capacity = smartEstimatedNewAccountTokenCapacityRCU(cfg)
+			capacity = smartEstimatedNewAccountTokenCapacityRCU(cfg, resource.AccountQuotaEstimateM)
 			resource.LeaseEstimatedAccounts++
 			resource.LeaseEstimatedCapacityRCU += capacity
 		default:
@@ -580,7 +597,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		}
 		overlaidFiles[fileName] = struct{}{}
 		remainingMinutes := clampFloat(time.UnixMilli(item.LeaseExpiresAtMS).Sub(now).Minutes(), 0, float64(smartUsefulAccountLifetimeMinutes()))
-		capacity := smartEstimatedNewAccountTokenCapacityRCU(cfg)
+		capacity := smartEstimatedNewAccountTokenCapacityRCU(cfg, resource.AccountQuotaEstimateM)
 		if capacity <= 0 {
 			continue
 		}
@@ -695,7 +712,8 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 
 	unit := smartProductUnitCapacity(cfg.Product)
 	resource.UnitCapacityRCU = unit
-	applySmartTokenCapacityDefaults(cfg, &resource)
+	poolQuotaEstimate := s.smartQuotaEstimateFor("")
+	s.applySmartQuotaEstimate(cfg, &resource, poolQuotaEstimate)
 	consumeRCUPerMinute := applySmartUsage(&resource, usageStats, unit)
 	var weightedCapacity float64
 	var effectiveAvailable float64
@@ -728,9 +746,20 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		resource.HealthyAccounts++
 		resource.NormalAccounts++
 		remainingMinutes := smartAccountRemainingMinutes(file.Raw, now, smartAccountLifetimeMinutes())
-		rawCapacity, ok := smartAccountCapacityRCU(file.Raw, unit, remainingMinutes)
+		planType := textField(file.Raw, "plan_type", "planType", "chatgpt_plan_type", "chatgptPlanType")
+		identities := smartQuotaCalibrationResultIdentities(
+			file.Name,
+			textField(file.Raw, "auth_index", "authIndex"),
+			textField(file.Raw, "account_key", "accountKey"),
+			textField(file.Raw, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"),
+		)
+		accountQuotaEstimate := s.smartQuotaEstimateFor(planType, identities...)
+		if accountQuotaEstimate.Source == smartQuotaEstimateSourceDefault {
+			accountQuotaEstimate = poolQuotaEstimate
+		}
+		rawCapacity, ok := smartAccountCapacityRCU(file.Raw, unit, accountQuotaEstimate.CapacityM)
 		if !ok {
-			rawCapacity = smartTokenMillionToRCU(smartDefaultAccountQuotaMillionTokens, unit)
+			rawCapacity = smartTokenMillionToRCU(accountQuotaEstimate.CapacityM, unit)
 		}
 		weightedCapacity += rawCapacity
 		if rawCapacity > 0 {
@@ -1241,6 +1270,11 @@ func applySmartTokenMetrics(resource *SmartResource) {
 	resource.ConsumeTokenM10M = round2(smartRCUToTokenMillion(resource.ConsumeRCU10M, unit))
 	resource.ConsumeTokenMPerMinute = round2(smartRCUToTokenMillion(resource.ConsumeRCUPerMinute, unit))
 	resource.DemandPlanningTokenMPerMinute = round2(smartRCUToTokenMillion(resource.DemandPlanningRCUPerMinute, unit))
+	forecastRCUPerMinute := math.Max(resource.ConsumeRCUPerMinute, resource.DemandPlanningRCUPerMinute)
+	resource.ForecastSustainMinutes = 0
+	if forecastRCUPerMinute > 0 {
+		resource.ForecastSustainMinutes = round1(resource.CurrentCapacityRCU / forecastRCUPerMinute)
+	}
 	resource.TargetCapacityTokenM = round2(smartRCUToTokenMillion(resource.TargetCapacityRCU, unit))
 	resource.CapacityGapTokenM = round2(smartRCUToTokenMillion(resource.CapacityGapRCU, unit))
 	resource.EstimatedNewAccountCapacityTokenM = round2(smartRCUToTokenMillion(resource.EstimatedNewAccountCapacityRCU, unit))
@@ -2176,9 +2210,12 @@ func smartRCUToTokenMillion(rcu, unit float64) float64 {
 	return rcu * unit / 1000
 }
 
-func smartAccountQuotaCapacityRCU(unit, remainingFraction float64) float64 {
+func smartAccountQuotaCapacityRCU(unit, accountQuotaM, remainingFraction float64) float64 {
 	remainingFraction = clampFloat(remainingFraction, 0, 1)
-	return smartTokenMillionToRCU(smartDefaultAccountQuotaMillionTokens*remainingFraction, unit)
+	if accountQuotaM <= 0 {
+		accountQuotaM = smartDefaultAccountQuotaMillionTokens
+	}
+	return smartTokenMillionToRCU(accountQuotaM*remainingFraction, unit)
 }
 
 func smartEstimatedNewAccountCapacityRCU(cfg store.ManagerSupplyConfig) float64 {
@@ -2191,9 +2228,12 @@ func smartEstimatedNewAccountCapacityRCU(cfg store.ManagerSupplyConfig) float64 
 	return capacity * confidence
 }
 
-func smartEstimatedNewAccountTokenCapacityRCU(cfg store.ManagerSupplyConfig) float64 {
+func smartEstimatedNewAccountTokenCapacityRCU(cfg store.ManagerSupplyConfig, accountQuotaM float64) float64 {
 	unit := smartProductUnitCapacity(cfg.Product)
-	capacity := smartTokenMillionToRCU(smartDefaultAccountQuotaMillionTokens, unit)
+	if accountQuotaM <= 0 {
+		accountQuotaM = smartDefaultAccountQuotaMillionTokens
+	}
+	capacity := smartTokenMillionToRCU(accountQuotaM, unit)
 	confidence := smartNewAccountConfidence(cfg)
 	if confidence <= 0 {
 		confidence = 1
@@ -2206,8 +2246,12 @@ func applySmartTokenCapacityDefaults(cfg store.ManagerSupplyConfig, resource *Sm
 		return
 	}
 	resource.TokenCapacityMode = smartTokenCapacityMode
-	resource.AccountQuotaEstimateM = smartDefaultAccountQuotaMillionTokens
-	resource.EstimatedNewAccountCapacityRCU = round2(smartEstimatedNewAccountTokenCapacityRCU(cfg))
+	if resource.AccountQuotaEstimateM <= 0 {
+		resource.AccountQuotaEstimateM = smartDefaultAccountQuotaMillionTokens
+		resource.AccountQuotaEstimateSource = smartQuotaEstimateSourceDefault
+		resource.AccountQuotaCalibrationConfidence = smartConfidenceLow
+	}
+	resource.EstimatedNewAccountCapacityRCU = round2(smartEstimatedNewAccountTokenCapacityRCU(cfg, resource.AccountQuotaEstimateM))
 	resource.RiskAdjustedUnitCapacityRCU = resource.EstimatedNewAccountCapacityRCU
 }
 
@@ -2259,7 +2303,7 @@ func smartAccountCapacityHardBlocked(values map[string]any) bool {
 	}
 }
 
-func smartAccountCapacityRCU(values map[string]any, unit float64, remainingMinutes float64) (float64, bool) {
+func smartAccountCapacityRCU(values map[string]any, unit float64, accountQuotaM float64) (float64, bool) {
 	if unit <= 0 {
 		unit = 1
 	}
@@ -2296,7 +2340,7 @@ func smartAccountCapacityRCU(values map[string]any, unit float64, remainingMinut
 		if remaining < 0 {
 			remaining = 0
 		}
-		return smartAccountQuotaCapacityRCU(unit, remaining), true
+		return smartAccountQuotaCapacityRCU(unit, accountQuotaM, remaining), true
 	}
 	return 0, false
 }

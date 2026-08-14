@@ -1222,6 +1222,11 @@ export function SupplyPage() {
           detail: t('supply.raw_capacity_waste_detail', {
             raw: formatNumber(rawCapacityTokenM),
             waste: formatNumber(expiryWasteRiskTokenM ?? 0),
+            accountQuota: formatNumber(smart?.accountQuotaEstimateM, 2),
+            source: t(
+              `supply.quota_estimate_source_${smart?.accountQuotaEstimateSource || 'default'}`
+            ),
+            samples: formatInteger(smart?.accountQuotaCalibrationSamples ?? 0),
             minutes: smart?.accountLifetimeMinutes ?? 60,
             accounts: formatInteger(smart?.expiringAccounts ?? 0),
             next: formatMinutes(smart?.expiringWithinMinutes),
@@ -1244,7 +1249,7 @@ export function SupplyPage() {
         },
         {
           label: t('supply.estimated_depletion'),
-          value: formatMinutes(smart?.estimatedSustainMinutes),
+          value: formatMinutes(smart?.forecastSustainMinutes ?? smart?.estimatedSustainMinutes),
           detail: t('supply.effective_health_target_minutes', {
             value:
               smart?.effectiveHealthyMinutesTarget ??

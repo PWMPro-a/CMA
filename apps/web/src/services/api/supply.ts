@@ -239,6 +239,10 @@ export interface SupplySmartResource {
   riskAdjustedUnitCapacityRcu?: number;
   tokenCapacityMode?: string;
   accountQuotaEstimateM?: number;
+  accountQuotaEstimateSource?: string;
+  accountQuotaCalibrationConfidence?: string;
+  accountQuotaCalibrationSamples?: number;
+  accountQuotaCalibrationObservedPercent?: number;
   rawCapacityTokenM?: number;
   currentCapacityTokenM?: number;
   timeLimitedCapacityTokenM?: number;
@@ -252,6 +256,7 @@ export interface SupplySmartResource {
   consumeTokenM10m?: number;
   consumeTokenMPerMinute?: number;
   demandPlanningTokenMPerMinute?: number;
+  forecastSustainMinutes?: number;
   targetCapacityTokenM?: number;
   capacityGapTokenM?: number;
   estimatedNewAccountCapacityTokenM?: number;

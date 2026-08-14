@@ -14,6 +14,7 @@ type Repository interface {
 	InsertBatch(ctx context.Context, events []model.UsageEvent) (model.InsertResult, error)
 	ListRecent(ctx context.Context, limit int) ([]model.UsageEvent, error)
 	ListSupplyUsageMinutes(ctx context.Context, sinceMS int64) ([]SupplyUsageMinute, error)
+	ListSupplyQuotaCalibrationEvents(ctx context.Context, sinceMS int64, limit int) ([]usage.Event, error)
 	ModelUsageSummary(ctx context.Context, limit int) (model.ModelUsageSummary, error)
 	BackfillResponseMetadata(ctx context.Context, batchLimit int) (int, error)
 	BackfillRoutingDiagnostics(ctx context.Context, batchLimit int) (int, error)
@@ -399,6 +400,92 @@ func (r *repository) ListSupplyUsageMinutes(ctx context.Context, sinceMS int64) 
 		minutes = append(minutes, minute)
 	}
 	return minutes, rows.Err()
+}
+
+// ListSupplyQuotaCalibrationEvents returns only the small set of fields needed
+// to infer an absolute quota budget from successive percentage headers. The
+// smart-supply warm path deliberately avoids loading response bodies or raw
+// JSON from the multi-gigabyte usage table.
+func (r *repository) ListSupplyQuotaCalibrationEvents(ctx context.Context, sinceMS int64, limit int) ([]usage.Event, error) {
+	if limit <= 0 {
+		limit = 100_000
+	}
+	if limit > 200_000 {
+		limit = 200_000
+	}
+	rows, err := r.db.QueryContext(ctx, `select
+		timestamp_ms,
+		coalesce(auth_index, ''),
+		coalesce(account_snapshot, ''),
+		coalesce(auth_file_snapshot, ''),
+		coalesce(input_tokens, 0),
+		coalesce(output_tokens, 0),
+		coalesce(reasoning_tokens, 0),
+		coalesce(total_tokens, 0),
+		coalesce(failed, 0),
+		header_quota_used_percent,
+		coalesce(header_quota_recover_at_ms, 0),
+		coalesce(header_quota_plan_type, '')
+		from (
+			select
+				id,
+				timestamp_ms,
+				auth_index,
+				account_snapshot,
+				auth_file_snapshot,
+				input_tokens,
+				output_tokens,
+				reasoning_tokens,
+				total_tokens,
+				failed,
+				header_quota_used_percent,
+				header_quota_recover_at_ms,
+				header_quota_plan_type
+			from usage_events indexed by idx_usage_events_timestamp
+			where timestamp_ms >= ?
+				and header_quota_used_percent is not null
+				and (
+					coalesce(auth_file_snapshot, '') <> ''
+					or coalesce(auth_index, '') <> ''
+					or coalesce(account_snapshot, '') <> ''
+				)
+			order by timestamp_ms desc, id desc
+			limit ?
+		)
+		order by timestamp_ms asc, id asc`, sinceMS, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := make([]usage.Event, 0, min(limit, 16_384))
+	for rows.Next() {
+		var event usage.Event
+		var failed int
+		var usedPercent sql.NullFloat64
+		if err := rows.Scan(
+			&event.TimestampMS,
+			&event.AuthIndex,
+			&event.AccountSnapshot,
+			&event.AuthFileSnapshot,
+			&event.InputTokens,
+			&event.OutputTokens,
+			&event.ReasoningTokens,
+			&event.TotalTokens,
+			&failed,
+			&usedPercent,
+			&event.HeaderQuotaRecoverAtMS,
+			&event.HeaderQuotaPlanType,
+		); err != nil {
+			return nil, err
+		}
+		event.Failed = failed != 0
+		if usedPercent.Valid {
+			value := usedPercent.Float64
+			event.HeaderQuotaUsedPercent = &value
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
 }
 
 func (r *repository) ListRecent(ctx context.Context, limit int) ([]model.UsageEvent, error) {
