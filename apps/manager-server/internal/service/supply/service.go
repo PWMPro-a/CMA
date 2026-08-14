@@ -1577,6 +1577,12 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 		return 30 * time.Second
 	}
 	if orders, err := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders); err == nil && len(orders) > 0 {
+		if eligible, eligibilityErr := s.automaticParallelCreateEligible(ctx, cfg.Supply, orders); eligibilityErr == nil && eligible {
+			// Build the 10/5/2 emergency ladder immediately. Supplier retry-after
+			// delays polling of an existing reservation, not creation of the next
+			// bounded competing quantity.
+			return s.withRecoveryInterval(time.Second, cfg.Supply)
+		}
 		order := selectSupplyOrderToProcess(orders, time.Now().UnixMilli())
 		if order.Status == "creating" || order.Status == "create_uncertain" {
 			return s.withRecoveryInterval(time.Minute, cfg.Supply)
@@ -1629,9 +1635,9 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 
 func maxConcurrentSupplyOrders(cfg store.ManagerSupplyConfig) int {
 	if cfg.MaxConcurrentOrders <= 0 {
-		return 1
+		return 3
 	}
-	return clampInt(cfg.MaxConcurrentOrders, 1, 4)
+	return clampInt(cfg.MaxConcurrentOrders, 1, 3)
 }
 
 const maxTrackedOpenSupplyOrders = 16
@@ -1721,6 +1727,26 @@ func openOrdersAllowParallelCreate(orders []store.SupplyOrder) bool {
 	return true
 }
 
+func (s *Service) automaticParallelCreateEligible(
+	ctx context.Context,
+	cfg store.ManagerSupplyConfig,
+	orders []store.SupplyOrder,
+) (bool, error) {
+	if len(orders) == 0 || len(orders) >= maxConcurrentSupplyOrders(cfg) ||
+		!openOrdersAllowParallelCreate(orders) || !smartSupplyEnabled(cfg) {
+		return false, nil
+	}
+	resource := s.currentSmartResource(cfg)
+	if !smartResourceEmergency(resource) && !isSmartEmergencyRetryReason(resource.DecisionReason) {
+		return false, nil
+	}
+	blocked, err := s.automaticParallelCreateBlocked(ctx, cfg)
+	if err != nil {
+		return false, err
+	}
+	return !blocked, nil
+}
+
 func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int, force bool) error {
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
@@ -1791,9 +1817,12 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 				return nil
 			}
 		}
-		parallelEligible = allowCreate && manualQuantity == 0 &&
-			len(openOrders) > 0 && len(openOrders) < maxConcurrentSupplyOrders(supplyCfg) &&
-			openOrdersAllowParallelCreate(openOrders)
+		if allowCreate && manualQuantity == 0 {
+			parallelEligible, err = s.automaticParallelCreateEligible(ctx, supplyCfg, openOrders)
+			if err != nil {
+				return err
+			}
+		}
 		if len(openOrders) > 0 && !parallelEligible {
 			return nil
 		}
@@ -1970,6 +1999,19 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		}
 		if smartResourceEmergency(resource) && !isSmartEmergencyRetryReason(resource.DecisionReason) {
 			resource.DecisionReason = "emergency_refill_to_healthy"
+		}
+		// Parallel emergency抢货 uses a bounded descending quantity ladder
+		// instead of repeating the full shortage quantity. For a verified need
+		// of 10 accounts, the three possible reservations are 10, 5 and 2.
+		// Existing ready/take admission still evaluates aggregate capacity, so a
+		// smaller reservation can win without making every full-sized order paid.
+		if stagedQuantity := emergencyParallelOrderQuantity(resource, quantity, openOrders, parallelEligible); stagedQuantity != quantity {
+			quantity = stagedQuantity
+			inventory, balance, err = s.fetchSupplyOverview(ctx, supplyCfg, quantity)
+			if err != nil {
+				return err
+			}
+			applySmartSupplyPressure(&resource, s.smartSupplyPressure(ctx, supplyCfg, inventory, quantity))
 		}
 	}
 	s.setOverview(Overview{
@@ -5774,6 +5816,32 @@ func supplyCreatePlanningResource(
 	return resource
 }
 
+// emergencyParallelOrderQuantity returns the next bounded quantity in the
+// emergency抢货 ladder. The first order keeps the complete calculated shortage;
+// one existing waiting order selects half, and two select one fifth. Three
+// orders are the hard concurrency ceiling, so no further stage is produced.
+func emergencyParallelOrderQuantity(
+	resource SmartResource,
+	quantity int,
+	openOrders []store.SupplyOrder,
+	parallel bool,
+) int {
+	if quantity <= 0 || !parallel ||
+		(!smartResourceEmergency(resource) && !isSmartEmergencyRetryReason(resource.DecisionReason)) {
+		return quantity
+	}
+	divisor := 1
+	switch len(openOrders) {
+	case 1:
+		divisor = 2
+	case 2:
+		divisor = 5
+	default:
+		return quantity
+	}
+	return clampInt(int(math.Ceil(float64(quantity)/float64(divisor))), 1, quantity)
+}
+
 // readySupplyOrderAccepted applies a deterministic take budget to all orders
 // that have actually secured stock. Taking/importing orders are irreversible
 // commitments; remaining ready orders are admitted oldest first until the
@@ -5909,11 +5977,17 @@ func (s *Service) remainingAutomaticDailyQuantity(ctx context.Context, cfg store
 		if !isSupplierPurchaseHistoryOrder(order) || !order.Automatic {
 			continue
 		}
-		switch order.Status {
-		case "failed", "cancelled", "dismissed", "released":
+		// Waiting-inventory orders are competing reservations, not acquired
+		// accounts. Counting every rung of a 10/5/2 ladder as daily replenishment
+		// would prevent the smaller orders from competing once the first order used
+		// the apparent budget. Charge the daily cap only when capacity is actually
+		// ready, being imported, or completed; the ready-order admission path still
+		// enforces the aggregate deficit before taking surplus reservations.
+		delivered := automaticOrderDeliveredQuantity(order)
+		if delivered <= 0 {
 			continue
 		}
-		used += max(0, order.RequestedQuantity)
+		used += delivered
 	}
 	if used >= limit {
 		return 0, nil
@@ -5953,7 +6027,9 @@ func (s *Service) automaticCreateCooldownActive(ctx context.Context, cfg store.M
 	}
 	if found {
 		last = maxInt64(last, latest.CreatedAtMS)
-		if retry := smartEmergencyRetryPlanForOrder(cfg, resource, latest, time.Now()); retry.active {
+		if retry, retryErr := s.automaticRetryPlan(ctx, cfg, resource, latest, time.Now()); retryErr != nil {
+			return false, retryErr
+		} else if retry.active {
 			seconds = max(1, int(retry.cooldown/time.Second))
 			last = maxInt64(last, smartSupplyOrderTerminalAtMS(latest))
 		} else if automaticOrderHasNoDeliveredCapacity(latest) {
@@ -5973,6 +6049,104 @@ func (s *Service) automaticCreateCooldownActive(ctx context.Context, cfg store.M
 		return false, nil
 	}
 	return time.Since(time.UnixMilli(last)) < time.Duration(seconds)*time.Second, nil
+}
+
+const automaticRetryBurstWindow = 10 * time.Minute
+
+// automaticZeroDeliveryBurst summarizes consecutive supplier attempts that
+// failed to deliver any usable capacity. It is intentionally based on local
+// terminal order history rather than a momentary inventory snapshot: a
+// supplier can report stock briefly while rejecting every competing order.
+func (s *Service) automaticZeroDeliveryBurst(
+	ctx context.Context,
+	cfg store.ManagerSupplyConfig,
+	latest store.SupplyOrder,
+) (failures int, cancellations int, err error) {
+	if s == nil || s.store == nil || !latest.Automatic || !automaticOrderHasNoDeliveredCapacity(latest) {
+		return 0, 0, nil
+	}
+	latestTerminalAtMS := smartSupplyOrderTerminalAtMS(latest)
+	if latestTerminalAtMS <= 0 {
+		return 0, 0, nil
+	}
+	orders, err := s.recentSupplyOrders(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, order := range orders {
+		if !order.Automatic || !sameSupplyProduct(order.Product, cfg.Product) ||
+			!isSupplierPurchaseHistoryOrder(order) {
+			continue
+		}
+		terminalAtMS := smartSupplyOrderTerminalAtMS(order)
+		if terminalAtMS <= 0 || terminalAtMS > latestTerminalAtMS ||
+			latestTerminalAtMS-terminalAtMS > automaticRetryBurstWindow.Milliseconds() {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(order.Status)) {
+		case "completed", "released":
+			// The burst is consecutive. A realized delivery resets the failure
+			// streak even when older cancelled rows are still inside the window.
+			if automaticOrderDeliveredQuantity(order) > 0 {
+				return failures, cancellations, nil
+			}
+		case "cancelled", "failed", "dismissed":
+			if automaticOrderDeliveredQuantity(order) > 0 {
+				continue
+			}
+			failures++
+			if strings.EqualFold(strings.TrimSpace(order.Status), "cancelled") {
+				cancellations++
+			}
+		}
+	}
+	return failures, cancellations, nil
+}
+
+// automaticRetryPlan applies an escalating local backoff after a supplier
+// failure burst. The pure planner remains at the normal 10-second retry for a
+// first failure; repeated zero-delivery attempts progressively back off to
+// avoid flooding the supplier and creating a long cancelled-order tail.
+func (s *Service) automaticRetryPlan(
+	ctx context.Context,
+	cfg store.ManagerSupplyConfig,
+	resource SmartResource,
+	order store.SupplyOrder,
+	now time.Time,
+) (smartEmergencyRetryPlan, error) {
+	plan := smartEmergencyRetryPlanForOrder(cfg, resource, order, now)
+	if !plan.active {
+		return plan, nil
+	}
+	failures, cancellations, err := s.automaticZeroDeliveryBurst(ctx, cfg, order)
+	if err != nil {
+		return smartEmergencyRetryPlan{}, err
+	}
+	switch {
+	case failures >= 5 || cancellations >= 4:
+		plan.cooldown = 5 * time.Minute
+	case failures >= 3 || cancellations >= 2:
+		plan.cooldown = 2 * time.Minute
+	case failures >= 2:
+		plan.cooldown = time.Minute
+	}
+	return plan, nil
+}
+
+// automaticParallelCreateBlocked closes the competition window after at least
+// two recent zero-delivery attempts. Existing waiting orders are retained and
+// reconciled, but the worker does not add another reservation until the retry
+// backoff expires and a fresh shortage decision is made.
+func (s *Service) automaticParallelCreateBlocked(ctx context.Context, cfg store.ManagerSupplyConfig) (bool, error) {
+	latest, found, err := s.store.GetLatestAutomaticSupplyOrder(ctx)
+	if err != nil || !found {
+		return false, err
+	}
+	failures, _, err := s.automaticZeroDeliveryBurst(ctx, cfg, latest)
+	if err != nil {
+		return false, err
+	}
+	return failures >= 2, nil
 }
 
 func automaticOrderHasNoDeliveredCapacity(order store.SupplyOrder) bool {
@@ -6037,7 +6211,10 @@ func (s *Service) applySmartEmergencyRetryPlan(ctx context.Context, cfg store.Ma
 	if err != nil || !found {
 		return smartEmergencyRetryPlan{}, err
 	}
-	plan := smartEmergencyRetryPlanForOrder(cfg, *resource, latest, time.Now())
+	plan, err := s.automaticRetryPlan(ctx, cfg, *resource, latest, time.Now())
+	if err != nil {
+		return smartEmergencyRetryPlan{}, err
+	}
 	if !plan.active {
 		return plan, nil
 	}

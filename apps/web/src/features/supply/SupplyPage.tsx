@@ -41,7 +41,7 @@ const emptyConfig: SupplyConfig = {
   strategy: 'strong_supply',
   targetAvailableAccounts: 100,
   replenishBatchSize: 10,
-  maxConcurrentOrders: 2,
+  maxConcurrentOrders: 3,
   checkIntervalSeconds: 60,
   pollIntervalSeconds: 3,
   defaultWebsockets: false,
@@ -1845,8 +1845,8 @@ export function SupplyPage() {
                     label={t('supply.max_concurrent_orders')}
                     type="number"
                     min={1}
-                    max={4}
-                    value={draft.maxConcurrentOrders ?? 1}
+                    max={3}
+                    value={draft.maxConcurrentOrders ?? 3}
                     onChange={(event) =>
                       updateDraft({ maxConcurrentOrders: Number(event.target.value) })
                     }

@@ -315,6 +315,7 @@ func TestRemainingAutomaticDailyQuantityIgnoresRecoveryImports(t *testing.T) {
 	nowMS := time.Now().UnixMilli()
 	orders := []store.SupplyOrder{
 		{OrderID: "purchase", Product: "oauth_7d", RequestedQuantity: 2, Automatic: true, Status: "completed", CreatedAtMS: nowMS},
+		{OrderID: "competing-reservation", Product: "oauth_7d", RequestedQuantity: 5, Automatic: true, TriggerReason: "parallel_emergency_refill_to_healthy", Status: "waiting_inventory", CreatedAtMS: nowMS},
 		{OrderID: "recovery-import", Product: "oauth_7d", RequestedQuantity: 50, Automatic: true, Strategy: "recovery", RemoteStatus: "recovery_claimed", Status: "completed", CreatedAtMS: nowMS},
 	}
 	for _, order := range orders {
@@ -393,6 +394,120 @@ func TestEmergencyRetryNextIntervalHonorsShortCooldown(t *testing.T) {
 				t.Fatalf("next interval = %s, want [%s, %s]", interval, tt.wantMin, tt.wantMax)
 			}
 		})
+	}
+}
+
+func TestEmergencyRetryBacksOffAfterZeroDeliveryBurst(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-retry-burst.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	enabled := true
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{Supply: store.ManagerSupplyConfig{
+		Enabled: &enabled, Product: "oauth_30d", CheckIntervalSeconds: 60,
+		HealthyMinutesTarget: 60, WarningMinutes: 30, CriticalMinutes: 20,
+		ReplenishBatchSize: 20, PrelockMaxQuantity: 20,
+	}}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	now := time.Now()
+	for index, age := range []time.Duration{9 * time.Second, 6 * time.Second, 3 * time.Second} {
+		if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+			OrderID:           fmt.Sprintf("cancelled-burst-%d", index),
+			Product:           "oauth_30d",
+			RequestedQuantity: 17,
+			Automatic:         true,
+			Status:            "cancelled",
+			CompletedAtMS:     now.Add(-age).UnixMilli(),
+		}); err != nil {
+			t.Fatalf("create cancelled order %d: %v", index, err)
+		}
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), nil)
+	service.setSmartResource(SmartResource{
+		GeneratedAtMS: time.Now().UnixMilli(), Enabled: true, SnapshotFresh: true,
+		EmergencyShortage: true, EffectiveHealthyMinutes: 60, CriticalMinutes: 20,
+		EstimatedSustainMinutes: 10, ConsumeRCUPerMinute: 1_000,
+		CapacityGapRCU: 40_000, SuggestedQuantity: 17,
+	})
+
+	interval := service.NextInterval(ctx)
+	if interval < 110*time.Second || interval > 125*time.Second {
+		t.Fatalf("burst retry interval = %s, want about two minutes", interval)
+	}
+}
+
+func TestEmergencyParallelNextIntervalBuildsQuantityLadderImmediately(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-emergency-ladder.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	enabled := true
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{Supply: store.ManagerSupplyConfig{
+		Enabled: &enabled, Product: "oauth_7d", MaxConcurrentOrders: 3,
+		SmartEnabled: &enabled, CheckIntervalSeconds: 60,
+	}}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "emergency-quantity-10", Product: "oauth_7d", RequestedQuantity: 10,
+		Automatic: true, Status: "waiting_inventory",
+		SupplierRetryUntilMS: time.Now().Add(time.Minute).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("create waiting order: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), nil)
+	service.setSmartResource(SmartResource{
+		GeneratedAtMS: time.Now().UnixMilli(), Enabled: true, SnapshotFresh: true, EmergencyShortage: true,
+		HealthLevel: smartHealthCritical, CapacityGapRCU: 10_000,
+	})
+
+	interval := service.NextInterval(ctx)
+	if interval < 500*time.Millisecond || interval > 1500*time.Millisecond {
+		t.Fatalf("parallel ladder interval = %s, want about one second", interval)
+	}
+}
+
+func TestAutomaticParallelCreateBlocksAfterZeroDeliveryBurst(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-parallel-burst.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	now := time.Now()
+	for index, age := range []time.Duration{8 * time.Second, 4 * time.Second} {
+		if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+			OrderID:           fmt.Sprintf("cancelled-parallel-%d", index),
+			Product:           "oauth_7d",
+			RequestedQuantity: 16,
+			Automatic:         true,
+			Status:            "cancelled",
+			CompletedAtMS:     now.Add(-age).UnixMilli(),
+		}); err != nil {
+			t.Fatalf("create cancelled order %d: %v", index, err)
+		}
+	}
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID:           "waiting-after-burst",
+		Product:           "oauth_7d",
+		RequestedQuantity: 16,
+		Automatic:         true,
+		Status:            "waiting_inventory",
+	}); err != nil {
+		t.Fatalf("create waiting order: %v", err)
+	}
+	service := New(st, nil, nil)
+	blocked, err := service.automaticParallelCreateBlocked(ctx, store.ManagerSupplyConfig{Product: "oauth_7d"})
+	if err != nil {
+		t.Fatalf("parallel burst guard: %v", err)
+	}
+	if !blocked {
+		t.Fatal("parallel order creation should be blocked after repeated zero-delivery attempts")
 	}
 }
 
@@ -1919,7 +2034,7 @@ func TestManualReplenishmentRejectsConcurrentOrder(t *testing.T) {
 	}
 }
 
-func TestAutomaticReplenishmentCreatesParallelOrderWhileSupplierRetryIsActive(t *testing.T) {
+func TestAutomaticReplenishmentDoesNotParallelizeOutsideSmartEmergency(t *testing.T) {
 	var createCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -1933,8 +2048,7 @@ func TestAutomaticReplenishmentCreatesParallelOrderWhileSupplierRetryIsActive(t 
 			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
 		case r.URL.Path == "/api/customer/pickup/orders" && r.Method == http.MethodPost:
 			createCalls.Add(1)
-			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"order":{"id":"parallel-order","status":"waiting_inventory","quantity":5,"retry_after_seconds":30}}`))
+			t.Fatal("non-smart replenishment must not open a parallel order")
 		case strings.HasPrefix(r.URL.Path, "/api/customer/pickup/orders/"):
 			t.Fatalf("an existing supplier retry-after deadline must not be polled: %s", r.URL.Path)
 		default:
@@ -1970,34 +2084,94 @@ func TestAutomaticReplenishmentCreatesParallelOrderWhileSupplierRetryIsActive(t 
 
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
 	if err := service.RunAutomatic(context.Background()); err != nil {
-		t.Fatalf("create parallel order: %v", err)
+		t.Fatalf("reconcile waiting order: %v", err)
 	}
 	orders, err := st.ListOpenSupplyOrders(context.Background(), 10)
-	if err != nil || len(orders) != 2 {
+	if err != nil || len(orders) != 1 {
 		t.Fatalf("open orders=%#v err=%v", orders, err)
 	}
-	if orders[1].OrderID != "parallel-order" || orders[1].TriggerReason != "parallel_automatic" {
-		t.Fatalf("parallel order = %#v", orders[1])
+	if createCalls.Load() != 0 {
+		t.Fatalf("parallel create calls = %d, want 0", createCalls.Load())
+	}
+}
+
+func TestAutomaticEmergencyReplenishmentCreatesTenFiveTwoLadderAndStops(t *testing.T) {
+	var quantitiesMu sync.Mutex
+	quantities := make([]int, 0, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":100,"missing":0,"estimated_total_fen":100}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
+		case r.URL.Path == "/api/customer/pickup/orders" && r.Method == http.MethodPost:
+			var request struct {
+				Quantity int `json:"quantity"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("decode create request: %v", err)
+			}
+			quantitiesMu.Lock()
+			quantities = append(quantities, request.Quantity)
+			orderIndex := len(quantities)
+			quantitiesMu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprintf(w, `{"order":{"id":"emergency-ladder-%d","status":"waiting_inventory","quantity":%d,"retry_after_seconds":60}}`, orderIndex, request.Quantity)
+		case strings.HasPrefix(r.URL.Path, "/api/customer/pickup/orders/"):
+			t.Fatalf("waiting ladder order was polled ahead of supplier retry-after: %s", r.URL.Path)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "emergency-order-ladder.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	enabled := true
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, SmartEnabled: &enabled,
+			BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_7d",
+			Strategy:                  managerconfigsvc.SupplyStrategyCustom,
+			CriticalAvailableAccounts: 2, HealthyAvailableAccounts: 20, DefaultEmergencyMinAccounts: 5,
+			ReplenishBatchSize: 10, PrelockMinQuantity: 1, PrelockMaxQuantity: 10,
+			MaxConcurrentOrders: 3, DailyMaxReplenishQuantity: 10,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	seedCompletedQuotaInspection(t, st, store.CodexInspectionResult{
+		Provider: "codex", Action: "reauth", Status: "unauthorized", StatusCode: intPtr(http.StatusUnauthorized),
+	})
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	for turn := 0; turn < 4; turn++ {
+		if err := service.RunAutomatic(ctx); err != nil {
+			t.Fatalf("automatic ladder turn %d: %v", turn+1, err)
+		}
 	}
 
-	if err := service.RunAutomatic(context.Background()); err != nil {
-		t.Fatalf("max-concurrency run: %v", err)
+	quantitiesMu.Lock()
+	gotQuantities := append([]int(nil), quantities...)
+	quantitiesMu.Unlock()
+	if fmt.Sprint(gotQuantities) != "[10 5 2]" {
+		t.Fatalf("emergency ladder quantities = %v, want [10 5 2]", gotQuantities)
 	}
-	orders, err = st.ListOpenSupplyOrders(context.Background(), 10)
-	if err != nil || len(orders) != 2 || createCalls.Load() != 1 {
-		t.Fatalf("parallel cap failed: orders=%#v createCalls=%d err=%v", orders, createCalls.Load(), err)
+	orders, err := st.ListOpenSupplyOrders(ctx, 10)
+	if err != nil || len(orders) != 3 {
+		t.Fatalf("open emergency ladder orders=%#v err=%v", orders, err)
 	}
-
-	managerCfg.Supply.MaxConcurrentOrders = 1
-	if err := st.SaveManagerConfig(context.Background(), managerCfg); err != nil {
-		t.Fatalf("lower parallel limit: %v", err)
-	}
-	if err := service.RunAutomatic(context.Background()); err != nil {
-		t.Fatalf("run after lowering parallel limit: %v", err)
-	}
-	orders, err = st.ListOpenSupplyOrders(context.Background(), 10)
-	if err != nil || len(orders) != 2 || createCalls.Load() != 1 {
-		t.Fatalf("lowered limit must preserve existing orders without adding another: orders=%#v createCalls=%d err=%v", orders, createCalls.Load(), err)
+	if !strings.HasPrefix(orders[1].TriggerReason, "parallel_") || !strings.HasPrefix(orders[2].TriggerReason, "parallel_") {
+		t.Fatalf("secondary ladder orders are not marked parallel: %#v", orders)
 	}
 }
 
@@ -2066,6 +2240,35 @@ func TestParallelSupplyCreatePlanningCompetesOnWaitingOrdersAndStopsOnCommittedS
 	}
 	if openOrdersAllowParallelCreate([]store.SupplyOrder{ready}) {
 		t.Fatal("ready order should close the competition window")
+	}
+}
+
+func TestEmergencyParallelOrderQuantityUsesDescendingLadder(t *testing.T) {
+	resource := SmartResource{
+		EmergencyShortage: true,
+		HealthLevel:       smartHealthCritical,
+	}
+	waiting := store.SupplyOrder{OrderID: "waiting-1", Status: "waiting_inventory"}
+	waitingSecond := store.SupplyOrder{OrderID: "waiting-2", Status: "waiting_inventory"}
+
+	if got := emergencyParallelOrderQuantity(resource, 10, nil, false); got != 10 {
+		t.Fatalf("first emergency quantity = %d, want 10", got)
+	}
+	if got := emergencyParallelOrderQuantity(resource, 10, []store.SupplyOrder{waiting}, true); got != 5 {
+		t.Fatalf("second emergency quantity = %d, want 5", got)
+	}
+	if got := emergencyParallelOrderQuantity(resource, 10, []store.SupplyOrder{waiting, waitingSecond}, true); got != 2 {
+		t.Fatalf("third emergency quantity = %d, want 2", got)
+	}
+	if got := emergencyParallelOrderQuantity(resource, 17, []store.SupplyOrder{waiting, waitingSecond}, true); got != 4 {
+		t.Fatalf("third rounded emergency quantity = %d, want 4", got)
+	}
+
+	normal := resource
+	normal.EmergencyShortage = false
+	normal.HealthLevel = smartHealthWarning
+	if got := emergencyParallelOrderQuantity(normal, 10, []store.SupplyOrder{waiting}, true); got != 10 {
+		t.Fatalf("normal parallel quantity = %d, want unchanged 10", got)
 	}
 }
 

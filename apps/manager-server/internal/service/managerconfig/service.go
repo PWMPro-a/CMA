@@ -262,7 +262,7 @@ func (s *Service) DefaultManagerConfig() store.ManagerConfig {
 			Product:                     "oauth_30d",
 			TargetAvailableAccounts:     100,
 			ReplenishBatchSize:          10,
-			MaxConcurrentOrders:         1,
+			MaxConcurrentOrders:         3,
 			CheckIntervalSeconds:        60,
 			PollIntervalSeconds:         3,
 			SmartEnabled:                BoolPtr(true),
@@ -356,7 +356,7 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	next.Strategy = NormalizeSupplyStrategy(ValueOr(submitted.Strategy, next.Strategy))
 	next.TargetAvailableAccounts = BoundedPositiveOrDefault(submitted.TargetAvailableAccounts, next.TargetAvailableAccounts, 100, 10000)
 	next.ReplenishBatchSize = BoundedPositiveOrDefault(submitted.ReplenishBatchSize, next.ReplenishBatchSize, 10, 100)
-	next.MaxConcurrentOrders = BoundedPositiveOrDefault(submitted.MaxConcurrentOrders, next.MaxConcurrentOrders, 1, 4)
+	next.MaxConcurrentOrders = BoundedPositiveOrDefault(submitted.MaxConcurrentOrders, next.MaxConcurrentOrders, 3, 3)
 	next.CheckIntervalSeconds = BoundedPositiveOrDefault(submitted.CheckIntervalSeconds, next.CheckIntervalSeconds, 60, 3600)
 	next.PollIntervalSeconds = BoundedPositiveOrDefault(submitted.PollIntervalSeconds, next.PollIntervalSeconds, 3, 60)
 	next.DefaultWebsockets = submitted.DefaultWebsockets
