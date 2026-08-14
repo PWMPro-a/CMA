@@ -403,9 +403,11 @@ func (r *repository) ListSupplyUsageMinutes(ctx context.Context, sinceMS int64) 
 }
 
 // ListSupplyQuotaCalibrationEvents returns only the small set of fields needed
-// to infer an absolute quota budget from successive percentage headers. The
-// smart-supply warm path deliberately avoids loading response bodies or raw
-// JSON from the multi-gigabyte usage table.
+// to combine each account's historical Token use with its quota percentage.
+// Header-less rows are included because their Token usage belongs to the same
+// active account window and must be accumulated before the next quota header.
+// The smart-supply warm path still avoids response bodies and raw JSON from the
+// multi-gigabyte usage table.
 func (r *repository) ListSupplyQuotaCalibrationEvents(ctx context.Context, sinceMS int64, limit int) ([]usage.Event, error) {
 	if limit <= 0 {
 		limit = 100_000
@@ -443,7 +445,6 @@ func (r *repository) ListSupplyQuotaCalibrationEvents(ctx context.Context, since
 				header_quota_plan_type
 			from usage_events indexed by idx_usage_events_timestamp
 			where timestamp_ms >= ?
-				and header_quota_used_percent is not null
 				and (
 					coalesce(auth_file_snapshot, '') <> ''
 					or coalesce(auth_index, '') <> ''

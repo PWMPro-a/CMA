@@ -65,6 +65,46 @@ func BenchmarkBuildSmartResourceFromInspectionSnapshot(b *testing.B) {
 	}
 }
 
+func BenchmarkBuildSmartResourceFromInspectionSnapshotWithQuotaSamples(b *testing.B) {
+	for _, size := range []int{121, 500, 1000} {
+		_, results := benchmarkPoolFixture(size)
+		now := time.Now().Truncate(time.Second)
+		snapshot := inspectionQuotaSnapshot{
+			run: store.CodexInspectionRun{
+				ID:            1,
+				ProbeSetCount: size,
+				SampledCount:  size,
+				FinishedAtMS:  now.UnixMilli(),
+			},
+			results:     results,
+			generatedAt: now,
+		}
+		service := New(nil, nil)
+		for index, result := range results {
+			if result.Disabled {
+				continue
+			}
+			service.smartQuotaState.samples = append(
+				service.smartQuotaState.samples,
+				quotaSamplesForEstimate(
+					"file:"+result.FileName,
+					"team",
+					55+float64(index%5),
+					now.Add(-time.Minute),
+					6,
+				)...,
+			)
+		}
+		cfg := store.ManagerSupplyConfig{Product: "oauth_7d", HealthyMinutesTarget: 60}
+		b.Run(fmt.Sprintf("accounts_%d", size), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_ = service.buildSmartResourceFromInspectionSnapshot(cfg, snapshot, now)
+			}
+		})
+	}
+}
+
 func BenchmarkGetStatusWithCPAFixture(b *testing.B) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/management/auth-files" {

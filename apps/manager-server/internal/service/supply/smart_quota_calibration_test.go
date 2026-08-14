@@ -40,13 +40,108 @@ func TestSmartQuotaCalibrationLearnsIdentityAndPlanCapacity(t *testing.T) {
 	}
 
 	identity := service.smartQuotaEstimateFor("team", "file:team-0.json")
-	if identity.Source != smartQuotaEstimateSourceIdentity || identity.CapacityM != 40 || identity.SampleCount != 10 {
+	if identity.Source != smartQuotaEstimateSourceCurrent || identity.CapacityM != 40 || identity.SampleCount != 10 {
 		t.Fatalf("identity estimate = %#v", identity)
 	}
 	plan := service.smartQuotaEstimateFor("team")
-	if plan.Source != smartQuotaEstimateSourcePlan || plan.CapacityM != 40 || plan.SampleCount != 30 || plan.ObservedPercent != 300 {
+	if plan.Source != smartQuotaEstimateSourceRecentPlan || plan.CapacityM != 40 || plan.SampleCount != 30 || plan.ObservedPercent != 285 {
 		t.Fatalf("plan estimate = %#v", plan)
 	}
+}
+
+func TestSmartQuotaCalibrationUsesWindowHistoryAndRemainingPercentage(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	recoverAt := now.Add(7 * 24 * time.Hour).UnixMilli()
+	events := []usage.Event{
+		{
+			TimestampMS:      now.Add(-2 * time.Minute).UnixMilli(),
+			Provider:         "codex",
+			AuthFileSnapshot: "active.json",
+			TotalTokens:      54_400_000,
+		},
+		{
+			TimestampMS:            now.Add(-time.Minute).UnixMilli(),
+			Provider:               "codex",
+			AuthFileSnapshot:       "active.json",
+			HeaderQuotaUsedPercent: floatPtr(90),
+			HeaderQuotaRecoverAtMS: recoverAt,
+			HeaderQuotaPlanType:    "team",
+		},
+		{
+			TimestampMS:            now.UnixMilli(),
+			Provider:               "codex",
+			AuthFileSnapshot:       "active.json",
+			HeaderQuotaUsedPercent: floatPtr(95),
+			HeaderQuotaRecoverAtMS: recoverAt,
+			HeaderQuotaPlanType:    "team",
+			TotalTokens:            3_000_000,
+		},
+	}
+	service.recordSmartUsageEvents(events, now)
+
+	estimate := service.smartQuotaEstimateForAt(now, "team", "file:active.json")
+	if estimate.CapacityM != 60.42 || estimate.Source != smartQuotaEstimateSourceCurrent || estimate.SampleCount != 2 {
+		t.Fatalf("window-history estimate = %#v", estimate)
+	}
+	observation := service.smartQuotaState.observations["file:active.json"]
+	if observation.windowTokens != 57_400_000 || observation.lastFraction != 0.95 {
+		t.Fatalf("window observation = %#v", observation)
+	}
+}
+
+func TestEstimateSmartQuotaSamplesDropsHighestAndLowest(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	samples := make([]smartQuotaCalibrationSample, 0, 5)
+	for index, capacityM := range []float64{1, 40, 41, 42, 400} {
+		samples = append(samples, smartQuotaCalibrationSample{
+			identity:     "file:active.json",
+			planType:     "team",
+			capacityM:    capacityM,
+			weight:       0.1,
+			usedFraction: 0.8,
+			observedMS:   now.Add(time.Duration(index) * time.Millisecond).UnixMilli(),
+		})
+	}
+	estimate, ok := estimateSmartQuotaSamplesAt(samples, smartQuotaEstimateSourceCurrent, 5, 0.1, now.Add(time.Second))
+	if !ok || estimate.CapacityM != 41 {
+		t.Fatalf("trimmed estimate = %#v/%v", estimate, ok)
+	}
+}
+
+func TestSmartQuotaCalibrationRecalibratesOldRegimeAroundCurrentUsage(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	service.smartQuotaState.samples = append(
+		quotaSamplesForEstimate("file:old-a.json", "team", 10, now.Add(-8*time.Hour), 3),
+		quotaSamplesForEstimate("file:old-b.json", "team", 10, now.Add(-8*time.Hour), 3)...,
+	)
+	service.smartQuotaState.samples = append(
+		service.smartQuotaState.samples,
+		quotaSamplesForEstimate("file:active.json", "team", 60, now.Add(-time.Minute), 6)...,
+	)
+
+	estimate := service.smartQuotaEstimateForAt(now, "team", "file:active.json")
+	if estimate.Source != smartQuotaEstimateSourceRecalibrated || estimate.CapacityM != 57.5 ||
+		estimate.CurrentEstimateM != 60 || estimate.RecentEstimateM != 60 || estimate.HistoricalEstimateM != 10 ||
+		estimate.DivergencePercent != 500 {
+		t.Fatalf("recalibrated estimate = %#v", estimate)
+	}
+}
+
+func quotaSamplesForEstimate(identity, plan string, capacityM float64, observedAt time.Time, count int) []smartQuotaCalibrationSample {
+	samples := make([]smartQuotaCalibrationSample, 0, count)
+	for index := 0; index < count; index++ {
+		samples = append(samples, smartQuotaCalibrationSample{
+			identity:     identity,
+			planType:     plan,
+			capacityM:    capacityM,
+			weight:       0.1,
+			usedFraction: 0.8,
+			observedMS:   observedAt.Add(time.Duration(index) * time.Second).UnixMilli(),
+		})
+	}
+	return samples
 }
 
 func TestNormalizeSmartQuotaFractionTreatsSubOneValuesAsPercent(t *testing.T) {
@@ -90,9 +185,40 @@ func TestSmartResourceUsesRuntimeQuotaCalibration(t *testing.T) {
 		generatedAt: now,
 	}, now)
 
-	if resource.AccountQuotaEstimateM != 40 || resource.AccountQuotaEstimateSource != smartQuotaEstimateSourcePlan ||
+	if resource.AccountQuotaEstimateM != 40 || resource.AccountQuotaEstimateSource != smartQuotaEstimateSourceRecentPlan ||
 		resource.AccountQuotaCalibrationSamples != 30 || resource.RawCapacityTokenM != 40 {
 		t.Fatalf("calibrated resource = %#v", resource)
+	}
+}
+
+func TestSmartResourcePrioritizesSamplesFromCurrentPoolAccounts(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	service.smartQuotaState.samples = append(
+		service.smartQuotaState.samples,
+		quotaSamplesForEstimate("file:active.json", "team", 60, now.Add(-time.Minute), 6)...,
+	)
+	service.smartQuotaState.samples = append(
+		service.smartQuotaState.samples,
+		quotaSamplesForEstimate("file:old.json", "team", 10, now.Add(-8*time.Hour), 6)...,
+	)
+	unused := 0.0
+	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
+		Product: "oauth_7d",
+	}, inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{ProbeSetCount: 1, SampledCount: 1, FinishedAtMS: now.UnixMilli()},
+		results: []store.CodexInspectionResult{{
+			AccountKey: "active", FileName: "active.json", Provider: "codex", Status: "active",
+			PlanType: "team", UsedPercent: &unused,
+		}},
+		generatedAt: now,
+	}, now)
+
+	if resource.AccountQuotaEstimateSource != smartQuotaEstimateSourceRecalibrated ||
+		resource.AccountQuotaEstimateM != 57.5 || resource.AccountQuotaCurrentEstimateM != 60 ||
+		resource.AccountQuotaHistoricalEstimateM != 10 || resource.AccountQuotaCalibrationUniqueAccounts != 1 ||
+		resource.RawCapacityTokenM != 60 {
+		t.Fatalf("current-pool calibrated resource = %#v", resource)
 	}
 }
 

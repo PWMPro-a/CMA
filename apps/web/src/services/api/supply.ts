@@ -243,6 +243,11 @@ export interface SupplySmartResource {
   accountQuotaCalibrationConfidence?: string;
   accountQuotaCalibrationSamples?: number;
   accountQuotaCalibrationObservedPercent?: number;
+  accountQuotaCalibrationUniqueAccounts?: number;
+  accountQuotaCurrentEstimateM?: number;
+  accountQuotaRecentEstimateM?: number;
+  accountQuotaHistoricalEstimateM?: number;
+  accountQuotaDivergencePercent?: number;
   rawCapacityTokenM?: number;
   currentCapacityTokenM?: number;
   timeLimitedCapacityTokenM?: number;

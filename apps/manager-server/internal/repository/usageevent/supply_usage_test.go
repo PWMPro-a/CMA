@@ -75,6 +75,30 @@ func TestListSupplyQuotaCalibrationEventsReturnsMinimalQuotaHistory(t *testing.T
 	}
 }
 
+func TestListSupplyQuotaCalibrationEventsIncludesHeaderlessUsage(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "quota-calibration-headerless.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	base := time.Date(2026, time.August, 14, 3, 0, 0, 0, time.UTC)
+	event := supplyUsageEvent("quota-history", base, 3_000_000, nil, false)
+	event.AuthFileSnapshot = "team.json"
+	repo := New(db)
+	if _, err := repo.InsertBatch(context.Background(), []usage.Event{event}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+
+	events, err := repo.ListSupplyQuotaCalibrationEvents(context.Background(), base.Add(-time.Minute).UnixMilli(), 10)
+	if err != nil {
+		t.Fatalf("list quota calibration events: %v", err)
+	}
+	if len(events) != 1 || events[0].HeaderQuotaUsedPercent != nil || events[0].TotalTokens != 3_000_000 {
+		t.Fatalf("headerless quota history = %#v", events)
+	}
+}
+
 func TestListSupplyQuotaCalibrationEventsLimitsToNewestHistoryInChronologicalOrder(t *testing.T) {
 	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "quota-calibration-limit.sqlite"))
 	if err != nil {
