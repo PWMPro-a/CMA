@@ -345,8 +345,8 @@ func TestEmergencyRetryNextIntervalHonorsShortCooldown(t *testing.T) {
 		{
 			name: "cancelled order wakes the next retry immediately",
 			order: store.SupplyOrder{
-				OrderID: "cancelled-recent", Product: "oauth_30d", Automatic: true,
-				Status: "cancelled", CompletedAtMS: now.Add(-4 * time.Second).UnixMilli(),
+				OrderID: "cancelled-recent", Product: "oauth_30d", RequestedQuantity: 10, Automatic: true,
+				Status: "cancelled", RemoteStatus: "cancelled", CompletedAtMS: now.Add(-4 * time.Second).UnixMilli(),
 			},
 			wantMin: 500 * time.Millisecond,
 			wantMax: 1500 * time.Millisecond,
@@ -354,8 +354,8 @@ func TestEmergencyRetryNextIntervalHonorsShortCooldown(t *testing.T) {
 		{
 			name: "cancelled order retries promptly after cooldown",
 			order: store.SupplyOrder{
-				OrderID: "cancelled-ready", Product: "oauth_30d", Automatic: true,
-				Status: "cancelled", CompletedAtMS: now.Add(-11 * time.Second).UnixMilli(),
+				OrderID: "cancelled-ready", Product: "oauth_30d", RequestedQuantity: 10, Automatic: true,
+				Status: "cancelled", RemoteStatus: "cancelled", CompletedAtMS: now.Add(-11 * time.Second).UnixMilli(),
 			},
 			wantMin: 500 * time.Millisecond,
 			wantMax: 1500 * time.Millisecond,
@@ -420,6 +420,7 @@ func TestEmergencyRetryWakesAfterZeroDeliveryBurst(t *testing.T) {
 			RequestedQuantity: 17,
 			Automatic:         true,
 			Status:            "cancelled",
+			RemoteStatus:      "cancelled",
 			CompletedAtMS:     now.Add(-age).UnixMilli(),
 		}); err != nil {
 			t.Fatalf("create cancelled order %d: %v", index, err)
@@ -447,7 +448,7 @@ func TestAutomaticRetryLadderQuantityKeepsTheOriginalBase(t *testing.T) {
 	}{
 		{base: 10, failures: 1, want: 5},
 		{base: 10, failures: 2, want: 2},
-		{base: 10, failures: 3, want: 1},
+		{base: 10, failures: 3, want: 0},
 		{base: 21, failures: 1, want: 11},
 		{base: 21, failures: 2, want: 5},
 	}
@@ -455,6 +456,56 @@ func TestAutomaticRetryLadderQuantityKeepsTheOriginalBase(t *testing.T) {
 		if got := automaticRetryLadderQuantity(tt.base, tt.failures); got != tt.want {
 			t.Errorf("ladder(%d, %d) = %d, want %d", tt.base, tt.failures, got, tt.want)
 		}
+	}
+}
+
+func TestAutomaticImmediateRetryRequiresConfirmedRemoteCancellation(t *testing.T) {
+	nowMS := time.Now().UnixMilli()
+	cfg := store.ManagerSupplyConfig{Product: "oauth_7d"}
+	base := store.SupplyOrder{
+		OrderID: "cancelled-10", Product: cfg.Product, RequestedQuantity: 10,
+		Automatic: true, Status: "cancelled", CompletedAtMS: nowMS,
+	}
+	if automaticImmediateRetryEligible(cfg, base) {
+		t.Fatal("local cancelled status without supplier terminal status must not unlock another order")
+	}
+	base.RemoteStatus = "cancelled"
+	if !automaticImmediateRetryEligible(cfg, base) {
+		t.Fatal("explicit zero-delivery supplier cancellation should unlock the next ladder rung")
+	}
+	base.LastError = "supply API returned HTTP 409"
+	if automaticImmediateRetryEligible(cfg, base) {
+		t.Fatal("a transport conflict inferred as cancellation must not unlock another order")
+	}
+}
+
+func TestAutomaticRetryLadderSkipsRepeatedQuantitiesAndExhaustsOnce(t *testing.T) {
+	now := time.Now()
+	cancelled := func(id string, quantity int, age time.Duration, reason string) store.SupplyOrder {
+		return store.SupplyOrder{
+			OrderID: id, Product: "oauth_7d", RequestedQuantity: quantity,
+			Automatic: true, TriggerReason: reason, Status: "cancelled", RemoteStatus: "cancelled",
+			CreatedAtMS: now.Add(-age - time.Second).UnixMilli(), CompletedAtMS: now.Add(-age).UnixMilli(),
+		}
+	}
+	repeated := []store.SupplyOrder{
+		cancelled("retry-5-c", 5, time.Second, "emergency_retry_immediate_after_cancelled"),
+		cancelled("retry-5-b", 5, 2*time.Second, "emergency_retry_immediate_after_cancelled"),
+		cancelled("retry-5-a", 5, 3*time.Second, "emergency_refill_to_healthy"),
+	}
+	state := automaticRetryLadderStateForOrders(store.ManagerSupplyConfig{Product: "oauth_7d"}, repeated[0], repeated)
+	if state.baseQuantity != 5 || state.nextQuantity != 3 {
+		t.Fatalf("repeated quantity state = %#v, want base 5 and next untried rung 3", state)
+	}
+
+	exhausted := []store.SupplyOrder{
+		cancelled("retry-2", 2, time.Second, "emergency_retry_immediate_after_cancelled"),
+		cancelled("retry-5", 5, 2*time.Second, "emergency_retry_immediate_after_cancelled"),
+		cancelled("base-10", 10, 3*time.Second, "emergency_refill_to_healthy"),
+	}
+	state = automaticRetryLadderStateForOrders(store.ManagerSupplyConfig{Product: "oauth_7d"}, exhausted[0], exhausted)
+	if state.baseQuantity != 10 || state.nextQuantity != 0 {
+		t.Fatalf("exhausted quantity state = %#v, want completed 10/5/2 cycle", state)
 	}
 }
 
@@ -692,6 +743,11 @@ func TestAutomaticSupplyGuardRequiresFreshBaselineAndSettledImports(t *testing.T
 	resource.SnapshotFresh = true
 	resource.SnapshotRefreshInProgress = false
 	resource.CapacitySnapshotAtMS = nowMS
+	resource.QuotaEstimateOrderingBlocked = true
+	if reason := service.automaticSupplyGuardReason(resource); reason != "quota_estimate_self_check_pending" {
+		t.Fatalf("quota estimate self-check guard reason = %q", reason)
+	}
+	resource.QuotaEstimateOrderingBlocked = false
 	resource.PendingInspectionAccounts = 6
 	if reason := service.automaticSupplyGuardReason(resource); reason != "pending_account_inspection" {
 		t.Fatalf("pending import guard reason = %q", reason)
@@ -2092,8 +2148,7 @@ func TestAutomaticCancelledOrderImmediatelyCreatesNextLadderRung(t *testing.T) {
 		case r.URL.Path == "/api/customer/login":
 			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
 		case r.URL.Path == "/api/customer/pickup/orders/order-cancelled":
-			w.WriteHeader(http.StatusConflict)
-			_, _ = w.Write([]byte(`{"message":"order cancelled"}`))
+			_, _ = w.Write([]byte(`{"order":{"id":"order-cancelled","status":"cancelled","quantity":10}}`))
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
 			_, _ = w.Write([]byte(`{"files":[]}`))
 		case r.URL.Path == "/api/customer/inventory":

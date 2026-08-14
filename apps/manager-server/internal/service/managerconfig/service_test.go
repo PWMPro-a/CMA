@@ -85,10 +85,30 @@ func TestNormalizeSupplyConfigDefaultsRecoveryControls(t *testing.T) {
 	if next.RevenueMultiplier != 0.06 {
 		t.Fatalf("revenue multiplier = %f, want 0.06", next.RevenueMultiplier)
 	}
+	if next.QuotaEstimationPolicies["team"].Mode != SupplyQuotaEstimationAuto ||
+		next.QuotaEstimationPolicies["team"].FallbackM != 60 ||
+		next.QuotaEstimationPolicies["free"].FallbackM != 10 {
+		t.Fatalf("quota estimation defaults = %#v", next.QuotaEstimationPolicies)
+	}
 	off := false
 	next = NormalizeSupplyConfig(store.ManagerSupplyConfig{RecoveryDisableOriginal: &off}, next)
 	if next.RecoveryDisableOriginal == nil || *next.RecoveryDisableOriginal {
 		t.Fatalf("submitted recovery original disable=false should be preserved: %#v", next.RecoveryDisableOriginal)
+	}
+}
+
+func TestNormalizeSupplyConfigAcceptsFixedAndBoundedQuotaPolicies(t *testing.T) {
+	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{
+		QuotaEstimationPolicies: map[string]store.ManagerSupplyQuotaEstimationPolicy{
+			" Team ": {Mode: SupplyQuotaEstimationFixed, FallbackM: 700, FixedM: 42},
+			"free":   {Mode: "invalid", FallbackM: 8, FixedM: 0.1},
+		},
+	}, store.ManagerSupplyConfig{})
+	if got := next.QuotaEstimationPolicies["team"]; got.Mode != SupplyQuotaEstimationFixed || got.FallbackM != 500 || got.FixedM != 42 {
+		t.Fatalf("normalized team quota policy = %#v", got)
+	}
+	if got := next.QuotaEstimationPolicies["free"]; got.Mode != SupplyQuotaEstimationAuto || got.FallbackM != 8 || got.FixedM != 0.5 {
+		t.Fatalf("normalized free quota policy = %#v", got)
 	}
 }
 

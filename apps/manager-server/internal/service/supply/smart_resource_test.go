@@ -703,7 +703,7 @@ func TestShortageRetryUsesFullBatchAfterDefiniteZeroDeliveryFailure(t *testing.T
 	}
 	cancelled := store.SupplyOrder{
 		OrderID: "cancelled-purchase", Product: cfg.Product, Automatic: true,
-		Status: "cancelled", CompletedAtMS: now.Add(-20 * time.Second).UnixMilli(),
+		Status: "cancelled", RemoteStatus: "cancelled", CompletedAtMS: now.Add(-20 * time.Second).UnixMilli(),
 	}
 	plan := smartEmergencyRetryPlanForOrder(cfg, resource, cancelled, now)
 	if !plan.active || plan.quantityLimit != 10 || plan.reason != "emergency_retry_after_cancelled" || plan.cooldown != 10*time.Second {
@@ -715,8 +715,8 @@ func TestShortageRetryUsesFullBatchAfterDefiniteZeroDeliveryFailure(t *testing.T
 	retried.TriggerReason = "emergency_retry_after_cancelled"
 	retried.LastError = "inventory unavailable"
 	plan = smartEmergencyRetryPlanForOrder(cfg, resource, retried, now)
-	if !plan.active || plan.quantityLimit != 10 || plan.cooldown != 10*time.Second {
-		t.Fatalf("repeated zero-delivery retry plan = %#v", plan)
+	if plan.active {
+		t.Fatalf("failed order must wait for ordinary reconciliation instead of fast retry: %#v", plan)
 	}
 
 	warning := resource
@@ -2825,6 +2825,30 @@ func TestSmartPrelockKeepsFullBatchWhenCapacityCritical(t *testing.T) {
 	quantity, reason := smartPrelockQuantityForSupplyPressure(cfg, resource, smartSupplyPressure{level: smartSupplyPressureScarce}, 10)
 	if quantity != 10 || reason != "supply_scarce_full_batch" {
 		t.Fatalf("critical quantity=%d reason=%q, want 10/full", quantity, reason)
+	}
+}
+
+func TestSmartPrelockDoesNotRaiseEmergencyRetryLadderRung(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		ReplenishBatchSize: 10,
+		PrelockMinQuantity: 1,
+		PrelockMaxQuantity: 10,
+	}
+	resource := SmartResource{
+		HealthLevel:       smartHealthCritical,
+		EmergencyShortage: true,
+		EmergencyReason:   "critical_available_accounts",
+		DecisionReason:    "emergency_retry_immediate_after_cancelled",
+		AvailableAccounts: 0,
+	}
+	quantity, reason := smartPrelockQuantityForSupplyPressure(
+		cfg,
+		resource,
+		smartSupplyPressure{level: smartSupplyPressureScarce},
+		2,
+	)
+	if quantity != 2 || reason != resource.DecisionReason {
+		t.Fatalf("retry pressure adjustment = %d/%q, want final ladder cap 2/%q", quantity, reason, resource.DecisionReason)
 	}
 }
 

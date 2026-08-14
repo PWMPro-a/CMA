@@ -25,6 +25,8 @@ const (
 	SupplyStrategyBalanced     = "balanced"
 	SupplyStrategyCostFirst    = "cost_first"
 	SupplyStrategyCustom       = "custom"
+	SupplyQuotaEstimationAuto  = "auto"
+	SupplyQuotaEstimationFixed = "fixed"
 )
 
 type supplyStrategyPreset struct {
@@ -293,6 +295,7 @@ func (s *Service) DefaultManagerConfig() store.ManagerConfig {
 			RecoverySyncIntervalSeconds: 60,
 			RecoveryClaimBatchSize:      20,
 			RecoveryDisableOriginal:     BoolPtr(true),
+			QuotaEstimationPolicies:     defaultSupplyQuotaEstimationPolicies(),
 		},
 	}
 }
@@ -415,8 +418,62 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	} else if next.RecoveryDisableOriginal == nil {
 		next.RecoveryDisableOriginal = BoolPtr(true)
 	}
+	next.QuotaEstimationPolicies = normalizeSupplyQuotaEstimationPolicies(
+		submitted.QuotaEstimationPolicies,
+		next.QuotaEstimationPolicies,
+	)
 	next.PasswordConfigured = next.Password != ""
 	return next
+}
+
+func defaultSupplyQuotaEstimationPolicies() map[string]store.ManagerSupplyQuotaEstimationPolicy {
+	return map[string]store.ManagerSupplyQuotaEstimationPolicy{
+		"team": {Mode: SupplyQuotaEstimationAuto, FallbackM: 60, FixedM: 60},
+		"free": {Mode: SupplyQuotaEstimationAuto, FallbackM: 10, FixedM: 10},
+	}
+}
+
+func normalizeSupplyQuotaEstimationPolicies(
+	submitted map[string]store.ManagerSupplyQuotaEstimationPolicy,
+	current map[string]store.ManagerSupplyQuotaEstimationPolicy,
+) map[string]store.ManagerSupplyQuotaEstimationPolicy {
+	result := defaultSupplyQuotaEstimationPolicies()
+	for planType, policy := range current {
+		planType = strings.ToLower(strings.TrimSpace(planType))
+		if planType == "" {
+			continue
+		}
+		result[planType] = normalizeSupplyQuotaEstimationPolicy(planType, policy, result[planType])
+	}
+	for planType, policy := range submitted {
+		planType = strings.ToLower(strings.TrimSpace(planType))
+		if planType == "" || len(planType) > 64 {
+			continue
+		}
+		result[planType] = normalizeSupplyQuotaEstimationPolicy(planType, policy, result[planType])
+	}
+	return result
+}
+
+func normalizeSupplyQuotaEstimationPolicy(
+	planType string,
+	policy store.ManagerSupplyQuotaEstimationPolicy,
+	current store.ManagerSupplyQuotaEstimationPolicy,
+) store.ManagerSupplyQuotaEstimationPolicy {
+	mode := strings.ToLower(strings.TrimSpace(policy.Mode))
+	if mode == "" {
+		mode = strings.ToLower(strings.TrimSpace(current.Mode))
+	}
+	if mode != SupplyQuotaEstimationFixed {
+		mode = SupplyQuotaEstimationAuto
+	}
+	defaultFallback := 10.0
+	if planType == "team" {
+		defaultFallback = 60
+	}
+	fallbackM := BoundedFloatOrDefault(policy.FallbackM, current.FallbackM, defaultFallback, 0.5, 500)
+	fixedM := BoundedFloatOrDefault(policy.FixedM, current.FixedM, fallbackM, 0.5, 500)
+	return store.ManagerSupplyQuotaEstimationPolicy{Mode: mode, FallbackM: fallbackM, FixedM: fixedM}
 }
 
 func NormalizeSupplyStrategy(value string) string {

@@ -12,16 +12,17 @@ import (
 )
 
 const (
-	smartQuotaCalibrationWarmWindow        = 24 * time.Hour
-	smartQuotaCalibrationSampleTTL         = 24 * time.Hour
-	smartQuotaCalibrationRecentWindow      = 6 * time.Hour
-	smartQuotaCalibrationMaxObservationGap = 2 * time.Hour
-	smartQuotaCalibrationMinDelta          = 0.0005
-	smartQuotaCalibrationMinUsedFraction   = 0.005
-	smartQuotaCalibrationMinCapacityM      = 0.5
-	smartQuotaCalibrationMaxCapacityM      = 500.0
-	smartQuotaCalibrationMaxSamples        = 8_000
-	smartQuotaCalibrationDivergencePct     = 25.0
+	smartQuotaCalibrationWarmWindow         = 24 * time.Hour
+	smartQuotaCalibrationSampleTTL          = 24 * time.Hour
+	smartQuotaCalibrationRecentWindow       = 6 * time.Hour
+	smartQuotaCalibrationMaxObservationGap  = 2 * time.Hour
+	smartQuotaCalibrationMinDelta           = 0.005
+	smartQuotaCalibrationMinUsedFraction    = 0.10
+	smartQuotaCalibrationMinCapacityM       = 0.5
+	smartQuotaCalibrationMaxCapacityM       = 500.0
+	smartQuotaCalibrationSamplesPerAccount  = 3
+	smartQuotaCalibrationMaxRepresentatives = 24
+	smartQuotaCalibrationDivergencePct      = 25.0
 
 	smartQuotaEstimateSourceDefault      = "default"
 	smartQuotaEstimateSourceGlobal       = "runtime_global"
@@ -45,6 +46,8 @@ type smartQuotaCalibrationObservation struct {
 	lastEventMS        int64
 	lastFraction       float64
 	lastSampleFraction float64
+	lastSampleTokens   int64
+	hasFraction        bool
 	recoverAtMS        int64
 	planType           string
 	windowTokens       int64
@@ -61,14 +64,17 @@ type smartQuotaCalibrationSample struct {
 }
 
 type smartQuotaCalibrationState struct {
-	observations map[string]smartQuotaCalibrationObservation
-	samples      []smartQuotaCalibrationSample
+	observations      map[string]smartQuotaCalibrationObservation
+	samples           []smartQuotaCalibrationSample
+	samplesByIdentity map[string][]smartQuotaCalibrationSample
+	directSamples     map[string]smartQuotaCalibrationSample
 }
 
 type smartQuotaEstimate struct {
 	CapacityM           float64
 	Source              string
 	SampleCount         int
+	EvidenceCount       int
 	ObservedPercent     float64
 	Confidence          string
 	UniqueAccounts      int
@@ -78,6 +84,24 @@ type smartQuotaEstimate struct {
 	DivergencePercent   float64
 	IndependentAccount  bool
 }
+
+type smartQuotaPlanAdoptionState struct {
+	mode                string
+	adoptedM            float64
+	candidateM          float64
+	lastObservedM       float64
+	confirmationRounds  int
+	lastInspectionRunID int64
+	pending             bool
+}
+
+const (
+	smartQuotaPolicyModeAuto        = "auto"
+	smartQuotaPolicyModeFixed       = "fixed"
+	smartQuotaPolicyMaxStepFraction = 0.10
+	smartQuotaPolicyWarningFraction = 0.10
+	smartQuotaPolicyRequiredRounds  = 2
+)
 
 type smartQuotaWeightedPoint struct {
 	capacityM float64
@@ -109,9 +133,35 @@ type smartQuotaWindowBaseline struct {
 
 func newSmartQuotaCalibrationState() smartQuotaCalibrationState {
 	return smartQuotaCalibrationState{
-		observations: make(map[string]smartQuotaCalibrationObservation),
-		samples:      make([]smartQuotaCalibrationSample, 0, 512),
+		observations:      make(map[string]smartQuotaCalibrationObservation),
+		samples:           make([]smartQuotaCalibrationSample, 0, 256),
+		samplesByIdentity: make(map[string][]smartQuotaCalibrationSample),
+		directSamples:     make(map[string]smartQuotaCalibrationSample),
 	}
+}
+
+func (s *Service) ensureSmartQuotaCalibrationStateLocked() {
+	if s.smartQuotaState.observations == nil {
+		s.smartQuotaState.observations = make(map[string]smartQuotaCalibrationObservation)
+	}
+	if s.smartQuotaState.samplesByIdentity == nil {
+		s.smartQuotaState.samplesByIdentity = make(map[string][]smartQuotaCalibrationSample)
+	}
+	if s.smartQuotaState.directSamples == nil {
+		s.smartQuotaState.directSamples = make(map[string]smartQuotaCalibrationSample)
+	}
+}
+
+func (s *Service) appendSmartQuotaCalibrationSampleLocked(sample smartQuotaCalibrationSample) {
+	if sample.identity == "" {
+		return
+	}
+	s.ensureSmartQuotaCalibrationStateLocked()
+	s.smartQuotaState.samples = append(s.smartQuotaState.samples, sample)
+	s.smartQuotaState.samplesByIdentity[sample.identity] = append(
+		s.smartQuotaState.samplesByIdentity[sample.identity],
+		sample,
+	)
 }
 
 func normalizeSmartQuotaFraction(value float64) (float64, bool) {
@@ -340,9 +390,7 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 	}
 	s.smartMu.Lock()
 	defer s.smartMu.Unlock()
-	if s.smartQuotaState.observations == nil {
-		s.smartQuotaState = newSmartQuotaCalibrationState()
-	}
+	s.ensureSmartQuotaCalibrationStateLocked()
 
 	for _, baseline := range baselines {
 		if baseline.identity == "" || baseline.windowTokens <= 0 || baseline.fraction < smartQuotaCalibrationMinUsedFraction {
@@ -369,10 +417,12 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 		if observation.recoverAtMS > 0 && baseline.recoverAtMS > 0 && observation.recoverAtMS != baseline.recoverAtMS {
 			observation = smartQuotaCalibrationObservation{}
 		}
-		observation.windowTokens = maxInt64(observation.windowTokens, baseline.windowTokens)
+		observation.windowTokens = baseline.windowTokens
 		observation.lastEventMS = maxInt64(observation.lastEventMS, maxInt64(baseline.observedMS, baseline.lastSeenMS))
 		observation.lastFraction = baseline.fraction
 		observation.lastSampleFraction = baseline.fraction
+		observation.lastSampleTokens = observation.windowTokens
+		observation.hasFraction = true
 		if baseline.recoverAtMS > 0 {
 			observation.recoverAtMS = baseline.recoverAtMS
 		}
@@ -380,7 +430,7 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 			observation.planType = baseline.planType
 		}
 		s.smartQuotaState.observations[baseline.identity] = observation
-		s.smartQuotaState.samples = append(s.smartQuotaState.samples, smartQuotaCalibrationSample{
+		s.smartQuotaState.directSamples[baseline.identity] = smartQuotaCalibrationSample{
 			identity:       baseline.identity,
 			planType:       observation.planType,
 			capacityM:      capacityM,
@@ -388,7 +438,7 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 			usedFraction:   baseline.fraction,
 			observedMS:     baseline.observedMS,
 			completeWindow: true,
-		})
+		}
 	}
 	s.pruneSmartQuotaCalibrationLocked(now)
 }
@@ -397,9 +447,7 @@ func (s *Service) recordSmartQuotaCalibrationEventsLocked(events []usage.Event, 
 	if s == nil || len(events) == 0 {
 		return
 	}
-	if s.smartQuotaState.observations == nil {
-		s.smartQuotaState = newSmartQuotaCalibrationState()
-	}
+	s.ensureSmartQuotaCalibrationStateLocked()
 	ordered := make([]usage.Event, 0, len(events))
 	for _, event := range events {
 		if smartQuotaCalibrationEventIdentity(event) == "" {
@@ -473,44 +521,66 @@ func (s *Service) recordSmartQuotaCalibrationEventLocked(event usage.Event, now 
 		observation.planType = planType
 	}
 
+	if !observation.hasFraction {
+		observation.lastSampleFraction = fraction
+		observation.lastSampleTokens = observation.windowTokens
+		observation.hasFraction = true
+		s.smartQuotaState.observations[identity] = observation
+		return
+	}
+
 	delta := fraction - observation.lastSampleFraction
-	if observation.windowTokens > 0 && fraction >= smartQuotaCalibrationMinUsedFraction &&
-		(delta >= smartQuotaCalibrationMinDelta || observation.lastSampleFraction == 0) {
-		capacityM := float64(observation.windowTokens) / fraction / 1_000_000
+	deltaTokens := observation.windowTokens - observation.lastSampleTokens
+	if deltaTokens > 0 && fraction >= smartQuotaCalibrationMinUsedFraction && delta >= smartQuotaCalibrationMinDelta {
+		// Runtime events are valid only as an observed delta. Dividing a partial
+		// post-restart Token tail by an absolute 10%+ quota percentage creates the
+		// false 8M/30M account estimates seen in production. Complete inspection
+		// windows use the independent absolute formula in recordSmartQuotaWindowBaselines.
+		capacityM := float64(deltaTokens) / delta / 1_000_000
 		if capacityM >= smartQuotaCalibrationMinCapacityM && capacityM <= smartQuotaCalibrationMaxCapacityM {
-			sampleWeight := math.Max(delta, smartQuotaCalibrationMinDelta)
-			if observation.lastSampleFraction == 0 {
-				// The first percentage seen after startup is a point-in-time ratio,
-				// not proof that this process observed the full 0..fraction change.
-				// Cap its influence so later current-window samples take precedence.
-				sampleWeight = math.Min(sampleWeight, 0.05)
-			}
-			s.smartQuotaState.samples = append(s.smartQuotaState.samples, smartQuotaCalibrationSample{
+			s.appendSmartQuotaCalibrationSampleLocked(smartQuotaCalibrationSample{
 				identity:     identity,
 				planType:     observation.planType,
 				capacityM:    capacityM,
-				weight:       sampleWeight,
+				weight:       math.Max(delta, smartQuotaCalibrationMinDelta),
 				usedFraction: fraction,
 				observedMS:   ts,
 			})
 		}
 		observation.lastSampleFraction = fraction
+		observation.lastSampleTokens = observation.windowTokens
 	}
 	s.smartQuotaState.observations[identity] = observation
 }
 
 func (s *Service) pruneSmartQuotaCalibrationLocked(now time.Time) {
 	cutoff := now.Add(-smartQuotaCalibrationSampleTTL).UnixMilli()
-	samples := s.smartQuotaState.samples[:0]
+	s.ensureSmartQuotaCalibrationStateLocked()
+	grouped := make(map[string][]smartQuotaCalibrationSample)
 	for _, sample := range s.smartQuotaState.samples {
 		if sample.observedMS >= cutoff {
-			samples = append(samples, sample)
+			grouped[sample.identity] = append(grouped[sample.identity], sample)
 		}
 	}
-	if len(samples) > smartQuotaCalibrationMaxSamples {
-		samples = samples[len(samples)-smartQuotaCalibrationMaxSamples:]
+	samples := make([]smartQuotaCalibrationSample, 0, len(grouped)*smartQuotaCalibrationSamplesPerAccount)
+	s.smartQuotaState.samplesByIdentity = make(map[string][]smartQuotaCalibrationSample, len(grouped))
+	for identity, identitySamples := range grouped {
+		sort.SliceStable(identitySamples, func(i, j int) bool {
+			return identitySamples[i].observedMS < identitySamples[j].observedMS
+		})
+		if len(identitySamples) > smartQuotaCalibrationSamplesPerAccount {
+			identitySamples = identitySamples[len(identitySamples)-smartQuotaCalibrationSamplesPerAccount:]
+		}
+		copied := append([]smartQuotaCalibrationSample(nil), identitySamples...)
+		s.smartQuotaState.samplesByIdentity[identity] = copied
+		samples = append(samples, copied...)
 	}
 	s.smartQuotaState.samples = samples
+	for identity, sample := range s.smartQuotaState.directSamples {
+		if sample.observedMS < cutoff {
+			delete(s.smartQuotaState.directSamples, identity)
+		}
+	}
 	for identity, observation := range s.smartQuotaState.observations {
 		if observation.lastEventMS < cutoff {
 			delete(s.smartQuotaState.observations, identity)
@@ -537,8 +607,13 @@ func (s *Service) smartQuotaEstimateForAt(now time.Time, planType string, identi
 		}
 	}
 	s.smartMu.RLock()
-	samples := make([]smartQuotaCalibrationSample, 0, len(s.smartQuotaState.samples))
+	samples := make([]smartQuotaCalibrationSample, 0, len(s.smartQuotaState.samples)+len(s.smartQuotaState.directSamples))
 	for _, sample := range s.smartQuotaState.samples {
+		if sample.observedMS >= cutoff {
+			samples = append(samples, sample)
+		}
+	}
+	for _, sample := range s.smartQuotaState.directSamples {
 		if sample.observedMS >= cutoff {
 			samples = append(samples, sample)
 		}
@@ -613,7 +688,7 @@ func (s *Service) smartQuotaEstimateForAt(now time.Time, planType string, identi
 		allEstimate.HistoricalEstimateM = allEstimate.CapacityM
 		return allEstimate
 	}
-	return defaultSmartQuotaEstimate()
+	return defaultSmartQuotaEstimateForPlan(planType)
 }
 
 func (s *Service) smartQuotaCurrentEstimateForAt(now time.Time, identities ...string) (smartQuotaEstimate, bool) {
@@ -632,13 +707,28 @@ func (s *Service) smartQuotaCurrentEstimateForAt(now time.Time, identities ...st
 	}
 	cutoff := now.Add(-smartQuotaCalibrationRecentWindow).UnixMilli()
 	s.smartMu.RLock()
-	samples := make([]smartQuotaCalibrationSample, 0, 16)
-	for _, sample := range s.smartQuotaState.samples {
-		if sample.observedMS < cutoff {
-			continue
-		}
-		if _, ok := normalizedIdentities[sample.identity]; ok {
+	samples := make([]smartQuotaCalibrationSample, 0, len(normalizedIdentities)*4)
+	for identity := range normalizedIdentities {
+		if sample, ok := s.smartQuotaState.directSamples[identity]; ok && sample.observedMS >= cutoff {
 			samples = append(samples, sample)
+		}
+		if identitySamples, ok := s.smartQuotaState.samplesByIdentity[identity]; ok {
+			for _, sample := range identitySamples {
+				if sample.observedMS >= cutoff {
+					samples = append(samples, sample)
+				}
+			}
+		}
+	}
+	// Tests and legacy in-memory state may predate the identity index. Keep a
+	// bounded compatibility scan only when no indexed samples were found.
+	if len(samples) == 0 {
+		for _, sample := range s.smartQuotaState.samples {
+			if sample.observedMS >= cutoff {
+				if _, ok := normalizedIdentities[sample.identity]; ok {
+					samples = append(samples, sample)
+				}
+			}
 		}
 	}
 	s.smartMu.RUnlock()
@@ -646,14 +736,10 @@ func (s *Service) smartQuotaCurrentEstimateForAt(now time.Time, identities ...st
 }
 
 func estimateSmartQuotaCurrentSamplesAt(samples []smartQuotaCalibrationSample, now time.Time) (smartQuotaEstimate, bool) {
-	minSamples := 2
-	for _, sample := range samples {
-		if sample.completeWindow {
-			minSamples = 1
-			break
-		}
-	}
-	return estimateSmartQuotaSamplesAt(samples, smartQuotaEstimateSourceCurrent, minSamples, 0.005, now)
+	// One complete-window estimate or one observed >=0.5% runtime delta is
+	// sufficient for that exact account. Absolute point-in-time ratios never
+	// enter this sample set.
+	return estimateSmartQuotaSamplesAt(samples, smartQuotaEstimateSourceCurrent, 1, 0.005, now)
 }
 
 func smartQuotaPlanOrGlobalEstimate(
@@ -714,7 +800,7 @@ func calibrateSmartQuotaCurrentEstimate(
 	}
 
 	currentWeight, recentWeight, historicalWeight := 0.80, 0.15, 0.05
-	if current.SampleCount < 6 || current.ObservedPercent < 2 {
+	if current.EvidenceCount < 6 || current.ObservedPercent < 2 {
 		currentWeight, recentWeight, historicalWeight = 0.60, 0.25, 0.15
 	}
 	weightedCapacity := current.CapacityM * currentWeight
@@ -746,6 +832,14 @@ func defaultSmartQuotaEstimate() smartQuotaEstimate {
 	}
 }
 
+func defaultSmartQuotaEstimateForPlan(planType string) smartQuotaEstimate {
+	estimate := defaultSmartQuotaEstimate()
+	if strings.EqualFold(strings.TrimSpace(planType), "team") {
+		estimate.CapacityM = smartDefaultTeamAccountQuotaMillionTokens
+	}
+	return estimate
+}
+
 func dominantSmartQuotaPlan(results []store.CodexInspectionResult) string {
 	counts := make(map[string]int)
 	for _, result := range results {
@@ -768,22 +862,229 @@ func dominantSmartQuotaPlan(results []store.CodexInspectionResult) string {
 	return best
 }
 
-func currentSmartQuotaInspectionIdentities(results []store.CodexInspectionResult) []string {
-	seen := make(map[string]struct{})
-	identities := make([]string, 0, len(results))
-	for _, result := range results {
-		if !isSmartCapacityInspectionResult(result) || inspectionResultCapacityExcluded(result) || inspectionResultUsabilityUnverified(result) {
-			continue
+func smartQuotaFallbackForPlan(planType string) float64 {
+	if strings.EqualFold(strings.TrimSpace(planType), "team") {
+		return smartDefaultTeamAccountQuotaMillionTokens
+	}
+	return smartDefaultAccountQuotaMillionTokens
+}
+
+func smartQuotaPolicyForPlan(cfg store.ManagerSupplyConfig, planType string) store.ManagerSupplyQuotaEstimationPolicy {
+	planType = strings.ToLower(strings.TrimSpace(planType))
+	policy := store.ManagerSupplyQuotaEstimationPolicy{
+		Mode:      smartQuotaPolicyModeAuto,
+		FallbackM: smartQuotaFallbackForPlan(planType),
+		FixedM:    smartQuotaFallbackForPlan(planType),
+	}
+	if configured, ok := cfg.QuotaEstimationPolicies[planType]; ok {
+		if strings.EqualFold(configured.Mode, smartQuotaPolicyModeFixed) {
+			policy.Mode = smartQuotaPolicyModeFixed
 		}
-		for _, identity := range smartQuotaCalibrationResultIdentities(result.FileName, result.AuthIndex, result.AccountKey, result.AccountID) {
-			if _, ok := seen[identity]; ok {
-				continue
-			}
-			seen[identity] = struct{}{}
-			identities = append(identities, identity)
+		if configured.FallbackM > 0 {
+			policy.FallbackM = clampFloat(configured.FallbackM, smartQuotaCalibrationMinCapacityM, smartQuotaCalibrationMaxCapacityM)
+		}
+		if configured.FixedM > 0 {
+			policy.FixedM = clampFloat(configured.FixedM, smartQuotaCalibrationMinCapacityM, smartQuotaCalibrationMaxCapacityM)
 		}
 	}
-	return identities
+	return policy
+}
+
+func smartQuotaEstimateHasValidData(estimate smartQuotaEstimate) bool {
+	return estimate.Source != smartQuotaEstimateSourceDefault && estimate.SampleCount > 0 && estimate.CapacityM > 0
+}
+
+func smartQuotaMoveAtMostTenPercent(current, target float64) float64 {
+	if current <= 0 {
+		return target
+	}
+	return clampFloat(target, current*(1-smartQuotaPolicyMaxStepFraction), current*(1+smartQuotaPolicyMaxStepFraction))
+}
+
+func smartQuotaRelativeDifference(left, right float64) float64 {
+	if left <= 0 || right <= 0 {
+		return 0
+	}
+	return math.Abs(left-right) / right
+}
+
+func (s *Service) smartQuotaPlanEstimatesForInspection(
+	cfg store.ManagerSupplyConfig,
+	results []store.CodexInspectionResult,
+	runID int64,
+	now time.Time,
+) ([]SmartQuotaPlanEstimate, map[string]smartQuotaEstimate) {
+	type planContext struct {
+		accounts   int
+		identities []string
+	}
+	contexts := make(map[string]*planContext)
+	for planType := range cfg.QuotaEstimationPolicies {
+		planType = strings.ToLower(strings.TrimSpace(planType))
+		if planType != "" {
+			contexts[planType] = &planContext{}
+		}
+	}
+	for _, result := range results {
+		if !isSmartCapacityInspectionResult(result) || inspectionResultCapacityExcluded(result) {
+			continue
+		}
+		planType := strings.ToLower(strings.TrimSpace(result.PlanType))
+		if planType == "" {
+			planType = "unknown"
+		}
+		context := contexts[planType]
+		if context == nil {
+			context = &planContext{}
+			contexts[planType] = context
+		}
+		context.accounts++
+		if inspectionResultUsabilityUnverified(result) {
+			continue
+		}
+		context.identities = append(context.identities, smartQuotaCalibrationResultIdentities(
+			result.FileName,
+			result.AuthIndex,
+			result.AccountKey,
+			result.AccountID,
+		)...)
+	}
+	if len(contexts) == 0 {
+		contexts["team"] = &planContext{}
+	}
+
+	plans := make([]string, 0, len(contexts))
+	for planType := range contexts {
+		plans = append(plans, planType)
+	}
+	sort.Strings(plans)
+
+	s.quotaPolicyMu.Lock()
+	defer s.quotaPolicyMu.Unlock()
+	if s.quotaPolicyState == nil {
+		s.quotaPolicyState = make(map[string]smartQuotaPlanAdoptionState)
+	}
+	items := make([]SmartQuotaPlanEstimate, 0, len(plans))
+	planning := make(map[string]smartQuotaEstimate, len(plans))
+	for _, planType := range plans {
+		context := contexts[planType]
+		policy := smartQuotaPolicyForPlan(cfg, planType)
+		observed := s.smartQuotaEstimateForAt(now, planType, context.identities...)
+		hasData := smartQuotaEstimateHasValidData(observed)
+		observedM := 0.0
+		if hasData {
+			observedM = observed.CapacityM
+		}
+		if !hasData {
+			observed = smartQuotaEstimate{
+				CapacityM:  policy.FallbackM,
+				Source:     smartQuotaEstimateSourceDefault,
+				Confidence: smartConfidenceLow,
+			}
+		}
+
+		state := s.quotaPolicyState[planType]
+		if state.mode != policy.Mode || state.adoptedM <= 0 {
+			state = smartQuotaPlanAdoptionState{mode: policy.Mode, adoptedM: policy.FallbackM}
+		}
+		if policy.Mode == smartQuotaPolicyModeFixed {
+			state.adoptedM = policy.FixedM
+			state.candidateM = policy.FixedM
+			state.lastObservedM = observed.CapacityM
+			state.confirmationRounds = smartQuotaPolicyRequiredRounds
+			state.pending = false
+			state.lastInspectionRunID = runID
+		} else if !hasData {
+			state.adoptedM = policy.FallbackM
+			state.candidateM = 0
+			state.lastObservedM = 0
+			state.confirmationRounds = 0
+			state.pending = false
+			state.lastInspectionRunID = runID
+		} else {
+			newInspection := (runID > 0 && runID != state.lastInspectionRunID) ||
+				(runID <= 0 && state.lastObservedM <= 0)
+			if newInspection {
+				candidateShifted := state.candidateM > 0 &&
+					smartQuotaRelativeDifference(observed.CapacityM, state.candidateM) > smartQuotaPolicyWarningFraction
+				if candidateShifted {
+					state.confirmationRounds = 1
+				} else {
+					state.confirmationRounds++
+				}
+				state.candidateM = observed.CapacityM
+				state.lastObservedM = observed.CapacityM
+				state.lastInspectionRunID = runID
+				difference := smartQuotaRelativeDifference(observed.CapacityM, state.adoptedM)
+				switch {
+				case difference <= smartQuotaPolicyWarningFraction:
+					state.adoptedM = observed.CapacityM
+					state.pending = false
+				case state.confirmationRounds >= smartQuotaPolicyRequiredRounds:
+					state.adoptedM = smartQuotaMoveAtMostTenPercent(state.adoptedM, observed.CapacityM)
+					state.pending = smartQuotaRelativeDifference(observed.CapacityM, state.adoptedM) > 0.001
+				default:
+					state.pending = true
+				}
+			}
+		}
+		s.quotaPolicyState[planType] = state
+
+		orderingBlocked := policy.Mode == smartQuotaPolicyModeAuto && hasData && state.pending &&
+			state.confirmationRounds < smartQuotaPolicyRequiredRounds && context.accounts > 0
+		divergence := 0.0
+		if hasData {
+			divergence = smartQuotaRelativeDifference(observed.CapacityM, state.adoptedM) * 100
+		}
+		source := observed.Source
+		if policy.Mode == smartQuotaPolicyModeFixed {
+			source = smartQuotaPolicyModeFixed
+		}
+		items = append(items, SmartQuotaPlanEstimate{
+			PlanType:            planType,
+			Mode:                policy.Mode,
+			AccountCount:        context.accounts,
+			FallbackM:           round2(policy.FallbackM),
+			FixedM:              round2(policy.FixedM),
+			ObservedM:           round2(observedM),
+			AdoptedM:            round2(state.adoptedM),
+			Source:              source,
+			SampleCount:         observed.SampleCount,
+			UniqueAccounts:      observed.UniqueAccounts,
+			DivergencePercent:   round2(divergence),
+			PendingConfirmation: state.pending,
+			ConfirmationRounds:  state.confirmationRounds,
+			RequiredRounds:      smartQuotaPolicyRequiredRounds,
+			OrderingBlocked:     orderingBlocked,
+			LastInspectionRunID: state.lastInspectionRunID,
+		})
+		planningSource := source
+		if policy.Mode == smartQuotaPolicyModeAuto && hasData &&
+			smartQuotaRelativeDifference(state.adoptedM, observed.CapacityM) > 0.001 {
+			planningSource = smartQuotaEstimateSourceRecalibrated
+		}
+		planningEstimate := observed
+		planningEstimate.CapacityM = state.adoptedM
+		planningEstimate.Source = planningSource
+		planning[planType] = planningEstimate
+	}
+	return items, planning
+}
+
+func smartQuotaPlanningEstimateForPlan(planning map[string]smartQuotaEstimate, planType string) smartQuotaEstimate {
+	planType = strings.ToLower(strings.TrimSpace(planType))
+	if estimate, ok := planning[planType]; ok && estimate.CapacityM > 0 {
+		return estimate
+	}
+	if estimate, ok := planning["team"]; ok && estimate.CapacityM > 0 {
+		return estimate
+	}
+	for _, estimate := range planning {
+		if estimate.CapacityM > 0 {
+			return estimate
+		}
+	}
+	return defaultSmartQuotaEstimateForPlan(planType)
 }
 
 func (s *Service) applySmartQuotaEstimate(cfg store.ManagerSupplyConfig, resource *SmartResource, estimate smartQuotaEstimate) {
@@ -807,18 +1108,24 @@ func (s *Service) applySmartQuotaEstimate(cfg store.ManagerSupplyConfig, resourc
 }
 
 func (s *Service) smartQuotaEstimateForInspectionResult(result store.CodexInspectionResult, fallback smartQuotaEstimate, now time.Time) smartQuotaEstimate {
+	// A fixed policy is an explicit operator override. Automatic policies are
+	// different: their adopted value is only the default for accounts that do
+	// not yet have enough account-scoped evidence. Once this exact account has a
+	// valid >=10% sample, use its independent estimate directly and never blend
+	// it with the plan default.
+	if fallback.Source == smartQuotaPolicyModeFixed && fallback.CapacityM > 0 {
+		return fallback
+	}
 	identities := smartQuotaCalibrationResultIdentities(result.FileName, result.AuthIndex, result.AccountKey, result.AccountID)
 	estimate, ok := s.smartQuotaCurrentEstimateForAt(now, identities...)
 	if ok {
-		if fallback.CapacityM > 0 {
-			return calibrateSmartQuotaCurrentEstimate(estimate, fallback, true, smartQuotaEstimate{}, false)
-		}
+		estimate.CurrentEstimateM = estimate.CapacityM
 		return estimate
 	}
 	if fallback.CapacityM > 0 {
 		return fallback
 	}
-	return defaultSmartQuotaEstimate()
+	return defaultSmartQuotaEstimateForPlan(result.PlanType)
 }
 
 func filterSmartQuotaSamples(samples []smartQuotaCalibrationSample, keep func(smartQuotaCalibrationSample) bool) []smartQuotaCalibrationSample {
@@ -842,7 +1149,8 @@ func estimateSmartQuotaSamplesAt(samples []smartQuotaCalibrationSample, source s
 	independentAccount := false
 	for _, sample := range samples {
 		if sample.capacityM < smartQuotaCalibrationMinCapacityM || sample.capacityM > smartQuotaCalibrationMaxCapacityM ||
-			sample.weight <= 0 || sample.observedMS <= 0 {
+			sample.weight <= 0 || sample.observedMS <= 0 ||
+			sample.usedFraction < smartQuotaCalibrationMinUsedFraction {
 			continue
 		}
 		recencyWeight := smartQuotaSampleRecencyWeight(now, sample.observedMS)
@@ -898,20 +1206,38 @@ func estimateSmartQuotaSamplesAt(samples []smartQuotaCalibrationSample, source s
 		return smartQuotaEstimate{}, false
 	}
 	accountPoints = trimSmartQuotaPointExtremes(accountPoints)
+	accountPoints = selectSmartQuotaRepresentativePoints(accountPoints, smartQuotaCalibrationMaxRepresentatives)
 	median := weightedSmartQuotaMedian(accountPoints)
 	confidence := smartConfidenceMedium
-	if len(valid) >= 30 && len(identitySet) >= 3 && totalObservedWeight >= 0.5 {
+	if len(accountPoints) >= 12 && totalObservedWeight >= 0.5 {
 		confidence = smartConfidenceHigh
 	}
 	return smartQuotaEstimate{
 		CapacityM:          round2(clampFloat(median, smartQuotaCalibrationMinCapacityM, smartQuotaCalibrationMaxCapacityM)),
 		Source:             source,
-		SampleCount:        len(valid),
+		SampleCount:        len(accountPoints),
+		EvidenceCount:      len(valid),
 		ObservedPercent:    round2(totalObservedWeight * 100),
 		Confidence:         confidence,
-		UniqueAccounts:     len(identitySet),
+		UniqueAccounts:     len(accountPoints),
 		IndependentAccount: independentAccount,
 	}, true
+}
+
+func selectSmartQuotaRepresentativePoints(points []smartQuotaWeightedPoint, limit int) []smartQuotaWeightedPoint {
+	if limit <= 0 || len(points) <= limit {
+		return points
+	}
+	ordered := append([]smartQuotaWeightedPoint(nil), points...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].capacityM < ordered[j].capacityM
+	})
+	selected := make([]smartQuotaWeightedPoint, 0, limit)
+	for index := 0; index < limit; index++ {
+		position := int(math.Round(float64(index) * float64(len(ordered)-1) / float64(limit-1)))
+		selected = append(selected, ordered[position])
+	}
+	return selected
 }
 
 func trimSmartQuotaSampleExtremes(samples []smartQuotaCalibrationSample) []smartQuotaCalibrationSample {
@@ -926,7 +1252,7 @@ func trimSmartQuotaSampleExtremes(samples []smartQuotaCalibrationSample) []smart
 }
 
 func trimSmartQuotaPointExtremes(points []smartQuotaWeightedPoint) []smartQuotaWeightedPoint {
-	if len(points) < 3 {
+	if len(points) < 5 {
 		return points
 	}
 	ordered := append([]smartQuotaWeightedPoint(nil), points...)

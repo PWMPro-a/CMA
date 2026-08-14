@@ -43,6 +43,7 @@ type ManagerCodexInspectionConfig = model.ManagerCodexInspectionConfig
 type ManagerCodexInspectionScheduleConfig = model.ManagerCodexInspectionScheduleConfig
 type ManagerExternalUsageServiceConfig = model.ManagerExternalUsageServiceConfig
 type ManagerSupplyConfig = model.ManagerSupplyConfig
+type ManagerSupplyQuotaEstimationPolicy = model.ManagerSupplyQuotaEstimationPolicy
 type SupplyOrder = model.SupplyOrder
 type SupplyImportItem = model.SupplyImportItem
 type SupplyRecovery = model.SupplyRecovery

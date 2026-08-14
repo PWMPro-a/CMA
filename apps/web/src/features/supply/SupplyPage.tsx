@@ -19,6 +19,7 @@ import {
   type SupplyActiveOrderStatus,
   type SupplyConfig,
   type SupplyOrder,
+  type SupplyQuotaEstimationPolicy,
   type SupplyReport,
   type SupplyReportDimensionStat,
   type SupplyReportUsageModelStat,
@@ -30,6 +31,11 @@ import {
 import { useNotificationStore } from '@/stores';
 import { resolveSupplyPoolAccountStats } from './model/poolAccountStats';
 import styles from './SupplyPage.module.scss';
+
+const DEFAULT_QUOTA_ESTIMATION_POLICIES: Record<string, SupplyQuotaEstimationPolicy> = {
+  team: { mode: 'auto', fallbackM: 60, fixedM: 60 },
+  free: { mode: 'auto', fallbackM: 10, fixedM: 10 },
+};
 
 const emptyConfig: SupplyConfig = {
   enabled: false,
@@ -75,6 +81,7 @@ const emptyConfig: SupplyConfig = {
   recoverySyncIntervalSeconds: 60,
   recoveryClaimBatchSize: 20,
   recoveryDisableOriginal: true,
+  quotaEstimationPolicies: DEFAULT_QUOTA_ESTIMATION_POLICIES,
 };
 
 type SupplyWorkspaceTab =
@@ -383,6 +390,33 @@ export function SupplyPage() {
     configDirtyRef.current = true;
     setDraft((current) => ({ ...current, ...patch }));
   }, []);
+
+  const updateQuotaEstimationPolicy = useCallback(
+    (planType: string, patch: Partial<SupplyQuotaEstimationPolicy>) => {
+      configDirtyRef.current = true;
+      setDraft((current) => {
+        const normalizedPlan = planType.trim().toLowerCase();
+        const defaultPolicy = DEFAULT_QUOTA_ESTIMATION_POLICIES[normalizedPlan] ?? {
+          mode: 'auto',
+          fallbackM: 10,
+          fixedM: 10,
+        };
+        const currentPolicies = current.quotaEstimationPolicies ?? {};
+        return {
+          ...current,
+          quotaEstimationPolicies: {
+            ...currentPolicies,
+            [normalizedPlan]: {
+              ...defaultPolicy,
+              ...currentPolicies[normalizedPlan],
+              ...patch,
+            },
+          },
+        };
+      });
+    },
+    []
+  );
 
   const selectSupplyStrategy = useCallback((strategy: SupplyStrategy) => {
     configDirtyRef.current = true;
@@ -1393,6 +1427,40 @@ export function SupplyPage() {
       })),
     [t]
   );
+  const quotaPlanTypes = useMemo(() => {
+    const planTypes = new Set<string>(['team', 'free']);
+    Object.keys(draft.quotaEstimationPolicies ?? {}).forEach((planType) => {
+      if (planType.trim()) planTypes.add(planType.trim().toLowerCase());
+    });
+    smart?.accountQuotaPlanEstimates?.forEach((estimate) => {
+      if (estimate.planType.trim()) planTypes.add(estimate.planType.trim().toLowerCase());
+    });
+    return [...planTypes].sort((left, right) => {
+      const rank = (value: string) => (value === 'team' ? 0 : value === 'free' ? 1 : 2);
+      return rank(left) - rank(right) || left.localeCompare(right);
+    });
+  }, [draft.quotaEstimationPolicies, smart?.accountQuotaPlanEstimates]);
+  const quotaPlanEstimateByType = useMemo(
+    () =>
+      new Map(
+        (smart?.accountQuotaPlanEstimates ?? []).map((estimate) => [
+          estimate.planType.trim().toLowerCase(),
+          estimate,
+        ])
+      ),
+    [smart?.accountQuotaPlanEstimates]
+  );
+  const quotaPolicyForPlan = (planType: string): SupplyQuotaEstimationPolicy => {
+    const defaultPolicy = DEFAULT_QUOTA_ESTIMATION_POLICIES[planType] ?? {
+      mode: 'auto',
+      fallbackM: 10,
+      fixedM: 10,
+    };
+    return {
+      ...defaultPolicy,
+      ...draft.quotaEstimationPolicies?.[planType],
+    };
+  };
 
   if (loading && !status) {
     return <div className={styles.loading}>{t('common.loading')}</div>;
@@ -1484,6 +1552,103 @@ export function SupplyPage() {
           <span>{t('supply.pool_unconfirmed_accounts')}</span>
           <strong>{poolClassificationObserved ? formatInteger(poolAccounts.unconfirmed) : '-'}</strong>
           <small>{t('supply.pool_unconfirmed_accounts_hint')}</small>
+        </div>
+      </section>
+
+      <section
+        className={styles.quotaEstimateSection}
+        aria-label={t('supply.quota_plan_estimates_title')}
+      >
+        <div className={styles.quotaEstimateHeader}>
+          <div>
+            <strong>{t('supply.quota_plan_estimates_title')}</strong>
+            <span>{t('supply.quota_plan_estimates_hint')}</span>
+          </div>
+          {smart?.quotaEstimateOrderingBlocked ? (
+            <span className={`${styles.statusPill} ${styles.error}`}>
+              {t('supply.quota_plan_ordering_blocked')}
+            </span>
+          ) : smart?.quotaEstimatePendingPlans ? (
+            <span className={`${styles.statusPill} ${styles.warning}`}>
+              {t('supply.quota_plan_pending_count', {
+                count: smart.quotaEstimatePendingPlans,
+              })}
+            </span>
+          ) : null}
+        </div>
+        <div className={styles.quotaEstimateGrid}>
+          {quotaPlanTypes.map((planType) => {
+            const estimate = quotaPlanEstimateByType.get(planType);
+            const policy = quotaPolicyForPlan(planType);
+            const mode = estimate?.mode ?? policy.mode;
+            const adoptedM =
+              estimate?.adoptedM ?? (mode === 'fixed' ? policy.fixedM : policy.fallbackM);
+            const pending = estimate?.pendingConfirmation === true;
+            const blocked = estimate?.orderingBlocked === true;
+            return (
+              <article
+                className={`${styles.quotaEstimateCard} ${
+                  blocked ? styles.quotaEstimateBlocked : pending ? styles.quotaEstimateWarning : ''
+                }`}
+                key={planType}
+              >
+                <div className={styles.quotaEstimateCardHeader}>
+                  <div>
+                    <span>{t('supply.quota_plan_type')}</span>
+                    <strong>
+                      {t(`supply.quota_plan_type_${planType}`, {
+                        defaultValue: planType.toUpperCase(),
+                      })}
+                    </strong>
+                  </div>
+                  <span className={`${styles.statusPill} ${pending ? styles.warning : styles.active}`}>
+                    {t(`supply.quota_plan_mode_${mode}`, { defaultValue: mode })}
+                  </span>
+                </div>
+                <div className={styles.quotaEstimateValues}>
+                  <div>
+                    <span>{t('supply.quota_plan_observed')}</span>
+                    <strong>
+                      {(estimate?.observedM ?? 0) > 0
+                        ? formatTokenM(estimate?.observedM, 2)
+                        : t('supply.quota_plan_no_data')}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>{t('supply.quota_plan_adopted')}</span>
+                    <strong>{formatTokenM(adoptedM, 2)}</strong>
+                  </div>
+                </div>
+                <div className={styles.quotaEstimateMeta}>
+                  <span>
+                    {t('supply.quota_plan_accounts')}: {formatInteger(estimate?.accountCount ?? 0)}
+                  </span>
+                  <span>
+                    {t('supply.quota_plan_samples')}: {formatInteger(estimate?.uniqueAccounts ?? 0)}
+                  </span>
+                  <span>
+                    {t('supply.quota_plan_fallback')}: {formatTokenM(estimate?.fallbackM ?? policy.fallbackM, 1)}
+                  </span>
+                </div>
+                {pending ? (
+                  <div className={blocked ? styles.quotaEstimateAlert : styles.quotaEstimateNotice}>
+                    {t(
+                      blocked
+                        ? 'supply.quota_plan_warning_pending'
+                        : 'supply.quota_plan_warning_staged',
+                      {
+                        divergence: formatNumber(estimate?.divergencePercent, 1),
+                        current: estimate?.confirmationRounds ?? 0,
+                        required: estimate?.requiredRounds ?? 2,
+                      }
+                    )}
+                  </div>
+                ) : (
+                  <small>{t('supply.quota_plan_default_scope')}</small>
+                )}
+              </article>
+            );
+          })}
         </div>
       </section>
 
@@ -2084,6 +2249,74 @@ export function SupplyPage() {
                     </div>
                   </>
                 ) : null}
+                <div className={styles.reportSectionHeader}>
+                  <span>{t('supply.quota_plan_config_title')}</span>
+                  <small>{t('supply.quota_plan_config_hint')}</small>
+                </div>
+                <div className={styles.quotaPolicyConfigGrid}>
+                  {quotaPlanTypes.map((planType) => {
+                    const policy = quotaPolicyForPlan(planType);
+                    return (
+                      <div className={styles.quotaPolicyConfigCard} key={planType}>
+                        <div className={styles.quotaPolicyConfigHeader}>
+                          <strong>
+                            {t(`supply.quota_plan_type_${planType}`, {
+                              defaultValue: planType.toUpperCase(),
+                            })}
+                          </strong>
+                          <span>
+                            {policy.mode === 'fixed'
+                              ? t('supply.quota_plan_fixed_hint')
+                              : t('supply.quota_plan_auto_hint')}
+                          </span>
+                        </div>
+                        <div className={styles.quotaPolicyFields}>
+                          <div className={styles.field}>
+                            <label>{t('supply.quota_plan_mode')}</label>
+                            <Select
+                              value={policy.mode}
+                              options={[
+                                { value: 'auto', label: t('supply.quota_plan_mode_auto') },
+                                { value: 'fixed', label: t('supply.quota_plan_mode_fixed') },
+                              ]}
+                              onChange={(mode) => updateQuotaEstimationPolicy(planType, { mode })}
+                              ariaLabel={t('supply.quota_plan_mode')}
+                            />
+                          </div>
+                          {policy.mode === 'fixed' ? (
+                            <Input
+                              label={t('supply.quota_plan_fixed_input')}
+                              type="number"
+                              min={0.5}
+                              max={500}
+                              step={0.5}
+                              value={policy.fixedM}
+                              onChange={(event) =>
+                                updateQuotaEstimationPolicy(planType, {
+                                  fixedM: Number(event.target.value),
+                                })
+                              }
+                            />
+                          ) : (
+                            <Input
+                              label={t('supply.quota_plan_fallback_input')}
+                              type="number"
+                              min={0.5}
+                              max={500}
+                              step={0.5}
+                              value={policy.fallbackM}
+                              onChange={(event) =>
+                                updateQuotaEstimationPolicy(planType, {
+                                  fallbackM: Number(event.target.value),
+                                })
+                              }
+                            />
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
                 <div className={styles.formGrid}>
                   <Input
                     label={t('supply.healthy_minutes_target')}

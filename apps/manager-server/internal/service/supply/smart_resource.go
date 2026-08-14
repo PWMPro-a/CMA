@@ -55,11 +55,11 @@ const (
 	smartDemandTrendFalling = "falling"
 	smartDemandTrendVirtual = "virtual"
 
-	// Codex quota headers expose a remaining percentage but not the absolute
-	// token limit. Supplier credentials currently provide about 10M effective
-	// tokens per short quota window. Keep this as a conservative baseline until
-	// enough runtime quota-delta samples are available to replace it.
-	smartDefaultAccountQuotaMillionTokens = 10.0
+	// Quota headers expose remaining percentages but not an absolute Token limit.
+	// Keep a conservative generic fallback, while team credentials use the
+	// verified 7-day baseline until an account has at least 10% valid usage data.
+	smartDefaultAccountQuotaMillionTokens     = 10.0
+	smartDefaultTeamAccountQuotaMillionTokens = 60.0
 )
 
 type SmartResource struct {
@@ -218,37 +218,59 @@ type SmartResource struct {
 	// million tokens. RCU fields remain for API compatibility, but are derived
 	// from the same token budget so runway and order sizing stay dimensionally
 	// consistent.
-	TokenCapacityMode                     string  `json:"tokenCapacityMode,omitempty"`
-	AccountQuotaEstimateM                 float64 `json:"accountQuotaEstimateM,omitempty"`
-	AccountQuotaEstimateSource            string  `json:"accountQuotaEstimateSource,omitempty"`
-	AccountQuotaCalibrationConfidence     string  `json:"accountQuotaCalibrationConfidence,omitempty"`
-	AccountQuotaCalibrationSamples        int     `json:"accountQuotaCalibrationSamples,omitempty"`
-	AccountQuotaCalibrationObservedPct    float64 `json:"accountQuotaCalibrationObservedPercent,omitempty"`
-	AccountQuotaCalibrationUniqueAccounts int     `json:"accountQuotaCalibrationUniqueAccounts,omitempty"`
-	AccountQuotaCurrentEstimateM          float64 `json:"accountQuotaCurrentEstimateM,omitempty"`
-	AccountQuotaRecentEstimateM           float64 `json:"accountQuotaRecentEstimateM,omitempty"`
-	AccountQuotaHistoricalEstimateM       float64 `json:"accountQuotaHistoricalEstimateM,omitempty"`
-	AccountQuotaDivergencePercent         float64 `json:"accountQuotaDivergencePercent,omitempty"`
-	RawCapacityTokenM                     float64 `json:"rawCapacityTokenM,omitempty"`
-	CurrentCapacityTokenM                 float64 `json:"currentCapacityTokenM,omitempty"`
-	TimeLimitedCapacityTokenM             float64 `json:"timeLimitedCapacityTokenM,omitempty"`
-	ExpiryWasteRiskTokenM                 float64 `json:"expiryWasteRiskTokenM,omitempty"`
-	ObservedTokenM1M                      float64 `json:"observedTokenM1m,omitempty"`
-	ObservedTokenM5M                      float64 `json:"observedTokenM5m,omitempty"`
-	ObservedTokenM10M                     float64 `json:"observedTokenM10m,omitempty"`
-	ObservedTokenM30M                     float64 `json:"observedTokenM30m,omitempty"`
-	ConsumeTokenM1M                       float64 `json:"consumeTokenM1m,omitempty"`
-	ConsumeTokenM5M                       float64 `json:"consumeTokenM5m,omitempty"`
-	ConsumeTokenM10M                      float64 `json:"consumeTokenM10m,omitempty"`
-	ConsumeTokenMPerMinute                float64 `json:"consumeTokenMPerMinute,omitempty"`
-	DemandPlanningTokenMPerMinute         float64 `json:"demandPlanningTokenMPerMinute,omitempty"`
-	ForecastSustainMinutes                float64 `json:"forecastSustainMinutes,omitempty"`
-	TargetCapacityTokenM                  float64 `json:"targetCapacityTokenM,omitempty"`
-	CapacityGapTokenM                     float64 `json:"capacityGapTokenM,omitempty"`
-	EstimatedNewAccountCapacityTokenM     float64 `json:"estimatedNewAccountCapacityTokenM,omitempty"`
-	PrelockedCapacityTokenM               float64 `json:"prelockedCapacityTokenM,omitempty"`
-	ProjectedCapacityAfterRefillTokenM    float64 `json:"projectedCapacityAfterRefillTokenM,omitempty"`
+	TokenCapacityMode                     string                   `json:"tokenCapacityMode,omitempty"`
+	AccountQuotaEstimateM                 float64                  `json:"accountQuotaEstimateM,omitempty"`
+	AccountQuotaEstimateSource            string                   `json:"accountQuotaEstimateSource,omitempty"`
+	AccountQuotaCalibrationConfidence     string                   `json:"accountQuotaCalibrationConfidence,omitempty"`
+	AccountQuotaCalibrationSamples        int                      `json:"accountQuotaCalibrationSamples,omitempty"`
+	AccountQuotaCalibrationObservedPct    float64                  `json:"accountQuotaCalibrationObservedPercent,omitempty"`
+	AccountQuotaCalibrationUniqueAccounts int                      `json:"accountQuotaCalibrationUniqueAccounts,omitempty"`
+	AccountQuotaCurrentEstimateM          float64                  `json:"accountQuotaCurrentEstimateM,omitempty"`
+	AccountQuotaRecentEstimateM           float64                  `json:"accountQuotaRecentEstimateM,omitempty"`
+	AccountQuotaHistoricalEstimateM       float64                  `json:"accountQuotaHistoricalEstimateM,omitempty"`
+	AccountQuotaDivergencePercent         float64                  `json:"accountQuotaDivergencePercent,omitempty"`
+	AccountQuotaPlanEstimates             []SmartQuotaPlanEstimate `json:"accountQuotaPlanEstimates,omitempty"`
+	QuotaEstimateOrderingBlocked          bool                     `json:"quotaEstimateOrderingBlocked,omitempty"`
+	QuotaEstimatePendingPlans             int                      `json:"quotaEstimatePendingPlans,omitempty"`
+	RawCapacityTokenM                     float64                  `json:"rawCapacityTokenM,omitempty"`
+	CurrentCapacityTokenM                 float64                  `json:"currentCapacityTokenM,omitempty"`
+	TimeLimitedCapacityTokenM             float64                  `json:"timeLimitedCapacityTokenM,omitempty"`
+	ExpiryWasteRiskTokenM                 float64                  `json:"expiryWasteRiskTokenM,omitempty"`
+	ObservedTokenM1M                      float64                  `json:"observedTokenM1m,omitempty"`
+	ObservedTokenM5M                      float64                  `json:"observedTokenM5m,omitempty"`
+	ObservedTokenM10M                     float64                  `json:"observedTokenM10m,omitempty"`
+	ObservedTokenM30M                     float64                  `json:"observedTokenM30m,omitempty"`
+	ConsumeTokenM1M                       float64                  `json:"consumeTokenM1m,omitempty"`
+	ConsumeTokenM5M                       float64                  `json:"consumeTokenM5m,omitempty"`
+	ConsumeTokenM10M                      float64                  `json:"consumeTokenM10m,omitempty"`
+	ConsumeTokenMPerMinute                float64                  `json:"consumeTokenMPerMinute,omitempty"`
+	DemandPlanningTokenMPerMinute         float64                  `json:"demandPlanningTokenMPerMinute,omitempty"`
+	ForecastSustainMinutes                float64                  `json:"forecastSustainMinutes,omitempty"`
+	TargetCapacityTokenM                  float64                  `json:"targetCapacityTokenM,omitempty"`
+	CapacityGapTokenM                     float64                  `json:"capacityGapTokenM,omitempty"`
+	EstimatedNewAccountCapacityTokenM     float64                  `json:"estimatedNewAccountCapacityTokenM,omitempty"`
+	PrelockedCapacityTokenM               float64                  `json:"prelockedCapacityTokenM,omitempty"`
+	ProjectedCapacityAfterRefillTokenM    float64                  `json:"projectedCapacityAfterRefillTokenM,omitempty"`
 	operatorClassificationObserved        bool
+}
+
+type SmartQuotaPlanEstimate struct {
+	PlanType            string  `json:"planType"`
+	Mode                string  `json:"mode"`
+	AccountCount        int     `json:"accountCount"`
+	FallbackM           float64 `json:"fallbackM"`
+	FixedM              float64 `json:"fixedM,omitempty"`
+	ObservedM           float64 `json:"observedM,omitempty"`
+	AdoptedM            float64 `json:"adoptedM"`
+	Source              string  `json:"source"`
+	SampleCount         int     `json:"sampleCount"`
+	UniqueAccounts      int     `json:"uniqueAccounts"`
+	DivergencePercent   float64 `json:"divergencePercent,omitempty"`
+	PendingConfirmation bool    `json:"pendingConfirmation,omitempty"`
+	ConfirmationRounds  int     `json:"confirmationRounds,omitempty"`
+	RequiredRounds      int     `json:"requiredRounds,omitempty"`
+	OrderingBlocked     bool    `json:"orderingBlocked,omitempty"`
+	LastInspectionRunID int64   `json:"lastInspectionRunId,omitempty"`
 }
 
 type smartUsageBucket struct {
@@ -474,10 +496,30 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 
 	usageStats := s.smartUsageSnapshot(now)
 	resource.UnitCapacityRCU = smartProductUnitCapacity(cfg.Product)
-	poolQuotaEstimate := s.smartQuotaEstimateFor(
-		dominantSmartQuotaPlan(snapshot.results),
-		currentSmartQuotaInspectionIdentities(snapshot.results)...,
+	quotaInspectionRunID := snapshot.run.ID
+	if quotaInspectionRunID <= 0 {
+		quotaInspectionRunID = snapshot.run.FinishedAtMS
+	}
+	if quotaInspectionRunID <= 0 && !snapshot.generatedAt.IsZero() {
+		quotaInspectionRunID = snapshot.generatedAt.UnixMilli()
+	}
+	planQuotaEstimates, planningByPlan := s.smartQuotaPlanEstimatesForInspection(
+		cfg,
+		snapshot.results,
+		quotaInspectionRunID,
+		now,
 	)
+	resource.AccountQuotaPlanEstimates = planQuotaEstimates
+	for _, estimate := range planQuotaEstimates {
+		if estimate.PendingConfirmation {
+			resource.QuotaEstimatePendingPlans++
+		}
+		if estimate.OrderingBlocked {
+			resource.QuotaEstimateOrderingBlocked = true
+		}
+	}
+	dominantPlan := dominantSmartQuotaPlan(snapshot.results)
+	poolQuotaEstimate := smartQuotaPlanningEstimateForPlan(planningByPlan, dominantPlan)
 	s.applySmartQuotaEstimate(cfg, &resource, poolQuotaEstimate)
 	consumeRCUPerMinute := applySmartUsage(&resource, usageStats, resource.UnitCapacityRCU)
 
@@ -549,7 +591,12 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			withQuotaEvidence++
 		}
 		capacity := 0.0
-		accountQuotaEstimate := s.smartQuotaEstimateForInspectionResult(result, poolQuotaEstimate, now)
+		planType := strings.ToLower(strings.TrimSpace(result.PlanType))
+		if planType == "" {
+			planType = "unknown"
+		}
+		planQuotaEstimate := smartQuotaPlanningEstimateForPlan(planningByPlan, planType)
+		accountQuotaEstimate := s.smartQuotaEstimateForInspectionResult(result, planQuotaEstimate, now)
 		switch {
 		case hasCapacityQuota:
 			capacity = smartAccountQuotaCapacityRCU(resource.UnitCapacityRCU, accountQuotaEstimate.CapacityM, remaining)
@@ -558,7 +605,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			// supplier's delivery record bounds how long it can remain usable.
 			// This is intentionally a conservative lease estimate, not a
 			// conversion of the excluded monthly allowance.
-			capacity = smartEstimatedNewAccountTokenCapacityRCU(cfg, resource.AccountQuotaEstimateM)
+			capacity = smartEstimatedNewAccountTokenCapacityRCU(cfg, accountQuotaEstimate.CapacityM)
 			resource.LeaseEstimatedAccounts++
 			resource.LeaseEstimatedCapacityRCU += capacity
 		default:
@@ -723,6 +770,20 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 	resource.UnitCapacityRCU = unit
 	poolPlan, poolIdentities := smartQuotaAuthSnapshotContext(authSnapshot.files)
 	poolQuotaEstimate := s.smartQuotaEstimateFor(poolPlan, poolIdentities...)
+	poolPolicy := smartQuotaPolicyForPlan(cfg, poolPlan)
+	if poolPolicy.Mode == smartQuotaPolicyModeFixed {
+		poolQuotaEstimate = smartQuotaEstimate{
+			CapacityM:  poolPolicy.FixedM,
+			Source:     smartQuotaPolicyModeFixed,
+			Confidence: smartConfidenceHigh,
+		}
+	} else if !smartQuotaEstimateHasValidData(poolQuotaEstimate) {
+		poolQuotaEstimate = smartQuotaEstimate{
+			CapacityM:  poolPolicy.FallbackM,
+			Source:     smartQuotaEstimateSourceDefault,
+			Confidence: smartConfidenceLow,
+		}
+	}
 	s.applySmartQuotaEstimate(cfg, &resource, poolQuotaEstimate)
 	consumeRCUPerMinute := applySmartUsage(&resource, usageStats, unit)
 	var weightedCapacity float64
@@ -756,6 +817,25 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		resource.HealthyAccounts++
 		resource.NormalAccounts++
 		remainingMinutes := smartAccountRemainingMinutes(file.Raw, now, smartAccountLifetimeMinutes())
+		planType := strings.ToLower(strings.TrimSpace(textField(
+			file.Raw,
+			"plan_type",
+			"planType",
+			"chatgpt_plan_type",
+			"chatgptPlanType",
+		)))
+		planPolicy := smartQuotaPolicyForPlan(cfg, planType)
+		planQuotaEstimate := poolQuotaEstimate
+		if planType != "" && planType != poolPlan {
+			planQuotaEstimate = s.smartQuotaEstimateForAt(now, planType)
+			if !smartQuotaEstimateHasValidData(planQuotaEstimate) {
+				planQuotaEstimate = smartQuotaEstimate{
+					CapacityM:  planPolicy.FallbackM,
+					Source:     smartQuotaEstimateSourceDefault,
+					Confidence: smartConfidenceLow,
+				}
+			}
+		}
 		identities := smartQuotaCalibrationResultIdentities(
 			file.Name,
 			textField(file.Raw, "auth_index", "authIndex"),
@@ -763,16 +843,17 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 			textField(file.Raw, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"),
 		)
 		accountQuotaEstimate, hasCurrentEstimate := s.smartQuotaCurrentEstimateForAt(now, identities...)
-		if hasCurrentEstimate {
-			accountQuotaEstimate = calibrateSmartQuotaCurrentEstimate(
-				accountQuotaEstimate,
-				poolQuotaEstimate,
-				poolQuotaEstimate.CapacityM > 0,
-				smartQuotaEstimate{},
-				false,
-			)
-		} else {
-			accountQuotaEstimate = poolQuotaEstimate
+		switch {
+		case planPolicy.Mode == smartQuotaPolicyModeFixed:
+			accountQuotaEstimate = smartQuotaEstimate{
+				CapacityM:  planPolicy.FixedM,
+				Source:     smartQuotaPolicyModeFixed,
+				Confidence: smartConfidenceHigh,
+			}
+		case hasCurrentEstimate:
+			accountQuotaEstimate.CurrentEstimateM = accountQuotaEstimate.CapacityM
+		default:
+			accountQuotaEstimate = planQuotaEstimate
 		}
 		rawCapacity, ok := smartAccountCapacityRCU(file.Raw, unit, accountQuotaEstimate.CapacityM)
 		if !ok {

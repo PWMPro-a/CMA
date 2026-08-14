@@ -178,6 +178,151 @@
   white-space: nowrap;
 }
 
+.quotaEstimateSection {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 18%, var(--border-color));
+  border-radius: var(--app-radius-md);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary)),
+    var(--bg-primary) 58%
+  );
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.05);
+}
+
+.quotaEstimateHeader,
+.quotaEstimateCardHeader,
+.quotaPolicyConfigHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.quotaEstimateHeader > div,
+.quotaEstimateCardHeader > div {
+  min-width: 0;
+}
+
+.quotaEstimateHeader > div,
+.quotaEstimateCardHeader > div {
+  display: grid;
+  gap: 3px;
+}
+
+.quotaEstimateHeader strong,
+.quotaEstimateCardHeader strong,
+.quotaPolicyConfigHeader strong {
+  color: var(--text-primary);
+}
+
+.quotaEstimateHeader strong {
+  font-size: 14px;
+  font-weight: 780;
+}
+
+.quotaEstimateHeader span,
+.quotaEstimateCardHeader span,
+.quotaEstimateMeta span,
+.quotaEstimateCard small,
+.quotaPolicyConfigHeader span {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.quotaEstimateGrid,
+.quotaPolicyConfigGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.quotaEstimateCard,
+.quotaPolicyConfigCard {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--bg-primary) 88%, var(--surface-subtle));
+}
+
+.quotaEstimateWarning {
+  border-color: color-mix(in srgb, #f59e0b 42%, var(--border-color));
+  background: color-mix(in srgb, #f59e0b 7%, var(--bg-primary));
+}
+
+.quotaEstimateBlocked {
+  border-color: color-mix(in srgb, #e5484d 48%, var(--border-color));
+  background: color-mix(in srgb, #e5484d 7%, var(--bg-primary));
+  box-shadow: inset 3px 0 0 #e5484d;
+}
+
+.quotaEstimateCardHeader strong {
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.quotaEstimateValues {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.quotaEstimateValues > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 8px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-subtle) 68%, transparent);
+}
+
+.quotaEstimateValues span {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.quotaEstimateValues strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quotaEstimateMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.quotaEstimateAlert,
+.quotaEstimateNotice {
+  padding: 8px 9px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 680;
+  line-height: 1.45;
+}
+
+.quotaEstimateAlert {
+  border: 1px solid color-mix(in srgb, #e5484d 42%, var(--border-color));
+  background: color-mix(in srgb, #e5484d 10%, var(--bg-primary));
+  color: var(--failure-badge-text);
+}
+
+.quotaEstimateNotice {
+  border: 1px solid color-mix(in srgb, #f59e0b 38%, var(--border-color));
+  background: color-mix(in srgb, #f59e0b 9%, var(--bg-primary));
+  color: #a45f04;
+}
+
 .metricCard {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -693,6 +838,26 @@
   margin-bottom: 14px;
 }
 
+.quotaPolicyConfigGrid {
+  margin-bottom: 14px;
+}
+
+.quotaPolicyConfigHeader strong {
+  font-size: 14px;
+}
+
+.quotaPolicyConfigHeader span {
+  max-width: 70%;
+  text-align: right;
+}
+
+.quotaPolicyFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
 .strategyMetricGrid > div {
   display: grid;
   min-width: 0;
@@ -1126,6 +1291,11 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .quotaEstimateGrid,
+  .quotaPolicyConfigGrid {
+    grid-template-columns: 1fr;
+  }
+
   .strategyMetricGrid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -1158,6 +1328,10 @@
   .reportMetricGrid,
   .riskBucketGrid,
   .dimensionGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .quotaPolicyFields {
     grid-template-columns: 1fr;
   }
 
@@ -1201,6 +1375,18 @@
   .reportSectionHeader {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .quotaEstimateHeader,
+  .quotaEstimateCardHeader,
+  .quotaPolicyConfigHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .quotaPolicyConfigHeader span {
+    max-width: none;
+    text-align: left;
   }
 
   .strategyDescription {

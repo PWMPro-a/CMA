@@ -485,6 +485,8 @@ type Service struct {
 	smartMu            sync.RWMutex
 	smartBuckets       map[int64]*smartUsageBucket
 	smartQuotaState    smartQuotaCalibrationState
+	quotaPolicyMu      sync.Mutex
+	quotaPolicyState   map[string]smartQuotaPlanAdoptionState
 	authCacheMu        sync.Mutex
 	authRefreshMu      sync.Mutex
 	authCache          authFileSnapshot
@@ -1629,7 +1631,17 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 				// next ladder rung can compete for stock instead of waiting for
 				// the normal create cooldown.
 				if automaticImmediateRetryEligible(cfg.Supply, latest) {
-					return s.withRecoveryInterval(time.Second, cfg.Supply)
+					state, stateErr := s.automaticRetryLadderState(ctx, cfg.Supply, latest)
+					if stateErr == nil {
+						if state.nextQuantity > 0 {
+							return s.withRecoveryInterval(time.Second, cfg.Supply)
+						}
+						retryAt := time.UnixMilli(smartSupplyOrderTerminalAtMS(latest)).Add(automaticRetryLadderCooldown)
+						if wait := time.Until(retryAt); wait > 0 {
+							return s.withRecoveryInterval(wait, cfg.Supply)
+						}
+						return s.withRecoveryInterval(time.Second, cfg.Supply)
+					}
 				}
 				retryAt := time.UnixMilli(smartSupplyOrderTerminalAtMS(latest)).Add(plan.cooldown)
 				if wait := time.Until(retryAt); wait > 0 {
@@ -2018,8 +2030,32 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			return nil
 		}
 		if useSmart {
-			if _, err := s.applySmartEmergencyRetryPlan(ctx, supplyCfg, &resource); err != nil {
+			retryPlan, err := s.applySmartEmergencyRetryPlan(ctx, supplyCfg, &resource)
+			if err != nil {
 				return err
+			}
+			immediateRetryQuantityLimit := 0
+			retryLadderExhausted := false
+			if immediateRetryOrder == nil && retryPlan.active {
+				latest, found, latestErr := s.store.GetLatestAutomaticSupplyOrder(ctx)
+				if latestErr != nil {
+					return latestErr
+				}
+				if found && automaticImmediateRetryEligible(supplyCfg, latest) {
+					immediateRetryOrder = &latest
+				}
+			}
+			if immediateRetryOrder != nil {
+				state, stateErr := s.automaticRetryLadderState(ctx, supplyCfg, *immediateRetryOrder)
+				if stateErr != nil {
+					return stateErr
+				}
+				if state.nextQuantity > 0 {
+					immediateRetryQuantityLimit = state.nextQuantity
+				} else {
+					retryLadderExhausted = true
+					immediateRetryOrder = nil
+				}
 			}
 			if immediateRetryOrder == nil {
 				cooldownActive, err := s.automaticCreateCooldownActive(ctx, supplyCfg, resource)
@@ -2040,8 +2076,18 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 					s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
 					return nil
 				}
+				if retryLadderExhausted {
+					// The previous base/half/fifth cycle has completed. Once its
+					// short cooldown expires, the next order starts a fresh cycle
+					// from the current verified shortage rather than inheriting the
+					// old retry reason and quantities.
+					resource.DecisionReason = firstNonEmptyString(resource.EmergencyReason, "emergency_refill_to_healthy")
+				}
 			} else {
 				resource.DecisionReason = "emergency_retry_immediate_after_cancelled"
+			}
+			if immediateRetryQuantityLimit > 0 {
+				resource.SuggestedQuantity = min(resource.SuggestedQuantity, immediateRetryQuantityLimit)
 			}
 		}
 	}
@@ -2093,11 +2139,20 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		}
 	}
 	if manualQuantity == 0 && immediateRetryOrder != nil {
-		if retryQuantity, retryErr := s.automaticImmediateRetryQuantity(ctx, supplyCfg, *immediateRetryOrder, quantity); retryErr != nil {
+		retryQuantity, retryErr := s.automaticImmediateRetryQuantity(ctx, supplyCfg, *immediateRetryOrder, quantity)
+		if retryErr != nil {
 			return retryErr
-		} else if retryQuantity > 0 {
-			quantity = min(quantity, retryQuantity)
 		}
+		if retryQuantity <= 0 {
+			resource.SuggestedAction = smartActionObserveDemand
+			resource.SuggestedQuantity = 0
+			resource.DecisionReason = "emergency_retry_cooldown"
+			applySmartRefillProjection(supplyCfg, &resource)
+			s.setSmartResource(resource)
+			s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
+			return nil
+		}
+		quantity = min(quantity, retryQuantity)
 	}
 
 	inventory, balance, err := s.fetchSupplyOverview(ctx, supplyCfg, quantity)
@@ -2108,6 +2163,20 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		pressure := s.smartSupplyPressure(ctx, supplyCfg, inventory, quantity)
 		applySmartSupplyPressure(&resource, pressure)
 		adjustedQuantity, pressureReason := smartPrelockQuantityForSupplyPressure(supplyCfg, resource, pressure, quantity)
+		if manualQuantity == 0 && immediateRetryOrder != nil {
+			// Retry ladder quantities are a final upper bound. In particular,
+			// account-vacuum pressure must not lift a 10/5/2 retry back to the
+			// emergency minimum and create a row of identical reservations.
+			retryQuantity, retryErr := s.automaticImmediateRetryQuantity(ctx, supplyCfg, *immediateRetryOrder, quantity)
+			if retryErr != nil {
+				return retryErr
+			}
+			if retryQuantity <= 0 {
+				adjustedQuantity = 0
+			} else if adjustedQuantity <= 0 || adjustedQuantity > retryQuantity {
+				adjustedQuantity = retryQuantity
+			}
+		}
 		if adjustedQuantity > 0 && adjustedQuantity != quantity {
 			quantity = adjustedQuantity
 			inventory, balance, err = s.fetchSupplyOverview(ctx, supplyCfg, quantity)
@@ -2511,7 +2580,7 @@ func (s *Service) retryUncertainCreate(ctx context.Context, cfg store.ManagerCon
 }
 
 func supplyOrderFromCreateResponse(attempt store.SupplyOrder, remote supplyclient.Order, cfg store.ManagerSupplyConfig) store.SupplyOrder {
-	return store.SupplyOrder{
+	order := store.SupplyOrder{
 		ID:                   attempt.ID,
 		OrderID:              remote.ID,
 		Product:              attempt.Product,
@@ -2531,6 +2600,10 @@ func supplyOrderFromCreateResponse(attempt store.SupplyOrder, remote supplyclien
 		SupplierRetryUntilMS: supplierRetryUntilMS(remote.RetryAfterSeconds),
 		CreatedAtMS:          attempt.CreatedAtMS,
 	}
+	if isTerminalRemoteStatus(remote.Status) && !isSuccessfulRemoteStatus(remote.Status) {
+		order.CompletedAtMS = time.Now().UnixMilli()
+	}
+	return order
 }
 
 // autoReleaseAutomaticOrderIfNotNeeded finishes an automatic order locally
@@ -5745,7 +5818,10 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 	if quantity <= 0 {
 		return quantity, ""
 	}
-	if isSmartEmergencyRetryReason(resource.DecisionReason) && !smartResourceEmergency(resource) {
+	if isSmartEmergencyRetryReason(resource.DecisionReason) {
+		// A retry quantity is already a descending ladder rung. Keep the normal
+		// configured minimum here even when the account pool is empty; applying
+		// the larger emergency minimum would turn 10/5/2 back into 10/5/5.
 		limit := smartAutomaticOrderQuantityLimit(cfg, resource)
 		minimum := min(smartPrelockMinQuantity(cfg), limit)
 		return clampInt(quantity, minimum, limit), resource.DecisionReason
@@ -5755,9 +5831,6 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 		minimum := min(smartPrelockMinQuantity(cfg), limit)
 		if smartAccountAvailabilityEmergency(resource) {
 			minimum = min(smartEmergencyMinimumOrderQuantity(cfg), limit)
-		}
-		if isSmartEmergencyRetryReason(resource.DecisionReason) {
-			return clampInt(quantity, minimum, limit), resource.DecisionReason
 		}
 		reason := firstNonEmptyString(resource.EmergencyReason, resource.DecisionReason)
 		if reason == "" {
@@ -6259,15 +6332,23 @@ func (s *Service) automaticCreateCooldownActive(ctx context.Context, cfg store.M
 		if retry, retryErr := s.automaticRetryPlan(ctx, cfg, resource, latest, time.Now()); retryErr != nil {
 			return false, retryErr
 		} else if retry.active {
-			// A just-cancelled zero-delivery reservation is immediately
-			// replaceable. The replacement is still bounded by the open-order
-			// window and the ladder quantity, so this exception does not permit
-			// duplicate reservations to accumulate.
 			if automaticImmediateRetryEligible(cfg, latest) {
-				return false, nil
+				state, stateErr := s.automaticRetryLadderState(ctx, cfg, latest)
+				if stateErr != nil {
+					return false, stateErr
+				}
+				// Only an untried rung bypasses cooldown. Once base/half/fifth
+				// have all been confirmed cancelled, pause the whole cycle before
+				// recalculating a fresh base from current demand.
+				if state.nextQuantity > 0 {
+					return false, nil
+				}
+				seconds = int(automaticRetryLadderCooldown / time.Second)
+				last = maxInt64(last, smartSupplyOrderTerminalAtMS(latest))
+			} else {
+				seconds = max(1, int(retry.cooldown/time.Second))
+				last = maxInt64(last, smartSupplyOrderTerminalAtMS(latest))
 			}
-			seconds = max(1, int(retry.cooldown/time.Second))
-			last = maxInt64(last, smartSupplyOrderTerminalAtMS(latest))
 		} else if automaticOrderHasNoDeliveredCapacity(latest) {
 			// A failed/cancelled zero-delivery attempt still needs a short
 			// duplicate guard. It does not represent usable capacity, so do not
@@ -6287,7 +6368,10 @@ func (s *Service) automaticCreateCooldownActive(ctx context.Context, cfg store.M
 	return time.Since(time.UnixMilli(last)) < time.Duration(seconds)*time.Second, nil
 }
 
-const automaticRetryBurstWindow = 10 * time.Minute
+const (
+	automaticRetryBurstWindow    = 10 * time.Minute
+	automaticRetryLadderCooldown = 90 * time.Second
+)
 
 // automaticZeroDeliveryBurst summarizes consecutive supplier attempts that
 // failed to deliver any usable capacity. It is intentionally based on local
@@ -6393,25 +6477,133 @@ func automaticImmediateRetryEligible(cfg store.ManagerSupplyConfig, order store.
 		order.ChargedFen > 0 || order.ReadyQuantity > 0 || order.ItemCount > 0 || order.ImportedCount > 0 {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(order.Status), "cancelled")
+	return automaticOrderCancellationConfirmed(order)
 }
 
-// automaticRetryLadderQuantity returns the next quantity after a consecutive
-// zero-delivery cancellation streak. For a calculated need of 10 the sequence
-// is 10 (initial), 5, 2, then 1. The base quantity is retained across the
-// streak so the third rung is 2 rather than ceil(5/2)=3.
-func automaticRetryLadderQuantity(baseQuantity, failureCount int) int {
+// automaticOrderCancellationConfirmed is stricter than the local status. A
+// transport conflict or uncertain create may close a local row, but only an
+// explicit supplier cancelled/canceled terminal response with no payment,
+// account or import evidence is allowed to unlock the next reservation.
+func automaticOrderCancellationConfirmed(order store.SupplyOrder) bool {
+	if !strings.EqualFold(strings.TrimSpace(order.Status), "cancelled") ||
+		localOrderStatus(order.RemoteStatus) != "cancelled" ||
+		smartSupplyOrderTerminalAtMS(order) <= 0 || strings.TrimSpace(order.LastError) != "" {
+		return false
+	}
+	return order.ChargedFen <= 0 && order.ReadyQuantity <= 0 && order.ItemCount <= 0 && order.ImportedCount <= 0
+}
+
+// automaticRetryLadderQuantities returns one bounded competition cycle. The
+// original requirement remains the base and the only retry quantities are half
+// and one fifth: 10 -> 5 -> 2. Rounded duplicates are removed for small orders.
+func automaticRetryLadderQuantities(baseQuantity int) []int {
 	if baseQuantity <= 0 {
+		return nil
+	}
+	raw := []int{
+		baseQuantity,
+		int(math.Ceil(float64(baseQuantity) / 2)),
+		int(math.Ceil(float64(baseQuantity) / 5)),
+	}
+	quantities := make([]int, 0, len(raw))
+	seen := make(map[int]struct{}, len(raw))
+	for _, quantity := range raw {
+		quantity = clampInt(quantity, 1, baseQuantity)
+		if _, ok := seen[quantity]; ok {
+			continue
+		}
+		seen[quantity] = struct{}{}
+		quantities = append(quantities, quantity)
+	}
+	return quantities
+}
+
+// automaticRetryLadderQuantity returns the rung following failureCount
+// confirmed cancellations. Zero means the cycle is exhausted.
+func automaticRetryLadderQuantity(baseQuantity, failureCount int) int {
+	quantities := automaticRetryLadderQuantities(baseQuantity)
+	if failureCount < 0 || failureCount >= len(quantities) {
 		return 0
 	}
-	divisor := 2
-	switch {
-	case failureCount >= 3:
-		divisor = 10
-	case failureCount == 2:
-		divisor = 5
+	return quantities[failureCount]
+}
+
+type automaticRetryLadderState struct {
+	baseQuantity        int
+	nextQuantity        int
+	attemptedQuantities map[int]struct{}
+}
+
+func automaticRetryContinuationOrder(order store.SupplyOrder) bool {
+	return isParallelSupplyOrder(order) || isSmartEmergencyRetryReason(order.TriggerReason)
+}
+
+// automaticRetryLadderStateForOrders attaches retries to the most recent
+// non-retry anchor. A new full order after cooldown therefore starts a fresh
+// cycle even while older cancellations remain in the ten-minute history.
+func automaticRetryLadderStateForOrders(
+	cfg store.ManagerSupplyConfig,
+	latest store.SupplyOrder,
+	orders []store.SupplyOrder,
+) automaticRetryLadderState {
+	state := automaticRetryLadderState{attemptedQuantities: make(map[int]struct{}, 3)}
+	if !automaticImmediateRetryEligible(cfg, latest) {
+		return state
 	}
-	return clampInt(int(math.Ceil(float64(baseQuantity)/float64(divisor))), 1, baseQuantity)
+	latestTerminalAtMS := smartSupplyOrderTerminalAtMS(latest)
+	started := false
+	add := func(order store.SupplyOrder) bool {
+		if !order.Automatic || !sameSupplyProduct(order.Product, cfg.Product) ||
+			!isSupplierPurchaseHistoryOrder(order) {
+			return true
+		}
+		terminalAtMS := smartSupplyOrderTerminalAtMS(order)
+		if terminalAtMS <= 0 || terminalAtMS > latestTerminalAtMS ||
+			latestTerminalAtMS-terminalAtMS > automaticRetryBurstWindow.Milliseconds() {
+			return false
+		}
+		if automaticOrderDeliveredQuantity(order) > 0 || !automaticOrderCancellationConfirmed(order) {
+			return false
+		}
+		if order.RequestedQuantity > 0 {
+			state.baseQuantity = max(state.baseQuantity, order.RequestedQuantity)
+			state.attemptedQuantities[order.RequestedQuantity] = struct{}{}
+		}
+		return automaticRetryContinuationOrder(order)
+	}
+	for _, order := range orders {
+		if !started {
+			if order.OrderID != latest.OrderID {
+				continue
+			}
+			started = true
+		}
+		if !add(order) {
+			break
+		}
+	}
+	if !started {
+		_ = add(latest)
+	}
+	for _, quantity := range automaticRetryLadderQuantities(state.baseQuantity) {
+		if _, attempted := state.attemptedQuantities[quantity]; !attempted {
+			state.nextQuantity = quantity
+			break
+		}
+	}
+	return state
+}
+
+func (s *Service) automaticRetryLadderState(
+	ctx context.Context,
+	cfg store.ManagerSupplyConfig,
+	latest store.SupplyOrder,
+) (automaticRetryLadderState, error) {
+	orders, err := s.recentSupplyOrders(ctx)
+	if err != nil {
+		return automaticRetryLadderState{}, err
+	}
+	return automaticRetryLadderStateForOrders(cfg, latest, orders), nil
 }
 
 func (s *Service) automaticImmediateRetryQuantity(
@@ -6423,47 +6615,14 @@ func (s *Service) automaticImmediateRetryQuantity(
 	if calculatedQuantity <= 0 || !automaticImmediateRetryEligible(cfg, latest) {
 		return calculatedQuantity, nil
 	}
-	orders, err := s.recentSupplyOrders(ctx)
+	state, err := s.automaticRetryLadderState(ctx, cfg, latest)
 	if err != nil {
 		return 0, err
 	}
-	baseQuantity := max(1, latest.RequestedQuantity)
-	failureCount := 1
-	started := false
-	for _, order := range orders {
-		if !started {
-			if order.OrderID != latest.OrderID {
-				continue
-			}
-			started = true
-			continue
-		}
-		if !order.Automatic || !sameSupplyProduct(order.Product, cfg.Product) ||
-			strings.EqualFold(strings.TrimSpace(order.Strategy), "recovery") ||
-			strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.OrderID)), "recovery-") {
-			continue
-		}
-		switch strings.ToLower(strings.TrimSpace(order.Status)) {
-		case "cancelled", "failed", "dismissed":
-			if automaticOrderHasNoDeliveredCapacity(order) {
-				failureCount++
-				baseQuantity = max(baseQuantity, order.RequestedQuantity)
-			}
-		case "completed", "released":
-			if automaticOrderDeliveredQuantity(order) > 0 {
-				// A realized delivery starts a fresh ladder.
-				started = false
-			}
-		}
-		if !started {
-			break
-		}
+	if state.nextQuantity <= 0 {
+		return 0, nil
 	}
-	next := automaticRetryLadderQuantity(baseQuantity, failureCount)
-	if next <= 0 {
-		return calculatedQuantity, nil
-	}
-	return min(calculatedQuantity, next), nil
+	return min(calculatedQuantity, state.nextQuantity), nil
 }
 
 func automaticOrderHasNoDeliveredCapacity(order store.SupplyOrder) bool {
@@ -6565,26 +6724,10 @@ func smartEmergencyRetryPlanForOrder(cfg store.ManagerSupplyConfig, resource Sma
 		return smartEmergencyRetryPlan{}
 	}
 
-	reason := ""
-	switch strings.ToLower(strings.TrimSpace(order.Status)) {
-	case "cancelled":
-		reason = "emergency_retry_after_cancelled"
-	case "dismissed":
-		reason = "emergency_retry_after_failed"
-	case "failed":
-		if smartAutomaticFailureBlocksFastRetry(order.LastError) {
-			return smartEmergencyRetryPlan{}
-		}
-		reason = "emergency_retry_after_failed"
-		failure := strings.ToLower(strings.TrimSpace(order.RemoteStatus + " " + order.LastError))
-		if strings.Contains(failure, "inventory") || strings.Contains(failure, "stock") ||
-			strings.Contains(failure, "production") || strings.Contains(failure, "expired") ||
-			strings.Contains(failure, "库存") || strings.Contains(failure, "缺货") {
-			reason = "emergency_retry_inventory_shortage"
-		}
-	default:
+	if !automaticOrderCancellationConfirmed(order) {
 		return smartEmergencyRetryPlan{}
 	}
+	reason := "emergency_retry_after_cancelled"
 
 	limit := smartAutomaticOrderQuantityLimit(cfg, resource)
 	if smartAccountAvailabilityEmergency(resource) {
@@ -6732,6 +6875,10 @@ func (s *Service) automaticBaselineBlockReason(resource SmartResource) string {
 }
 
 func (s *Service) automaticSupplyGuardReason(resource SmartResource) string {
+	if resource.QuotaEstimateOrderingBlocked {
+		s.requestStaleInspectionSnapshotRefresh()
+		return "quota_estimate_self_check_pending"
+	}
 	if reason := s.automaticBaselineBlockReason(resource); reason != "" {
 		return reason
 	}

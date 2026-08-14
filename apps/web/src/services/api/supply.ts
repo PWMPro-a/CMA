@@ -2,6 +2,13 @@ import { apiClient } from './client';
 
 export type SupplyProduct = 'oauth_30d' | 'oauth_7d';
 export type SupplyStrategy = 'strong_supply' | 'balanced' | 'cost_first' | 'custom';
+export type SupplyQuotaEstimationMode = 'auto' | 'fixed' | string;
+
+export interface SupplyQuotaEstimationPolicy {
+  mode: SupplyQuotaEstimationMode;
+  fallbackM: number;
+  fixedM: number;
+}
 
 export interface SupplyConfig {
   enabled?: boolean;
@@ -47,6 +54,7 @@ export interface SupplyConfig {
   recoverySyncIntervalSeconds?: number;
   recoveryClaimBatchSize?: number;
   recoveryDisableOriginal?: boolean;
+  quotaEstimationPolicies?: Record<string, SupplyQuotaEstimationPolicy>;
 }
 
 export interface SupplyInventory {
@@ -248,6 +256,9 @@ export interface SupplySmartResource {
   accountQuotaRecentEstimateM?: number;
   accountQuotaHistoricalEstimateM?: number;
   accountQuotaDivergencePercent?: number;
+  accountQuotaPlanEstimates?: SupplyQuotaPlanEstimate[];
+  quotaEstimateOrderingBlocked?: boolean;
+  quotaEstimatePendingPlans?: number;
   rawCapacityTokenM?: number;
   currentCapacityTokenM?: number;
   timeLimitedCapacityTokenM?: number;
@@ -267,6 +278,25 @@ export interface SupplySmartResource {
   estimatedNewAccountCapacityTokenM?: number;
   prelockedCapacityTokenM?: number;
   projectedCapacityAfterRefillTokenM?: number;
+}
+
+export interface SupplyQuotaPlanEstimate {
+  planType: string;
+  mode: SupplyQuotaEstimationMode;
+  accountCount: number;
+  fallbackM: number;
+  fixedM?: number;
+  observedM?: number;
+  adoptedM: number;
+  source: string;
+  sampleCount: number;
+  uniqueAccounts: number;
+  divergencePercent?: number;
+  pendingConfirmation?: boolean;
+  confirmationRounds?: number;
+  requiredRounds?: number;
+  orderingBlocked?: boolean;
+  lastInspectionRunId?: number;
 }
 
 export interface SupplyAutomationExecution {
