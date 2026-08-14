@@ -770,8 +770,19 @@ export function SupplyPage() {
   const inventory = overview?.inventory;
   const balance = overview?.balance;
   const smart = status?.smartResource;
-  const poolAccounts = resolveSupplyPoolAccountStats(smart, overview?.cpaAvailable);
-  const poolClassificationObserved = smart?.accountClassificationObserved === true;
+  const poolAccounts = resolveSupplyPoolAccountStats(
+    smart,
+    overview?.cpaAvailable,
+    status?.accountPool
+  );
+  const poolClassificationObserved =
+    status?.accountPool?.classificationObserved === true ||
+    smart?.accountClassificationObserved === true;
+  const displayedCPAAvailable = poolAccounts.normal ?? overview?.cpaAvailable;
+  const displayedCPADeficit =
+    displayedCPAAvailable === undefined
+      ? overview?.cpaDeficit
+      : Math.max(0, (overview?.cpaTarget ?? draft.targetAvailableAccounts) - displayedCPAAvailable);
   const automation = status?.automation;
   const recovery = status?.recovery;
   const autoSupplyEnabled = status?.config?.enabled ?? draft.enabled ?? false;
@@ -1333,7 +1344,7 @@ export function SupplyPage() {
     return [
       {
         label: t('supply.cpa_available'),
-        value: overview?.cpaAvailable ?? '-',
+        value: displayedCPAAvailable ?? '-',
         detail: t('supply.target_value', {
           value: overview?.cpaTarget ?? draft.targetAvailableAccounts,
         }),
@@ -1342,7 +1353,7 @@ export function SupplyPage() {
       },
       {
         label: t('supply.deficit'),
-        value: overview?.cpaDeficit ?? '-',
+        value: displayedCPADeficit ?? '-',
         detail: t('supply.auto_order_hint'),
         icon: <IconInbox size={18} />,
         tone: 'orange',

@@ -70,6 +70,7 @@ type Status struct {
 	Config        store.ManagerSupplyConfig `json:"config"`
 	Running       bool                      `json:"running"`
 	Overview      Overview                  `json:"overview"`
+	AccountPool   *AccountPoolSummary       `json:"accountPool,omitempty"`
 	SmartResource SmartResource             `json:"smartResource"`
 	Automation    AutomationExecution       `json:"automation"`
 	Recovery      RecoverySummary           `json:"recovery"`
@@ -714,6 +715,7 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	// auth-file cache so the ten-second dashboard poll does not scan the whole
 	// pool on every request.
 	overviewAvailable := -1
+	var accountPool *AccountPoolSummary
 	if cpaManagementConfigured(cfg) {
 		poolStats, poolStatsErr := s.countAccountPoolStatsWithInspection(ctx, cfg, resource)
 		if poolStatsErr == nil || poolStats.liveObserved {
@@ -725,6 +727,8 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 			s.reconcileSmartAccountPoolGuard(cfg.Supply, &resource)
 			applySmartAccountQuantityEstimate(cfg.Supply, &resource)
 			overviewAvailable = poolStats.operatorAvailable(resource.SchedulableAccounts)
+			summary := accountPoolSummaryFromStats(poolStats, time.Now())
+			accountPool = &summary
 		}
 	}
 	retryPlan, err := s.applySmartEmergencyRetryPlan(ctx, cfg.Supply, &resource)
@@ -795,6 +799,7 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		Config:        sanitizeConfig(cfg.Supply),
 		Running:       running,
 		Overview:      overview,
+		AccountPool:   accountPool,
 		SmartResource: resource,
 		Automation:    s.currentAutomationExecution(managerconfigsvc.SupplyEnabled(cfg.Supply)),
 		Recovery:      s.currentRecoverySummary(ctx, cfg.Supply),
@@ -816,8 +821,12 @@ func (s *Service) GetAccountPoolSummary(ctx context.Context) (AccountPoolSummary
 	if statsErr != nil && !stats.liveObserved {
 		return AccountPoolSummary{}, statsErr
 	}
+	return accountPoolSummaryFromStats(stats, time.Now()), nil
+}
+
+func accountPoolSummaryFromStats(stats accountPoolStats, checkedAt time.Time) AccountPoolSummary {
 	return AccountPoolSummary{
-		CheckedAtMS:            time.Now().UnixMilli(),
+		CheckedAtMS:            checkedAt.UnixMilli(),
 		Total:                  max(0, stats.total),
 		Normal:                 max(0, stats.normal),
 		NeedsAttention:         max(0, stats.needsAttention),
@@ -825,7 +834,7 @@ func (s *Service) GetAccountPoolSummary(ctx context.Context) (AccountPoolSummary
 		Disabled:               max(0, stats.total-stats.enabled),
 		Unconfirmed:            max(0, stats.unconfirmed),
 		ClassificationObserved: stats.classificationObserved,
-	}, nil
+	}
 }
 
 // GetActiveOrderStatus refreshes only the currently open supplier order when

@@ -832,6 +832,27 @@ func TestAccountPoolStatsKeepsPopulationIdentityAcrossLiveAndInspectionBuckets(t
 	}
 }
 
+func TestAccountPoolSummaryFromStatsKeepsExclusivePoolIdentity(t *testing.T) {
+	checkedAt := time.UnixMilli(1_786_745_988_395)
+	summary := accountPoolSummaryFromStats(accountPoolStats{
+		total:                  46,
+		enabled:                26,
+		normal:                 3,
+		needsAttention:         0,
+		quotaRisk:              15,
+		unconfirmed:            8,
+		classificationObserved: true,
+	}, checkedAt)
+	if summary.CheckedAtMS != checkedAt.UnixMilli() || summary.Total != 46 || summary.Normal != 3 ||
+		summary.NeedsAttention != 0 || summary.QuotaRisk != 15 || summary.Disabled != 20 ||
+		summary.Unconfirmed != 8 || !summary.ClassificationObserved {
+		t.Fatalf("account pool summary = %#v", summary)
+	}
+	if summary.Normal+summary.NeedsAttention+summary.QuotaRisk+summary.Unconfirmed+summary.Disabled != summary.Total {
+		t.Fatalf("account pool summary identity does not hold: %#v", summary)
+	}
+}
+
 func TestAccountPoolStatsParsesConcurrencyAliasesWithoutConstrainingUnlimitedAccounts(t *testing.T) {
 	files := []cpaauthfiles.File{
 		{Name: "finite.json", Provider: "codex", Raw: map[string]any{"max_concurrency": 2}},

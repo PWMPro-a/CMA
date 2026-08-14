@@ -1,9 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import type { SupplySmartResource } from '@/services/api';
+import type { SupplyAccountPoolSummary, SupplySmartResource } from '@/services/api';
 import { resolveSupplyPoolAccountStats } from './poolAccountStats';
 
 const resource = (values: Partial<SupplySmartResource>): SupplySmartResource =>
   values as SupplySmartResource;
+
+const summary = (values: Partial<SupplyAccountPoolSummary>): SupplyAccountPoolSummary =>
+  ({
+    checkedAtMs: 1,
+    total: 0,
+    normal: 0,
+    needsAttention: 0,
+    quotaRisk: 0,
+    disabled: 0,
+    unconfirmed: 0,
+    classificationObserved: true,
+    ...values,
+  }) as SupplyAccountPoolSummary;
 
 describe('resolveSupplyPoolAccountStats', () => {
   it('keeps normal and at-risk counts exclusive inside the live schedulable pool', () => {
@@ -175,6 +188,41 @@ describe('resolveSupplyPoolAccountStats', () => {
       atRisk: undefined,
       total: 4,
       disabled: 0,
+    });
+  });
+
+  it('uses the shared live pool summary instead of stale embedded resource buckets', () => {
+    expect(
+      resolveSupplyPoolAccountStats(
+        resource({
+          schedulableAccounts: 26,
+          accountClassificationObserved: true,
+          normalAccounts: 1,
+          needsAttentionAccounts: 2,
+          quotaRiskAccounts: 15,
+          unconfirmedAccounts: 8,
+          totalAccounts: 46,
+          disabledAccounts: 20,
+        }),
+        1,
+        summary({
+          total: 46,
+          normal: 3,
+          needsAttention: 0,
+          quotaRisk: 15,
+          disabled: 20,
+          unconfirmed: 8,
+        })
+      )
+    ).toMatchObject({
+      schedulable: 26,
+      normal: 3,
+      needsAttention: 0,
+      quotaRisk: 15,
+      unconfirmed: 8,
+      atRisk: 23,
+      total: 46,
+      disabled: 20,
     });
   });
 });

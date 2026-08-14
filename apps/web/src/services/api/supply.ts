@@ -716,6 +716,7 @@ export interface SupplyStatus {
   config: SupplyConfig;
   running: boolean;
   overview: SupplyOverview;
+  accountPool?: SupplyAccountPoolSummary;
   smartResource: SupplySmartResource;
   automation?: SupplyAutomationExecution;
   recovery?: SupplyRecoverySummary;
