@@ -62,12 +62,32 @@ func TestSmartQuotaCalibrationUsesWindowHistoryAndRemainingPercentage(t *testing
 			TotalTokens:      54_400_000,
 		},
 		{
-			TimestampMS:            now.Add(-time.Minute).UnixMilli(),
+			TimestampMS:            now.Add(-90 * time.Second).UnixMilli(),
+			Provider:               "codex",
+			AuthFileSnapshot:       "active.json",
+			HeaderQuotaUsedPercent: floatPtr(80),
+			HeaderQuotaRecoverAtMS: recoverAt,
+			HeaderQuotaPlanType:    "team",
+			ResponseMetadata:       smartQuotaWeeklyMetadata("team", 80, recoverAt),
+		},
+		{
+			TimestampMS:            now.Add(-60 * time.Second).UnixMilli(),
+			Provider:               "codex",
+			AuthFileSnapshot:       "active.json",
+			HeaderQuotaUsedPercent: floatPtr(85),
+			HeaderQuotaRecoverAtMS: recoverAt,
+			HeaderQuotaPlanType:    "team",
+			TotalTokens:            3_000_000,
+			ResponseMetadata:       smartQuotaWeeklyMetadata("team", 85, recoverAt),
+		},
+		{
+			TimestampMS:            now.Add(-30 * time.Second).UnixMilli(),
 			Provider:               "codex",
 			AuthFileSnapshot:       "active.json",
 			HeaderQuotaUsedPercent: floatPtr(90),
 			HeaderQuotaRecoverAtMS: recoverAt,
 			HeaderQuotaPlanType:    "team",
+			TotalTokens:            3_000_000,
 			ResponseMetadata:       smartQuotaWeeklyMetadata("team", 90, recoverAt),
 		},
 		{
@@ -84,12 +104,66 @@ func TestSmartQuotaCalibrationUsesWindowHistoryAndRemainingPercentage(t *testing
 	service.recordSmartUsageEvents(events, now)
 
 	estimate := service.smartQuotaEstimateForAt(now, "team", "file:active.json")
-	if estimate.CapacityM != 60 || estimate.Source != smartQuotaEstimateSourceCurrent || estimate.SampleCount != 1 {
+	if estimate.CapacityM != 60 || estimate.Source != smartQuotaEstimateSourceCurrent ||
+		estimate.SampleCount != 1 || estimate.EvidenceCount != 3 {
 		t.Fatalf("window-history estimate = %#v", estimate)
 	}
 	observation := service.smartQuotaState.observations["file:active.json"]
-	if observation.windowTokens != 57_400_000 || observation.lastFraction != 0.95 {
+	if observation.windowTokens != 63_400_000 || observation.lastFraction != 0.95 {
 		t.Fatalf("window observation = %#v", observation)
+	}
+}
+
+func TestSmartQuotaRuntimeEstimateRequiresTenPercentObservedDeltaAndConsistentSamples(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	fallback := smartQuotaEstimate{CapacityM: 60, Source: smartQuotaEstimateSourceDefault}
+
+	insufficient := New(nil, nil)
+	identity := "file:noisy.json"
+	insufficient.smartQuotaState.samplesByIdentity[identity] = []smartQuotaCalibrationSample{
+		{identity: identity, planType: "team", capacityM: 10, weight: 0.01, usedFraction: 0.71, observedMS: now.Add(-3 * time.Minute).UnixMilli()},
+		{identity: identity, planType: "team", capacityM: 30, weight: 0.01, usedFraction: 0.72, observedMS: now.Add(-2 * time.Minute).UnixMilli()},
+		{identity: identity, planType: "team", capacityM: 90, weight: 0.01, usedFraction: 0.73, observedMS: now.Add(-time.Minute).UnixMilli()},
+	}
+	got := insufficient.smartQuotaEstimateForInspectionResult(
+		store.CodexInspectionResult{FileName: "noisy.json", PlanType: "team"},
+		fallback,
+		now,
+	)
+	if got.CapacityM != 60 || got.Source != smartQuotaEstimateSourceDefault {
+		t.Fatalf("three noisy one-percent samples replaced fallback: %#v", got)
+	}
+
+	inconsistent := New(nil, nil)
+	inconsistentIdentity := "file:inconsistent.json"
+	inconsistent.smartQuotaState.samplesByIdentity[inconsistentIdentity] = []smartQuotaCalibrationSample{
+		{identity: inconsistentIdentity, planType: "team", capacityM: 10, weight: 0.04, usedFraction: 0.24, observedMS: now.Add(-3 * time.Minute).UnixMilli()},
+		{identity: inconsistentIdentity, planType: "team", capacityM: 30, weight: 0.04, usedFraction: 0.28, observedMS: now.Add(-2 * time.Minute).UnixMilli()},
+		{identity: inconsistentIdentity, planType: "team", capacityM: 90, weight: 0.04, usedFraction: 0.32, observedMS: now.Add(-time.Minute).UnixMilli()},
+	}
+	got = inconsistent.smartQuotaEstimateForInspectionResult(
+		store.CodexInspectionResult{FileName: "inconsistent.json", PlanType: "team"},
+		fallback,
+		now,
+	)
+	if got.CapacityM != 60 || got.Source != smartQuotaEstimateSourceDefault {
+		t.Fatalf("inconsistent twelve-percent runtime samples replaced fallback: %#v", got)
+	}
+
+	trusted := New(nil, nil)
+	trustedIdentity := "file:trusted.json"
+	trusted.smartQuotaState.samplesByIdentity[trustedIdentity] = []smartQuotaCalibrationSample{
+		{identity: trustedIdentity, planType: "team", capacityM: 58, weight: 0.04, usedFraction: 0.24, observedMS: now.Add(-3 * time.Minute).UnixMilli()},
+		{identity: trustedIdentity, planType: "team", capacityM: 60, weight: 0.04, usedFraction: 0.28, observedMS: now.Add(-2 * time.Minute).UnixMilli()},
+		{identity: trustedIdentity, planType: "team", capacityM: 62, weight: 0.04, usedFraction: 0.32, observedMS: now.Add(-time.Minute).UnixMilli()},
+	}
+	got = trusted.smartQuotaEstimateForInspectionResult(
+		store.CodexInspectionResult{FileName: "trusted.json", PlanType: "team"},
+		fallback,
+		now,
+	)
+	if got.CapacityM != 60 || got.Source != smartQuotaEstimateSourceCurrent || got.CurrentEstimateM != 60 {
+		t.Fatalf("stable twelve-percent runtime evidence was not adopted: %#v", got)
 	}
 }
 
@@ -796,11 +870,11 @@ func TestSmartQuotaCalibrationKeepsHistoryWhenSummaryWindowSwitches(t *testing.T
 	weeklyReset := now.Add(7 * 24 * time.Hour).UnixMilli()
 	primaryMinutes := 300.0
 	weeklyMinutes := 10_080.0
-	primary80, primary10 := 80.0, 10.0
-	weekly90, weekly95 := 90.0, 95.0
+	primary80, primary10, primary20, primary30 := 80.0, 10.0, 20.0, 30.0
+	weekly80, weekly85, weekly90, weekly95 := 80.0, 85.0, 90.0, 95.0
 	events := []usage.Event{
 		{
-			TimestampMS:            now.Add(-time.Minute).UnixMilli(),
+			TimestampMS:            now.Add(-90 * time.Second).UnixMilli(),
 			Provider:               "codex",
 			AuthFileSnapshot:       "switching.json",
 			HeaderQuotaUsedPercent: &primary80,
@@ -814,14 +888,14 @@ func TestSmartQuotaCalibrationKeepsHistoryWhenSummaryWindowSwitches(t *testing.T
 					WindowMinutes: &primaryMinutes,
 				},
 				Secondary: &usage.HeaderQuotaWindow{
-					UsedPercent:   &weekly90,
+					UsedPercent:   &weekly80,
 					ResetAtMS:     weeklyReset,
 					WindowMinutes: &weeklyMinutes,
 				},
 			}},
 		},
 		{
-			TimestampMS:            now.UnixMilli(),
+			TimestampMS:            now.Add(-60 * time.Second).UnixMilli(),
 			Provider:               "codex",
 			AuthFileSnapshot:       "switching.json",
 			HeaderQuotaUsedPercent: &primary10,
@@ -835,6 +909,48 @@ func TestSmartQuotaCalibrationKeepsHistoryWhenSummaryWindowSwitches(t *testing.T
 					WindowMinutes: &primaryMinutes,
 				},
 				Secondary: &usage.HeaderQuotaWindow{
+					UsedPercent:   &weekly85,
+					ResetAtMS:     weeklyReset,
+					WindowMinutes: &weeklyMinutes,
+				},
+			}},
+		},
+		{
+			TimestampMS:            now.Add(-30 * time.Second).UnixMilli(),
+			Provider:               "codex",
+			AuthFileSnapshot:       "switching.json",
+			HeaderQuotaUsedPercent: &primary20,
+			HeaderQuotaRecoverAtMS: now.Add(10 * time.Hour).UnixMilli(),
+			TotalTokens:            3_000_000,
+			ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+				PlanType: "team",
+				Primary: &usage.HeaderQuotaWindow{
+					UsedPercent:   &primary20,
+					ResetAtMS:     now.Add(10 * time.Hour).UnixMilli(),
+					WindowMinutes: &primaryMinutes,
+				},
+				Secondary: &usage.HeaderQuotaWindow{
+					UsedPercent:   &weekly90,
+					ResetAtMS:     weeklyReset,
+					WindowMinutes: &weeklyMinutes,
+				},
+			}},
+		},
+		{
+			TimestampMS:            now.UnixMilli(),
+			Provider:               "codex",
+			AuthFileSnapshot:       "switching.json",
+			HeaderQuotaUsedPercent: &primary30,
+			HeaderQuotaRecoverAtMS: now.Add(10 * time.Hour).UnixMilli(),
+			TotalTokens:            3_000_000,
+			ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+				PlanType: "team",
+				Primary: &usage.HeaderQuotaWindow{
+					UsedPercent:   &primary30,
+					ResetAtMS:     now.Add(10 * time.Hour).UnixMilli(),
+					WindowMinutes: &primaryMinutes,
+				},
+				Secondary: &usage.HeaderQuotaWindow{
 					UsedPercent:   &weekly95,
 					ResetAtMS:     weeklyReset,
 					WindowMinutes: &weeklyMinutes,
@@ -844,10 +960,10 @@ func TestSmartQuotaCalibrationKeepsHistoryWhenSummaryWindowSwitches(t *testing.T
 	}
 	service.recordSmartUsageEvents(events, now)
 	estimate := service.smartQuotaEstimateForAt(now, "team", "file:switching.json")
-	if estimate.CapacityM != 60 || estimate.SampleCount != 1 {
+	if estimate.CapacityM != 60 || estimate.SampleCount != 1 || estimate.EvidenceCount != 3 {
 		t.Fatalf("switching-window estimate = %#v", estimate)
 	}
-	if observation := service.smartQuotaState.observations["file:switching.json"]; observation.windowTokens != 57_000_000 || observation.recoverAtMS != weeklyReset {
+	if observation := service.smartQuotaState.observations["file:switching.json"]; observation.windowTokens != 63_000_000 || observation.recoverAtMS != weeklyReset {
 		t.Fatalf("switching-window observation = %#v", observation)
 	}
 }
