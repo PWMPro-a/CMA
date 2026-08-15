@@ -5439,7 +5439,7 @@
     "dismiss_uncertain_success": "Блокировка неизвестного заказа снята",
     "dismiss_uncertain_title": "Снять блокировку неизвестного заказа?",
     "effective_capacity_1h": "Фактический остаток токенов аккаунтов",
-    "capacity_split_detail": "Доступно {{available}} · заморожено {{frozen}}",
+    "capacity_split_detail": "Доступно до истечения {{effective}} · доступно {{available}} · заморожено {{frozen}}",
     "effective_capacity_rcu": "Усваиваемая / целевая ёмкость",
     "effective_health_target_minutes": "Эффективный запас {{value}} мин (настроено {{configured}} мин)",
     "enable_auto": "Включить автопополнение",
@@ -6059,7 +6059,13 @@
     "forecast_next_expiry_hint": "Осталось около {{minutes}}; маршрутизация отдаёт приоритет аккаунтам с близким сроком",
     "forecast_expiry_unknown": "Текущая ёмкость не сопоставлена с арендой поставщика; проверьте записи жизненного цикла аккаунтов",
     "forecast_next_deficit": "Первый ожидаемый дефицит ёмкости",
-    "forecast_next_deficit_hint": "Рассчитывается по остатку, сроку действия каждого аккаунта и текущей скорости расхода"
+    "forecast_next_deficit_hint": "Рассчитывается по остатку, сроку действия каждого аккаунта и текущей скорости расхода",
+    "forecast_purchase_lead": "Опережение закупки",
+    "forecast_purchase_lead_hint": "Учитывает недавнее время поставки, отмены, импорт, обновление и проверку квоты",
+    "forecast_purchase_trigger": "Порог времени до закупки",
+    "forecast_purchase_trigger_wait_hint": "Подождать примерно {{minutes}} перед заказом, чтобы срок аккаунта не начался слишком рано",
+    "forecast_purchase_trigger_ready_hint": "Текущий спрос полностью использует {{quantity}} новых аккаунтов без превышения полезной ёмкости",
+    "smart_reason_purchase_timing_wait": "Текущий дефицит пока не позволяет полностью использовать новый аккаунт; заказ ждёт порогового времени"
   },
   "egress_ip": {
     "card_eyebrow": "Выходной IP в один клик",

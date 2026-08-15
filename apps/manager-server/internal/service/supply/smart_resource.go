@@ -200,6 +200,10 @@ type SmartResource struct {
 	SupplyRecentRequestedQuantity   int     `json:"supplyRecentRequestedQuantity,omitempty"`
 	SupplyRecentDeliveredQuantity   int     `json:"supplyRecentDeliveredQuantity,omitempty"`
 	SupplyFulfillmentRate           float64 `json:"supplyFulfillmentRate,omitempty"`
+	PurchaseLeadMinutes             float64 `json:"purchaseLeadMinutes,omitempty"`
+	PurchaseTimingTriggerMinutes    float64 `json:"purchaseTimingTriggerMinutes,omitempty"`
+	PurchaseTimingWaitMinutes       float64 `json:"purchaseTimingWaitMinutes,omitempty"`
+	PurchaseTimingEligibleQuantity  int     `json:"purchaseTimingEligibleQuantity,omitempty"`
 	UsageSampleMinutes              int     `json:"usageSampleMinutes"`
 	AccountCacheAgeSeconds          int     `json:"accountCacheAgeSeconds"`
 	LockedOrderID                   string  `json:"lockedOrderId,omitempty"`
@@ -267,6 +271,7 @@ type SmartResource struct {
 	ProjectedCapacityAfterRefillTokenM    float64                  `json:"projectedCapacityAfterRefillTokenM,omitempty"`
 	operatorClassificationObserved        bool
 	capacityItems                         []smartCapacityItem
+	quotaSupplierByFile                   map[string]string
 }
 
 type SmartQuotaPlanEstimate struct {
@@ -521,6 +526,7 @@ func (s *Service) smartResource(ctx context.Context, cfg store.ManagerConfig, fo
 
 func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupplyConfig, snapshot inspectionQuotaSnapshot, now time.Time) (resource SmartResource) {
 	resource = defaultSmartResource(cfg)
+	resource.quotaSupplierByFile = snapshot.supplierByFile
 	defer func() {
 		applySmartTokenMetrics(&resource)
 	}()

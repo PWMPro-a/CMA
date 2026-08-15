@@ -37,9 +37,12 @@ func (w *SupplyReplenishmentWorker) run(ctx context.Context) {
 			return
 		case <-timer.C:
 			startedAt := time.Now()
-			_, _ = w.service.SyncRecoveriesIfDue(ctx)
 			err := w.service.RunAutomatic(ctx)
 			finishedAt := time.Now()
+			// Recovery can scan and reconcile hundreds of records. Schedule it
+			// after the replenishment decision so it never extends the dashboard's
+			// "checking" state or delays an urgent order.
+			w.service.ScheduleRecoverySyncIfDue(ctx)
 			nextInterval := w.service.NextInterval(ctx)
 			w.service.RecordAutomaticExecution(startedAt, finishedAt, finishedAt.Add(nextInterval), err)
 			timer.Reset(nextInterval)

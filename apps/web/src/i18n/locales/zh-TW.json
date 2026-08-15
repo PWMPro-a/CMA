@@ -5439,7 +5439,7 @@
     "dismiss_uncertain_success": "未知訂單阻塞已解除",
     "dismiss_uncertain_title": "解除未知訂單阻塞？",
     "effective_capacity_1h": "帳號真實 Token 餘量",
-    "capacity_split_detail": "可用 {{available}} · 凍結 {{frozen}}",
+    "capacity_split_detail": "到期前有效 {{effective}} · 可用 {{available}} · 凍結 {{frozen}}",
     "effective_capacity_rcu": "有效可消化 / 目標容量",
     "effective_health_target_minutes": "有效健康水位 {{value}} 分鐘（設定 {{configured}} 分鐘）",
     "enable_auto": "啟用自動補貨",
@@ -6059,7 +6059,13 @@
     "forecast_next_expiry_hint": "距離到期約 {{minutes}}，調度將優先消耗臨期帳號",
     "forecast_expiry_unknown": "目前容量沒有匹配到採購租期，請檢查帳號生命週期記錄",
     "forecast_next_deficit": "預計首次容量缺口",
-    "forecast_next_deficit_hint": "按每個帳號的剩餘額度、到期時間和目前消耗速度計算"
+    "forecast_next_deficit_hint": "按每個帳號的剩餘額度、到期時間和目前消耗速度計算",
+    "forecast_purchase_lead": "採購交付提前量",
+    "forecast_purchase_lead_hint": "綜合近期履約、取消率及匯入刷新耗時",
+    "forecast_purchase_trigger": "採購觸發水位",
+    "forecast_purchase_trigger_wait_hint": "預計再等待 {{minutes}}；目前不下單，避免帳號過早開始計時",
+    "forecast_purchase_trigger_ready_hint": "目前可按實際消耗採購 {{quantity}} 個，避免超過可消耗容量",
+    "smart_reason_purchase_timing_wait": "目前缺口不足以完整消耗一個新帳號；等待到採購觸發水位再下單"
   },
   "egress_ip": {
     "card_eyebrow": "一鍵出口 IP",

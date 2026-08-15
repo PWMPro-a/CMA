@@ -5439,7 +5439,7 @@
     "dismiss_uncertain_success": "The unknown-order block has been released",
     "dismiss_uncertain_title": "Release unknown-order block?",
     "effective_capacity_1h": "Actual account token balance",
-    "capacity_split_detail": "Available {{available}} · frozen {{frozen}}",
+    "capacity_split_detail": "Expiry-usable {{effective}} · available {{available}} · frozen {{frozen}}",
     "effective_capacity_rcu": "Digestible / target capacity",
     "effective_health_target_minutes": "Effective runway {{value}} min (configured {{configured}} min)",
     "enable_auto": "Enable automatic supply",
@@ -6059,7 +6059,13 @@
     "forecast_next_expiry_hint": "About {{minutes}} remaining; routing prioritizes accounts near expiry",
     "forecast_expiry_unknown": "Current capacity is not matched to a supplier lease; inspect the account lifecycle records",
     "forecast_next_deficit": "First projected capacity gap",
-    "forecast_next_deficit_hint": "Calculated from each account balance, expiry deadline, and current burn rate"
+    "forecast_next_deficit_hint": "Calculated from each account balance, expiry deadline, and current burn rate",
+    "forecast_purchase_lead": "Purchase delivery lead",
+    "forecast_purchase_lead_hint": "Includes recent fulfillment time, cancellation rate, import, refresh, and quota probing",
+    "forecast_purchase_trigger": "Purchase trigger runway",
+    "forecast_purchase_trigger_wait_hint": "Wait about {{minutes}} before ordering so account lifetime does not start too early",
+    "forecast_purchase_trigger_ready_hint": "Current demand can fully use {{quantity}} new account(s) without exceeding consumable capacity",
+    "smart_reason_purchase_timing_wait": "The current gap cannot fully consume one new account yet; ordering waits for the purchase trigger runway"
   },
   "egress_ip": {
     "card_eyebrow": "One-click egress IP",

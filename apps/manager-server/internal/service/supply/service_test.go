@@ -61,6 +61,64 @@ func TestAutomationExecutionTracksScheduledAndCompletedCycles(t *testing.T) {
 	}
 }
 
+func TestScheduleRecoverySyncIfDueIsNonBlockingAndSingleFlight(t *testing.T) {
+	service := New(nil, nil)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	completed := make(chan struct{})
+	var calls atomic.Int32
+	service.recoverySyncIfDue = func(ctx context.Context) (RecoverySummary, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return RecoverySummary{}, ctx.Err()
+			}
+			close(completed)
+		}
+		return RecoverySummary{}, nil
+	}
+
+	startedAt := time.Now()
+	if !service.ScheduleRecoverySyncIfDue(context.Background()) {
+		t.Fatal("first recovery sync was not scheduled")
+	}
+	if elapsed := time.Since(startedAt); elapsed > 250*time.Millisecond {
+		t.Fatalf("recovery scheduling blocked for %s", elapsed)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("background recovery sync did not start")
+	}
+	if service.ScheduleRecoverySyncIfDue(context.Background()) {
+		t.Fatal("duplicate recovery sync was scheduled while the first was running")
+	}
+	close(release)
+	select {
+	case <-completed:
+	case <-time.After(time.Second):
+		t.Fatal("background recovery sync did not complete")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		service.recoveryAsyncMu.Lock()
+		running := service.recoveryAsyncRunning
+		service.recoveryAsyncMu.Unlock()
+		if !running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background recovery single-flight guard did not clear")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !service.ScheduleRecoverySyncIfDue(context.Background()) {
+		t.Fatal("recovery sync could not be scheduled after completion")
+	}
+}
+
 func TestGetActiveOrderStatusUsesFastRemotePollAndHonorsRetryAfter(t *testing.T) {
 	var statusCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1088,6 +1146,170 @@ func TestEnabledPoolCapacitySplitUsesCredentialIdentity(t *testing.T) {
 	}
 }
 
+func TestNormalLiveCredentialMissingFromInspectionUsesPlanFallbackCapacity(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	service := New(nil, nil)
+	unit := smartProductUnitCapacity("oauth_7d")
+	existingCapacity := smartTokenMillionToRCU(30, unit)
+	resource := SmartResource{
+		CapacitySource:         smartCapacitySourceInspection,
+		CapacitySnapshotAtMS:   now.UnixMilli(),
+		UnitCapacityRCU:        unit,
+		RawCapacityRCU:         existingCapacity,
+		CurrentCapacityRCU:     existingCapacity,
+		TimeLimitedCapacityRCU: existingCapacity,
+		TotalCapacityRCU:       existingCapacity,
+		HealthyAccounts:        1,
+		capacityItems: []smartCapacityItem{{
+			credentialKey:     operatorCredentialKey("known.json", "known"),
+			fileKey:           operatorFileCredentialKey("known.json"),
+			capacityRCU:       existingCapacity,
+			usableCapacityRCU: existingCapacity,
+			remainingMinutes:  float64(smartAccountLifetimeMinutes()),
+		}},
+		AccountQuotaPlanEstimates: []SmartQuotaPlanEstimate{{
+			PlanType: "team", AccountCount: 1, FallbackM: 60, AdoptedM: 60, Source: smartQuotaEstimateSourceDefault,
+		}},
+	}
+	known := cpaauthfiles.File{
+		Name: "known.json", AuthIndex: "known", Provider: "codex",
+		Raw: map[string]any{"status": "ready", "plan_type": "team"},
+	}
+	missing := cpaauthfiles.File{
+		Name: "missing.json", AuthIndex: "missing", Provider: "codex",
+		Raw: map[string]any{"status": "ready", "plan_type": "team"},
+	}
+	stats := accountPoolStats{
+		files: []cpaauthfiles.File{known, missing},
+		total: 2, enabled: 2, schedulable: 2, normal: 2,
+		classificationObserved: true, liveObserved: true,
+		bucketByCredential: map[string]operatorAccountBucket{
+			operatorCredentialKey("known.json", "known"):     operatorAccountNormal,
+			operatorCredentialKey("missing.json", "missing"): operatorAccountNormal,
+		},
+		normalRemainingByCredential: map[string]float64{
+			operatorCredentialKey("known.json", "known"):     0.5,
+			operatorCredentialKey("missing.json", "missing"): 0.75,
+		},
+	}
+	applyAccountPoolStats(&resource, stats)
+	if !service.reconcileSmartNormalCapacityFloor(store.ManagerSupplyConfig{Product: "oauth_7d"}, &resource, stats, now) {
+		t.Fatal("missing normal credential did not add fallback capacity")
+	}
+	if resource.CurrentCapacityTokenM != 75 || resource.RawCapacityTokenM != 75 ||
+		resource.AvailableCapacityTokenM != 75 || resource.HealthyAccounts != 2 {
+		t.Fatalf("normal capacity floor = %#v", resource)
+	}
+	if got := resource.AccountQuotaPlanEstimates[0].AccountCount; got != 2 {
+		t.Fatalf("team account count = %d, want 2", got)
+	}
+}
+
+func TestNormalLiveTeamPoolReconcilesAllSixteenAccountsIntoRawCapacity(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	service := New(nil, nil)
+	unit := smartProductUnitCapacity("oauth_7d")
+	resource := SmartResource{
+		CapacitySource:       smartCapacitySourceInspection,
+		CapacitySnapshotAtMS: now.UnixMilli(),
+		UnitCapacityRCU:      unit,
+		HealthyAccounts:      10,
+		AccountQuotaPlanEstimates: []SmartQuotaPlanEstimate{{
+			PlanType: "team", AccountCount: 10, FallbackM: 60, AdoptedM: 60, Source: smartQuotaEstimateSourceDefault,
+		}},
+	}
+	stats := accountPoolStats{
+		total: 16, enabled: 16, schedulable: 16, normal: 16,
+		classificationObserved:      true,
+		liveObserved:                true,
+		bucketByCredential:          make(map[string]operatorAccountBucket, 16),
+		normalRemainingByCredential: make(map[string]float64, 16),
+	}
+	for index := 0; index < 16; index++ {
+		name := fmt.Sprintf("team-%02d.json", index)
+		authIndex := fmt.Sprintf("team-%02d", index)
+		file := cpaauthfiles.File{
+			Name: name, AuthIndex: authIndex, Provider: "codex",
+			Raw: map[string]any{"status": "ready", "plan_type": "team"},
+		}
+		stats.files = append(stats.files, file)
+		key := operatorCredentialKey(name, authIndex)
+		stats.bucketByCredential[key] = operatorAccountNormal
+		stats.normalRemainingByCredential[key] = 1
+		if index < 10 {
+			// The completed inspection only saw 35M remaining on its ten
+			// credentials. Six newer live credentials must add their full 60M
+			// Team fallback instead of leaving the pool at the stale ten-account
+			// total shown by the dashboard.
+			capacity := smartTokenMillionToRCU(35, unit)
+			resource.RawCapacityRCU += capacity
+			resource.capacityItems = append(resource.capacityItems, smartCapacityItem{
+				credentialKey: key,
+				fileKey:       operatorFileCredentialKey(name),
+				capacityRCU:   capacity,
+			})
+		}
+	}
+	resource.RawCapacityRCU = round2(resource.RawCapacityRCU)
+	applySmartExpiryCapacity(&resource, resource.capacityItems, 0, now)
+	applyAccountPoolStats(&resource, stats)
+
+	if !service.reconcileSmartNormalCapacityFloor(store.ManagerSupplyConfig{Product: "oauth_7d"}, &resource, stats, now) {
+		t.Fatal("six missing Team credentials did not add fallback capacity")
+	}
+	if resource.RawCapacityTokenM != 710 || resource.CurrentCapacityTokenM != 710 ||
+		resource.HealthyAccounts != 16 || resource.AccountQuotaPlanEstimates[0].AccountCount != 16 {
+		t.Fatalf("sixteen-account Team capacity = %#v", resource)
+	}
+}
+
+func TestNormalLiveCredentialUsesItsSupplierQuotaPolicy(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	service := New(nil, nil)
+	unit := smartProductUnitCapacity("oauth_7d")
+	cfg := store.ManagerSupplyConfig{
+		Product: "oauth_7d",
+		Platforms: []store.ManagerSupplyPlatformConfig{
+			{ID: "small", Type: managerconfigsvc.SupplyPlatformLegacy, Product: "oauth_7d", QuotaEstimationPolicies: map[string]store.ManagerSupplyQuotaEstimationPolicy{
+				"team": {FallbackM: 40},
+			}},
+			{ID: "large", Type: managerconfigsvc.SupplyPlatformBugTeam, Product: "team_1h", QuotaEstimationPolicies: map[string]store.ManagerSupplyQuotaEstimationPolicy{
+				"team": {FallbackM: 240},
+			}},
+		},
+	}
+	file := cpaauthfiles.File{
+		Name: "large-team.json", AuthIndex: "large-team", Provider: "codex",
+		Raw: map[string]any{"status": "ready", "plan_type": "team"},
+	}
+	key := operatorCredentialKey(file.Name, file.AuthIndex)
+	resource := SmartResource{
+		CapacitySource:       smartCapacitySourceInspection,
+		CapacitySnapshotAtMS: now.UnixMilli(),
+		UnitCapacityRCU:      unit,
+		quotaSupplierByFile:  map[string]string{file.Name: "large"},
+		AccountQuotaPlanEstimates: []SmartQuotaPlanEstimate{
+			{SupplierID: "small", PlanType: "team", AccountCount: 1, FallbackM: 40, AdoptedM: 40, Source: smartQuotaEstimateSourceDefault},
+			{SupplierID: "large", PlanType: "team", AccountCount: 0, FallbackM: 240, AdoptedM: 240, Source: smartQuotaEstimateSourceDefault},
+		},
+	}
+	stats := accountPoolStats{
+		files: []cpaauthfiles.File{file}, total: 1, enabled: 1, schedulable: 1, normal: 1,
+		classificationObserved: true, liveObserved: true,
+		bucketByCredential:          map[string]operatorAccountBucket{key: operatorAccountNormal},
+		normalRemainingByCredential: map[string]float64{key: 1},
+	}
+	applyAccountPoolStats(&resource, stats)
+
+	if !service.reconcileSmartNormalCapacityFloor(cfg, &resource, stats, now) {
+		t.Fatal("supplier-scoped normal credential did not add capacity")
+	}
+	if resource.RawCapacityTokenM != 240 || resource.AccountQuotaPlanEstimates[0].AccountCount != 1 ||
+		resource.AccountQuotaPlanEstimates[1].AccountCount != 1 {
+		t.Fatalf("supplier-scoped capacity = %#v", resource)
+	}
+}
+
 func TestAvailableCapacityEmergencyBuysOnlyMinimumCrossingQuantity(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		Product: "oauth_30d", Strategy: managerconfigsvc.SupplyStrategyStrongSupply,
@@ -1354,6 +1576,83 @@ func TestSupplyAccountLeaseMetadataUsesSupplierDeadline(t *testing.T) {
 	remaining := smartAccountRemainingMinutes(metadata, time.Now(), smartAccountLifetimeMinutes())
 	if remaining < 44 || remaining > 46 {
 		t.Fatalf("remaining supplier validity = %.2f minutes, want about 45", remaining)
+	}
+}
+
+func TestDisableExpiredSupplyAccountsIfDueSchedulesNonBlockingSingleFlight(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "expired-sweep-background.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	service := New(st, nil)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	completed := make(chan struct{})
+	var calls atomic.Int32
+	service.expiredLeaseSweep = func(ctx context.Context, cfg store.ManagerConfig, now time.Time) (int, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+			close(completed)
+		}
+		return 1, nil
+	}
+	cfg := store.ManagerConfig{CPAConnection: store.ManagerCPAConnectionConfig{
+		CPABaseURL: "http://cpa.local", ManagementKey: "management-key",
+	}}
+	now := time.Now()
+	startedAt := time.Now()
+	disabled, err := service.disableExpiredSupplyAccountsIfDue(context.Background(), cfg, now)
+	if err != nil || disabled != 0 {
+		t.Fatalf("schedule result disabled=%d err=%v", disabled, err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 250*time.Millisecond {
+		t.Fatalf("expired lease scheduling blocked for %s", elapsed)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("background expired lease sweep did not start")
+	}
+	_, _ = service.disableExpiredSupplyAccountsIfDue(context.Background(), cfg, now.Add(time.Second))
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("concurrent sweep calls = %d, want 1", got)
+	}
+	close(release)
+	select {
+	case <-completed:
+	case <-time.After(time.Second):
+		t.Fatal("background expired lease sweep did not complete")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		service.expiredLeaseSweepMu.Lock()
+		running := service.expiredLeaseSweepRunning
+		service.expiredLeaseSweepMu.Unlock()
+		if !running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expired lease single-flight guard did not clear")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_, _ = service.disableExpiredSupplyAccountsIfDue(context.Background(), cfg, now.Add(2*time.Second))
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("sweep interval was ignored: calls=%d", got)
+	}
+	_, _ = service.disableExpiredSupplyAccountsIfDue(context.Background(), cfg, now.Add(expiredSupplyLeaseSweepInterval))
+	deadline = time.Now().Add(time.Second)
+	for calls.Load() != 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("sweep did not reschedule after interval: calls=%d", got)
 	}
 }
 

@@ -52,7 +52,47 @@ const (
 	automaticReleasePendingMessage      = "automatically released locally; supplier reservation will expire automatically"
 	defaultSupplyRevenueMultiplier      = 0.06
 	expiredSupplyLeaseSweepInterval     = 15 * time.Second
+	expiredSupplyLeaseSweepTimeout      = 2 * time.Minute
+	recoverySyncBackgroundTimeout       = 10 * time.Minute
+	automaticRunSlowLogThreshold        = 500 * time.Millisecond
 )
+
+type automaticRunTiming struct {
+	startedAt time.Time
+	stageAt   time.Time
+	stage     string
+	durations []string
+}
+
+func newAutomaticRunTiming() *automaticRunTiming {
+	now := time.Now()
+	return &automaticRunTiming{startedAt: now, stageAt: now, stage: "run-lock"}
+}
+
+func (t *automaticRunTiming) next(stage string) {
+	if t == nil {
+		return
+	}
+	now := time.Now()
+	if t.stage != "" {
+		t.durations = append(t.durations, fmt.Sprintf("%s=%s", t.stage, now.Sub(t.stageAt).Round(time.Millisecond)))
+	}
+	t.stage = stage
+	t.stageAt = now
+}
+
+func (t *automaticRunTiming) finish(err error) {
+	if t == nil {
+		return
+	}
+	t.next("")
+	total := time.Since(t.startedAt)
+	if err == nil && total < automaticRunSlowLogThreshold {
+		return
+	}
+	log.Printf("[supply] automatic check completed duration=%s stages=[%s] err=%v",
+		total.Round(time.Millisecond), strings.Join(t.durations, " "), err)
+}
 
 type Overview struct {
 	CheckedAtMS int64 `json:"checkedAtMs,omitempty"`
@@ -504,28 +544,33 @@ type Service struct {
 	// request must not independently log in to the supplier after a restart.
 	overviewRefreshMu sync.Mutex
 
-	smartMu             sync.RWMutex
-	smartBuckets        map[int64]*smartUsageBucket
-	smartQuotaState     smartQuotaCalibrationState
-	quotaPolicyMu       sync.Mutex
-	quotaPolicyState    map[string]smartQuotaPlanAdoptionState
-	authCacheMu         sync.Mutex
-	authRefreshMu       sync.Mutex
-	authCache           authFileSnapshot
-	quotaSnapshotMu     sync.Mutex
-	quotaRefreshMu      sync.Mutex
-	quotaSnapshot       inspectionQuotaSnapshot
-	operatorHeadersMu   sync.Mutex
-	operatorHeaders     operatorHeaderSnapshotCache
-	smartResourceState  SmartResource
-	automation          AutomationExecution
-	recoveryMu          sync.Mutex
-	recoveryState       RecoverySummary
-	importMu            sync.Mutex
-	expiredLeaseSweepMu sync.Mutex
-	expiredLeaseSweepAt time.Time
-	poolVacuumMu        sync.Mutex
-	poolVacuumStarted   int64
+	smartMu                  sync.RWMutex
+	smartBuckets             map[int64]*smartUsageBucket
+	smartQuotaState          smartQuotaCalibrationState
+	quotaPolicyMu            sync.Mutex
+	quotaPolicyState         map[string]smartQuotaPlanAdoptionState
+	authCacheMu              sync.Mutex
+	authRefreshMu            sync.Mutex
+	authCache                authFileSnapshot
+	quotaSnapshotMu          sync.Mutex
+	quotaRefreshMu           sync.Mutex
+	quotaSnapshot            inspectionQuotaSnapshot
+	operatorHeadersMu        sync.Mutex
+	operatorHeaders          operatorHeaderSnapshotCache
+	smartResourceState       SmartResource
+	automation               AutomationExecution
+	recoveryMu               sync.Mutex
+	recoveryState            RecoverySummary
+	recoveryAsyncMu          sync.Mutex
+	recoveryAsyncRunning     bool
+	recoverySyncIfDue        func(context.Context) (RecoverySummary, error)
+	importMu                 sync.Mutex
+	expiredLeaseSweepMu      sync.Mutex
+	expiredLeaseSweepAt      time.Time
+	expiredLeaseSweepRunning bool
+	expiredLeaseSweep        func(context.Context, store.ManagerConfig, time.Time) (int, error)
+	poolVacuumMu             sync.Mutex
+	poolVacuumStarted        int64
 
 	inspectionSnapshotRefreshMu sync.Mutex
 	inspectionSnapshotRefresh   inspectionSnapshotRefreshState
@@ -728,7 +773,11 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		if poolStatsErr == nil || poolStats.liveObserved {
 			inspectedEnabled := resource.EnabledAccounts
 			applyAccountPoolStats(&resource, poolStats)
+			capacityChanged := s.reconcileSmartNormalCapacityFloor(cfg.Supply, &resource, poolStats, time.Now())
 			if reconcileSmartCapacityWithAccountPool(&resource, inspectedEnabled) {
+				capacityChanged = true
+			}
+			if capacityChanged && resource.ConsumeRCUPerMinute > 0 {
 				recalculateSmartResourceCapacityPlan(cfg.Supply, &resource)
 			}
 			s.reconcileSmartAccountPoolGuard(cfg.Supply, &resource)
@@ -790,6 +839,7 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	if overview.Inventory != nil {
 		pressure := smartSupplyPressureFromOrders(cfg.Supply, *overview.Inventory, max(1, resource.SuggestedQuantity), orders)
 		applySmartSupplyPressure(&resource, pressure)
+		applySmartPurchaseTiming(&resource, smartJustInTimePurchase(cfg.Supply, resource, pressure, resource.SuggestedQuantity))
 		s.setSmartResource(resource)
 	}
 	if overviewAvailable >= 0 {
@@ -1118,6 +1168,49 @@ func (s *Service) SyncRecoveriesIfDue(ctx context.Context) (RecoverySummary, err
 		return summary, nil
 	}
 	return s.SyncRecoveries(ctx, RecoverySyncRequest{})
+}
+
+// ScheduleRecoverySyncIfDue keeps the potentially long recovery scan outside
+// the automatic replenishment critical path. The extra guard covers the short
+// window before SyncRecoveries marks its public state as running, so rapid
+// worker ticks still create at most one background scan.
+func (s *Service) ScheduleRecoverySyncIfDue(ctx context.Context) bool {
+	if s == nil {
+		return false
+	}
+	s.recoveryAsyncMu.Lock()
+	if s.recoveryAsyncRunning {
+		s.recoveryAsyncMu.Unlock()
+		return false
+	}
+	s.recoveryAsyncRunning = true
+	run := s.recoverySyncIfDue
+	s.recoveryAsyncMu.Unlock()
+
+	go func() {
+		startedAt := time.Now()
+		defer func() {
+			s.recoveryAsyncMu.Lock()
+			s.recoveryAsyncRunning = false
+			s.recoveryAsyncMu.Unlock()
+		}()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		syncCtx, cancel := context.WithTimeout(ctx, recoverySyncBackgroundTimeout)
+		defer cancel()
+		if run == nil {
+			run = s.SyncRecoveriesIfDue
+		}
+		_, err := run(syncCtx)
+		duration := time.Since(startedAt)
+		if err != nil {
+			log.Printf("[supply] background recovery sync failed duration=%s: %v", duration.Round(time.Millisecond), err)
+		} else if duration >= automaticRunSlowLogThreshold {
+			log.Printf("[supply] background recovery sync completed duration=%s", duration.Round(time.Millisecond))
+		}
+	}()
+	return true
 }
 
 func (s *Service) SyncRecoveries(ctx context.Context, req RecoverySyncRequest) (RecoverySummary, error) {
@@ -1637,6 +1730,12 @@ func (s *Service) withRecoveryInterval(base time.Duration, cfg store.ManagerSupp
 	if !recoverySyncEnabled(cfg) || !supplyCredentialsConfigured(cfg) {
 		return base
 	}
+	s.recoveryAsyncMu.Lock()
+	asyncRunning := s.recoveryAsyncRunning
+	s.recoveryAsyncMu.Unlock()
+	if asyncRunning {
+		return base
+	}
 	s.recoveryMu.Lock()
 	nextSyncAtMS := s.recoveryState.NextSyncAtMS
 	running := s.recoveryState.Running
@@ -1941,9 +2040,12 @@ func (s *Service) automaticParallelCreateEligible(
 	return !blocked, nil
 }
 
-func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int, force bool) error {
+func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int, force bool) (err error) {
+	timing := newAutomaticRunTiming()
+	defer func() { timing.finish(err) }()
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
+	timing.next("config")
 	s.setRunning(true)
 	defer s.setRunning(false)
 
@@ -1951,6 +2053,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	if err != nil {
 		return err
 	}
+	timing.next("lease-sweep-schedule")
 	supplyCfg := cfg.Supply
 	_, baselineStarted := s.observeAutomaticEnabled(managerconfigsvc.SupplyEnabled(supplyCfg))
 	if baselineStarted && smartSupplyEnabled(supplyCfg) {
@@ -1958,10 +2061,10 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		s.requestStaleInspectionSnapshotRefresh()
 	}
 	if _, sweepErr := s.disableExpiredSupplyAccountsIfDue(ctx, cfg, time.Now()); sweepErr != nil {
-		// Expiry cleanup must never hold up order reconciliation or replenishment.
-		// The next worker pass retries after the bounded sweep interval.
+		// Scheduling errors must never hold up order reconciliation or replenishment.
 		log.Printf("[supply] expired supplier lease cleanup failed: %v", sweepErr)
 	}
+	timing.next("order-reconcile")
 	if restored, restoredFound, err := s.store.ActivateNextUnsupportedSupplyRelease(ctx); err != nil {
 		return err
 	} else if restoredFound {
@@ -2058,6 +2161,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	var resource SmartResource
 	useSmart := manualQuantity == 0 && smartSupplyEnabled(supplyCfg)
 	if useSmart {
+		timing.next("capacity-snapshot")
 		resource, err = s.smartResource(ctx, cfg, force)
 		if err != nil {
 			return err
@@ -2067,6 +2171,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			resource.LockedOrderID = openOrders[0].OrderID
 			applySmartRefillProjection(supplyCfg, &resource)
 		}
+		timing.next("account-pool")
 		if poolAvailable, emergencyQuantity, emergencyReason, accountLoaded, err := s.smartEmergencyAvailability(ctx, cfg, &resource); err != nil {
 			return err
 		} else {
@@ -2084,11 +2189,13 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			s.setSmartResource(resource)
 		}
 	} else {
+		timing.next("account-pool")
 		available, err = s.countAvailableAccounts(ctx, cfg)
 		if err != nil {
 			return err
 		}
 	}
+	timing.next("decision")
 	if manualQuantity == 0 {
 		if useSmart {
 			if reason := s.automaticSupplyGuardReason(resource); reason != "" {
@@ -2243,6 +2350,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		quantity = min(quantity, retryQuantity)
 	}
 
+	timing.next("supplier-quote")
 	selection, err := s.selectSupplyPlatform(ctx, supplyCfg, quantity, openOrders)
 	if err != nil {
 		return err
@@ -2253,7 +2361,8 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	if useSmart {
 		pressure := s.smartSupplyPressure(ctx, supplyCfg, inventory, quantity)
 		applySmartSupplyPressure(&resource, pressure)
-		adjustedQuantity, pressureReason := smartPrelockQuantityForSupplyPressure(supplyCfg, resource, pressure, quantity)
+		adjustedQuantity, pressureReason, timing := smartPrelockQuantityForSupplyPressureWithTiming(supplyCfg, resource, pressure, quantity)
+		applySmartPurchaseTiming(&resource, timing)
 		if manualQuantity == 0 && immediateRetryOrder != nil {
 			// Retry ladder quantities are a final upper bound. In particular,
 			// account-vacuum pressure must not lift a 10/5/2 retry back to the
@@ -2382,6 +2491,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		TriggerReason:     triggerReason,
 		Status:            "creating",
 	}
+	timing.next("order-create")
 	attempt, err = s.store.CreateSupplyOrder(ctx, attempt)
 	if err != nil {
 		return err
@@ -3115,7 +3225,11 @@ func (s *Service) refreshOverview(ctx context.Context, cfg store.ManagerConfig, 
 		}
 		inspectedEnabled := resource.EnabledAccounts
 		applyAccountPoolStats(&resource, poolStats)
+		capacityChanged := s.reconcileSmartNormalCapacityFloor(cfg.Supply, &resource, poolStats, time.Now())
 		if reconcileSmartCapacityWithAccountPool(&resource, inspectedEnabled) {
+			capacityChanged = true
+		}
+		if capacityChanged && resource.ConsumeRCUPerMinute > 0 {
 			recalculateSmartResourceCapacityPlan(cfg.Supply, &resource)
 		}
 		applySmartAccountQuantityEstimate(cfg.Supply, &resource)
@@ -5027,13 +5141,45 @@ func (s *Service) disableExpiredSupplyAccountsIfDue(ctx context.Context, cfg sto
 		now = time.Now()
 	}
 	s.expiredLeaseSweepMu.Lock()
-	if !s.expiredLeaseSweepAt.IsZero() && now.Sub(s.expiredLeaseSweepAt) < expiredSupplyLeaseSweepInterval {
+	if s.expiredLeaseSweepRunning ||
+		(!s.expiredLeaseSweepAt.IsZero() && now.Sub(s.expiredLeaseSweepAt) < expiredSupplyLeaseSweepInterval) {
 		s.expiredLeaseSweepMu.Unlock()
 		return 0, nil
 	}
 	s.expiredLeaseSweepAt = now
+	s.expiredLeaseSweepRunning = true
+	run := s.expiredLeaseSweep
 	s.expiredLeaseSweepMu.Unlock()
-	return s.disableExpiredSupplyAccounts(ctx, cfg, now)
+
+	go func() {
+		startedAt := time.Now()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		sweepCtx, cancel := context.WithTimeout(ctx, expiredSupplyLeaseSweepTimeout)
+		defer cancel()
+		if run == nil {
+			run = s.disableExpiredSupplyAccounts
+		}
+		disabled, err := run(sweepCtx, cfg, now)
+		duration := time.Since(startedAt)
+
+		s.expiredLeaseSweepMu.Lock()
+		s.expiredLeaseSweepRunning = false
+		if err != nil {
+			// Failed/cancelled sweeps are retried on the next automatic pass
+			// instead of being hidden behind the normal interval.
+			s.expiredLeaseSweepAt = time.Time{}
+		}
+		s.expiredLeaseSweepMu.Unlock()
+
+		if err != nil {
+			log.Printf("[supply] expired supplier lease cleanup failed duration=%s: %v", duration.Round(time.Millisecond), err)
+		} else if disabled > 0 || duration >= automaticRunSlowLogThreshold {
+			log.Printf("[supply] expired supplier lease cleanup completed duration=%s disabled=%d", duration.Round(time.Millisecond), disabled)
+		}
+	}()
+	return 0, nil
 }
 
 // disableExpiredSupplyAccounts reconciles the supplier's paid lease boundary
@@ -5148,23 +5294,24 @@ func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerC
 }
 
 type accountPoolStats struct {
-	files                  []cpaauthfiles.File
-	total                  int
-	enabled                int
-	schedulable            int
-	verifiedAvailable      int
-	normal                 int
-	needsAttention         int
-	quotaRisk              int
-	unconfirmed            int
-	concurrencyLimited     int
-	concurrencyUnlimited   int
-	concurrencyMissing     int
-	concurrencyFiniteSlots int
-	classificationObserved bool
-	liveObserved           bool
-	inspectionObserved     bool
-	bucketByCredential     map[string]operatorAccountBucket
+	files                       []cpaauthfiles.File
+	total                       int
+	enabled                     int
+	schedulable                 int
+	verifiedAvailable           int
+	normal                      int
+	needsAttention              int
+	quotaRisk                   int
+	unconfirmed                 int
+	concurrencyLimited          int
+	concurrencyUnlimited        int
+	concurrencyMissing          int
+	concurrencyFiniteSlots      int
+	classificationObserved      bool
+	liveObserved                bool
+	inspectionObserved          bool
+	bucketByCredential          map[string]operatorAccountBucket
+	normalRemainingByCredential map[string]float64
 }
 
 func (s *Service) countAccountPoolStats(ctx context.Context, cfg store.ManagerConfig) (accountPoolStats, error) {
@@ -5273,9 +5420,10 @@ func (s *Service) cachedOperatorHeaderSnapshots(
 
 func accountPoolStatsFromFiles(files []cpaauthfiles.File) accountPoolStats {
 	stats := accountPoolStats{
-		files:              files,
-		liveObserved:       true,
-		bucketByCredential: make(map[string]operatorAccountBucket),
+		files:                       files,
+		liveObserved:                true,
+		bucketByCredential:          make(map[string]operatorAccountBucket),
+		normalRemainingByCredential: make(map[string]float64),
 	}
 	filesByName := make(map[string]int, len(files))
 	for _, file := range files {
@@ -5353,6 +5501,24 @@ func (stats *accountPoolStats) recordCredentialBucket(file cpaauthfiles.File, bu
 	}
 }
 
+func (stats *accountPoolStats) recordNormalCapacityEvidence(file cpaauthfiles.File, remaining float64, uniqueFileName bool) {
+	if stats == nil || file.Disabled {
+		return
+	}
+	if stats.normalRemainingByCredential == nil {
+		stats.normalRemainingByCredential = make(map[string]float64)
+	}
+	remaining = clampFloat(remaining, 0, 1)
+	if key := operatorCredentialKey(file.Name, file.AuthIndex); key != "" {
+		stats.normalRemainingByCredential[key] = remaining
+	}
+	if uniqueFileName {
+		if key := operatorFileCredentialKey(file.Name); key != "" {
+			stats.normalRemainingByCredential[key] = remaining
+		}
+	}
+}
+
 type operatorAccountBucket int
 
 const (
@@ -5392,6 +5558,7 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 	stats.classificationObserved = true
 	stats.liveObserved = true
 	stats.bucketByCredential = make(map[string]operatorAccountBucket, len(files)*2)
+	stats.normalRemainingByCredential = make(map[string]float64, len(files)*2)
 
 	resultsByFile := make(map[string][]store.CodexInspectionResult, len(results))
 	filesByName := make(map[string]int, len(files))
@@ -5435,6 +5602,7 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 			headerMatched = false
 		}
 		bucket := operatorAccountUnconfirmed
+		remainingFraction := 1.0
 		if isAvailableCodexFile(file) && len(resultsByFile[strings.TrimSpace(file.Name)]) == 0 {
 			// A live schedulable credential remains usable when no inspection row
 			// exists for that file. Ambiguous or non-authoritative inspection rows
@@ -5445,8 +5613,14 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 			bucket = operatorAccountNeedsAttention
 		} else if headerMatched && (!inspectionAuthoritative || !matched || header.TimestampMS > result.CreatedAtMS) {
 			bucket = classifyOperatorAccountFromHeader(header)
+			if usedPercent, hasQuota := operatorHeaderSnapshotUsedPercent(header); hasQuota {
+				remainingFraction = 1 - clampFloat(usedPercent/100, 0, 1)
+			}
 		} else if matched && (inspectionAuthoritative || operatorSupplyInspectionUsabilityConfirmed(result)) {
 			bucket = classifyOperatorAccount(file, result)
+			if remaining, hasQuota := inspectionResultRemainingQuotaFraction(result); hasQuota {
+				remainingFraction = remaining
+			}
 		}
 		switch bucket {
 		case operatorAccountNormal:
@@ -5458,7 +5632,11 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 		default:
 			stats.unconfirmed++
 		}
-		stats.recordCredentialBucket(file, bucket, filesByName[strings.TrimSpace(file.Name)] == 1)
+		uniqueFileName := filesByName[strings.TrimSpace(file.Name)] == 1
+		stats.recordCredentialBucket(file, bucket, uniqueFileName)
+		if bucket == operatorAccountNormal {
+			stats.recordNormalCapacityEvidence(file, remainingFraction, uniqueFileName)
+		}
 	}
 	return stats
 }
@@ -5844,6 +6022,155 @@ func applySmartCapacityBreakdown(resource *SmartResource, stats accountPoolStats
 	resource.TotalCapacityRCU = round2(total)
 }
 
+// reconcileSmartNormalCapacityFloor adds live credentials that have current
+// normal evidence but are absent from the completed inspection's capacity
+// items. This commonly happens when a stale inspection recorded 401/402 while
+// a newer real request has already proved the refreshed credential usable.
+// Missing account-scoped >10% evidence uses the configured plan fallback; a
+// provisional 2-10% estimate never reduces the account below that fallback.
+func (s *Service) reconcileSmartNormalCapacityFloor(
+	cfg store.ManagerSupplyConfig,
+	resource *SmartResource,
+	stats accountPoolStats,
+	now time.Time,
+) bool {
+	if s == nil || resource == nil || resource.CapacitySource != smartCapacitySourceInspection ||
+		resource.CapacitySnapshotAtMS <= 0 || !stats.classificationObserved || len(stats.files) == 0 {
+		return false
+	}
+	existing := make(map[string]struct{}, len(resource.capacityItems)*2)
+	for _, item := range resource.capacityItems {
+		if item.credentialKey != "" {
+			existing[item.credentialKey] = struct{}{}
+		}
+		if item.fileKey != "" {
+			existing[item.fileKey] = struct{}{}
+		}
+	}
+	filesByName := make(map[string]int, len(stats.files))
+	for _, file := range stats.files {
+		if isCodexAuthFile(file) {
+			filesByName[strings.TrimSpace(file.Name)]++
+		}
+	}
+	addedCapacity := 0.0
+	addedAccounts := 0
+	addedByPlan := make(map[string]int)
+	platforms := supplyPlatforms(cfg)
+	for _, file := range stats.files {
+		if file.Disabled || !isAvailableCodexFile(file) {
+			continue
+		}
+		credentialKey := operatorCredentialKey(file.Name, file.AuthIndex)
+		fileKey := operatorFileCredentialKey(file.Name)
+		bucket, matched := stats.bucketByCredential[credentialKey]
+		if !matched && filesByName[strings.TrimSpace(file.Name)] == 1 {
+			bucket, matched = stats.bucketByCredential[fileKey]
+		}
+		if !matched || bucket != operatorAccountNormal {
+			continue
+		}
+		if _, found := existing[credentialKey]; found {
+			continue
+		}
+		uniqueFileName := filesByName[strings.TrimSpace(file.Name)] == 1
+		if uniqueFileName {
+			if _, found := existing[fileKey]; found {
+				continue
+			}
+		}
+
+		planType := strings.ToLower(strings.TrimSpace(textField(
+			file.Raw,
+			"plan_type", "planType", "chatgpt_plan_type", "chatgptPlanType",
+		)))
+		if planType == "" {
+			planType = "unknown"
+		}
+		supplierID := normalizeSmartQuotaSupplierID(resource.quotaSupplierByFile[strings.TrimSpace(file.Name)])
+		if supplierID == "" && len(platforms) == 1 {
+			supplierID = normalizeSmartQuotaSupplierID(platforms[0].ID)
+		}
+		policy := smartQuotaPolicyForSupplier(cfg, supplierID, planType)
+		estimate := smartQuotaEstimate{
+			CapacityM:  policy.FallbackM,
+			Source:     smartQuotaEstimateSourceDefault,
+			Confidence: smartConfidenceLow,
+		}
+		if policy.Mode == smartQuotaPolicyModeFixed {
+			estimate.CapacityM = policy.FixedM
+			estimate.Source = smartQuotaPolicyModeFixed
+			estimate.Confidence = smartConfidenceHigh
+		} else {
+			for _, plan := range resource.AccountQuotaPlanEstimates {
+				if normalizeSmartQuotaSupplierID(plan.SupplierID) == supplierID &&
+					strings.EqualFold(strings.TrimSpace(plan.PlanType), planType) && plan.AdoptedM > 0 {
+					estimate.CapacityM = plan.AdoptedM
+					estimate.Source = plan.Source
+					break
+				}
+			}
+			identities := smartQuotaCalibrationResultIdentities(
+				file.Name,
+				file.AuthIndex,
+				textField(file.Raw, "account_key", "accountKey"),
+				firstNonEmptyString(file.AccountID, textField(file.Raw, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId")),
+			)
+			if current, ok := s.smartQuotaCurrentEstimateForAt(now, identities...); ok && !current.Provisional && current.CapacityM > 0 {
+				estimate = current
+			}
+		}
+		remaining := 1.0
+		if value, ok := stats.normalRemainingByCredential[credentialKey]; ok {
+			remaining = value
+		} else if value, ok := stats.normalRemainingByCredential[fileKey]; ok {
+			remaining = value
+		}
+		capacity := smartAccountQuotaCapacityRCU(resource.UnitCapacityRCU, estimate.CapacityM, remaining)
+		if capacity <= 0 {
+			continue
+		}
+		remainingMinutes := smartAccountRemainingMinutes(file.Raw, now, smartAccountLifetimeMinutes())
+		item := smartCapacityItem{
+			credentialKey:    credentialKey,
+			fileKey:          fileKey,
+			capacityRCU:      capacity,
+			remainingMinutes: remainingMinutes,
+		}
+		if expiry, supplied := smartSupplyLeaseExpiry(file.Raw, now); supplied {
+			item.expiresAtMS = expiry.UnixMilli()
+		}
+		resource.capacityItems = append(resource.capacityItems, item)
+		existing[credentialKey] = struct{}{}
+		if uniqueFileName {
+			existing[fileKey] = struct{}{}
+		}
+		addedCapacity += capacity
+		addedAccounts++
+		addedByPlan[smartQuotaContextKey(supplierID, planType)]++
+		resource.recordExpiringAccount(remainingMinutes, capacity)
+	}
+	if addedAccounts == 0 || addedCapacity <= 0 {
+		return false
+	}
+	resource.RawCapacityRCU = round2(resource.RawCapacityRCU + addedCapacity)
+	resource.HealthyAccounts = min(resource.AvailableAccounts, resource.HealthyAccounts+addedAccounts)
+	applySmartAccountCountBreakdown(resource)
+	for planKey, count := range addedByPlan {
+		for index := range resource.AccountQuotaPlanEstimates {
+			plan := &resource.AccountQuotaPlanEstimates[index]
+			if smartQuotaContextKey(plan.SupplierID, plan.PlanType) == planKey {
+				plan.AccountCount += count
+				break
+			}
+		}
+	}
+	applySmartExpiryCapacity(resource, resource.capacityItems, resource.ConsumeRCUPerMinute, now)
+	applySmartCapacityBreakdown(resource, stats)
+	applySmartTokenMetrics(resource)
+	return true
+}
+
 func applyAccountPoolConcurrency(resource *SmartResource, stats accountPoolStats) {
 	if resource == nil || !stats.liveObserved {
 		return
@@ -6012,6 +6339,15 @@ func (s *Service) reconcileSmartAccountPoolGuard(cfg store.ManagerSupplyConfig, 
 	}
 	if smartAvailableCapacityEmergency(cfg, *resource) {
 		applySmartEmergencyAvailability(cfg, resource, time.Now())
+		// At exactly the configured critical account floor, an idle pool is
+		// intentionally sufficient: applySmartEmergencyAvailability clears the
+		// stale emergency state instead of buying short-lived credentials. Finish
+		// the zero-traffic recalculation here so a previous
+		// usage_rate_not_ready decision does not survive the live-pool refresh.
+		if !smartResourceEmergency(*resource) {
+			recalculateSmartResourceCapacityPlan(cfg, resource)
+			return
+		}
 		if resource.AvailableAccounts <= 0 {
 			startedAtMS := s.beginPoolVacuum()
 			resource.PoolVacuumActive = true
@@ -6058,7 +6394,11 @@ func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.Mana
 	}
 	inspectedEnabled := resource.EnabledAccounts
 	applyAccountPoolStats(resource, poolStats)
+	capacityChanged := s.reconcileSmartNormalCapacityFloor(cfg.Supply, resource, poolStats, time.Now())
 	if reconcileSmartCapacityWithAccountPool(resource, inspectedEnabled) {
+		capacityChanged = true
+	}
+	if capacityChanged && resource.ConsumeRCUPerMinute > 0 {
 		recalculateSmartResourceCapacityPlan(cfg.Supply, resource)
 	}
 	// The first return value only updates the operator overview; every guard and
@@ -6458,8 +6798,30 @@ func applySmartSupplyPressure(resource *SmartResource, pressure smartSupplyPress
 }
 
 func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resource SmartResource, pressure smartSupplyPressure, quantity int) (int, string) {
+	quantity, reason, _ := smartPrelockQuantityForSupplyPressureWithTiming(cfg, resource, pressure, quantity)
+	return quantity, reason
+}
+
+type smartPurchaseTiming struct {
+	leadMinutes      float64
+	triggerMinutes   float64
+	waitMinutes      float64
+	eligibleQuantity int
+}
+
+func applySmartPurchaseTiming(resource *SmartResource, timing smartPurchaseTiming) {
+	if resource == nil {
+		return
+	}
+	resource.PurchaseLeadMinutes = timing.leadMinutes
+	resource.PurchaseTimingTriggerMinutes = timing.triggerMinutes
+	resource.PurchaseTimingWaitMinutes = timing.waitMinutes
+	resource.PurchaseTimingEligibleQuantity = timing.eligibleQuantity
+}
+
+func smartPrelockQuantityForSupplyPressureWithTiming(cfg store.ManagerSupplyConfig, resource SmartResource, pressure smartSupplyPressure, quantity int) (int, string, smartPurchaseTiming) {
 	if quantity <= 0 {
-		return quantity, ""
+		return quantity, "", smartPurchaseTiming{}
 	}
 	if isSmartEmergencyRetryReason(resource.DecisionReason) {
 		// A retry quantity is already a descending ladder rung. Keep the normal
@@ -6467,7 +6829,7 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 		// the larger emergency minimum would turn 10/5/2 back into 10/5/5.
 		limit := smartAutomaticOrderQuantityLimit(cfg, resource)
 		minimum := min(smartPrelockMinQuantity(cfg), limit)
-		return clampInt(quantity, minimum, limit), resource.DecisionReason
+		return clampInt(quantity, minimum, limit), resource.DecisionReason, smartPurchaseTiming{}
 	}
 	if smartResourceEmergency(resource) {
 		limit := smartAutomaticOrderQuantityLimit(cfg, resource)
@@ -6482,25 +6844,34 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 		if !smartAccountAvailabilityEmergency(resource) {
 			reason = "emergency_refill_to_healthy"
 		}
-		return clampInt(quantity, minimum, limit), reason
+		return clampInt(quantity, minimum, limit), reason, smartPurchaseTiming{}
 	}
 	if resource.DemandTrend == smartDemandTrendFalling && !smartResourceEmergency(resource) {
-		return 0, "demand_falling_observe"
+		return 0, "demand_falling_observe", smartPurchaseTiming{}
 	}
-	if resource.DemandTrend == smartDemandTrendRising && !smartResourceEmergency(resource) {
-		return min(quantity, smartRisingObservationQuantity(cfg, resource)), "demand_rising_observe"
+	rising := resource.DemandTrend == smartDemandTrendRising && !smartResourceEmergency(resource)
+	if rising {
+		quantity = min(quantity, smartRisingObservationQuantity(cfg, resource))
+	}
+	timing := smartJustInTimePurchase(cfg, resource, pressure, quantity)
+	quantity = timing.eligibleQuantity
+	if quantity <= 0 {
+		return 0, "purchase_timing_wait", timing
+	}
+	if rising {
+		return quantity, "demand_rising_observe", timing
 	}
 	maxQuantity := smartAutomaticOrderQuantityLimit(cfg, resource)
 	minimumQuantity := min(smartPrelockMinQuantity(cfg), maxQuantity)
 	quantity = clampInt(quantity, minimumQuantity, maxQuantity)
 	if smartResourceAtOrBelowWarning(resource) {
 		if smartAccountAvailabilityEmergency(resource) {
-			return quantity, firstNonEmptyString(resource.EmergencyReason, "critical_available_accounts")
+			return quantity, firstNonEmptyString(resource.EmergencyReason, "critical_available_accounts"), timing
 		}
-		return quantity, "low_water_staged_batch"
+		return quantity, "low_water_staged_batch", timing
 	}
 	if !smartPrelockEnabled(cfg) {
-		return quantity, ""
+		return quantity, "", timing
 	}
 	minQuantity := minimumQuantity
 	fallbackBatch := smartFallbackBatchQuantity(cfg)
@@ -6510,34 +6881,95 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 		// quantity 已由消耗速率、账号剩余额度、有效期和健康水位共同计算。
 		smallBatch := smartPlentySmallBatchQuantity(cfg, quantity)
 		if quantity > smallBatch {
-			return smallBatch, "supply_plenty_small_batch"
+			return smallBatch, "supply_plenty_small_batch", timing
 		}
-		return quantity, "supply_plenty_small_batch"
+		return quantity, "supply_plenty_small_batch", timing
 	case smartSupplyPressureNormal:
 		moderateBatch := clampInt(int(math.Ceil(float64(quantity)/2)), minQuantity, maxQuantity)
 		moderateBatch = min(moderateBatch, fallbackBatch)
 		if quantity > moderateBatch {
-			return moderateBatch, "supply_normal_moderate_batch"
+			return moderateBatch, "supply_normal_moderate_batch", timing
 		}
-		return quantity, "supply_normal_moderate_batch"
+		return quantity, "supply_normal_moderate_batch", timing
 	case smartSupplyPressureTight:
 		// 货源紧张时，健康度不足意味着需要尽快补足容量。不要再按
 		// fallbackBatch 固定拆成 5 个，避免补货速度落后于消耗速度。
-		return quantity, "supply_tight_full_batch"
+		return quantity, "supply_tight_full_batch", timing
 	case smartSupplyPressureScarce:
 		// 货源稀缺时同样按智能计算出的缺口一次锁定，数量仍已受
 		// PrelockMaxQuantity、ReplenishBatchSize 和日限额约束。
-		return quantity, "supply_scarce_full_batch"
+		return quantity, "supply_scarce_full_batch", timing
 	default:
 		if resource.HealthLevel == smartHealthCritical {
-			return quantity, ""
+			return quantity, "", timing
 		}
 		conservativeBatch := min(clampInt(2, minQuantity, maxQuantity), fallbackBatch)
 		if quantity > conservativeBatch {
-			return conservativeBatch, "supply_unknown_conservative_batch"
+			return conservativeBatch, "supply_unknown_conservative_batch", timing
 		}
-		return quantity, ""
+		return quantity, "", timing
 	}
+}
+
+func smartJustInTimePurchase(cfg store.ManagerSupplyConfig, resource SmartResource, pressure smartSupplyPressure, requested int) smartPurchaseTiming {
+	result := smartPurchaseTiming{eligibleQuantity: max(0, requested)}
+	demand := math.Max(resource.ConsumeRCUPerMinute, resource.DemandPlanningRCUPerMinute)
+	unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
+	if demand <= 0 || unit <= 0 {
+		return result
+	}
+	leadMinutes := smartSupplyDeliveryLeadMinutes(cfg, pressure)
+	unitMinutes := unit / demand
+	targetMinutes := float64(max(1, resource.EffectiveHealthyMinutes))
+	triggerMinutes := math.Max(float64(max(1, resource.WarningMinutes)), targetMinutes+leadMinutes-unitMinutes)
+	currentMinutes := resource.EstimatedSustainMinutes
+	if currentMinutes <= 0 && resource.CurrentCapacityRCU > 0 {
+		currentMinutes = resource.CurrentCapacityRCU / demand
+	}
+	result.leadMinutes = round1(leadMinutes)
+	result.triggerMinutes = round1(triggerMinutes)
+	if requested <= 0 {
+		if currentMinutes > triggerMinutes {
+			result.waitMinutes = round1(currentMinutes - triggerMinutes)
+		}
+		return result
+	}
+	if smartResourceEmergency(resource) || smartResourceAtOrBelowWarning(resource) || resource.CapacityGapRCU <= 0 {
+		return result
+	}
+	arrivalGap := math.Max(0, resource.CapacityGapRCU+demand*leadMinutes)
+	eligible := int(math.Floor((arrivalGap + 1e-9) / unit))
+	eligible = min(requested, max(0, eligible))
+	result.eligibleQuantity = eligible
+	if eligible <= 0 && currentMinutes > triggerMinutes {
+		result.waitMinutes = round1(currentMinutes - triggerMinutes)
+	}
+	return result
+}
+
+func smartSupplyDeliveryLeadMinutes(cfg store.ManagerSupplyConfig, pressure smartSupplyPressure) float64 {
+	lead := 5.0
+	switch pressure.level {
+	case smartSupplyPressurePlenty:
+		lead = 1
+	case smartSupplyPressureNormal:
+		lead = 3
+	case smartSupplyPressureTight:
+		lead = 6
+	case smartSupplyPressureScarce:
+		lead = 12
+	}
+	if pressure.avgFulfillSeconds > 0 {
+		lead = math.Max(lead, float64(pressure.avgFulfillSeconds)/60)
+	}
+	if pressure.fulfillmentRate > 0 && pressure.fulfillmentRate < 100 {
+		lead *= math.Min(3, 100/pressure.fulfillmentRate)
+	}
+	lead += math.Min(5, float64(max(0, pressure.recentCancelled)))
+	// Polling, download, import, token refresh and the first quota probe happen
+	// after remote fulfillment. Reserve at least one minute for that local path.
+	localReadyMinutes := math.Max(1, float64(max(1, cfg.PollIntervalSeconds))/60)
+	return clampFloat(lead+localReadyMinutes, 2, 30)
 }
 
 func smartFallbackBatchQuantity(cfg store.ManagerSupplyConfig) int {

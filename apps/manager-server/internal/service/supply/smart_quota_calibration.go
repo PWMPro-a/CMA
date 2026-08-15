@@ -846,9 +846,6 @@ func (s *Service) smartQuotaCurrentEstimateForAt(now time.Time, identities ...st
 				}
 			}
 		}
-		if sample, ok := s.smartQuotaState.provisionalSamples[identity]; ok && sample.observedMS >= cutoff {
-			samples = append(samples, sample)
-		}
 	}
 	// Tests and legacy in-memory state may predate the identity index. Keep a
 	// bounded compatibility scan only when no indexed samples were found.
@@ -866,15 +863,12 @@ func (s *Service) smartQuotaCurrentEstimateForAt(now time.Time, identities ...st
 }
 
 func estimateSmartQuotaCurrentSamplesAt(samples []smartQuotaCalibrationSample, now time.Time) (smartQuotaEstimate, bool) {
-	// One complete-window estimate or one observed >=0.5% runtime delta is
-	// sufficient for that exact account. Absolute point-in-time ratios never
-	// enter this sample set.
-	estimate, ok := estimateSmartQuotaSamplesAtMode(samples, smartQuotaEstimateSourceCurrent, 1, 0.005, now, true)
-	if ok && estimate.Provisional {
-		estimate.Source = smartQuotaEstimateSourceClassified
-		estimate.Confidence = smartConfidenceLow
-	}
-	return estimate, ok
+	// Only samples whose account has consumed strictly more than 10% may
+	// replace the configured per-plan fallback in real capacity accounting.
+	// Provisional 2-10% observations remain useful for quota-class discovery,
+	// but applying them to an individual account produced the false low pool
+	// totals shown while the UI correctly reported zero valid samples.
+	return estimateSmartQuotaSamplesAtMode(samples, smartQuotaEstimateSourceCurrent, 1, 0.005, now, false)
 }
 
 func smartQuotaPlanOrGlobalEstimate(

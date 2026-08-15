@@ -227,6 +227,13 @@ func TestSmartQuotaCalibrationRequiresStrictlyMoreThanTenPercentUsed(t *testing.
 	if sample, ok := service.smartQuotaState.directSamples["file:above-ten.json"]; !ok || sample.capacityM != 40 {
 		t.Fatalf("account above 10%% was not calibrated: %#v/%v", sample, ok)
 	}
+	if estimate := service.smartQuotaEstimateForInspectionResult(
+		store.CodexInspectionResult{FileName: "exact-ten.json", PlanType: "team"},
+		smartQuotaEstimate{CapacityM: 60, Source: smartQuotaEstimateSourceDefault},
+		now,
+	); estimate.CapacityM != 60 || estimate.Source != smartQuotaEstimateSourceDefault {
+		t.Fatalf("exactly 10%% account replaced fallback capacity: %#v", estimate)
+	}
 	if _, ok := estimateSmartQuotaSamplesAt([]smartQuotaCalibrationSample{{
 		identity: "file:exact-ten.json", planType: "team", capacityM: 40,
 		weight: 1, usedFraction: 0.10, observedMS: now.UnixMilli(),
@@ -354,8 +361,8 @@ func TestSmartQuotaCalibrationRequiresAtLeastTenPercentUsage(t *testing.T) {
 	if len(service.smartQuotaState.provisionalSamples) != 1 {
 		t.Fatalf("usage below 10%% did not create one provisional sample: %#v", service.smartQuotaState.provisionalSamples)
 	}
-	if estimate.CapacityM != 60 || estimate.Source != smartQuotaEstimateSourceClassified ||
-		!estimate.Provisional || estimate.SampleCount != 1 || estimate.QuotaClassID == "" ||
+	if estimate.CapacityM != 60 || estimate.Source != smartQuotaEstimateSourceDefault ||
+		estimate.Provisional || estimate.SampleCount != 0 || estimate.QuotaClassID == "" ||
 		len(estimate.QuotaClasses) != 1 || estimate.QuotaClasses[0].TrustedAccounts != 0 {
 		t.Fatalf("low-usage team pre-classification = %#v", estimate)
 	}

@@ -281,6 +281,10 @@ export interface SupplySmartResource {
   supplyRecentRequestedQuantity?: number;
   supplyRecentDeliveredQuantity?: number;
   supplyFulfillmentRate?: number;
+  purchaseLeadMinutes?: number;
+  purchaseTimingTriggerMinutes?: number;
+  purchaseTimingWaitMinutes?: number;
+  purchaseTimingEligibleQuantity?: number;
   usageSampleMinutes: number;
   lockedOrderId?: string;
   lockedOrderAgeSeconds?: number;

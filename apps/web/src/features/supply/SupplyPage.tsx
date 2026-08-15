@@ -1454,10 +1454,13 @@ export function SupplyPage() {
       return [
         {
           label: t('supply.effective_capacity_1h'),
-          value: formatTokenM(totalCapacityTokenM),
+          // Keep the actual sum of per-account remaining quota separate from
+          // the expiry-aware amount that the planner can consume in time.
+          value: formatTokenM(rawCapacityTokenM),
           detail: t('supply.capacity_split_detail', {
             available: formatTokenM(availableCapacityTokenM),
             frozen: formatTokenM(frozenCapacityTokenM),
+            effective: formatTokenM(timeLimitedCapacityTokenM),
           }),
           icon: <IconDatabaseZap size={18} />,
           tone: 'teal',
@@ -2035,6 +2038,24 @@ export function SupplyPage() {
               <span>{t('supply.forecast_next_deficit')}</span>
               <strong>{nextCapacityDeficitAtMs ? formatTime(nextCapacityDeficitAtMs) : '-'}</strong>
               <small>{t('supply.forecast_next_deficit_hint')}</small>
+            </article>
+            <article className={`${styles.consumptionForecastItem} ${styles.forecastHealthy}`}>
+              <span>{t('supply.forecast_purchase_lead')}</span>
+              <strong>{formatMinutes(smart?.purchaseLeadMinutes)}</strong>
+              <small>{t('supply.forecast_purchase_lead_hint')}</small>
+            </article>
+            <article className={`${styles.consumptionForecastItem} ${styles.forecastRunway}`}>
+              <span>{t('supply.forecast_purchase_trigger')}</span>
+              <strong>{formatMinutes(smart?.purchaseTimingTriggerMinutes)}</strong>
+              <small>
+                {(smart?.purchaseTimingWaitMinutes ?? 0) > 0
+                  ? t('supply.forecast_purchase_trigger_wait_hint', {
+                      minutes: formatMinutes(smart?.purchaseTimingWaitMinutes),
+                    })
+                  : t('supply.forecast_purchase_trigger_ready_hint', {
+                      quantity: formatInteger(smart?.purchaseTimingEligibleQuantity),
+                    })}
+              </small>
             </article>
           </div>
         </section>
