@@ -46,6 +46,7 @@ type AuthFileModelApiItem = {
   owned_by?: string;
 };
 export type AuthFileFieldsPatch = {
+  group_ids?: number[];
   expired?: string;
   last_refresh?: string;
   prefix?: string;
@@ -658,6 +659,18 @@ export const applyAuthFileFieldsPatchToRecord = (
 ): Record<string, unknown> => {
   const next = { ...record };
 
+  if (fields.group_ids !== undefined) {
+    const groupIds = Array.from(
+      new Set(fields.group_ids.filter((id) => Number.isSafeInteger(id) && id > 0))
+    ).sort((left, right) => left - right);
+    if (groupIds.length > 0) {
+      next.group_ids = groupIds;
+    } else {
+      delete next.group_ids;
+    }
+    delete next.groupIds;
+  }
+
   const applyTrimmedString = (key: string, value: string | undefined) => {
     if (value === undefined) return;
     const normalized = value.trim();
@@ -842,8 +855,7 @@ export const applyAuthFileFieldsPatchToRecord = (
     next.codex_cli_only_allow_app_server = fields.codex_cli_only_allow_app_server;
   }
   const codexRestrictionTouched =
-    fields.codex_cli_only !== undefined ||
-    fields.codex_cli_only_allow_app_server !== undefined;
+    fields.codex_cli_only !== undefined || fields.codex_cli_only_allow_app_server !== undefined;
   if (codexRestrictionTouched && next.codex_cli_only !== true) {
     next.codex_cli_only_allow_app_server = false;
   }
@@ -1163,6 +1175,13 @@ const buildAuthFileStatusPayload = (
 
 export const authFilesApi = {
   list: async () => dedupeAuthFilesResponse(await apiClient.get<AuthFilesResponse>('/auth-files')),
+
+  listForGrouping: async () =>
+    dedupeAuthFilesResponse(
+      await apiClient.get<AuthFilesResponse>('/auth-files', {
+        params: { include_config: true },
+      })
+    ),
 
   setStatus: (target: AuthFileStatusTarget, disabled: boolean) =>
     apiClient.patch<AuthFileStatusResponse>(

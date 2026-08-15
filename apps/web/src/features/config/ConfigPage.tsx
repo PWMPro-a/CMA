@@ -268,6 +268,7 @@ export function ConfigPage() {
 
   const [content, setContent] = useState('');
   const [sourceConfigLoaded, setSourceConfigLoaded] = useState(false);
+  const [savedConfigRevision, setSavedConfigRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -376,6 +377,7 @@ export function ConfigPage() {
       setPreviewServerYaml(data);
       setSourceConfigLoaded(true);
       loadVisualValuesFromYaml(data);
+      setSavedConfigRevision((revision) => revision + 1);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : t('notification.refresh_failed');
       setError(message);
@@ -595,6 +597,7 @@ export function ConfigPage() {
           setDiffModalOpen(false);
           setContent(latestServerYaml);
           loadVisualValuesFromYaml(latestServerYaml);
+          setSavedConfigRevision((revision) => revision + 1);
           showNotification(t('config_management.diff.no_changes'), 'info');
         }
         return;
@@ -613,6 +616,7 @@ export function ConfigPage() {
       setMergedYaml(latestContent);
       setPreviewServerYaml(latestContent);
       loadVisualValuesFromYaml(latestContent);
+      setSavedConfigRevision((revision) => revision + 1);
 
       // Keep the global config store in sync so sidebar / other pages reflect YAML changes immediately.
       try {
@@ -849,6 +853,7 @@ export function ConfigPage() {
         setMergedYaml(nextMergedYaml);
         setPreviewServerYaml(latestServerYaml);
         loadVisualValuesFromYaml(latestServerYaml);
+        setSavedConfigRevision((revision) => revision + 1);
         showNotification(t('config_management.diff.no_changes'), 'info');
         return;
       }
@@ -1317,6 +1322,7 @@ export function ConfigPage() {
               validationErrors={visualValidationErrors}
               hasPayloadValidationErrors={visualHasPayloadValidationErrors}
               disabled={disableControls || loading}
+              apiKeysRefreshToken={savedConfigRevision}
               onChange={setVisualValues}
             />
           ) : (

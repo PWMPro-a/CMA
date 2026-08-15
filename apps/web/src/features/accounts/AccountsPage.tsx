@@ -73,6 +73,15 @@ import { useAuthFilesModels } from '@/features/authFiles/hooks/useAuthFilesModel
 import { useAuthFileConfigurationEditor } from '@/features/authFiles/hooks/useAuthFileConfigurationEditor';
 import { useCredentialInspectionSnapshot } from '@/features/accounts/hooks/useCredentialInspectionSnapshot';
 import { useAccountsWorkspaceRefresh } from '@/features/accounts/hooks/useAccountsWorkspaceRefresh';
+import {
+  AccountGroupBadges,
+  AccountGroupPicker,
+} from '@/features/accountGroups/AccountGroupControls';
+import {
+  accountMatchesGroupFilters,
+  getAuthFileGroupIds,
+  isRuntimeOnlyAuthFile,
+} from '@/features/accountGroups/accountGroupModel';
 import { useHeaderSnapshotsLoader } from '@/features/monitoring/hooks/useHeaderSnapshotsLoader';
 import { PaginationControls } from '@/features/monitoring/components/MonitoringShared';
 import { CredentialHealthInspectionWorkspace } from '@/features/monitoring/components/CredentialHealthInspectionWorkspace';
@@ -213,10 +222,12 @@ import {
 } from '@/features/accounts/components';
 import {
   accountQuotaSnapshotApi,
+  accountGroupsApi,
   monitoringAnalyticsApi,
   supplyApi,
   usageServiceApi,
   type AccountActionCandidate,
+  type AccountGroup,
   type AccountQuotaSnapshotObservationInput,
   type AccountQuotaSnapshotWriteEntry,
   type AccountQuotaSnapshotWindow,
@@ -658,6 +669,14 @@ export function AccountsPage() {
       ? 'all'
       : operationalFilter;
   const [search, setSearch] = useState(() => initialWorkspaceUrlState.current.search);
+  const [accountGroups, setAccountGroups] = useState<AccountGroup[]>([]);
+  const [accountGroupsAvailable, setAccountGroupsAvailable] = useState(false);
+  const [accountGroupIncludeFilter, setAccountGroupIncludeFilter] = useState('all');
+  const [accountGroupExcludeFilter, setAccountGroupExcludeFilter] = useState('none');
+  const [accountGroupEditorOpen, setAccountGroupEditorOpen] = useState(false);
+  const [accountGroupEditorTargets, setAccountGroupEditorTargets] = useState<AuthFileItem[]>([]);
+  const [accountGroupEditorIds, setAccountGroupEditorIds] = useState<number[]>([]);
+  const [accountGroupSaving, setAccountGroupSaving] = useState(false);
   const [accountSort, setAccountSort] = useState<AccountRowSort>(
     () => initialWorkspaceUrlState.current.accountSort
   );
@@ -796,6 +815,30 @@ export function AccountsPage() {
     checking: featureAvailability.checking,
     requestMonitoringAvailable: featureAvailability.requestMonitoringAvailable,
   });
+
+  const loadAccountGroups = useCallback(async () => {
+    try {
+      const nextGroups = await accountGroupsApi.list();
+      const validIds = new Set(nextGroups.map((group) => String(group.id)));
+      setAccountGroups(nextGroups);
+      setAccountGroupsAvailable(true);
+      setAccountGroupIncludeFilter((current) =>
+        current === 'all' || current === 'ungrouped' || validIds.has(current) ? current : 'all'
+      );
+      setAccountGroupExcludeFilter((current) =>
+        current === 'none' || validIds.has(current) ? current : 'none'
+      );
+    } catch {
+      setAccountGroups([]);
+      setAccountGroupsAvailable(false);
+      setAccountGroupIncludeFilter('all');
+      setAccountGroupExcludeFilter('none');
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadAccountGroups();
+  }, [connectionFingerprint, loadAccountGroups]);
 
   useLayoutEffect(() => {
     if (
@@ -1051,6 +1094,7 @@ export function AccountsPage() {
   }, [activeView, documentVisible, refreshAccountsWorkspace]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
     if (activeView !== 'accounts') return undefined;
     const refreshOnFocus = () => {
       void refreshAccountsWorkspace();
@@ -1455,7 +1499,14 @@ export function AccountsPage() {
     ]
   );
   const filteredRows = useMemo(() => {
-    const operationalRows = baseFilteredRows.filter((row) => {
+    const groupFilteredRows = baseFilteredRows.filter((row) =>
+      accountMatchesGroupFilters(
+        getAuthFileGroupIds(row.raw),
+        accountGroupIncludeFilter,
+        accountGroupExcludeFilter
+      )
+    );
+    const operationalRows = groupFilteredRows.filter((row) => {
       if (effectiveOperationalFilter === 'all') return true;
       if (effectiveOperationalFilter === 'reauth') {
         const recommendation = recommendationBySelectionKey.get(row.selectionKey);
@@ -1479,6 +1530,8 @@ export function AccountsPage() {
   }, [
     accountSort,
     actionCandidatesByRowKey,
+    accountGroupExcludeFilter,
+    accountGroupIncludeFilter,
     baseFilteredRows,
     effectiveOperationalFilter,
     quotaCooldownsByRowKey,
@@ -2001,6 +2054,8 @@ export function AccountsPage() {
   useEffect(() => {
     setPage(1);
   }, [
+    accountGroupExcludeFilter,
+    accountGroupIncludeFilter,
     operationalFilter,
     pageSize,
     planFilter,
@@ -3291,11 +3346,22 @@ export function AccountsPage() {
   const selectedQuotaFilterLabel =
     quotaBandFilter === 'all' ? t('accounts.quota_all') : t(`accounts.quota_${quotaBandFilter}`);
   const selectedOperationalFilterLabel = t(`accounts.operational_${effectiveOperationalFilter}`);
+  const selectedGroupIncludeLabel =
+    accountGroupIncludeFilter === 'all'
+      ? t('account_groups.filter_all')
+      : accountGroupIncludeFilter === 'ungrouped'
+        ? t('account_groups.ungrouped')
+        : (accountGroups.find((group) => String(group.id) === accountGroupIncludeFilter)?.name ??
+          t('account_groups.filter_all'));
+  const selectedGroupExcludeLabel =
+    accountGroups.find((group) => String(group.id) === accountGroupExcludeFilter)?.name ?? '';
   const activeMobileFilterCount = [
     statusFilter !== 'all',
     effectiveOperationalFilter !== 'all',
     planFilter !== 'all',
     quotaBandFilter !== 'all',
+    accountGroupIncludeFilter !== 'all',
+    accountGroupExcludeFilter !== 'none',
     accountSort.key !== 'default',
   ].filter(Boolean).length;
   const mobileFilterSummary =
@@ -3306,6 +3372,10 @@ export function AccountsPage() {
           effectiveOperationalFilter !== 'all' ? selectedOperationalFilterLabel : null,
           planFilter !== 'all' ? selectedPlanFilterLabel : null,
           quotaBandFilter !== 'all' ? selectedQuotaFilterLabel : null,
+          accountGroupIncludeFilter !== 'all' ? selectedGroupIncludeLabel : null,
+          accountGroupExcludeFilter !== 'none'
+            ? t('account_groups.exclude_summary', { name: selectedGroupExcludeLabel })
+            : null,
           accountSort.key !== 'default' ? selectedAccountSortLabel : null,
         ]
           .filter(Boolean)
@@ -3339,6 +3409,8 @@ export function AccountsPage() {
     setOperationalFilter('all');
     setPlanFilter('all');
     setQuotaBandFilter('all');
+    setAccountGroupIncludeFilter('all');
+    setAccountGroupExcludeFilter('none');
     setAccountSort({ key: 'default', direction: 'desc' });
     setPage(1);
     setIsAccountSortDropdownOpen(false);
@@ -3436,6 +3508,40 @@ export function AccountsPage() {
         return;
       default:
         return;
+    }
+  };
+
+  const openAccountGroupEditor = (targets: AuthFileItem[], initialIds: number[] = []) => {
+    const editableTargets = targets.filter((file) => !isRuntimeOnlyAuthFile(file));
+    if (editableTargets.length === 0) return;
+    setAccountGroupEditorTargets(editableTargets);
+    setAccountGroupEditorIds(initialIds);
+    setAccountGroupEditorOpen(true);
+  };
+
+  const saveAccountGroupMemberships = async () => {
+    if (accountGroupEditorTargets.length === 0) return;
+    setAccountGroupSaving(true);
+    try {
+      await accountGroupsApi.updateMemberships(
+        accountGroupEditorTargets.map((file) => ({
+          name: String(file.id ?? '').trim() || file.name,
+          auth_index: String(file.authIndex ?? '').trim(),
+          group_ids: accountGroupEditorIds,
+        }))
+      );
+      setAccountGroupEditorOpen(false);
+      deselectAll();
+      setIsSelectionMode(false);
+      showNotification(
+        t('account_groups.membership_success', { count: accountGroupEditorTargets.length }),
+        'success'
+      );
+      await Promise.all([loadFiles(), loadAccountGroups()]);
+    } catch (error) {
+      showNotification(error instanceof Error ? error.message : String(error), 'error');
+    } finally {
+      setAccountGroupSaving(false);
     }
   };
 
@@ -3615,6 +3721,35 @@ export function AccountsPage() {
           triggerClassName={styles.toolbarSelectTrigger}
         />
       </div>
+      {accountGroupsAvailable ? (
+        <div className={styles.filterField}>
+          <Select
+            value={accountGroupIncludeFilter}
+            options={[
+              { value: 'all', label: t('account_groups.filter_all') },
+              { value: 'ungrouped', label: t('account_groups.ungrouped') },
+              ...accountGroups.map((group) => ({ value: String(group.id), label: group.name })),
+            ]}
+            onChange={setAccountGroupIncludeFilter}
+            ariaLabel={t('account_groups.include_filter_label')}
+            triggerClassName={styles.toolbarSelectTrigger}
+          />
+        </div>
+      ) : null}
+      {accountGroupsAvailable && accountGroups.length > 0 ? (
+        <div className={styles.filterField}>
+          <Select
+            value={accountGroupExcludeFilter}
+            options={[
+              { value: 'none', label: t('account_groups.exclude_none') },
+              ...accountGroups.map((group) => ({ value: String(group.id), label: group.name })),
+            ]}
+            onChange={setAccountGroupExcludeFilter}
+            ariaLabel={t('account_groups.exclude_filter_label')}
+            triggerClassName={styles.toolbarSelectTrigger}
+          />
+        </div>
+      ) : null}
     </>
   );
 
@@ -3963,6 +4098,18 @@ export function AccountsPage() {
               <IconX size={15} />
               {t('accounts.disable')}
             </Button>
+            {accountGroupsAvailable ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={disableControls || selectedTargetFiles.length === 0 || accountGroupSaving}
+                onClick={() => openAccountGroupEditor(selectedTargetFiles, [])}
+                title={t('account_groups.batch_edit')}
+              >
+                <IconModelCluster size={15} />
+                {t('account_groups.batch_edit')}
+              </Button>
+            ) : null}
             <Button
               variant="secondary"
               size="sm"
@@ -4221,6 +4368,25 @@ export function AccountsPage() {
                     </span>
                     {item.identity.planType ? (
                       <span className={styles.accountMetaPill}>{item.identity.planType}</span>
+                    ) : null}
+                    {accountGroupsAvailable ? (
+                      <button
+                        type="button"
+                        className={styles.accountGroupBadgeButton}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          openAccountGroupEditor([row.raw], getAuthFileGroupIds(row.raw));
+                        }}
+                        disabled={row.runtimeOnly}
+                        title={t('account_groups.edit_membership')}
+                      >
+                        <AccountGroupBadges
+                          ids={getAuthFileGroupIds(row.raw)}
+                          groups={accountGroups}
+                          maxVisible={2}
+                          showEmpty
+                        />
+                      </button>
                     ) : null}
                     {row.workspaceName || row.workspaceId ? (
                       <span
@@ -5174,6 +5340,47 @@ export function AccountsPage() {
               if (event.key !== 'Enter' || disableControls || batchFieldsUpdating) return;
               void handleBatchPrioritySave();
             }}
+          />
+        </div>
+      </Modal>
+      <Modal
+        open={accountGroupEditorOpen}
+        onClose={() => {
+          if (!accountGroupSaving) setAccountGroupEditorOpen(false);
+        }}
+        closeDisabled={accountGroupSaving}
+        title={t('account_groups.membership_modal_title', {
+          count: accountGroupEditorTargets.length,
+        })}
+        width={720}
+        footer={
+          <div className={styles.batchPriorityFooter}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setAccountGroupEditorOpen(false)}
+              disabled={accountGroupSaving}
+            >
+              {t('common.cancel')}
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => void saveAccountGroupMemberships()}
+              loading={accountGroupSaving}
+              disabled={disableControls || accountGroupEditorTargets.length === 0}
+            >
+              {t('account_groups.apply_membership')}
+            </Button>
+          </div>
+        }
+      >
+        <div className={styles.accountGroupEditorModal}>
+          <p>{t('account_groups.membership_replace_hint')}</p>
+          <AccountGroupPicker
+            groups={accountGroups}
+            value={accountGroupEditorIds}
+            onChange={setAccountGroupEditorIds}
+            disabled={accountGroupSaving}
           />
         </div>
       </Modal>

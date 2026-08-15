@@ -7,6 +7,7 @@ import {
   type RouteObject,
 } from 'react-router-dom';
 import { AccountsPage } from '@/pages/AccountsPage';
+import { AccountGroupsPage } from '@/pages/AccountGroupsPage';
 import { DashboardPage } from '@/pages/DashboardPage';
 import { AiProvidersPage } from '@/pages/AiProvidersPage';
 import { AiProvidersClaudeEditLayout } from '@/pages/AiProvidersClaudeEditLayout';
@@ -173,6 +174,7 @@ const mainRoutes: RouteObject[] = [
   { path: '/ai-providers', element: <AiProvidersPage /> },
   { path: '/ai-providers/*', element: <AiProvidersPage /> },
   { path: '/accounts', element: <AccountsPage /> },
+  { path: '/groups', element: <AccountGroupsPage /> },
   { path: '/auth-files', element: <LegacyAccountsRedirect /> },
   {
     path: '/supply',

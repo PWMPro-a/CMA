@@ -3,9 +3,16 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
 import {
-  usageServiceApi,
-  type ApiKeyAlias,
-} from '@/services/api/usageService';
+  AccountGroupBadges,
+  AccountGroupPicker,
+} from '@/features/accountGroups/AccountGroupControls';
+import {
+  accountGroupsApi,
+  apiKeysApi,
+  type AccountGroup,
+  type APIKeyGroupPolicy,
+} from '@/services/api';
+import { usageServiceApi, type ApiKeyAlias } from '@/services/api/usageService';
 import { useAuthStore, useNotificationStore } from '@/stores';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { copyToClipboard } from '@/utils/clipboard';
@@ -23,16 +30,19 @@ type OrphanAliasConflict = {
 export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
   value,
   disabled,
+  refreshToken = 0,
   onChange,
 }: {
   value: string;
   disabled?: boolean;
+  refreshToken?: number;
   onChange: (nextValue: string) => void;
 }) {
   const { t } = useTranslation();
   const showNotification = useNotificationStore((state) => state.showNotification);
   const showConfirmation = useNotificationStore((state) => state.showConfirmation);
   const managementKey = useAuthStore((state) => state.managementKey);
+  const apiBase = useAuthStore((state) => state.apiBase);
   const featureAvailability = usePanelFeatureAvailability();
   const apiKeys = useMemo(
     () =>
@@ -71,6 +81,16 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
   const [aliasInputValue, setAliasInputValue] = useState('');
   const [aliasFormError, setAliasFormError] = useState('');
   const [aliasSaving, setAliasSaving] = useState(false);
+  const [accountGroups, setAccountGroups] = useState<AccountGroup[]>([]);
+  const [groupPolicies, setGroupPolicies] = useState<APIKeyGroupPolicy[]>([]);
+  const [activeApiKeyHashes, setActiveApiKeyHashes] = useState<Set<string>>(() => new Set());
+  const [groupPoliciesAvailable, setGroupPoliciesAvailable] = useState(false);
+  const [groupPolicyModalOpen, setGroupPolicyModalOpen] = useState(false);
+  const [groupPolicyEditingApiKeyId, setGroupPolicyEditingApiKeyId] = useState<string | null>(null);
+  const [groupPolicyRestricted, setGroupPolicyRestricted] = useState(false);
+  const [groupPolicyIds, setGroupPolicyIds] = useState<number[]>([]);
+  const [groupPolicyError, setGroupPolicyError] = useState('');
+  const [groupPolicySaving, setGroupPolicySaving] = useState(false);
 
   const aliasByHash = useMemo(() => {
     const map = new Map<string, ApiKeyAlias>();
@@ -84,6 +104,11 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
     });
     return map;
   }, [apiKeyAliases]);
+
+  const groupPolicyByHash = useMemo(
+    () => new Map(groupPolicies.map((policy) => [policy.api_key_hash.toLowerCase(), policy])),
+    [groupPolicies]
+  );
 
   const resolveAliasServiceBase = useCallback(
     async (): Promise<string> =>
@@ -125,6 +150,38 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
       cancelled = true;
     };
   }, [managementKey, resolveAliasServiceBase]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadGroupPolicies = async () => {
+      try {
+        const [groups, policies, activeKeys] = await Promise.all([
+          accountGroupsApi.list(),
+          accountGroupsApi.listAPIKeyPolicies(),
+          apiKeysApi.list(),
+        ]);
+        if (cancelled) return;
+        setAccountGroups(groups);
+        setGroupPolicies(policies);
+        setActiveApiKeyHashes(
+          new Set(activeKeys.map((key) => sha256Hex(key).toLowerCase()).filter(Boolean))
+        );
+        setGroupPoliciesAvailable(true);
+      } catch {
+        if (cancelled) return;
+        setAccountGroups([]);
+        setGroupPolicies([]);
+        setActiveApiKeyHashes(new Set());
+        setGroupPoliciesAvailable(false);
+      }
+    };
+
+    void loadGroupPolicies();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase, managementKey, refreshToken]);
 
   function generateSecureApiKey(): string {
     const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -352,6 +409,64 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
     setAliasFormError('');
   };
 
+  const openGroupPolicyModal = (apiKeyId: string) => {
+    const editingIndex = renderApiKeyIds.findIndex((id) => id === apiKeyId);
+    const editingKey = apiKeys[editingIndex] ?? '';
+    const hash = getApiKeyHash(editingKey);
+    const policy = groupPolicyByHash.get(hash);
+    setGroupPolicyEditingApiKeyId(apiKeyId);
+    setGroupPolicyRestricted(Boolean(policy));
+    setGroupPolicyIds(policy?.allowed_group_ids ?? []);
+    setGroupPolicyError('');
+    setGroupPolicyModalOpen(true);
+  };
+
+  const closeGroupPolicyModal = () => {
+    setGroupPolicyModalOpen(false);
+    setGroupPolicyEditingApiKeyId(null);
+    setGroupPolicyRestricted(false);
+    setGroupPolicyIds([]);
+    setGroupPolicyError('');
+  };
+
+  const handleGroupPolicySave = async () => {
+    const editingIndex = groupPolicyEditingApiKeyId
+      ? renderApiKeyIds.findIndex((id) => id === groupPolicyEditingApiKeyId)
+      : -1;
+    const editingKey = apiKeys[editingIndex] ?? '';
+    const hash = getApiKeyHash(editingKey);
+    if (!hash || !activeApiKeyHashes.has(hash)) {
+      setGroupPolicyError(t('config_management.visual.api_keys.groups_save_config_first'));
+      return;
+    }
+    if (groupPolicyRestricted && groupPolicyIds.length === 0) {
+      setGroupPolicyError(t('account_groups.policy_group_required'));
+      return;
+    }
+
+    setGroupPolicySaving(true);
+    setGroupPolicyError('');
+    try {
+      if (groupPolicyRestricted) {
+        const nextPolicies = await accountGroupsApi.updateAPIKeyPolicies([
+          { api_key_hash: hash, allowed_group_ids: groupPolicyIds },
+        ]);
+        setGroupPolicies(nextPolicies);
+      } else {
+        await accountGroupsApi.deleteAPIKeyPolicy(hash);
+        setGroupPolicies((current) =>
+          current.filter((policy) => policy.api_key_hash.toLowerCase() !== hash)
+        );
+      }
+      showNotification(t('account_groups.policy_success'), 'success');
+      closeGroupPolicyModal();
+    } catch (error) {
+      setGroupPolicyError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGroupPolicySaving(false);
+    }
+  };
+
   const updateApiKeys = (nextKeys: string[]) => {
     onChange(nextKeys.join('\n'));
   };
@@ -435,7 +550,11 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
       : -1;
     const editingKey = apiKeys[editingIndex] ?? '';
     const activeApiKeyHashes = collectActiveApiKeyHashes(apiKeys);
-    const aliasError = validateAlias(aliasInputValue, getApiKeyHash(editingKey), activeApiKeyHashes);
+    const aliasError = validateAlias(
+      aliasInputValue,
+      getApiKeyHash(editingKey),
+      activeApiKeyHashes
+    );
     if (aliasError) {
       setAliasFormError(aliasError);
       return;
@@ -525,6 +644,9 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
           {apiKeys.map((key, index) => {
             const apiKeyHash = getApiKeyHash(key);
             const alias = apiKeyHash ? (aliasByHash.get(apiKeyHash)?.alias ?? '') : '';
+            const groupPolicy = apiKeyHash ? groupPolicyByHash.get(apiKeyHash) : undefined;
+            const canEditGroupPolicy =
+              groupPoliciesAvailable && Boolean(apiKeyHash) && activeApiKeyHashes.has(apiKeyHash);
             return (
               <div key={renderApiKeyIds[index] ?? `${key}-${index}`} className="item-row">
                 <div className="item-meta">
@@ -532,8 +654,38 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
                     {alias || t('config_management.visual.api_keys.input_label')}
                   </div>
                   <div className="item-subtitle">{maskApiKey(String(key || ''))}</div>
+                  {groupPoliciesAvailable ? (
+                    <div style={{ marginTop: 5 }}>
+                      {groupPolicy ? (
+                        <AccountGroupBadges
+                          ids={groupPolicy.allowed_group_ids}
+                          groups={accountGroups}
+                          maxVisible={3}
+                        />
+                      ) : (
+                        <span className={styles.apiKeyGroupUnrestricted}>
+                          {t('account_groups.unrestricted')}
+                        </span>
+                      )}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="item-actions">
+                  {groupPoliciesAvailable ? (
+                    <Button
+                      variant="secondary"
+                      size="xs"
+                      onClick={() => openGroupPolicyModal(renderApiKeyIds[index] ?? '')}
+                      disabled={disabled || !canEditGroupPolicy}
+                      title={
+                        canEditGroupPolicy
+                          ? t('config_management.visual.api_keys.groups_action')
+                          : t('config_management.visual.api_keys.groups_save_config_first')
+                      }
+                    >
+                      {t('config_management.visual.api_keys.groups_action')}
+                    </Button>
+                  ) : null}
                   <Button
                     variant="secondary"
                     size="xs"
@@ -707,6 +859,65 @@ export const ApiKeysCardEditor = memo(function ApiKeysCardEditor({
               {aliasFormError}
             </div>
           )}
+        </div>
+      </Modal>
+
+      <Modal
+        open={groupPolicyModalOpen}
+        onClose={closeGroupPolicyModal}
+        closeDisabled={groupPolicySaving}
+        title={t('config_management.visual.api_keys.groups_title')}
+        width={720}
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              onClick={closeGroupPolicyModal}
+              disabled={disabled || groupPolicySaving}
+            >
+              {t('config_management.visual.common.cancel')}
+            </Button>
+            <Button
+              onClick={() => void handleGroupPolicySave()}
+              disabled={disabled || groupPolicySaving}
+              loading={groupPolicySaving}
+            >
+              {t('config_management.visual.common.update')}
+            </Button>
+          </>
+        }
+      >
+        <div className={styles.apiKeyGroupPolicyEditor}>
+          <p>{t('config_management.visual.api_keys.groups_hint')}</p>
+          <div className={styles.apiKeyGroupPolicyModes}>
+            <button
+              type="button"
+              className={!groupPolicyRestricted ? styles.apiKeyGroupPolicyModeActive : ''}
+              onClick={() => setGroupPolicyRestricted(false)}
+              disabled={groupPolicySaving}
+            >
+              <strong>{t('account_groups.unrestricted')}</strong>
+              <span>{t('account_groups.unrestricted_hint')}</span>
+            </button>
+            <button
+              type="button"
+              className={groupPolicyRestricted ? styles.apiKeyGroupPolicyModeActive : ''}
+              onClick={() => setGroupPolicyRestricted(true)}
+              disabled={groupPolicySaving}
+            >
+              <strong>{t('account_groups.restricted')}</strong>
+              <span>{t('account_groups.restricted_hint')}</span>
+            </button>
+          </div>
+          {groupPolicyRestricted ? (
+            <AccountGroupPicker
+              groups={accountGroups}
+              value={groupPolicyIds}
+              onChange={setGroupPolicyIds}
+              disabled={groupPolicySaving}
+            />
+          ) : null}
+          {groupPolicyError ? <div className="error-box">{groupPolicyError}</div> : null}
         </div>
       </Modal>
     </div>

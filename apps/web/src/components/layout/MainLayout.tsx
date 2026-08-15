@@ -18,6 +18,7 @@ import {
   IconSidebarConfig,
   IconSidebarContainerOps,
   IconSidebarDashboard,
+  IconSidebarGroups,
   IconSidebarLogs,
   IconSidebarMonitor,
   IconSidebarOauth,
@@ -61,6 +62,7 @@ const sidebarIcons: Record<string, ReactNode> = {
   dashboard: <IconSidebarDashboard size={SIDEBAR_ICON_SIZE} />,
   aiProviders: <IconSidebarProviders size={SIDEBAR_ICON_SIZE} />,
   authFiles: <IconSidebarAuthFiles size={SIDEBAR_ICON_SIZE} />,
+  groups: <IconSidebarGroups size={SIDEBAR_ICON_SIZE} />,
   supply: <IconSidebarStore size={SIDEBAR_ICON_SIZE} />,
   oauth: <IconSidebarOauth size={SIDEBAR_ICON_SIZE} />,
   quota: <IconSidebarQuota size={SIDEBAR_ICON_SIZE} />,
@@ -532,14 +534,15 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
         icon: sidebarIcons.monitoring,
       }
     : null;
-  const supplyNavItem = featureAvailability.managerServiceAvailable && !demoMode
-    ? {
-        path: '/supply',
-        label: t('nav.supply'),
-        shortLabel: navShortLabel('nav.supply', t('nav.supply')),
-        icon: sidebarIcons.supply,
-      }
-    : null;
+  const supplyNavItem =
+    featureAvailability.managerServiceAvailable && !demoMode
+      ? {
+          path: '/supply',
+          label: t('nav.supply'),
+          shortLabel: navShortLabel('nav.supply', t('nav.supply')),
+          icon: sidebarIcons.supply,
+        }
+      : null;
   const operationNavItems: NavItem[] = [
     ...(fileLogsAvailable
       ? [
@@ -611,6 +614,16 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
         ),
         icon: sidebarIcons.authFiles,
       },
+      ...(!demoMode
+        ? [
+            {
+              path: '/groups',
+              label: t('nav.account_groups'),
+              shortLabel: navShortLabel('nav.account_groups', t('nav.account_groups')),
+              icon: sidebarIcons.groups,
+            },
+          ]
+        : []),
       ...(supplyNavItem ? [supplyNavItem] : []),
       {
         path: '/oauth',

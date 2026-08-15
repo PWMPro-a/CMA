@@ -168,6 +168,33 @@ describe('authFilesApi model endpoints', () => {
 });
 
 describe('authFilesApi list normalization', () => {
+  it('requests config-backed credentials for the grouping workspace', async () => {
+    mocks.get.mockResolvedValue({
+      files: [
+        {
+          id: 'codex-config-auth',
+          name: 'codex-config-auth',
+          type: 'codex',
+          source: 'config',
+          config_backed: true,
+        },
+      ],
+    });
+
+    const result = await authFilesApi.listForGrouping();
+
+    expect(mocks.get).toHaveBeenCalledWith('/auth-files', {
+      params: { include_config: true },
+    });
+    expect(result.files).toEqual([
+      expect.objectContaining({
+        id: 'codex-config-auth',
+        source: 'config',
+        config_backed: true,
+      }),
+    ]);
+  });
+
   it('preserves same-name auth file rows when authIndex differs', async () => {
     mocks.get.mockResolvedValue({
       files: [
@@ -1359,6 +1386,21 @@ describe('authFilesApi patchFieldsForAuthIndexes', () => {
 });
 
 describe('applyAuthFileFieldsPatchToRecord', () => {
+  it('normalizes and clears account group memberships', () => {
+    expect(
+      applyAuthFileFieldsPatchToRecord(
+        { type: 'codex', groupIds: [9], group_ids: [3] },
+        { group_ids: [2, 1, 2, 0] }
+      )
+    ).toEqual({ type: 'codex', group_ids: [1, 2] });
+    expect(
+      applyAuthFileFieldsPatchToRecord(
+        { type: 'codex', groupIds: [9], group_ids: [1, 2] },
+        { group_ids: [] }
+      )
+    ).toEqual({ type: 'codex' });
+  });
+
   it('clears the app-server child switch when the Codex parent switch is disabled', () => {
     const result = applyAuthFileFieldsPatchToRecord(
       { codex_cli_only: true, codex_cli_only_allow_app_server: true },

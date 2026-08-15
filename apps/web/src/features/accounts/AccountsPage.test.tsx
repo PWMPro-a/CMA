@@ -670,6 +670,10 @@ vi.mock('@/features/oauth/CodexReauthDialog', () => ({
 }));
 
 vi.mock('@/services/api', () => ({
+  accountGroupsApi: {
+    list: vi.fn(async () => []),
+    updateMemberships: vi.fn(async () => undefined),
+  },
   containerOpsApi: {
     egressIPs: vi.fn(async () => ({ addresses: [] })),
   },

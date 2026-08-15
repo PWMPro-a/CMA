@@ -472,6 +472,24 @@
   gap: 6px;
 }
 
+.accountGroupBadgeButton {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.accountGroupBadgeButton:not(:disabled) {
+  cursor: pointer;
+}
+
+.accountGroupBadgeButton:disabled {
+  cursor: default;
+}
+
 .accountCardLine {
   justify-content: flex-start;
   gap: 8px;
@@ -5543,6 +5561,18 @@
 .batchPriorityModal {
   display: grid;
   gap: 12px;
+}
+
+.accountGroupEditorModal {
+  display: grid;
+  gap: 12px;
+
+  > p {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+  }
 }
 
 .batchDeletePreview {

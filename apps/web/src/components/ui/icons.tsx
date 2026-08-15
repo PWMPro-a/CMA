@@ -655,6 +655,21 @@ export function IconSidebarAuthFiles({ size = 20, ...props }: IconProps) {
   );
 }
 
+export function IconSidebarGroups({ size = 20, ...props }: IconProps) {
+  return (
+    <svg {...sidebarSvgProps} width={size} height={size} {...props}>
+      <circle cx="7" cy="7" r="3" fill="currentColor" fillOpacity="0.12" />
+      <circle cx="17" cy="7" r="3" />
+      <circle cx="7" cy="17" r="3" />
+      <circle cx="17" cy="17" r="3" fill="currentColor" fillOpacity="0.12" />
+      <path d="M10 7h4" />
+      <path d="M7 10v4" />
+      <path d="M17 10v4" />
+      <path d="M10 17h4" />
+    </svg>
+  );
+}
+
 export function IconSidebarOauth({ size = 20, ...props }: IconProps) {
   return (
     <svg {...sidebarSvgProps} width={size} height={size} {...props}>

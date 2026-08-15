@@ -103,6 +103,7 @@ export interface AuthFileItem {
   size?: number;
   authIndex?: string | number | null;
   runtimeOnly?: boolean | string;
+  config_backed?: boolean;
   disabled?: boolean;
   unavailable?: boolean;
   status?: string;
@@ -126,6 +127,8 @@ export interface AuthFileItem {
   codexQuotaSnapshots?: Record<string, CodexQuotaSnapshot>;
   agent_identity_registration?: AgentIdentityRegistrationStatus;
   agentIdentityRegistration?: AgentIdentityRegistrationStatus;
+  group_ids?: number[];
+  groupIds?: number[];
   [key: string]: unknown;
 }
 

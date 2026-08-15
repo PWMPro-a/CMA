@@ -72,6 +72,7 @@ interface VisualConfigEditorProps {
   validationErrors?: VisualConfigValidationErrors;
   hasPayloadValidationErrors?: boolean;
   disabled?: boolean;
+  apiKeysRefreshToken?: number;
   onChange: (values: Partial<VisualConfigValues>) => void;
 }
 
@@ -179,6 +180,7 @@ export function VisualConfigEditor({
   validationErrors,
   hasPayloadValidationErrors = false,
   disabled = false,
+  apiKeysRefreshToken = 0,
   onChange,
 }: VisualConfigEditorProps) {
   const { t } = useTranslation();
@@ -826,6 +828,7 @@ export function VisualConfigEditor({
                 <ApiKeysCardEditor
                   value={values.apiKeysText}
                   disabled={disabled}
+                  refreshToken={apiKeysRefreshToken}
                   onChange={handleApiKeysTextChange}
                 />
               </div>
