@@ -500,22 +500,26 @@ func TestSmartQuotaPlanAdoptionScalesInspectionRoundsAndMovesTenPercent(t *testi
 	}
 	results := []store.CodexInspectionResult{{FileName: "source.json", Provider: "codex", Status: "active", PlanType: "team"}}
 
-	first, _ := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 101, now)
+	first, firstPlanning := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 101, now)
 	if len(first) != 1 || first[0].ObservedM != 40 || first[0].AdoptedM != 60 ||
 		first[0].ConfirmationRounds != 1 || first[0].RequiredRounds != 3 ||
-		first[0].ValidationState != smartQuotaValidationConfirming || !first[0].OrderingBlocked {
+		first[0].ValidationState != smartQuotaValidationConfirming || !first[0].UsingFallback ||
+		first[0].OrderingBlocked || firstPlanning["team"].CapacityM != 60 ||
+		firstPlanning["team"].Source != smartQuotaEstimateSourceDefault || !firstPlanning["team"].FallbackOnly {
 		t.Fatalf("first quota adoption = %#v", first)
 	}
 	repeated, _ := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 101, now)
 	if repeated[0].ConfirmationRounds != 1 || repeated[0].AdoptedM != 60 {
 		t.Fatalf("same inspection run advanced confirmation = %#v", repeated[0])
 	}
-	second, _ := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 102, now.Add(time.Minute))
-	if second[0].ConfirmationRounds != 2 || second[0].AdoptedM != 60 || !second[0].OrderingBlocked {
+	second, secondPlanning := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 102, now.Add(time.Minute))
+	if second[0].ConfirmationRounds != 2 || second[0].AdoptedM != 60 || !second[0].UsingFallback ||
+		second[0].OrderingBlocked || !secondPlanning["team"].FallbackOnly {
 		t.Fatalf("second quota adoption = %#v", second[0])
 	}
 	third, _ := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 103, now.Add(2*time.Minute))
-	if third[0].AdoptedM != 54 || third[0].ValidationState != smartQuotaValidationAccepted || third[0].OrderingBlocked {
+	if third[0].AdoptedM != 54 || third[0].ValidationState != smartQuotaValidationAccepted ||
+		third[0].UsingFallback || third[0].OrderingBlocked {
 		t.Fatalf("third quota adoption = %#v, want first bounded 10%% step after three confirmations", third[0])
 	}
 	fourth, _ := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 104, now.Add(3*time.Minute))
@@ -567,13 +571,14 @@ func TestSmartQuotaPlanAdoptionRestartsConfirmationWhenCandidateShifts(t *testin
 	}
 	setSamples(40, now.Add(-time.Minute))
 	first, _ := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 201, now)
-	if first[0].ConfirmationRounds != 1 || !first[0].OrderingBlocked {
+	if first[0].ConfirmationRounds != 1 || !first[0].UsingFallback || first[0].OrderingBlocked {
 		t.Fatalf("first candidate state = %#v", first[0])
 	}
 
 	setSamples(20, now)
-	shifted, _ := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 202, now.Add(time.Minute))
-	if shifted[0].ObservedM != 20 || shifted[0].ConfirmationRounds != 1 || !shifted[0].OrderingBlocked || shifted[0].AdoptedM != 60 {
+	shifted, shiftedPlanning := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 202, now.Add(time.Minute))
+	if shifted[0].ObservedM != 20 || shifted[0].ConfirmationRounds != 1 || !shifted[0].UsingFallback ||
+		shifted[0].OrderingBlocked || shifted[0].AdoptedM != 60 || !shiftedPlanning["team"].FallbackOnly {
 		t.Fatalf("shifted candidate state = %#v", shifted[0])
 	}
 }
@@ -611,8 +616,9 @@ func TestSmartQuotaPlanQuarantinesExtremeDownwardRuntimeEstimate(t *testing.T) {
 	results := []store.CodexInspectionResult{{FileName: "unseen.json", Provider: "codex", Status: "active", PlanType: "team"}}
 
 	var items []SmartQuotaPlanEstimate
+	var planning map[string]smartQuotaEstimate
 	for runID := int64(401); runID <= 406; runID++ {
-		items, _ = service.smartQuotaPlanEstimatesForInspection(
+		items, planning = service.smartQuotaPlanEstimatesForInspection(
 			store.ManagerSupplyConfig{},
 			results,
 			runID,
@@ -622,7 +628,9 @@ func TestSmartQuotaPlanQuarantinesExtremeDownwardRuntimeEstimate(t *testing.T) {
 	if len(items) != 1 || items[0].ObservedM != 0.81 || items[0].AdoptedM != 60 ||
 		items[0].RequiredRounds != 5 || items[0].CompleteWindowAccounts != 0 ||
 		items[0].ValidationState != smartQuotaValidationQuarantined ||
-		!items[0].PendingConfirmation || !items[0].OrderingBlocked {
+		!items[0].PendingConfirmation || !items[0].UsingFallback || items[0].OrderingBlocked ||
+		planning["team"].CapacityM != 60 || planning["team"].Source != smartQuotaEstimateSourceDefault ||
+		!planning["team"].FallbackOnly {
 		t.Fatalf("extreme runtime estimate escaped quarantine = %#v", items)
 	}
 }
@@ -800,29 +808,40 @@ func TestSmartQuotaCalibrationDoesNotTreatFlattenedSummaryAsOneWindow(t *testing
 func TestSmartResourceUsesRuntimeQuotaCalibration(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Second)
+	results := make([]store.CodexInspectionResult, 0, 3)
 	for index := 0; index < 3; index++ {
+		accountKey := fmt.Sprintf("source-%d", index)
 		service.recordSmartUsageEvents(
-			smartQuotaCalibrationFixture(fmt.Sprintf("source-%d.json", index), "team", now.Add(-10*time.Minute), 40),
+			smartQuotaCalibrationFixture(accountKey+".json", "team", now.Add(-10*time.Minute), 40),
 			now,
 		)
+		unused := 0.0
+		results = append(results, store.CodexInspectionResult{
+			AccountKey:  accountKey,
+			FileName:    accountKey + ".json",
+			Provider:    "codex",
+			Status:      "active",
+			PlanType:    "team",
+			UsedPercent: &unused,
+		})
 	}
-	unused := 0.0
 	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
 		Product: "oauth_7d",
 	}, inspectionQuotaSnapshot{
-		run: store.CodexInspectionRun{ProbeSetCount: 1, SampledCount: 1, FinishedAtMS: now.UnixMilli()},
-		results: []store.CodexInspectionResult{{
-			AccountKey: "unseen", FileName: "unseen.json", Provider: "codex", Status: "active",
-			PlanType: "team", UsedPercent: &unused,
-		}},
+		run:         store.CodexInspectionRun{ProbeSetCount: 3, SampledCount: 3, FinishedAtMS: now.UnixMilli()},
+		results:     results,
 		generatedAt: now,
 	}, now)
 
-	if resource.AccountQuotaEstimateM != 60 || resource.AccountQuotaEstimateSource != smartQuotaEstimateSourceRecalibrated ||
-		resource.AccountQuotaCalibrationSamples != 3 || resource.RawCapacityTokenM != 60 ||
-		!resource.QuotaEstimateOrderingBlocked || len(resource.AccountQuotaPlanEstimates) == 0 ||
-		resource.AccountQuotaPlanEstimates[0].ObservedM != 40 || resource.AccountQuotaPlanEstimates[0].AdoptedM != 60 {
+	if resource.AccountQuotaEstimateM != 60 || resource.AccountQuotaEstimateSource != smartQuotaEstimateSourceDefault ||
+		resource.AccountQuotaCalibrationSamples != 3 || resource.RawCapacityTokenM != 180 ||
+		resource.QuotaEstimateOrderingBlocked || len(resource.AccountQuotaPlanEstimates) == 0 ||
+		resource.AccountQuotaPlanEstimates[0].ObservedM != 40 || resource.AccountQuotaPlanEstimates[0].AdoptedM != 60 ||
+		!resource.AccountQuotaPlanEstimates[0].UsingFallback {
 		t.Fatalf("calibrated resource = %#v", resource)
+	}
+	if reason := service.automaticSupplyGuardReason(resource); reason != "" {
+		t.Fatalf("fallback quota calibration blocked automatic ordering: %q", reason)
 	}
 }
 

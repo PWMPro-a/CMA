@@ -93,6 +93,7 @@ type smartQuotaEstimate struct {
 	DivergencePercent      float64
 	IndependentAccount     bool
 	Provisional            bool
+	FallbackOnly           bool
 	QuotaClassID           string
 	QuotaClasses           []SmartQuotaClassEstimate
 }
@@ -1359,15 +1360,19 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 		}
 		s.quotaPolicyState[key] = state
 
-		// A higher observed quota is safe to keep handling with the currently
-		// adopted (lower) estimate while independent inspections confirm and
-		// gradually calibrate it. Only a downward deviation can make the planner
-		// rely on more capacity per account than the latest evidence supports, so
-		// only that direction pauses automatic ordering before confirmation.
-		orderingBlocked := policy.Mode == smartQuotaPolicyModeAuto && hasData && state.pending &&
+		// A downward observation under confirmation is not reliable enough to size
+		// purchases. Keep collecting evidence, but plan every account in this
+		// supplier/plan context from the configured no-data fallback until the
+		// candidate is accepted. This keeps the warning visible without stranding
+		// the pool behind a calibration-only ordering gate.
+		usingFallback := policy.Mode == smartQuotaPolicyModeAuto && hasData && state.pending &&
 			context.accounts > 0 && planningObserved.CapacityM < state.adoptedM &&
 			(state.validationState == smartQuotaValidationConfirming ||
 				state.validationState == smartQuotaValidationQuarantined)
+		effectiveAdoptedM := state.adoptedM
+		if usingFallback {
+			effectiveAdoptedM = policy.FallbackM
+		}
 		divergence := 0.0
 		if hasObservedData {
 			divergence = smartQuotaRelativeDifference(observedM, state.adoptedM) * 100
@@ -1395,7 +1400,7 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 			FallbackM:              round2(policy.FallbackM),
 			FixedM:                 round2(policy.FixedM),
 			ObservedM:              round2(observedM),
-			AdoptedM:               round2(state.adoptedM),
+			AdoptedM:               round2(effectiveAdoptedM),
 			Source:                 source,
 			SampleCount:            sampleCount,
 			UniqueAccounts:         uniqueAccounts,
@@ -1406,7 +1411,8 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 			ConfirmationRounds:     state.confirmationRounds,
 			RequiredRounds:         state.requiredRounds,
 			ValidationState:        state.validationState,
-			OrderingBlocked:        orderingBlocked,
+			UsingFallback:          usingFallback,
+			OrderingBlocked:        false,
 			LastInspectionRunID:    state.lastInspectionRunID,
 			QuotaClasses:           observed.QuotaClasses,
 		})
@@ -1414,13 +1420,16 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 		if policy.Mode == smartQuotaPolicyModeAuto && !hasData {
 			planningSource = smartQuotaEstimateSourceDefault
 		}
-		if policy.Mode == smartQuotaPolicyModeAuto && hasData &&
+		if usingFallback {
+			planningSource = smartQuotaEstimateSourceDefault
+		} else if policy.Mode == smartQuotaPolicyModeAuto && hasData &&
 			smartQuotaRelativeDifference(state.adoptedM, planningObserved.CapacityM) > 0.001 {
 			planningSource = smartQuotaEstimateSourceRecalibrated
 		}
 		planningEstimate := planningObserved
-		planningEstimate.CapacityM = state.adoptedM
+		planningEstimate.CapacityM = effectiveAdoptedM
 		planningEstimate.Source = planningSource
+		planningEstimate.FallbackOnly = usingFallback
 		planning[key] = planningEstimate
 		if context.supplierID == "" {
 			planning[planType] = planningEstimate
@@ -1474,6 +1483,9 @@ func (s *Service) smartQuotaEstimateForInspectionResult(result store.CodexInspec
 	// it with the plan default. Consumption must be strictly above 10% so an
 	// integer-rounded 10% header never becomes account-capacity evidence.
 	if fallback.Source == smartQuotaPolicyModeFixed && fallback.CapacityM > 0 {
+		return fallback
+	}
+	if fallback.FallbackOnly && fallback.CapacityM > 0 {
 		return fallback
 	}
 	identities := smartQuotaCalibrationResultIdentities(result.FileName, result.AuthIndex, result.AccountKey, result.AccountID)

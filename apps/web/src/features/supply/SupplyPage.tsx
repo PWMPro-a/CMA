@@ -1788,6 +1788,7 @@ export function SupplyPage() {
               estimate?.adoptedM ?? (mode === 'fixed' ? policy.fixedM : policy.fallbackM);
             const pending = estimate?.pendingConfirmation === true;
             const blocked = estimate?.orderingBlocked === true;
+            const usingFallback = estimate?.usingFallback === true;
             const validationState =
               estimate?.validationState ??
               (mode === 'fixed' ? 'fixed' : pending ? 'confirming' : 'accepted');
@@ -1796,14 +1797,16 @@ export function SupplyPage() {
             const upwardPending =
               pending &&
               !blocked &&
+              !usingFallback &&
               validationState === 'confirming' &&
               (estimate?.confirmationRounds ?? 0) < (estimate?.requiredRounds ?? 2) &&
               (estimate?.observedM ?? 0) > adoptedM;
+            const downwardPending = pending && usingFallback;
             const showValidationNotice = pending || insufficient;
             return (
               <article
                 className={`${styles.quotaEstimateCard} ${
-                  blocked || quarantined
+                  blocked
                     ? styles.quotaEstimateBlocked
                     : showValidationNotice
                       ? styles.quotaEstimateWarning
@@ -1893,7 +1896,7 @@ export function SupplyPage() {
                         ? 'supply.quota_plan_warning_insufficient'
                         : quarantined
                           ? 'supply.quota_plan_warning_quarantined'
-                          : blocked
+                          : blocked || downwardPending
                             ? 'supply.quota_plan_warning_pending'
                             : upwardPending
                               ? 'supply.quota_plan_warning_upward_pending'

@@ -290,6 +290,7 @@ type SmartQuotaPlanEstimate struct {
 	ConfirmationRounds     int                       `json:"confirmationRounds,omitempty"`
 	RequiredRounds         int                       `json:"requiredRounds,omitempty"`
 	ValidationState        string                    `json:"validationState,omitempty"`
+	UsingFallback          bool                      `json:"usingFallback,omitempty"`
 	OrderingBlocked        bool                      `json:"orderingBlocked,omitempty"`
 	LastInspectionRunID    int64                     `json:"lastInspectionRunId,omitempty"`
 	QuotaClasses           []SmartQuotaClassEstimate `json:"quotaClasses,omitempty"`
