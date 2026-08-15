@@ -1714,7 +1714,9 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 						if state.nextQuantity > 0 {
 							return s.withRecoveryInterval(time.Second, cfg.Supply)
 						}
-						retryAt := time.UnixMilli(smartSupplyOrderTerminalAtMS(latest)).Add(automaticRetryLadderCooldown)
+						retryAt := time.UnixMilli(smartSupplyOrderTerminalAtMS(latest)).Add(
+							automaticRetryCycleCooldown(resource),
+						)
 						if wait := time.Until(retryAt); wait > 0 {
 							return s.withRecoveryInterval(wait, cfg.Supply)
 						}
@@ -1866,6 +1868,9 @@ func parallelSupplyCompetitionForOrders(
 	competition := parallelSupplyCompetition{
 		anchor:              anchor,
 		attemptedQuantities: make(map[int]struct{}, 2),
+	}
+	if anchor.RequestedQuantity > 0 {
+		competition.attemptedQuantities[anchor.RequestedQuantity] = struct{}{}
 	}
 	seen := make(map[string]struct{}, len(openOrders)+len(history))
 	add := func(order store.SupplyOrder) {
@@ -6703,15 +6708,18 @@ func emergencyParallelOrderQuantity(
 		return 0
 	}
 	baseQuantity := max(quantity, competition.anchor.RequestedQuantity)
-	candidate := clampInt(
-		int(math.Ceil(float64(baseQuantity)/float64(divisors[competition.attempts]))),
-		1,
-		quantity,
-	)
-	if _, duplicate := competition.attemptedQuantities[candidate]; duplicate {
-		return 0
+	for stage := competition.attempts; stage < len(divisors); stage++ {
+		candidate := clampInt(
+			int(math.Ceil(float64(baseQuantity)/float64(divisors[stage]))),
+			1,
+			quantity,
+		)
+		if _, duplicate := competition.attemptedQuantities[candidate]; duplicate {
+			continue
+		}
+		return candidate
 	}
-	return candidate
+	return 0
 }
 
 // readySupplyOrderAccepted applies a deterministic aggregate take budget to
@@ -6969,7 +6977,7 @@ func (s *Service) automaticCreateCooldownActive(ctx context.Context, cfg store.M
 				if state.nextQuantity > 0 {
 					return false, nil
 				}
-				seconds = int(automaticRetryLadderCooldown / time.Second)
+				seconds = int(automaticRetryCycleCooldown(resource) / time.Second)
 				last = maxInt64(last, smartSupplyOrderTerminalAtMS(latest))
 			} else {
 				seconds = max(1, int(retry.cooldown/time.Second))
@@ -6995,9 +7003,28 @@ func (s *Service) automaticCreateCooldownActive(ctx context.Context, cfg store.M
 }
 
 const (
-	automaticRetryBurstWindow    = 10 * time.Minute
-	automaticRetryLadderCooldown = 90 * time.Second
+	automaticRetryBurstWindow         = 10 * time.Minute
+	automaticRetryLadderCooldown      = 90 * time.Second
+	automaticUrgentRetryCycleCooldown = 10 * time.Second
 )
+
+func automaticRetryCycleCooldown(resource SmartResource) time.Duration {
+	if smartSupplyUrgentRetryRequired(resource) {
+		return automaticUrgentRetryCycleCooldown
+	}
+	return automaticRetryLadderCooldown
+}
+
+func smartSupplyUrgentRetryRequired(resource SmartResource) bool {
+	if !smartShortageFastRetryAllowed(resource) || resource.ConsumeRCUPerMinute <= 0 {
+		return false
+	}
+	if resource.PoolVacuumActive || (resource.AccountClassificationObserved &&
+		resource.AvailableAccounts <= max(1, resource.CriticalAvailableAccounts)) {
+		return true
+	}
+	return resource.AvailableSustainMinutes > 0 && resource.AvailableSustainMinutes <= 5
+}
 
 // automaticZeroDeliveryBurst summarizes consecutive supplier attempts that
 // failed to deliver any usable capacity. It is intentionally based on local
@@ -7067,6 +7094,10 @@ func (s *Service) automaticRetryPlan(
 	failures, cancellations, err := s.automaticZeroDeliveryBurst(ctx, cfg, order)
 	if err != nil {
 		return smartEmergencyRetryPlan{}, err
+	}
+	if smartSupplyUrgentRetryRequired(resource) {
+		plan.cooldown = automaticUrgentRetryCycleCooldown
+		return plan, nil
 	}
 	switch {
 	case failures >= 5 || cancellations >= 4:

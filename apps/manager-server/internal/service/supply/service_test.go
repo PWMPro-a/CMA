@@ -442,6 +442,46 @@ func TestEmergencyRetryWakesAfterZeroDeliveryBurst(t *testing.T) {
 	}
 }
 
+func TestUrgentCapacityRetryKeepsTenSecondRhythmAfterCancellationBurst(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "urgent-retry-rhythm.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	now := time.Now()
+	var latest store.SupplyOrder
+	for index := 0; index < 5; index++ {
+		latest, err = st.CreateSupplyOrder(ctx, store.SupplyOrder{
+			OrderID: fmt.Sprintf("cancelled-urgent-%d", index), Product: "oauth_7d", RequestedQuantity: 9,
+			Automatic: true, Status: "cancelled", RemoteStatus: "cancelled",
+			CreatedAtMS:   now.Add(time.Duration(index-6) * time.Second).UnixMilli(),
+			CompletedAtMS: now.Add(time.Duration(index-5) * time.Second).UnixMilli(),
+		})
+		if err != nil {
+			t.Fatalf("create cancelled order %d: %v", index, err)
+		}
+	}
+	service := New(st, nil)
+	resource := SmartResource{
+		SnapshotFresh: true, EmergencyShortage: true, HealthLevel: smartHealthCritical,
+		ConsumeRCUPerMinute: 500, CapacityGapRCU: 20_000,
+		AccountClassificationObserved: true, AvailableAccounts: 1,
+		CriticalAvailableAccounts: 2, AvailableSustainMinutes: 1.5,
+	}
+	plan, err := service.automaticRetryPlan(ctx, store.ManagerSupplyConfig{Product: "oauth_7d"}, resource, latest, now)
+	if err != nil || !plan.active || plan.cooldown != automaticUrgentRetryCycleCooldown {
+		t.Fatalf("urgent retry plan=%#v err=%v", plan, err)
+	}
+
+	resource.AvailableAccounts = 10
+	resource.AvailableSustainMinutes = 20
+	plan, err = service.automaticRetryPlan(ctx, store.ManagerSupplyConfig{Product: "oauth_7d"}, resource, latest, now)
+	if err != nil || plan.cooldown != 5*time.Minute {
+		t.Fatalf("non-urgent retry plan=%#v err=%v", plan, err)
+	}
+}
+
 func TestAutomaticRetryLadderQuantityKeepsTheOriginalBase(t *testing.T) {
 	tests := []struct {
 		base     int
@@ -2950,6 +2990,13 @@ func TestEmergencyParallelOrderQuantityUsesDescendingLadder(t *testing.T) {
 	}
 	if got := emergencyParallelOrderQuantity(resource, 10, competition, true); got != 5 {
 		t.Fatalf("second emergency quantity = %d, want 5", got)
+	}
+	continuation := parallelSupplyCompetition{
+		anchor:              store.SupplyOrder{OrderID: "retry-3", RequestedQuantity: 3, Status: "waiting_inventory"},
+		attemptedQuantities: map[int]struct{}{3: {}},
+	}
+	if got := emergencyParallelOrderQuantity(resource, 5, continuation, true); got != 1 {
+		t.Fatalf("duplicate half rung quantity = %d, want next untried rung 1", got)
 	}
 	competition.attempts = 1
 	competition.attemptedQuantities[5] = struct{}{}
