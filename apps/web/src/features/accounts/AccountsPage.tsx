@@ -526,6 +526,11 @@ export function AccountsPage() {
     !featureAvailability.checking &&
     Boolean(featureAvailability.managerServiceBase) &&
     Boolean(managementKey);
+  const accountPoolSummaryAvailable =
+    !featureAvailability.checking &&
+    Boolean(managementKey) &&
+    (Boolean(featureAvailability.managerServiceBase) ||
+      featureAvailability.panelHostMode === 'manager_embedded');
   const requestHistoryAvailable =
     managerStorageAvailable && featureAvailability.requestMonitoringAvailable;
 
@@ -865,7 +870,7 @@ export function AccountsPage() {
   const loadAccountPoolSummary = useCallback(async () => {
     const requestId = accountPoolSummaryRequestIdRef.current + 1;
     accountPoolSummaryRequestIdRef.current = requestId;
-    if (!managerStorageAvailable) {
+    if (!accountPoolSummaryAvailable) {
       setAccountPoolSummary(null);
       setAccountPoolSummaryLoading(false);
       return;
@@ -882,7 +887,7 @@ export function AccountsPage() {
         setAccountPoolSummaryLoading(false);
       }
     }
-  }, [managerStorageAvailable]);
+  }, [accountPoolSummaryAvailable]);
 
   const loadAccountActionCandidates = useCallback(async () => {
     const requestId = accountActionCandidatesReqIdRef.current + 1;
@@ -1110,21 +1115,21 @@ export function AccountsPage() {
   );
 
   useEffect(() => {
-    if (activeView !== 'accounts' || !managerStorageAvailable) return;
+    if (activeView !== 'accounts' || !accountPoolSummaryAvailable) return;
     void loadAccountPoolSummary();
-  }, [activeView, loadAccountPoolSummary, managerStorageAvailable]);
+  }, [accountPoolSummaryAvailable, activeView, loadAccountPoolSummary]);
 
   useEffect(() => {
-    if (activeView === 'accounts' && managerStorageAvailable && accountPoolSummary === null) {
+    if (activeView === 'accounts' && accountPoolSummaryAvailable && accountPoolSummary === null) {
       setAccountPoolSummaryLoading(true);
     }
-  }, [accountPoolSummary, activeView, managerStorageAvailable]);
+  }, [accountPoolSummary, accountPoolSummaryAvailable, activeView]);
 
   useInterval(
     () => {
       void loadAccountPoolSummary();
     },
-    activeView === 'accounts' && documentVisible && managerStorageAvailable ? 10_000 : null
+    activeView === 'accounts' && documentVisible && accountPoolSummaryAvailable ? 10_000 : null
   );
 
   useEffect(
@@ -4889,10 +4894,10 @@ export function AccountsPage() {
     <>
       <AccountMetricsGrid
         metrics={metrics}
-        loading={managerStorageAvailable && accountPoolSummaryLoading}
+        loading={accountPoolSummaryAvailable && accountPoolSummaryLoading}
       />
       {error ? <div className={styles.errorBox}>{error}</div> : null}
-      {loading || (managerStorageAvailable && accountPoolSummaryLoading) ? (
+      {loading || (accountPoolSummaryAvailable && accountPoolSummaryLoading) ? (
         <div className={styles.loadingPanel}>
           <LoadingSpinner />
         </div>

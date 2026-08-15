@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { ProviderStatusBar } from '@/components/providers/ProviderStatusBar';
 import { CODEX_CONFIG } from '@/components/quota';
-import { accountQuotaSnapshotApi } from '@/services/api';
+import { accountQuotaSnapshotApi, type SupplyAccountPoolSummary } from '@/services/api';
 import type { AuthFileItem, CodexQuotaState, OAuthModelAliasEntry } from '@/types';
 import type {
   AccountActionCandidatesResponse,
@@ -344,6 +344,12 @@ const { mocks } = vi.hoisted(() => {
           pendingCount: 0,
         })
       ),
+      getAccountPoolSummary: vi.fn(
+        async (): Promise<SupplyAccountPoolSummary> => {
+          throw new Error('account pool unavailable');
+        }
+      ),
+      listAccountLeases: vi.fn(async () => []),
       getAnalytics: vi.fn(
         async (_base: string, _key: string | undefined, _request: unknown): Promise<unknown> => ({
           generated_at_ms: 1,
@@ -702,6 +708,10 @@ vi.mock('@/services/api', () => ({
     getActiveQuotaCooldowns: mocks.getActiveQuotaCooldowns,
     listAccountActionCandidates: mocks.listAccountActionCandidates,
   },
+  supplyApi: {
+    getAccountPoolSummary: mocks.getAccountPoolSummary,
+    listAccountLeases: mocks.listAccountLeases,
+  },
 }));
 
 vi.mock('@/services/api/usageService', async (importOriginal) => {
@@ -1041,6 +1051,10 @@ describe('AccountsPage replacement flows', () => {
     mocks.getActiveQuotaCooldowns.mockResolvedValue([]);
     mocks.listAccountActionCandidates.mockReset();
     mocks.listAccountActionCandidates.mockResolvedValue({ items: [], pendingCount: 0 });
+    mocks.getAccountPoolSummary.mockReset();
+    mocks.getAccountPoolSummary.mockRejectedValue(new Error('account pool unavailable'));
+    mocks.listAccountLeases.mockReset();
+    mocks.listAccountLeases.mockResolvedValue([]);
     mocks.quotaState.antigravityQuota = {};
     mocks.quotaState.claudeQuota = {};
     mocks.quotaState.codexQuota = {};
@@ -2877,6 +2891,55 @@ describe('AccountsPage replacement flows', () => {
         expect.objectContaining({ value: 'automation' }),
       ])
     );
+  });
+
+  it('keeps the shared available-account split when monitoring discovery is unavailable', async () => {
+    if (typeof window === 'undefined') {
+      vi.stubGlobal('window', {
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      });
+    }
+    const file = makeCodexFile('normal.json', 'auth-normal', 'normal@example.com');
+    mocks.files = [file];
+    mocks.location = { pathname: '/accounts', search: '?status=available' };
+    mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      windows: [{ id: 'weekly', label: 'Weekly', usedPercent: 100, resetLabel: 'Mon' }],
+    });
+    mocks.panelFeatureAvailability = {
+      checking: false,
+      managerServiceBase: '',
+      requestMonitoringAvailable: false,
+      serverCodexInspectionAvailable: false,
+    };
+    Object.assign(mocks.panelFeatureAvailability, { panelHostMode: 'manager_embedded' });
+    mocks.getAccountPoolSummary.mockResolvedValue({
+      checkedAtMs: Date.now(),
+      total: 1,
+      normal: 1,
+      needsAttention: 0,
+      quotaRisk: 0,
+      disabled: 0,
+      unconfirmed: 0,
+      classificationObserved: true,
+      credentials: [
+        {
+          authFileName: file.name,
+          provider: 'codex',
+          authIndex: 'auth-normal',
+          accountSnapshot: 'normal@example.com',
+          bucket: 'normal',
+        },
+      ],
+    });
+
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+
+    expect(mocks.getAccountPoolSummary).toHaveBeenCalled();
+    expect(treeText(renderer)).toContain('normal@example.com');
+    expect(treeText(renderer)).not.toContain('accounts.empty_title');
   });
 
   it('uses unique table row keys for shared auth accounts', async () => {
