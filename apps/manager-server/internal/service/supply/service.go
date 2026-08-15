@@ -726,9 +726,9 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	if cpaManagementConfigured(cfg) {
 		poolStats, poolStatsErr := s.countAccountPoolStatsWithInspection(ctx, cfg, resource)
 		if poolStatsErr == nil || poolStats.liveObserved {
-			inspectedAvailable := resource.AvailableAccounts
+			inspectedEnabled := resource.EnabledAccounts
 			applyAccountPoolStats(&resource, poolStats)
-			if reconcileSmartCapacityWithAccountPool(&resource, inspectedAvailable) {
+			if reconcileSmartCapacityWithAccountPool(&resource, inspectedEnabled) {
 				recalculateSmartResourceCapacityPlan(cfg.Supply, &resource)
 			}
 			s.reconcileSmartAccountPoolGuard(cfg.Supply, &resource)
@@ -834,7 +834,7 @@ func (s *Service) GetAccountPoolSummary(ctx context.Context) (AccountPoolSummary
 func accountPoolSummaryFromStats(stats accountPoolStats, checkedAt time.Time) AccountPoolSummary {
 	return AccountPoolSummary{
 		CheckedAtMS:            checkedAt.UnixMilli(),
-		Total:                  max(0, stats.total),
+		Total:                  max(0, stats.enabled),
 		Normal:                 max(0, stats.normal),
 		NeedsAttention:         max(0, stats.needsAttention),
 		QuotaRisk:              max(0, stats.quotaRisk),
@@ -2278,7 +2278,8 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		if pressureReason != "" {
 			resource.DecisionReason = pressureReason
 		}
-		if smartResourceEmergency(resource) && !isSmartEmergencyRetryReason(resource.DecisionReason) {
+		if smartResourceEmergency(resource) && !smartAccountAvailabilityEmergency(resource) &&
+			!isSmartEmergencyRetryReason(resource.DecisionReason) {
 			resource.DecisionReason = "emergency_refill_to_healthy"
 		}
 		// Parallel emergency抢货 uses a bounded descending quantity ladder
@@ -3024,9 +3025,9 @@ func (s *Service) refreshOverview(ctx context.Context, cfg store.ManagerConfig, 
 		if err != nil {
 			return err
 		}
-		inspectedAvailable := resource.AvailableAccounts
+		inspectedEnabled := resource.EnabledAccounts
 		applyAccountPoolStats(&resource, poolStats)
-		if reconcileSmartCapacityWithAccountPool(&resource, inspectedAvailable) {
+		if reconcileSmartCapacityWithAccountPool(&resource, inspectedEnabled) {
 			recalculateSmartResourceCapacityPlan(cfg.Supply, &resource)
 		}
 		applySmartAccountQuantityEstimate(cfg.Supply, &resource)
@@ -5075,6 +5076,7 @@ type accountPoolStats struct {
 	classificationObserved bool
 	liveObserved           bool
 	inspectionObserved     bool
+	bucketByCredential     map[string]operatorAccountBucket
 }
 
 func (s *Service) countAccountPoolStats(ctx context.Context, cfg store.ManagerConfig) (accountPoolStats, error) {
@@ -5182,7 +5184,17 @@ func (s *Service) cachedOperatorHeaderSnapshots(
 }
 
 func accountPoolStatsFromFiles(files []cpaauthfiles.File) accountPoolStats {
-	stats := accountPoolStats{files: files, liveObserved: true}
+	stats := accountPoolStats{
+		files:              files,
+		liveObserved:       true,
+		bucketByCredential: make(map[string]operatorAccountBucket),
+	}
+	filesByName := make(map[string]int, len(files))
+	for _, file := range files {
+		if isCodexAuthFile(file) {
+			filesByName[strings.TrimSpace(file.Name)]++
+		}
+	}
 	for _, file := range files {
 		if !isCodexAuthFile(file) {
 			continue
@@ -5192,8 +5204,10 @@ func accountPoolStatsFromFiles(files []cpaauthfiles.File) accountPoolStats {
 			stats.enabled++
 			if smartAccountNeedsAttention(file.Raw) {
 				stats.needsAttention++
+				stats.recordCredentialBucket(file, operatorAccountNeedsAttention, filesByName[strings.TrimSpace(file.Name)] == 1)
 			} else {
 				stats.unconfirmed++
+				stats.recordCredentialBucket(file, operatorAccountUnconfirmed, filesByName[strings.TrimSpace(file.Name)] == 1)
 			}
 		}
 		if isAvailableCodexFile(file) {
@@ -5215,6 +5229,40 @@ func accountPoolStatsFromFiles(files []cpaauthfiles.File) accountPoolStats {
 		}
 	}
 	return stats
+}
+
+func operatorCredentialKey(fileName, authIndex string) string {
+	fileName = strings.ToLower(strings.TrimSpace(fileName))
+	authIndex = strings.ToLower(strings.TrimSpace(authIndex))
+	if fileName == "" || authIndex == "" {
+		return ""
+	}
+	return "auth\x00" + fileName + "\x00" + authIndex
+}
+
+func operatorFileCredentialKey(fileName string) string {
+	fileName = strings.ToLower(strings.TrimSpace(fileName))
+	if fileName == "" {
+		return ""
+	}
+	return "file\x00" + fileName
+}
+
+func (stats *accountPoolStats) recordCredentialBucket(file cpaauthfiles.File, bucket operatorAccountBucket, uniqueFileName bool) {
+	if stats == nil || file.Disabled {
+		return
+	}
+	if stats.bucketByCredential == nil {
+		stats.bucketByCredential = make(map[string]operatorAccountBucket)
+	}
+	if key := operatorCredentialKey(file.Name, file.AuthIndex); key != "" {
+		stats.bucketByCredential[key] = bucket
+	}
+	if uniqueFileName {
+		if key := operatorFileCredentialKey(file.Name); key != "" {
+			stats.bucketByCredential[key] = bucket
+		}
+	}
 }
 
 type operatorAccountBucket int
@@ -5255,6 +5303,7 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 	stats.unconfirmed = 0
 	stats.classificationObserved = true
 	stats.liveObserved = true
+	stats.bucketByCredential = make(map[string]operatorAccountBucket, len(files)*2)
 
 	resultsByFile := make(map[string][]store.CodexInspectionResult, len(results))
 	filesByName := make(map[string]int, len(files))
@@ -5298,11 +5347,17 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 			headerMatched = false
 		}
 		bucket := operatorAccountUnconfirmed
+		if isAvailableCodexFile(file) && len(resultsByFile[strings.TrimSpace(file.Name)]) == 0 {
+			// A live schedulable credential remains usable when no inspection row
+			// exists for that file. Ambiguous or non-authoritative inspection rows
+			// still stay unconfirmed unless direct quota/usability evidence exists.
+			bucket = operatorAccountNormal
+		}
 		if smartAccountNeedsAttention(file.Raw) {
 			bucket = operatorAccountNeedsAttention
 		} else if headerMatched && (!inspectionAuthoritative || !matched || header.TimestampMS > result.CreatedAtMS) {
 			bucket = classifyOperatorAccountFromHeader(header)
-		} else if matched && inspectionAuthoritative {
+		} else if matched && (inspectionAuthoritative || operatorSupplyInspectionUsabilityConfirmed(result)) {
 			bucket = classifyOperatorAccount(file, result)
 		}
 		switch bucket {
@@ -5315,8 +5370,25 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 		default:
 			stats.unconfirmed++
 		}
+		stats.recordCredentialBucket(file, bucket, filesByName[strings.TrimSpace(file.Name)] == 1)
 	}
 	return stats
+}
+
+func operatorSupplyInspectionUsabilityConfirmed(result store.CodexInspectionResult) bool {
+	if inspectionResultUsabilityUnverified(result) {
+		return false
+	}
+	action := strings.ToLower(strings.TrimSpace(result.Action))
+	if action != "" && action != "keep" {
+		return false
+	}
+	if _, hasQuota := inspectionResultRemainingQuotaFraction(result); hasQuota {
+		return true
+	}
+	status := strings.ToLower(strings.TrimSpace(result.Status))
+	state := strings.ToLower(strings.TrimSpace(result.State))
+	return status == "active" || status == "ready" || state == "active" || state == "ready"
 }
 
 func operatorInspectionAuthoritative(triggerType string) bool {
@@ -5560,8 +5632,21 @@ func (stats accountPoolStats) operatorAvailable(fallback int) int {
 }
 
 func reconcileAccountPoolStatsWithInspection(stats accountPoolStats, resource SmartResource) accountPoolStats {
+	if !stats.liveObserved {
+		if resource.CapacitySource != smartCapacitySourceInspection || resource.CapacitySnapshotAtMS <= 0 ||
+			resource.TotalAccounts < stats.total {
+			return stats
+		}
+		stats.inspectionObserved = true
+		stats.verifiedAvailable = min(max(0, resource.AvailableAccounts), max(0, stats.schedulable))
+		return stats
+	}
+	inspectedEnabled := resource.EnabledAccounts
+	if inspectedEnabled <= 0 {
+		inspectedEnabled = resource.TotalAccounts
+	}
 	if resource.CapacitySource != smartCapacitySourceInspection || resource.CapacitySnapshotAtMS <= 0 ||
-		resource.TotalAccounts < stats.total {
+		inspectedEnabled < stats.enabled {
 		return stats
 	}
 	stats.inspectionObserved = true
@@ -5573,12 +5658,16 @@ func applyAccountPoolStats(resource *SmartResource, stats accountPoolStats) {
 	if resource == nil {
 		return
 	}
-	resource.TotalAccounts = max(0, stats.total)
+	if stats.liveObserved {
+		resource.TotalAccounts = max(0, stats.enabled)
+	} else {
+		resource.TotalAccounts = max(0, stats.total)
+	}
 	resource.AvailableAccounts = stats.capacityAvailable(resource.AvailableAccounts)
 	resource.SchedulableAccounts = max(0, stats.schedulable)
 	if stats.liveObserved {
 		resource.EnabledAccounts = max(0, stats.enabled)
-		resource.DisabledAccounts = max(0, resource.TotalAccounts-resource.EnabledAccounts)
+		resource.DisabledAccounts = max(0, stats.total-stats.enabled)
 	} else {
 		resource.DisabledAccounts = max(0, resource.TotalAccounts-resource.SchedulableAccounts)
 	}
@@ -5589,6 +5678,7 @@ func applyAccountPoolStats(resource *SmartResource, stats accountPoolStats) {
 		resource.NeedsAttentionAccounts = max(0, stats.needsAttention)
 		resource.QuotaRiskAccounts = max(0, stats.quotaRisk)
 		resource.UnconfirmedAccounts = max(0, stats.unconfirmed)
+		resource.AvailableAccounts = max(0, stats.normal)
 	} else if stats.liveObserved {
 		// Do not retain the previous inspection split when the current response
 		// has no matching evidence. HealthyAccounts/AvailableAccounts are
@@ -5606,7 +5696,64 @@ func applyAccountPoolStats(resource *SmartResource, stats accountPoolStats) {
 		resource.HealthyAccounts = resource.AvailableAccounts
 	}
 	applySmartAccountCountBreakdown(resource)
+	applySmartCapacityBreakdown(resource, stats)
 	applyAccountPoolConcurrency(resource, stats)
+	applySmartTokenMetrics(resource)
+}
+
+func applySmartCapacityBreakdown(resource *SmartResource, stats accountPoolStats) {
+	if resource == nil {
+		return
+	}
+	total := math.Max(0, resource.CurrentCapacityRCU)
+	if !stats.classificationObserved {
+		resource.AvailableCapacityRCU = total
+		resource.FrozenCapacityRCU = 0
+		resource.TotalCapacityRCU = total
+		return
+	}
+	available := 0.0
+	frozen := 0.0
+	unmatched := 0.0
+	for _, item := range resource.capacityItems {
+		capacity := math.Max(0, item.usableCapacityRCU)
+		bucket, matched := stats.bucketByCredential[item.credentialKey]
+		if !matched {
+			bucket, matched = stats.bucketByCredential[item.fileKey]
+		}
+		if !matched {
+			unmatched += capacity
+		} else if bucket == operatorAccountNormal {
+			available += capacity
+		} else {
+			frozen += capacity
+		}
+	}
+	if unmatched > 0 {
+		normalRatio := 0.0
+		if stats.enabled > 0 {
+			normalRatio = clampFloat(float64(max(0, stats.normal))/float64(stats.enabled), 0, 1)
+		}
+		available += unmatched * normalRatio
+		frozen += unmatched * (1 - normalRatio)
+	}
+	classified := available + frozen
+	if classified <= 0 && total > 0 {
+		// Old in-memory snapshots do not contain credential-level capacity items.
+		// Preserve the total and use the enabled-pool ratio only as a compatibility
+		// fallback until the next snapshot rebuild supplies exact identities.
+		if stats.enabled > 0 {
+			available = total * float64(max(0, stats.normal)) / float64(stats.enabled)
+		}
+		frozen = math.Max(0, total-available)
+	} else if classified > 0 && classified != total {
+		scale := total / classified
+		available *= scale
+		frozen *= scale
+	}
+	resource.AvailableCapacityRCU = round2(clampFloat(available, 0, total))
+	resource.FrozenCapacityRCU = round2(math.Max(0, total-resource.AvailableCapacityRCU))
+	resource.TotalCapacityRCU = round2(total)
 }
 
 func applyAccountPoolConcurrency(resource *SmartResource, stats accountPoolStats) {
@@ -5672,6 +5819,7 @@ func applySmartAccountCountBreakdown(resource *SmartResource) {
 		return
 	}
 	resource.WeakAccounts = max(0, resource.AvailableAccounts-resource.HealthyAccounts)
+	resource.FrozenAccounts = max(0, resource.TotalAccounts-resource.AvailableAccounts)
 	if resource.operatorClassificationObserved {
 		resource.AtRiskAccounts = max(0, resource.NeedsAttentionAccounts+resource.QuotaRiskAccounts+resource.UnconfirmedAccounts)
 		return
@@ -5686,16 +5834,19 @@ func applySmartAccountCountBreakdown(resource *SmartResource) {
 // they can add capacity, while a rapid 401/disable proportionally removes stale
 // inspected quota. Request-count risk thresholds are intentionally absent from
 // this calculation.
-func reconcileSmartCapacityWithAccountPool(resource *SmartResource, inspectedAvailable int) bool {
+func reconcileSmartCapacityWithAccountPool(resource *SmartResource, inspectedEnabled int) bool {
 	if resource == nil {
 		return false
 	}
-	liveAvailable := max(0, resource.AvailableAccounts)
-	inspectedAvailable = max(0, inspectedAvailable)
-	if inspectedAvailable <= 0 {
-		if liveAvailable == 0 && resource.CurrentCapacityRCU > 0 {
+	liveEnabled := max(0, resource.TotalAccounts)
+	inspectedEnabled = max(0, inspectedEnabled)
+	if inspectedEnabled <= 0 {
+		if liveEnabled == 0 && resource.CurrentCapacityRCU > 0 {
 			resource.CurrentCapacityRCU = 0
 			resource.TimeLimitedCapacityRCU = 0
+			resource.AvailableCapacityRCU = 0
+			resource.FrozenCapacityRCU = 0
+			resource.TotalCapacityRCU = 0
 			resource.PendingInspectionCapacityRCU = 0
 			resource.PendingInspectionAccounts = 0
 			recalculateAccountPoolConcurrency(resource)
@@ -5703,10 +5854,10 @@ func reconcileSmartCapacityWithAccountPool(resource *SmartResource, inspectedAva
 		}
 		return false
 	}
-	if liveAvailable >= inspectedAvailable {
+	if liveEnabled >= inspectedEnabled {
 		return false
 	}
-	ratio := float64(liveAvailable) / float64(inspectedAvailable)
+	ratio := float64(liveEnabled) / float64(inspectedEnabled)
 	adjust := func(value float64) float64 { return round2(math.Max(0, value) * ratio) }
 	changed := false
 	currentCapacity := adjust(resource.CurrentCapacityRCU)
@@ -5719,7 +5870,13 @@ func reconcileSmartCapacityWithAccountPool(resource *SmartResource, inspectedAva
 		resource.TimeLimitedCapacityRCU = timeLimitedCapacity
 		changed = true
 	}
-	maximumPending := max(0, liveAvailable-resource.HealthyAccounts)
+	resource.AvailableCapacityRCU = adjust(resource.AvailableCapacityRCU)
+	resource.FrozenCapacityRCU = adjust(resource.FrozenCapacityRCU)
+	resource.TotalCapacityRCU = resource.CurrentCapacityRCU
+	for index := range resource.capacityItems {
+		resource.capacityItems[index].usableCapacityRCU = adjust(resource.capacityItems[index].usableCapacityRCU)
+	}
+	maximumPending := max(0, liveEnabled-resource.HealthyAccounts)
 	if resource.PendingInspectionAccounts > maximumPending {
 		previousPending := resource.PendingInspectionAccounts
 		resource.PendingInspectionAccounts = maximumPending
@@ -5765,7 +5922,7 @@ func (s *Service) reconcileSmartAccountPoolGuard(cfg store.ManagerSupplyConfig, 
 	if resource == nil || !smartSupplyStrategyConfigured(cfg) || !smartEmergencyBypassUsageRate(cfg) {
 		return
 	}
-	if resource.AvailableAccounts <= smartCriticalAvailableAccounts(cfg) {
+	if smartAvailableCapacityEmergency(cfg, *resource) {
 		applySmartEmergencyAvailability(cfg, resource, time.Now())
 		if resource.AvailableAccounts <= 0 {
 			startedAtMS := s.beginPoolVacuum()
@@ -5780,22 +5937,8 @@ func (s *Service) reconcileSmartAccountPoolGuard(cfg store.ManagerSupplyConfig, 
 		}
 		return
 	}
-	if smartHealthyFloorShortageEnabled(cfg) && resource.ConsumeRCUPerMinute > 0 && resource.SnapshotFresh &&
-		resource.CapacitySource == smartCapacitySourceInspection &&
-		resource.AvailableAccounts < smartHealthyAvailableAccounts(cfg) {
-		resource.EmergencyShortage = true
-		resource.EmergencyReason = "healthy_available_accounts"
-		resource.HealthLevel = smartHealthCritical
-		resource.SuggestedAction = smartActionEmergencyReplenish
-		resource.DecisionReason = "healthy_available_accounts"
-		resource.SuggestedQuantity = max(resource.SuggestedQuantity,
-			min(smartReplenishBatchLimit(cfg), smartHealthyAvailableAccounts(cfg)-resource.AvailableAccounts))
-		applySmartAccountQuantityEstimate(cfg, resource)
-		applySmartRefillProjection(cfg, resource)
-		return
-	}
 	s.clearPoolVacuum()
-	if resource.EmergencyReason != "critical_available_accounts" && resource.EmergencyReason != "emergency_pool_vacuum" &&
+	if resource.EmergencyReason != "available_capacity_critical" && resource.EmergencyReason != "critical_available_accounts" && resource.EmergencyReason != "emergency_pool_vacuum" &&
 		resource.EmergencyReason != "healthy_available_accounts" {
 		return
 	}
@@ -5803,7 +5946,7 @@ func (s *Service) reconcileSmartAccountPoolGuard(cfg store.ManagerSupplyConfig, 
 	resource.PoolVacuumActive = false
 	resource.PoolVacuumStartedAtMS = 0
 	resource.PoolVacuumDurationSeconds = 0
-	if resource.DecisionReason == "critical_available_accounts" || resource.DecisionReason == "emergency_pool_vacuum" ||
+	if resource.DecisionReason == "available_capacity_critical" || resource.DecisionReason == "critical_available_accounts" || resource.DecisionReason == "emergency_pool_vacuum" ||
 		resource.DecisionReason == "healthy_available_accounts" {
 		resource.EmergencyShortage = false
 		if resource.ConsumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling {
@@ -5825,67 +5968,23 @@ func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.Mana
 	if err != nil {
 		return 0, 0, "", false, err
 	}
-	inspectedAvailable := resource.AvailableAccounts
+	inspectedEnabled := resource.EnabledAccounts
 	applyAccountPoolStats(resource, poolStats)
-	if reconcileSmartCapacityWithAccountPool(resource, inspectedAvailable) {
+	if reconcileSmartCapacityWithAccountPool(resource, inspectedEnabled) {
 		recalculateSmartResourceCapacityPlan(cfg.Supply, resource)
 	}
-	capacityAvailable := resource.AvailableAccounts
 	// The first return value only updates the operator overview; every guard and
 	// replenishment decision below remains based on verified capacity.
 	operatorAvailable := poolStats.operatorAvailable(resource.SchedulableAccounts)
 	if !smartSupplyStrategyConfigured(cfg.Supply) || !smartEmergencyBypassUsageRate(cfg.Supply) {
 		return operatorAvailable, 0, "", true, nil
 	}
-	healthyFloorShortage := smartHealthyFloorShortageEnabled(cfg.Supply) && resource.ConsumeRCUPerMinute > 0 && resource.SnapshotFresh &&
-		resource.CapacitySource == smartCapacitySourceInspection
-	if !healthyFloorShortage && capacityAvailable > smartCriticalAvailableAccounts(cfg.Supply) {
+	if !smartAvailableCapacityEmergency(cfg.Supply, *resource) {
 		s.clearPoolVacuum()
 		return operatorAvailable, 0, "", true, nil
-	}
-	if !healthyFloorShortage && capacityAvailable >= smartCriticalAvailableAccounts(cfg.Supply) && resource.ConsumeRCUPerMinute <= 0 {
-		s.clearPoolVacuum()
-		return operatorAvailable, 0, "", true, nil
-	}
-	if healthyFloorShortage &&
-		capacityAvailable >= smartHealthyAvailableAccounts(cfg.Supply) {
-		s.clearPoolVacuum()
-		if resource.EmergencyReason == "critical_available_accounts" || resource.EmergencyReason == "emergency_pool_vacuum" ||
-			resource.EmergencyReason == "healthy_available_accounts" {
-			resource.EmergencyReason = ""
-			resource.PoolVacuumActive = false
-			resource.PoolVacuumStartedAtMS = 0
-			resource.PoolVacuumDurationSeconds = 0
-			if resource.DecisionReason == "critical_available_accounts" || resource.DecisionReason == "emergency_pool_vacuum" ||
-				resource.DecisionReason == "healthy_available_accounts" {
-				resource.EmergencyShortage = false
-				resource.SuggestedQuantity = 0
-				if resource.ConsumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling {
-					resource.HealthLevel = smartHealthUnknown
-					resource.SuggestedAction = smartActionSnapshotStale
-					resource.DecisionReason = "usage_rate_not_ready"
-				} else {
-					recalculateSmartResourceCapacityPlan(cfg.Supply, resource)
-				}
-			}
-		}
-		return operatorAvailable, 0, "", true, nil
-	}
-	if healthyFloorShortage &&
-		capacityAvailable > smartCriticalAvailableAccounts(cfg.Supply) {
-		quantity := min(smartReplenishBatchLimit(cfg.Supply), smartHealthyAvailableAccounts(cfg.Supply)-capacityAvailable)
-		resource.EmergencyShortage = true
-		resource.EmergencyReason = "healthy_available_accounts"
-		resource.HealthLevel = smartHealthCritical
-		resource.SuggestedAction = smartActionEmergencyReplenish
-		resource.DecisionReason = "healthy_available_accounts"
-		resource.SuggestedQuantity = max(resource.SuggestedQuantity, quantity)
-		applySmartAccountQuantityEstimate(cfg.Supply, resource)
-		applySmartRefillProjection(cfg.Supply, resource)
-		return operatorAvailable, quantity, "healthy_available_accounts", true, nil
 	}
 	applySmartEmergencyAvailability(cfg.Supply, resource, time.Now())
-	if capacityAvailable <= 0 {
+	if resource.AvailableAccounts <= 0 {
 		startedAtMS := s.beginPoolVacuum()
 		resource.PoolVacuumActive = true
 		resource.PoolVacuumStartedAtMS = startedAtMS
@@ -5896,13 +5995,10 @@ func (s *Service) smartEmergencyAvailability(ctx context.Context, cfg store.Mana
 		resource.PoolVacuumStartedAtMS = 0
 		resource.PoolVacuumDurationSeconds = 0
 	}
-	quantity := smartEmergencyRefillQuantity(cfg.Supply, capacityAvailable)
-	if resource.ConsumeRCUPerMinute <= 0 {
-		quantity = smartIdleEmergencyRefillQuantity(cfg.Supply, capacityAvailable)
-	}
+	quantity := resource.SuggestedQuantity
 	reason := resource.DecisionReason
 	if reason == "" {
-		reason = "critical_available_accounts"
+		reason = "available_capacity_critical"
 	}
 	return operatorAvailable, quantity, reason, true, nil
 }
@@ -6289,7 +6385,7 @@ func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resour
 		limit := smartAutomaticOrderQuantityLimit(cfg, resource)
 		minimum := min(smartPrelockMinQuantity(cfg), limit)
 		if smartAccountAvailabilityEmergency(resource) {
-			minimum = min(smartEmergencyMinimumOrderQuantity(cfg), limit)
+			minimum = 1
 		}
 		reason := firstNonEmptyString(resource.EmergencyReason, resource.DecisionReason)
 		if reason == "" {
@@ -6391,6 +6487,16 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	if resource.DemandTrend == smartDemandTrendFalling && !smartResourceEmergency(resource) {
 		return 0
 	}
+	if smartAccountAvailabilityEmergency(resource) {
+		quantity := smartMinimumAvailableRefillQuantity(cfg, resource)
+		if quantity <= 0 {
+			return 0
+		}
+		if cfg.DailyMaxReplenishQuantity > 0 {
+			quantity = min(quantity, cfg.DailyMaxReplenishQuantity)
+		}
+		return clampInt(quantity, 1, 100)
+	}
 	quantity := resource.SuggestedQuantity
 	if quantity <= 0 && resource.CapacityGapRCU > 0 && resource.UnitCapacityRCU > 0 {
 		unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
@@ -6433,12 +6539,6 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	}
 	limit := smartAutomaticOrderQuantityLimit(cfg, resource)
 	quantity = min(quantity, limit)
-	if smartAccountAvailabilityEmergency(resource) && resource.PrelockedCapacityRCU <= 0 {
-		// Account-vacuum orders are deliberately not reduced to the configured
-		// prelock minimum. The live pool is already at/below the critical line,
-		// so one half-waterline batch is the smallest useful recovery attempt.
-		quantity = max(quantity, min(smartEmergencyMinimumOrderQuantity(cfg), limit))
-	}
 	if smartPrelockEnabled(cfg) {
 		minimumQuantity := min(smartPrelockMinQuantity(cfg), limit)
 		if accountQuantityLimit > 0 {
@@ -7157,9 +7257,6 @@ func (s *Service) applySmartEmergencyRetryPlan(ctx context.Context, cfg store.Ma
 	if quantity <= 0 {
 		quantity = resource.SuggestedQuantity
 	}
-	if smartAccountAvailabilityEmergency(*resource) {
-		quantity = max(quantity, smartEmergencyMinimumOrderQuantity(cfg))
-	}
 	resource.SuggestedQuantity = clampInt(quantity, 1, plan.quantityLimit)
 	resource.DecisionReason = plan.reason
 	applySmartRefillProjection(cfg, resource)
@@ -7189,9 +7286,6 @@ func smartEmergencyRetryPlanForOrder(cfg store.ManagerSupplyConfig, resource Sma
 	reason := "emergency_retry_after_cancelled"
 
 	limit := smartAutomaticOrderQuantityLimit(cfg, resource)
-	if smartAccountAvailabilityEmergency(resource) {
-		limit = max(limit, smartEmergencyMinimumOrderQuantity(cfg))
-	}
 	return smartEmergencyRetryPlan{active: true, reason: reason, quantityLimit: limit, cooldown: 10 * time.Second}
 }
 

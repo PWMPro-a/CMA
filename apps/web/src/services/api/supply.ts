@@ -197,6 +197,7 @@ export interface SupplySmartResource {
   weakAccounts: number;
   totalAccounts?: number;
   disabledAccounts?: number;
+  frozenAccounts?: number;
   concurrencyLimitedAccounts?: number;
   concurrencyUnlimitedAccounts?: number;
   concurrencyMissingAccounts?: number;
@@ -244,6 +245,11 @@ export interface SupplySmartResource {
   demandPlanningRcuPerMinute: number;
   consumeRcuPerMinute: number;
   currentCapacityRcu: number;
+  availableCapacityRcu?: number;
+  frozenCapacityRcu?: number;
+  totalCapacityRcu?: number;
+  availableSustainMinutes?: number;
+  frozenSustainMinutes?: number;
   rawCapacityRcu?: number;
   timeLimitedCapacityRcu?: number;
   expiryWasteRiskRcu?: number;
@@ -312,6 +318,9 @@ export interface SupplySmartResource {
   quotaEstimatePendingPlans?: number;
   rawCapacityTokenM?: number;
   currentCapacityTokenM?: number;
+  availableCapacityTokenM?: number;
+  frozenCapacityTokenM?: number;
+  totalCapacityTokenM?: number;
   timeLimitedCapacityTokenM?: number;
   expiryWasteRiskTokenM?: number;
   observedTokenM1m?: number;

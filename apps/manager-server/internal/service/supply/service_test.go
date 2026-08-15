@@ -791,7 +791,7 @@ func TestAccountPoolStatsSeparateTotalAvailableHealthyAndDisabled(t *testing.T) 
 	}
 	resource := SmartResource{HealthyAccounts: 1, NormalAccounts: 1}
 	applyAccountPoolStats(&resource, stats)
-	if resource.TotalAccounts != 3 || resource.AvailableAccounts != 2 || resource.SchedulableAccounts != 2 ||
+	if resource.TotalAccounts != 2 || resource.AvailableAccounts != 2 || resource.SchedulableAccounts != 2 ||
 		resource.HealthyAccounts != 1 || resource.WeakAccounts != 1 || resource.AtRiskAccounts != 2 ||
 		resource.DisabledAccounts != 1 {
 		t.Fatalf("account pool statistics = %#v", resource)
@@ -858,7 +858,7 @@ func TestAccountPoolStatsKeepsPopulationIdentityAcrossLiveAndInspectionBuckets(t
 	resource := SmartResource{}
 	applyAccountPoolStats(&resource, stats)
 	if resource.NormalAccounts+resource.NeedsAttentionAccounts+resource.QuotaRiskAccounts+
-		resource.UnconfirmedAccounts+resource.DisabledAccounts != resource.TotalAccounts {
+		resource.UnconfirmedAccounts != resource.TotalAccounts {
 		t.Fatalf("exclusive account identity does not hold: %#v", resource)
 	}
 }
@@ -874,13 +874,26 @@ func TestAccountPoolSummaryFromStatsKeepsExclusivePoolIdentity(t *testing.T) {
 		unconfirmed:            8,
 		classificationObserved: true,
 	}, checkedAt)
-	if summary.CheckedAtMS != checkedAt.UnixMilli() || summary.Total != 46 || summary.Normal != 3 ||
+	if summary.CheckedAtMS != checkedAt.UnixMilli() || summary.Total != 26 || summary.Normal != 3 ||
 		summary.NeedsAttention != 0 || summary.QuotaRisk != 15 || summary.Disabled != 20 ||
 		summary.Unconfirmed != 8 || !summary.ClassificationObserved {
 		t.Fatalf("account pool summary = %#v", summary)
 	}
-	if summary.Normal+summary.NeedsAttention+summary.QuotaRisk+summary.Unconfirmed+summary.Disabled != summary.Total {
+	if summary.Normal+summary.NeedsAttention+summary.QuotaRisk+summary.Unconfirmed != summary.Total {
 		t.Fatalf("account pool summary identity does not hold: %#v", summary)
+	}
+}
+
+func TestAccountPoolSummarySeparatesEnabledPoolFromDisabledArchive(t *testing.T) {
+	summary := accountPoolSummaryFromStats(accountPoolStats{
+		total: 24, enabled: 14, normal: 3, needsAttention: 11,
+		classificationObserved: true,
+	}, time.Now())
+	if summary.Total != 14 || summary.Normal != 3 || summary.NeedsAttention != 11 || summary.Disabled != 10 {
+		t.Fatalf("14-account enabled pool summary = %#v", summary)
+	}
+	if summary.Normal+summary.NeedsAttention+summary.QuotaRisk+summary.Unconfirmed != summary.Total {
+		t.Fatalf("enabled pool identity does not hold: %#v", summary)
 	}
 }
 
@@ -947,12 +960,12 @@ func TestAccountPoolStatsMatchesCredentialStatusBuckets(t *testing.T) {
 	stats := accountPoolStatsFromFilesAndInspection(files, results)
 	resource := SmartResource{}
 	applyAccountPoolStats(&resource, stats)
-	if resource.TotalAccounts != 5 || resource.EnabledAccounts != 4 || resource.DisabledAccounts != 1 ||
-		resource.NormalAccounts != 1 || resource.NeedsAttentionAccounts != 1 || resource.QuotaRiskAccounts != 1 ||
-		resource.UnconfirmedAccounts != 1 || resource.AtRiskAccounts != 3 {
+	if resource.TotalAccounts != 4 || resource.EnabledAccounts != 4 || resource.DisabledAccounts != 1 ||
+		resource.NormalAccounts != 2 || resource.NeedsAttentionAccounts != 1 || resource.QuotaRiskAccounts != 1 ||
+		resource.UnconfirmedAccounts != 0 || resource.AtRiskAccounts != 2 {
 		t.Fatalf("operator account buckets = %#v", resource)
 	}
-	if resource.NormalAccounts+resource.AtRiskAccounts+resource.DisabledAccounts != resource.TotalAccounts {
+	if resource.NormalAccounts+resource.AtRiskAccounts != resource.TotalAccounts {
 		t.Fatalf("account bucket identity does not hold: %#v", resource)
 	}
 }
@@ -997,6 +1010,99 @@ func TestAccountPoolStatsKeepsRateLimitedCredentialsAvailable(t *testing.T) {
 	}
 	if stats.normal+stats.needsAttention+stats.quotaRisk+stats.unconfirmed+(stats.total-stats.enabled) != stats.total {
 		t.Fatalf("rate-limit account identity does not hold: %#v", stats)
+	}
+}
+
+func TestEnabledPoolCapacitySplitUsesCredentialIdentity(t *testing.T) {
+	resource := SmartResource{
+		CurrentCapacityRCU:     1_000,
+		TimeLimitedCapacityRCU: 1_000,
+		TotalCapacityRCU:       1_000,
+		capacityItems: []smartCapacityItem{
+			{
+				credentialKey:     operatorCredentialKey("normal.json", "normal"),
+				fileKey:           operatorFileCredentialKey("normal.json"),
+				usableCapacityRCU: 100,
+			},
+			{
+				credentialKey:     operatorCredentialKey("attention.json", "attention"),
+				fileKey:           operatorFileCredentialKey("attention.json"),
+				usableCapacityRCU: 900,
+			},
+		},
+	}
+	stats := accountPoolStats{
+		total: 2, enabled: 2, schedulable: 2, normal: 1, needsAttention: 1,
+		classificationObserved: true, liveObserved: true,
+		bucketByCredential: map[string]operatorAccountBucket{
+			operatorCredentialKey("normal.json", "normal"):       operatorAccountNormal,
+			operatorCredentialKey("attention.json", "attention"): operatorAccountNeedsAttention,
+		},
+	}
+	applyAccountPoolStats(&resource, stats)
+	if resource.TotalAccounts != 2 || resource.AvailableAccounts != 1 || resource.FrozenAccounts != 1 {
+		t.Fatalf("account split counts = %#v", resource)
+	}
+	if resource.TotalCapacityRCU != 1_000 || resource.AvailableCapacityRCU != 100 || resource.FrozenCapacityRCU != 900 {
+		t.Fatalf("credential capacity split = %#v", resource)
+	}
+}
+
+func TestAvailableCapacityEmergencyBuysOnlyMinimumCrossingQuantity(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Product: "oauth_30d", Strategy: managerconfigsvc.SupplyStrategyStrongSupply,
+		HealthyMinutesTarget: 60, WarningMinutes: 20, CriticalMinutes: 5,
+		CriticalAvailableAccounts: 2, HealthyAvailableAccounts: 10,
+		ReplenishBatchSize: 10, PrelockMaxQuantity: 10, NewAccountConfidence: 1,
+	}
+	resource := defaultSmartResource(cfg)
+	resource.SnapshotFresh = true
+	resource.CapacitySource = smartCapacitySourceInspection
+	resource.TotalAccounts = 14
+	resource.EnabledAccounts = 14
+	resource.AvailableAccounts = 3
+	resource.SchedulableAccounts = 14
+	resource.HealthyAccounts = 14
+	resource.CurrentCapacityRCU = 1_000
+	resource.TimeLimitedCapacityRCU = 1_000
+	resource.TotalCapacityRCU = 1_000
+	resource.AvailableCapacityRCU = 20
+	resource.FrozenCapacityRCU = 980
+	resource.ConsumeRCUPerMinute = 10
+
+	recalculateSmartResourceCapacityPlan(cfg, &resource)
+	if resource.HealthLevel != smartHealthHealthy {
+		t.Fatalf("total capacity should remain healthy before available-runway guard: %#v", resource)
+	}
+	New(nil, nil).reconcileSmartAccountPoolGuard(cfg, &resource)
+	if resource.DecisionReason != "available_capacity_critical" || resource.SuggestedQuantity != 1 ||
+		resource.SuggestedAction != smartActionEmergencyReplenish {
+		t.Fatalf("available emergency should buy one estimated account: %#v", resource)
+	}
+}
+
+func TestAvailableCapacityEmergencyCountsPrelockedCapacityBeforeBuying(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Product: "oauth_30d", Strategy: managerconfigsvc.SupplyStrategyStrongSupply,
+		HealthyMinutesTarget: 60, WarningMinutes: 20, CriticalMinutes: 5,
+		CriticalAvailableAccounts: 2, HealthyAvailableAccounts: 10,
+		ReplenishBatchSize: 10, PrelockMaxQuantity: 10, NewAccountConfidence: 1,
+	}
+	resource := defaultSmartResource(cfg)
+	resource.TotalAccounts = 14
+	resource.AvailableAccounts = 2
+	resource.CurrentCapacityRCU = 1_000
+	resource.AvailableCapacityRCU = 20
+	resource.FrozenCapacityRCU = 980
+	resource.TotalCapacityRCU = 1_000
+	resource.ConsumeRCUPerMinute = 10
+	resource.PrelockedCapacityRCU = smartEstimatedNewAccountCapacityForResource(cfg, resource)
+	resource.EmergencyShortage = true
+	resource.EmergencyReason = "available_capacity_critical"
+	resource.DecisionReason = "available_capacity_critical"
+
+	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); got != 0 {
+		t.Fatalf("prelocked capacity should cross both emergency lines without another order: got %d", got)
 	}
 }
 
@@ -1425,10 +1531,8 @@ func TestCustomSupplyRefillsVerifiedPoolToConfiguredHealthyFloor(t *testing.T) {
 		ConsumeRCUPerMinute: 1,
 	}
 	New(nil, nil).reconcileSmartAccountPoolGuard(cfg, &resource)
-	if resource.DecisionReason != "healthy_available_accounts" ||
-		resource.SuggestedAction != smartActionEmergencyReplenish || resource.SuggestedQuantity != 10 ||
-		resource.AccountQuantityDeficit != 88 {
-		t.Fatalf("verified healthy-floor plan = %#v", resource)
+	if resource.EmergencyShortage || resource.SuggestedAction == smartActionEmergencyReplenish || resource.SuggestedQuantity != 0 {
+		t.Fatalf("healthy-floor-only shortage must not trigger emergency purchase = %#v", resource)
 	}
 }
 
@@ -1483,7 +1587,7 @@ func TestLiveAccountPoolCapsStaleInspectionCapacityAndRecalculatesShortage(t *te
 	resource.CurrentCapacityRCU = 41_000
 	resource.TimeLimitedCapacityRCU = 41_000
 
-	applyAccountPoolStats(&resource, accountPoolStats{total: 1220, schedulable: 5})
+	applyAccountPoolStats(&resource, accountPoolStats{total: 1220, enabled: 5, schedulable: 5, liveObserved: true})
 	if !reconcileSmartCapacityWithAccountPool(&resource, 41) {
 		t.Fatal("live account decrease must cap stale inspection capacity")
 	}

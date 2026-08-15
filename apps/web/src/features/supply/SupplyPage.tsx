@@ -974,6 +974,15 @@ export function SupplyPage() {
     typeof value === 'number' && Number.isFinite(value) ? (value * tokenUnit) / 1000 : undefined;
   const currentCapacityTokenM =
     smart?.currentCapacityTokenM ?? rcuToTokenM(smart?.currentCapacityRcu);
+  const totalCapacityTokenM = smart?.totalCapacityTokenM ?? currentCapacityTokenM;
+  const availableCapacityTokenM =
+    smart?.availableCapacityTokenM ??
+    rcuToTokenM(smart?.availableCapacityRcu) ??
+    totalCapacityTokenM;
+  const frozenCapacityTokenM =
+    smart?.frozenCapacityTokenM ??
+    rcuToTokenM(smart?.frozenCapacityRcu) ??
+    Math.max(0, (totalCapacityTokenM ?? 0) - (availableCapacityTokenM ?? 0));
   const timeLimitedCapacityTokenM = smart?.timeLimitedCapacityTokenM ?? currentCapacityTokenM;
   const targetCapacityTokenM = smart?.targetCapacityTokenM ?? rcuToTokenM(smart?.targetCapacityRcu);
   const capacityGapTokenM = smart?.capacityGapTokenM ?? rcuToTokenM(smart?.capacityGapRcu);
@@ -993,6 +1002,11 @@ export function SupplyPage() {
     smart?.forecastSustainMinutes ??
     (forecastTokenMPerMinute > 0 && (timeLimitedCapacityTokenM ?? 0) > 0
       ? (timeLimitedCapacityTokenM ?? 0) / forecastTokenMPerMinute
+      : undefined);
+  const availableSustainMinutes =
+    smart?.availableSustainMinutes ??
+    (forecastTokenMPerMinute > 0 && (availableCapacityTokenM ?? 0) > 0
+      ? (availableCapacityTokenM ?? 0) / forecastTokenMPerMinute
       : undefined);
   const rawSustainMinutes =
     smart?.rawSustainMinutes ??
@@ -1439,19 +1453,10 @@ export function SupplyPage() {
       return [
         {
           label: t('supply.effective_capacity_1h'),
-          value: formatTokenM(rawCapacityTokenM),
-          detail: t('supply.raw_capacity_waste_detail', {
-            raw: formatNumber(rawCapacityTokenM),
-            usable: formatNumber(timeLimitedCapacityTokenM),
-            waste: formatNumber(expiryWasteRiskTokenM ?? 0),
-            accountQuota: formatNumber(smart?.accountQuotaEstimateM, 2),
-            source: t(
-              `supply.quota_estimate_source_${smart?.accountQuotaEstimateSource || 'default'}`
-            ),
-            samples: formatInteger(smart?.accountQuotaCalibrationSamples ?? 0),
-            minutes: smart?.accountLifetimeMinutes ?? 60,
-            accounts: formatInteger(smart?.expiringAccounts ?? 0),
-            next: formatMinutes(smart?.expiringWithinMinutes),
+          value: formatTokenM(totalCapacityTokenM),
+          detail: t('supply.capacity_split_detail', {
+            available: formatTokenM(availableCapacityTokenM),
+            frozen: formatTokenM(frozenCapacityTokenM),
           }),
           icon: <IconDatabaseZap size={18} />,
           tone: 'teal',
@@ -1536,11 +1541,13 @@ export function SupplyPage() {
     draft.healthyMinutesTarget,
     draft.smartEnabled,
     draft.targetAvailableAccounts,
-    expiryWasteRiskTokenM,
+    displayedCPAAvailable,
+    displayedCPADeficit,
+    availableCapacityTokenM,
+    frozenCapacityTokenM,
     inventory,
     overview,
-    rawCapacityTokenM,
-    timeLimitedCapacityTokenM,
+    totalCapacityTokenM,
     smart,
     t,
   ]);
@@ -1963,12 +1970,39 @@ export function SupplyPage() {
                 </small>
               </article>
             ))}
+            <article className={`${styles.consumptionForecastItem} ${styles.forecastHealthy}`}>
+              <span>{t('supply.forecast_available_balance')}</span>
+              <strong>{formatTokenM(availableCapacityTokenM)}</strong>
+              <small>
+                {t('supply.forecast_available_balance_hint', {
+                  accounts: formatInteger(smart?.availableAccounts),
+                })}
+              </small>
+            </article>
+            <article className={`${styles.consumptionForecastItem} ${styles.forecastWarning}`}>
+              <span>{t('supply.forecast_frozen_balance')}</span>
+              <strong>{formatTokenM(frozenCapacityTokenM)}</strong>
+              <small>
+                {t('supply.forecast_frozen_balance_hint', {
+                  accounts: formatInteger(smart?.frozenAccounts),
+                })}
+              </small>
+            </article>
+            <article className={`${styles.consumptionForecastItem} ${styles.forecastRunway}`}>
+              <span>{t('supply.forecast_available_runway')}</span>
+              <strong>{formatMinutes(availableSustainMinutes)}</strong>
+              <small>
+                {t('supply.forecast_available_runway_hint', {
+                  critical: formatMinutes(smart?.criticalMinutes),
+                })}
+              </small>
+            </article>
             <article className={`${styles.consumptionForecastItem} ${styles.forecastBalance}`}>
               <span>{t('supply.forecast_usable_balance')}</span>
-              <strong>{formatTokenM(timeLimitedCapacityTokenM)}</strong>
+              <strong>{formatTokenM(totalCapacityTokenM)}</strong>
               <small>
                 {t('supply.forecast_usable_balance_hint', {
-                  raw: formatTokenM(rawCapacityTokenM),
+                  raw: formatTokenM(totalCapacityTokenM),
                   waste: formatTokenM(expiryWasteRiskTokenM ?? 0),
                 })}
               </small>

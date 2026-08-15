@@ -1461,7 +1461,7 @@ func TestGetStatusRefreshesSmartSnapshotWhenAutomaticSupplyDisabled(t *testing.T
 	if !status.SmartResource.SnapshotFresh || status.SmartResource.CapacitySource != smartCapacitySourceInspection {
 		t.Fatalf("cold status should load the completed quota inspection snapshot: %#v", status.SmartResource)
 	}
-	if status.SmartResource.TotalAccounts != 3 || status.SmartResource.AvailableAccounts != 2 ||
+	if status.SmartResource.TotalAccounts != 2 || status.SmartResource.AvailableAccounts != 2 ||
 		status.SmartResource.HealthyAccounts != 1 || status.SmartResource.WeakAccounts != 1 ||
 		status.SmartResource.DisabledAccounts != 1 {
 		t.Fatalf("cold status did not combine live pool counts with inspection health: %#v", status.SmartResource)
@@ -1483,7 +1483,7 @@ func TestGetStatusRefreshesSmartSnapshotWhenAutomaticSupplyDisabled(t *testing.T
 	if err != nil {
 		t.Fatalf("status after newer inspection: %v", err)
 	}
-	if status.SmartResource.CapacitySnapshotRunID <= firstRunID || status.SmartResource.TotalAccounts != 3 ||
+	if status.SmartResource.CapacitySnapshotRunID <= firstRunID || status.SmartResource.TotalAccounts != 2 ||
 		status.SmartResource.AvailableAccounts != 2 || status.SmartResource.HealthyAccounts != 2 ||
 		status.SmartResource.WeakAccounts != 0 || status.SmartResource.DisabledAccounts != 1 {
 		t.Fatalf("status did not adopt the newer completed inspection: %#v", status.SmartResource)
@@ -1889,6 +1889,34 @@ func TestApplySmartExpiryCapacityReportsEventTimeline(t *testing.T) {
 	}
 	if resource.NextCapacityDeficitAtMS != now.Add(60*time.Minute).UnixMilli() {
 		t.Fatalf("next capacity deficit = %d, want %d", resource.NextCapacityDeficitAtMS, now.Add(60*time.Minute).UnixMilli())
+	}
+}
+
+func TestEqualExpiryCapacitySplitsProportionallyAcrossAccountStates(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	resource := SmartResource{RawCapacityRCU: 400, UnitCapacityRCU: 1}
+	items := []smartCapacityItem{
+		{
+			credentialKey: operatorCredentialKey("normal.json", "normal"),
+			capacityRCU:   100, remainingMinutes: 10,
+		},
+		{
+			credentialKey: operatorCredentialKey("frozen.json", "frozen"),
+			capacityRCU:   300, remainingMinutes: 10,
+		},
+	}
+	resource.capacityItems = items
+	applySmartExpiryCapacity(&resource, resource.capacityItems, 20, now)
+	applyAccountPoolStats(&resource, accountPoolStats{
+		total: 2, enabled: 2, schedulable: 2, normal: 1, needsAttention: 1,
+		classificationObserved: true, liveObserved: true,
+		bucketByCredential: map[string]operatorAccountBucket{
+			operatorCredentialKey("normal.json", "normal"): operatorAccountNormal,
+			operatorCredentialKey("frozen.json", "frozen"): operatorAccountNeedsAttention,
+		},
+	})
+	if resource.TotalCapacityRCU != 200 || resource.AvailableCapacityRCU != 50 || resource.FrozenCapacityRCU != 150 {
+		t.Fatalf("equal-expiry proportional split = %#v", resource)
 	}
 }
 
@@ -2490,10 +2518,10 @@ func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *t
 	}
 	if status.SmartResource.SupplyPressureLevel != smartSupplyPressurePlenty ||
 		status.SmartResource.SuggestedAction != smartActionEmergencyReplenish ||
-		status.SmartResource.DecisionReason != "emergency_capacity_shortage" {
+		status.SmartResource.DecisionReason != "available_capacity_critical" {
 		t.Fatalf("smart resource = %#v", status.SmartResource)
 	}
-	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "emergency_refill_to_healthy" || status.Orders[0].RequestedQuantity != 10 {
+	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "available_capacity_critical" || status.Orders[0].RequestedQuantity != 10 {
 		t.Fatalf("staged order = %#v", status.Orders)
 	}
 }
@@ -2568,10 +2596,10 @@ func TestSmartAutomaticUsesQuotaSizedBatchWhenSupplyIsScarce(t *testing.T) {
 	}
 	if status.SmartResource.SupplyPressureLevel != smartSupplyPressureScarce ||
 		status.SmartResource.SuggestedAction != smartActionEmergencyReplenish ||
-		status.SmartResource.DecisionReason != "emergency_capacity_shortage" {
+		status.SmartResource.DecisionReason != "available_capacity_critical" {
 		t.Fatalf("smart resource = %#v", status.SmartResource)
 	}
-	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "emergency_refill_to_healthy" || status.Orders[0].RequestedQuantity != 10 {
+	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "available_capacity_critical" || status.Orders[0].RequestedQuantity != 10 {
 		t.Fatalf("staged scarce order = %#v", status.Orders)
 	}
 }
@@ -2730,8 +2758,8 @@ func TestSmartEmergencyAccountWaterlineKeepsAutomaticOrderWhenQuotaIsHealthy(t *
 		t.Fatal("critical live-account waterline must keep the existing reservation")
 	}
 	resource := service.currentSmartResource(cfg.Supply)
-	if !smartResourceEmergency(resource) || resource.DecisionReason != "critical_available_accounts" ||
-		resource.LockedOrderID != order.OrderID || resource.SuggestedQuantity != 4 {
+	if !smartResourceEmergency(resource) || resource.DecisionReason != "available_capacity_critical" ||
+		resource.LockedOrderID != order.OrderID || resource.SuggestedQuantity != 1 {
 		t.Fatalf("live-account emergency resource = %#v", resource)
 	}
 }
