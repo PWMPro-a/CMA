@@ -79,6 +79,18 @@ func rootHandler(
 	proxyHandler *proxycontroller.Handler,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Management responses are live operational snapshots. The panel polls
+		// these stable URLs repeatedly, so allowing a browser or intermediary to
+		// reuse an older JSON response can make the account and supply pages show
+		// different generations of the same pool after imports, cleanup, or a
+		// manager rollout. Keep caching disabled for the complete management API;
+		// individual services already provide their own short-lived in-process
+		// caches where amortization is required.
+		if strings.HasPrefix(r.URL.Path, "/v0/management/") {
+			w.Header().Set("Cache-Control", "no-store, max-age=0")
+			w.Header().Set("Pragma", "no-cache")
+			w.Header().Set("Expires", "0")
+		}
 		if r.Method == http.MethodOptions {
 			middleware.WriteCORS(appCtx.Config, w, r)
 			w.WriteHeader(http.StatusNoContent)

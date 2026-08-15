@@ -138,9 +138,11 @@ func TestServerCompatContainerOpsInfoRequiresPanelAuth(t *testing.T) {
 
 	unauthorizedRR := testutil.Request(t, handler, http.MethodGet, "/v0/management/container-ops/info", "", "")
 	testutil.RequireStatus(t, unauthorizedRR, http.StatusUnauthorized)
+	assertManagementNoStore(t, unauthorizedRR)
 
 	infoRR := testutil.Request(t, handler, http.MethodGet, "/v0/management/container-ops/info", "", testutil.AdminKey)
 	testutil.RequireStatus(t, infoRR, http.StatusOK)
+	assertManagementNoStore(t, infoRR)
 	var info struct {
 		Enabled bool   `json:"enabled"`
 		Mode    string `json:"mode"`
@@ -158,6 +160,19 @@ func TestServerCompatContainerOpsInfoRequiresPanelAuth(t *testing.T) {
 	}
 	if info.NewAPI.RecommendedBaseURL != "http://host.docker.internal:8317/v1" {
 		t.Fatalf("recommended base url = %q", info.NewAPI.RecommendedBaseURL)
+	}
+}
+
+func assertManagementNoStore(t *testing.T, rr *httptest.ResponseRecorder) {
+	t.Helper()
+	if got, want := rr.Header().Get("Cache-Control"), "no-store, max-age=0"; got != want {
+		t.Fatalf("management cache control = %q, want %q", got, want)
+	}
+	if got, want := rr.Header().Get("Pragma"), "no-cache"; got != want {
+		t.Fatalf("management pragma = %q, want %q", got, want)
+	}
+	if got, want := rr.Header().Get("Expires"), "0"; got != want {
+		t.Fatalf("management expires = %q, want %q", got, want)
 	}
 }
 
