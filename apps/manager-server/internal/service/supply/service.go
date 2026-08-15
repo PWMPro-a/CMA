@@ -7527,12 +7527,14 @@ func (s *Service) automaticBaselineBlockReason(resource SmartResource) string {
 
 func (s *Service) automaticSupplyGuardReason(resource SmartResource) string {
 	if resource.QuotaEstimateOrderingBlocked {
-		s.requestStaleInspectionSnapshotRefresh()
-		return "quota_estimate_self_check_pending"
+		// Quota calibration is advisory for ordering. A rejected or still-pending
+		// observation is already replaced by the configured no-data fallback in
+		// the resource calculation, so keep inspecting without stranding supply.
+		s.requestQuotaEstimateCalibrationRefresh()
 	}
-	// Upward quota divergence remains a visible staged calibration but does not
-	// pause ordering. Keep collecting independent inspection rounds in the
-	// background so the adopted value can converge without operator action.
+	// Quota divergence remains a visible staged calibration but does not pause
+	// ordering. Keep collecting independent inspection rounds in the background
+	// so the adopted value can converge without operator action.
 	if resource.QuotaEstimatePendingPlans > 0 {
 		s.requestQuotaEstimateCalibrationRefresh()
 	}

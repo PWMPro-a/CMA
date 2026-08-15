@@ -791,8 +791,8 @@ func TestAutomaticSupplyGuardRequiresFreshBaselineAndSettledImports(t *testing.T
 	}
 	resource.QuotaEstimatePendingPlans = 0
 	resource.QuotaEstimateOrderingBlocked = true
-	if reason := service.automaticSupplyGuardReason(resource); reason != "quota_estimate_self_check_pending" {
-		t.Fatalf("quota estimate self-check guard reason = %q", reason)
+	if reason := service.automaticSupplyGuardReason(resource); reason != "" {
+		t.Fatalf("quota estimate self-check must use the fallback without pausing ordering, reason = %q", reason)
 	}
 	resource.QuotaEstimateOrderingBlocked = false
 	resource.PendingInspectionAccounts = 6
