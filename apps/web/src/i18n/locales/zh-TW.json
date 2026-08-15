@@ -6022,7 +6022,13 @@
     "quota_plan_fallback_input": "無有效資料時預設額度（M）",
     "quota_plan_fixed_input": "固定單帳號額度（M）",
     "quota_estimate_source_fixed": "類型固定值",
-    "smart_reason_quota_estimate_self_check_pending": "帳號類型額度觀察值下調超過 10%，正在進行獨立巡檢自檢，確認前暫停自動下單"
+    "smart_reason_quota_estimate_self_check_pending": "帳號類型額度觀察值下調超過 10%，正在進行獨立巡檢自檢，確認前暫停自動下單",
+    "forecast_runway_comparison_hint": "按到期事件可支撐；忽略到期的理論值為 {{raw}}",
+    "forecast_next_expiry": "最近帳號到期",
+    "forecast_next_expiry_hint": "距離到期約 {{minutes}}，調度將優先消耗臨期帳號",
+    "forecast_expiry_unknown": "目前容量沒有匹配到採購租期，請檢查帳號生命週期記錄",
+    "forecast_next_deficit": "預計首次容量缺口",
+    "forecast_next_deficit_hint": "按每個帳號的剩餘額度、到期時間和目前消耗速度計算"
   },
   "egress_ip": {
     "card_eyebrow": "一鍵出口 IP",

@@ -6022,7 +6022,13 @@
     "quota_plan_fallback_input": "Default quota without valid data (M)",
     "quota_plan_fixed_input": "Fixed quota per account (M)",
     "quota_estimate_source_fixed": "fixed plan value",
-    "smart_reason_quota_estimate_self_check_pending": "The observed account-type quota estimate fell by more than 10%; independent inspection self-check is in progress and automatic ordering is paused until confirmation"
+    "smart_reason_quota_estimate_self_check_pending": "The observed account-type quota estimate fell by more than 10%; independent inspection self-check is in progress and automatic ordering is paused until confirmation",
+    "forecast_runway_comparison_hint": "Expiry-event runway; the theoretical value ignoring expiry is {{raw}}",
+    "forecast_next_expiry": "Nearest account expiry",
+    "forecast_next_expiry_hint": "About {{minutes}} remaining; routing prioritizes accounts near expiry",
+    "forecast_expiry_unknown": "Current capacity is not matched to a supplier lease; inspect the account lifecycle records",
+    "forecast_next_deficit": "First projected capacity gap",
+    "forecast_next_deficit_hint": "Calculated from each account balance, expiry deadline, and current burn rate"
   },
   "egress_ip": {
     "card_eyebrow": "One-click egress IP",

@@ -212,6 +212,11 @@ export interface SupplySmartResource {
   rawCapacityRcu?: number;
   timeLimitedCapacityRcu?: number;
   expiryWasteRiskRcu?: number;
+  rawSustainMinutes?: number;
+  expiryLimitedSustainMinutes?: number;
+  nearestExpiryAtMs?: number;
+  nearestExpiryMinutes?: number;
+  nextCapacityDeficitAtMs?: number;
   expiringAccounts?: number;
   expiringWithinMinutes?: number;
   expiringCapacityRcu?: number;

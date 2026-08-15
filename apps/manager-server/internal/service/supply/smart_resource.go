@@ -137,32 +137,37 @@ type SmartResource struct {
 	EstimatedSustainMinutes   float64 `json:"estimatedSustainMinutes"`
 	// EmergencyShortage marks a runway shortfall that takes precedence over
 	// normal demand-trend observation.
-	EmergencyShortage          bool    `json:"emergencyShortage"`
-	HealthyMinutesTarget       int     `json:"healthyMinutesTarget"`
-	WarningMinutes             int     `json:"warningMinutes"`
-	CriticalMinutes            int     `json:"criticalMinutes"`
-	RPM30M                     float64 `json:"rpm30m"`
-	RPM5MPeak                  float64 `json:"rpm5mPeak"`
-	TPM30M                     float64 `json:"tpm30m"`
-	RPM1M                      float64 `json:"rpm1m"`
-	RPM5M                      float64 `json:"rpm5m"`
-	RPM10M                     float64 `json:"rpm10m"`
-	TPM1M                      float64 `json:"tpm1m"`
-	TPM5M                      float64 `json:"tpm5m"`
-	TPM10M                     float64 `json:"tpm10m"`
-	RequestDemandRCUPerMinute  float64 `json:"requestDemandRcuPerMinute"`
-	TokenDemandRCUPerMinute    float64 `json:"tokenDemandRcuPerMinute"`
-	DemandDriver               string  `json:"demandDriver,omitempty"`
-	ConsumeRCU1M               float64 `json:"consumeRcu1m"`
-	ConsumeRCU5M               float64 `json:"consumeRcu5m"`
-	ConsumeRCU10M              float64 `json:"consumeRcu10m"`
-	DemandTrend                string  `json:"demandTrend"`
-	DemandPlanningRCUPerMinute float64 `json:"demandPlanningRcuPerMinute"`
-	ConsumeRCUPerMinute        float64 `json:"consumeRcuPerMinute"`
-	CurrentCapacityRCU         float64 `json:"currentCapacityRcu"`
-	RawCapacityRCU             float64 `json:"rawCapacityRcu,omitempty"`
-	TimeLimitedCapacityRCU     float64 `json:"timeLimitedCapacityRcu,omitempty"`
-	ExpiryWasteRiskRCU         float64 `json:"expiryWasteRiskRcu,omitempty"`
+	EmergencyShortage           bool    `json:"emergencyShortage"`
+	HealthyMinutesTarget        int     `json:"healthyMinutesTarget"`
+	WarningMinutes              int     `json:"warningMinutes"`
+	CriticalMinutes             int     `json:"criticalMinutes"`
+	RPM30M                      float64 `json:"rpm30m"`
+	RPM5MPeak                   float64 `json:"rpm5mPeak"`
+	TPM30M                      float64 `json:"tpm30m"`
+	RPM1M                       float64 `json:"rpm1m"`
+	RPM5M                       float64 `json:"rpm5m"`
+	RPM10M                      float64 `json:"rpm10m"`
+	TPM1M                       float64 `json:"tpm1m"`
+	TPM5M                       float64 `json:"tpm5m"`
+	TPM10M                      float64 `json:"tpm10m"`
+	RequestDemandRCUPerMinute   float64 `json:"requestDemandRcuPerMinute"`
+	TokenDemandRCUPerMinute     float64 `json:"tokenDemandRcuPerMinute"`
+	DemandDriver                string  `json:"demandDriver,omitempty"`
+	ConsumeRCU1M                float64 `json:"consumeRcu1m"`
+	ConsumeRCU5M                float64 `json:"consumeRcu5m"`
+	ConsumeRCU10M               float64 `json:"consumeRcu10m"`
+	DemandTrend                 string  `json:"demandTrend"`
+	DemandPlanningRCUPerMinute  float64 `json:"demandPlanningRcuPerMinute"`
+	ConsumeRCUPerMinute         float64 `json:"consumeRcuPerMinute"`
+	CurrentCapacityRCU          float64 `json:"currentCapacityRcu"`
+	RawCapacityRCU              float64 `json:"rawCapacityRcu,omitempty"`
+	TimeLimitedCapacityRCU      float64 `json:"timeLimitedCapacityRcu,omitempty"`
+	ExpiryWasteRiskRCU          float64 `json:"expiryWasteRiskRcu,omitempty"`
+	RawSustainMinutes           float64 `json:"rawSustainMinutes,omitempty"`
+	ExpiryLimitedSustainMinutes float64 `json:"expiryLimitedSustainMinutes,omitempty"`
+	NearestExpiryAtMS           int64   `json:"nearestExpiryAtMs,omitempty"`
+	NearestExpiryMinutes        float64 `json:"nearestExpiryMinutes,omitempty"`
+	NextCapacityDeficitAtMS     int64   `json:"nextCapacityDeficitAtMs,omitempty"`
 	// ExpiringAccounts counts currently schedulable credentials whose remaining
 	// supplier/OAuth validity is inside the warning window. They remain usable,
 	// but their usable capacity is already bounded by expiry.
@@ -312,6 +317,7 @@ type inspectionQuotaSnapshot struct {
 type smartCapacityItem struct {
 	capacityRCU      float64
 	remainingMinutes float64
+	expiresAtMS      int64
 }
 
 func defaultSmartResource(cfg store.ManagerSupplyConfig) SmartResource {
@@ -627,10 +633,14 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		if hasCapacityQuota && remaining >= smartNormalAccountMinimumRemainingFraction && !inspectionResultInCooldown(result) {
 			resource.NormalAccounts++
 		}
-		capacityItems = append(capacityItems, smartCapacityItem{
+		capacityItem := smartCapacityItem{
 			capacityRCU:      capacity,
 			remainingMinutes: remainingMinutes,
-		})
+		}
+		if hasActiveLease {
+			capacityItem.expiresAtMS = leaseExpiresAtMS
+		}
+		capacityItems = append(capacityItems, capacityItem)
 	}
 	// A completed inspection is intentionally snapshot based, so an account
 	// delivered just after that run used to contribute zero capacity until the
@@ -663,7 +673,11 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		if capacity <= 0 {
 			continue
 		}
-		capacityItems = append(capacityItems, smartCapacityItem{capacityRCU: capacity, remainingMinutes: remainingMinutes})
+		capacityItems = append(capacityItems, smartCapacityItem{
+			capacityRCU:      capacity,
+			remainingMinutes: remainingMinutes,
+			expiresAtMS:      item.LeaseExpiresAtMS,
+		})
 		resource.TotalAccounts++
 		resource.EnabledAccounts++
 		resource.UnconfirmedAccounts++
@@ -698,13 +712,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		resource.RawCapacityRCU += item.capacityRCU
 	}
 	resource.RawCapacityRCU = round2(resource.RawCapacityRCU)
-	resource.CurrentCapacityRCU = resource.RawCapacityRCU
-	if consumeRCUPerMinute > 0 {
-		usableCapacity, wasteRisk := smartExpiryLimitedCapacity(capacityItems, consumeRCUPerMinute)
-		resource.TimeLimitedCapacityRCU = round2(usableCapacity)
-		resource.ExpiryWasteRiskRCU = round2(wasteRisk)
-		resource.CurrentCapacityRCU = resource.TimeLimitedCapacityRCU
-	}
+	applySmartExpiryCapacity(&resource, capacityItems, consumeRCUPerMinute, now)
 	resource.TargetCapacityRCU = round2(consumeRCUPerMinute * float64(resource.EffectiveHealthyMinutes))
 	resource.RecommendedCapacityRCU = resource.TargetCapacityRCU
 	consumeRCUPerMinute = s.applySmartDemandMemory(cfg, &resource, now, consumeRCUPerMinute)
@@ -873,10 +881,14 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		}
 		weightedCapacity += rawCapacity
 		if rawCapacity > 0 {
-			capacityItems = append(capacityItems, smartCapacityItem{
+			capacityItem := smartCapacityItem{
 				capacityRCU:      rawCapacity,
 				remainingMinutes: remainingMinutes,
-			})
+			}
+			if suppliedAccount {
+				capacityItem.expiresAtMS = leaseExpiresAt.UnixMilli()
+			}
+			capacityItems = append(capacityItems, capacityItem)
 		}
 		resource.recordExpiringAccount(remainingMinutes, rawCapacity)
 		effectiveAvailable++
@@ -884,13 +896,7 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 	resource.AvailableAccounts = int(effectiveAvailable)
 	applySmartAccountCountBreakdown(&resource)
 	resource.RawCapacityRCU = round2(weightedCapacity)
-	resource.CurrentCapacityRCU = resource.RawCapacityRCU
-	if consumeRCUPerMinute > 0 {
-		usableCapacity, wasteRisk := smartExpiryLimitedCapacity(capacityItems, consumeRCUPerMinute)
-		resource.TimeLimitedCapacityRCU = round2(usableCapacity)
-		resource.ExpiryWasteRiskRCU = round2(wasteRisk)
-		resource.CurrentCapacityRCU = resource.TimeLimitedCapacityRCU
-	}
+	applySmartExpiryCapacity(&resource, capacityItems, consumeRCUPerMinute, now)
 	applyAccountPoolConcurrency(&resource, accountPoolStatsFromFiles(authSnapshot.files))
 	resource.TargetCapacityRCU = round2(consumeRCUPerMinute * float64(resource.EffectiveHealthyMinutes))
 	resource.RecommendedCapacityRCU = resource.TargetCapacityRCU
@@ -1424,8 +1430,21 @@ func applySmartTokenMetrics(resource *SmartResource) {
 	resource.DemandPlanningTokenMPerMinute = round2(smartRCUToTokenMillion(resource.DemandPlanningRCUPerMinute, unit))
 	forecastRCUPerMinute := math.Max(resource.ConsumeRCUPerMinute, resource.DemandPlanningRCUPerMinute)
 	resource.ForecastSustainMinutes = 0
+	resource.RawSustainMinutes = 0
+	resource.ExpiryLimitedSustainMinutes = 0
+	resource.NextCapacityDeficitAtMS = 0
 	if forecastRCUPerMinute > 0 {
+		resource.RawSustainMinutes = round1(resource.RawCapacityRCU / forecastRCUPerMinute)
+		resource.ExpiryLimitedSustainMinutes = round1(resource.CurrentCapacityRCU / forecastRCUPerMinute)
 		resource.ForecastSustainMinutes = round1(resource.CurrentCapacityRCU / forecastRCUPerMinute)
+		if resource.GeneratedAtMS > 0 && resource.CurrentCapacityRCU > 0 {
+			resource.NextCapacityDeficitAtMS = resource.GeneratedAtMS + int64(resource.CurrentCapacityRCU/forecastRCUPerMinute*float64(time.Minute/time.Millisecond))
+		}
+	}
+	if resource.NearestExpiryAtMS > resource.GeneratedAtMS && resource.GeneratedAtMS > 0 {
+		resource.NearestExpiryMinutes = round1(float64(resource.NearestExpiryAtMS-resource.GeneratedAtMS) / float64(time.Minute/time.Millisecond))
+	} else if resource.NearestExpiryAtMS > 0 {
+		resource.NearestExpiryMinutes = 0
 	}
 	resource.TargetCapacityTokenM = round2(smartRCUToTokenMillion(resource.TargetCapacityRCU, unit))
 	resource.CapacityGapTokenM = round2(smartRCUToTokenMillion(resource.CapacityGapRCU, unit))
@@ -2558,6 +2577,41 @@ func smartExpiryLimitedCapacity(items []smartCapacityItem, consumeRCUPerMinute f
 		wasteRisk += math.Max(0, item.capacityRCU-use)
 	}
 	return usable, wasteRisk
+}
+
+// applySmartExpiryCapacity turns per-account quota and supplier deadlines into
+// one capacity timeline. Raw capacity answers how much quota exists, while the
+// time-limited capacity answers how much can still be consumed if the oldest
+// lease is drained first. Keeping the absolute nearest deadline lets the UI
+// explain why a runway value can remain flat after a recovery or a staggered
+// purchase instead of presenting only the opaque capacity/rate quotient.
+func applySmartExpiryCapacity(resource *SmartResource, items []smartCapacityItem, consumeRCUPerMinute float64, now time.Time) {
+	if resource == nil {
+		return
+	}
+	resource.CurrentCapacityRCU = resource.RawCapacityRCU
+	resource.TimeLimitedCapacityRCU = resource.RawCapacityRCU
+	resource.ExpiryWasteRiskRCU = 0
+	resource.NearestExpiryAtMS = 0
+	resource.NearestExpiryMinutes = 0
+	for _, item := range items {
+		if item.expiresAtMS <= now.UnixMilli() {
+			continue
+		}
+		if resource.NearestExpiryAtMS == 0 || item.expiresAtMS < resource.NearestExpiryAtMS {
+			resource.NearestExpiryAtMS = item.expiresAtMS
+		}
+	}
+	if resource.NearestExpiryAtMS > 0 {
+		resource.NearestExpiryMinutes = round1(math.Max(0, time.UnixMilli(resource.NearestExpiryAtMS).Sub(now).Minutes()))
+	}
+	if consumeRCUPerMinute <= 0 {
+		return
+	}
+	usableCapacity, wasteRisk := smartExpiryLimitedCapacity(items, consumeRCUPerMinute)
+	resource.TimeLimitedCapacityRCU = round2(usableCapacity)
+	resource.ExpiryWasteRiskRCU = round2(wasteRisk)
+	resource.CurrentCapacityRCU = resource.TimeLimitedCapacityRCU
 }
 
 func smartAccountRemainingMinutes(values map[string]any, now time.Time, fallbackMinutes int) float64 {

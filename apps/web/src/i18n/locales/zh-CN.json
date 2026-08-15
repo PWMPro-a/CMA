@@ -6022,7 +6022,13 @@
     "quota_plan_fallback_input": "无有效数据时默认额度（M）",
     "quota_plan_fixed_input": "固定单账号额度（M）",
     "quota_estimate_source_fixed": "类型固定值",
-    "smart_reason_quota_estimate_self_check_pending": "账号类型额度观察值下浮超过 10%，正在进行独立巡检自检，确认前暂停自动下单"
+    "smart_reason_quota_estimate_self_check_pending": "账号类型额度观察值下浮超过 10%，正在进行独立巡检自检，确认前暂停自动下单",
+    "forecast_runway_comparison_hint": "按到期事件可支撑；忽略到期的理论值为 {{raw}}",
+    "forecast_next_expiry": "最近账号到期",
+    "forecast_next_expiry_hint": "距离到期约 {{minutes}}，调度将优先消耗临期账号",
+    "forecast_expiry_unknown": "当前容量没有匹配到采购租期，请检查账号生命周期记录",
+    "forecast_next_deficit": "预计首次容量缺口",
+    "forecast_next_deficit_hint": "按每个账号的剩余额度、到期时间和当前消耗速度计算"
   },
   "egress_ip": {
     "card_eyebrow": "一键出口 IP",

@@ -1862,6 +1862,36 @@ func TestSmartResourceReportsExpiringAccountCapacity(t *testing.T) {
 	}
 }
 
+func TestApplySmartExpiryCapacityReportsEventTimeline(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	resource := SmartResource{
+		GeneratedAtMS:              now.UnixMilli(),
+		UnitCapacityRCU:            1,
+		RawCapacityRCU:             200,
+		ConsumeRCUPerMinute:        2,
+		DemandPlanningRCUPerMinute: 2,
+	}
+	items := []smartCapacityItem{
+		{capacityRCU: 100, remainingMinutes: 10, expiresAtMS: now.Add(10 * time.Minute).UnixMilli()},
+		{capacityRCU: 100, remainingMinutes: 60, expiresAtMS: now.Add(60 * time.Minute).UnixMilli()},
+	}
+	applySmartExpiryCapacity(&resource, items, 2, now)
+	applySmartTokenMetrics(&resource)
+
+	if resource.TimeLimitedCapacityRCU != 120 || resource.ExpiryWasteRiskRCU != 80 || resource.CurrentCapacityRCU != 120 {
+		t.Fatalf("expiry-limited capacity = %#v", resource)
+	}
+	if resource.RawSustainMinutes != 100 || resource.ExpiryLimitedSustainMinutes != 60 || resource.ForecastSustainMinutes != 60 {
+		t.Fatalf("runway timeline = %#v", resource)
+	}
+	if resource.NearestExpiryAtMS != now.Add(10*time.Minute).UnixMilli() || resource.NearestExpiryMinutes != 10 {
+		t.Fatalf("nearest expiry = %#v", resource)
+	}
+	if resource.NextCapacityDeficitAtMS != now.Add(60*time.Minute).UnixMilli() {
+		t.Fatalf("next capacity deficit = %d, want %d", resource.NextCapacityDeficitAtMS, now.Add(60*time.Minute).UnixMilli())
+	}
+}
+
 func TestStrongSupplyCreatesMinimumEmergencyOrderWhenPoolIsEmptyAndUsageRateNotReady(t *testing.T) {
 	var createCalls atomic.Int32
 	var createQuantity atomic.Int32

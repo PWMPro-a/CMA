@@ -864,6 +864,18 @@ export function SupplyPage() {
     (forecastTokenMPerMinute > 0 && (timeLimitedCapacityTokenM ?? 0) > 0
       ? (timeLimitedCapacityTokenM ?? 0) / forecastTokenMPerMinute
       : undefined);
+  const rawSustainMinutes =
+    smart?.rawSustainMinutes ??
+    (forecastTokenMPerMinute > 0 && (rawCapacityTokenM ?? 0) > 0
+      ? (rawCapacityTokenM ?? 0) / forecastTokenMPerMinute
+      : undefined);
+  const nearestExpiryAtMs = smart?.nearestExpiryAtMs;
+  const nearestExpiryMinutes =
+    smart?.nearestExpiryMinutes ??
+    (nearestExpiryAtMs && nearestExpiryAtMs > nowMs
+      ? (nearestExpiryAtMs - nowMs) / 60_000
+      : undefined);
+  const nextCapacityDeficitAtMs = smart?.nextCapacityDeficitAtMs;
   const forecastConsumptionTokenM = (minutes: number) =>
     forecastTokenMPerMinute > 0 ? forecastTokenMPerMinute * minutes : 0;
   const forecastPressureTone = (minutes: number) => {
@@ -1797,7 +1809,27 @@ export function SupplyPage() {
             <article className={`${styles.consumptionForecastItem} ${styles.forecastRunway}`}>
               <span>{t('supply.forecast_runway')}</span>
               <strong>{formatMinutes(forecastSustainMinutes)}</strong>
-              <small>{t('supply.forecast_runway_hint')}</small>
+              <small>
+                {t('supply.forecast_runway_comparison_hint', {
+                  raw: formatMinutes(rawSustainMinutes),
+                })}
+              </small>
+            </article>
+            <article className={`${styles.consumptionForecastItem} ${styles.forecastBalance}`}>
+              <span>{t('supply.forecast_next_expiry')}</span>
+              <strong>{nearestExpiryAtMs ? formatTime(nearestExpiryAtMs) : '-'}</strong>
+              <small>
+                {nearestExpiryAtMs
+                  ? t('supply.forecast_next_expiry_hint', {
+                      minutes: formatMinutes(nearestExpiryMinutes),
+                    })
+                  : t('supply.forecast_expiry_unknown')}
+              </small>
+            </article>
+            <article className={`${styles.consumptionForecastItem} ${styles.forecastRunway}`}>
+              <span>{t('supply.forecast_next_deficit')}</span>
+              <strong>{nextCapacityDeficitAtMs ? formatTime(nextCapacityDeficitAtMs) : '-'}</strong>
+              <small>{t('supply.forecast_next_deficit_hint')}</small>
             </article>
           </div>
         </section>
