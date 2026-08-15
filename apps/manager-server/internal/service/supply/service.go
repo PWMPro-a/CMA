@@ -2977,6 +2977,17 @@ func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, orde
 		order.CompletedAtMS = time.Now().UnixMilli()
 		order.NextPollAtMS = 0
 		order.LastError = ""
+	} else if settled, settlementError, settleErr := s.supplyImportFailuresSettled(ctx, *order, time.Now()); settleErr != nil {
+		return settleErr
+	} else if settled {
+		if imported > 0 {
+			order.Status = "completed_partial"
+		} else {
+			order.Status = "failed"
+		}
+		order.CompletedAtMS = time.Now().UnixMilli()
+		order.NextPollAtMS = 0
+		order.LastError = settlementError
 	} else {
 		if strings.HasPrefix(order.OrderID, "recovery-") {
 			order.Status = "recovery_partial"
@@ -2991,11 +3002,67 @@ func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, orde
 	if err := s.store.UpdateSupplyOrder(ctx, *order); err != nil {
 		return err
 	}
-	if order.Status == "completed" && order.Automatic {
+	if (order.Status == "completed" || order.Status == "completed_partial") && order.Automatic {
 		s.invalidateInspectionQuotaSnapshot()
 		s.requestStaleInspectionSnapshotRefresh()
 	}
+	if order.Status == "completed_partial" || order.Status == "failed" {
+		// The supplier delivery is already terminal and every remaining item has
+		// exhausted its useful import path. Closing the order returns that failed
+		// quantity to the live deficit instead of retaining an active-order lock.
+		return nil
+	}
 	return firstErr
+}
+
+const minimumUsefulSupplyImportLease = 5 * time.Minute
+
+// supplyImportFailuresSettled reports whether every non-imported item in a
+// terminal supplier order has become unusable. Recovery claims retain their
+// existing retry workflow; only paid supplier orders are closed here.
+func (s *Service) supplyImportFailuresSettled(ctx context.Context, order store.SupplyOrder, now time.Time) (bool, string, error) {
+	if s == nil || s.store == nil || strings.HasPrefix(order.OrderID, "recovery-") ||
+		strings.EqualFold(strings.TrimSpace(order.Strategy), "recovery") ||
+		!isSuccessfulRemoteStatus(order.RemoteStatus) {
+		return false, "", nil
+	}
+	items, err := s.store.ListSupplyImportItemsByOrderIDs(ctx, []string{order.OrderID})
+	if err != nil {
+		return false, "", err
+	}
+	terminalFailures := 0
+	lastError := ""
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item.Status), "imported") {
+			continue
+		}
+		if !terminalSupplyImportItem(item, now) {
+			return false, "", nil
+		}
+		terminalFailures++
+		if strings.TrimSpace(item.LastError) != "" {
+			lastError = strings.TrimSpace(item.LastError)
+		}
+	}
+	if terminalFailures == 0 {
+		return false, "", nil
+	}
+	message := fmt.Sprintf("supplier delivery settled with %d unusable account(s)", terminalFailures)
+	if lastError != "" {
+		message += ": " + lastError
+	}
+	return true, message, nil
+}
+
+func terminalSupplyImportItem(item store.SupplyImportItem, now time.Time) bool {
+	if item.LeaseExpiresAtMS > 0 && item.LeaseExpiresAtMS <= now.UnixMilli() {
+		return true
+	}
+	if item.AttemptCount > 0 && permanentCPAAuthLifecycleFailure(item.LastError) {
+		return true
+	}
+	return item.AttemptCount >= 3 && item.LeaseExpiresAtMS > 0 &&
+		time.UnixMilli(item.LeaseExpiresAtMS).Sub(now) <= minimumUsefulSupplyImportLease
 }
 
 func withSupplyAccountLeaseMetadata(account normalizedSupplyAccount, leaseExpiresAtMS int64) normalizedSupplyAccount {
@@ -7740,8 +7807,13 @@ func (s *Service) waitForCPAAuthLifecycle(ctx context.Context, find func(context
 			return nil
 		}
 		lastErr = err
-		if file.Name != "" && !isCPAAuthLifecyclePending(file) {
-			return err
+		if file.Name != "" {
+			if lifecycleErr := terminalCPAAuthLifecycleError(file); lifecycleErr != nil {
+				return lifecycleErr
+			}
+			if !isCPAAuthLifecyclePending(file) {
+				return err
+			}
 		}
 		select {
 		case <-waitCtx.Done():
@@ -7752,6 +7824,36 @@ func (s *Service) waitForCPAAuthLifecycle(ctx context.Context, find func(context
 		case <-ticker.C:
 		}
 	}
+}
+
+func terminalCPAAuthLifecycleError(file cpaauthfiles.File) error {
+	status := strings.ToLower(textField(file.Raw, "status", "state"))
+	if status != "initialization_failed" && status != "recovery_failed" {
+		return nil
+	}
+	message := textField(file.Raw, "status_message", "statusMessage", "last_error", "lastError", "error")
+	if !permanentCPAAuthLifecycleFailure(message) {
+		return nil
+	}
+	return errors.New(message)
+}
+
+func permanentCPAAuthLifecycleFailure(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, marker := range []string{
+		"refresh_token_invalidated",
+		"invalid_grant",
+		"session has ended",
+		"log in again",
+		"oauth token was revoked",
+		"token was revoked or invalidated",
+		"workspace is deactivated",
+	} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func isCPAAuthLifecyclePending(file cpaauthfiles.File) bool {

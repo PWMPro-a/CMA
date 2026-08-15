@@ -3932,6 +3932,81 @@ func TestImportVerificationFailureBlocksDuplicateAutomaticOrders(t *testing.T) {
 	}
 }
 
+func TestExpiredPartialImportSettlesOrderAndReleasesOpenSlot(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "expired-partial-import.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	order, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "order-expired-partial", Product: "oauth_7d", RequestedQuantity: 2,
+		Automatic: true, Status: "partial", RemoteStatus: "completed",
+	})
+	if err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	now := time.Now()
+	if _, err := st.InsertSupplyImportItems(ctx, order.OrderID, []store.SupplyImportItem{
+		{OrderID: order.OrderID, ItemKey: "good", FileName: "good.json", PayloadJSON: `{}`,
+			LeaseExpiresAtMS: now.Add(30 * time.Minute).UnixMilli()},
+		{OrderID: order.OrderID, ItemKey: "expired", FileName: "expired.json", PayloadJSON: `{}`,
+			LeaseExpiresAtMS: now.Add(-time.Minute).UnixMilli()},
+	}); err != nil {
+		t.Fatalf("insert items: %v", err)
+	}
+	items, err := st.ListSupplyImportItemsByOrderIDs(ctx, []string{order.OrderID})
+	if err != nil || len(items) != 2 {
+		t.Fatalf("list items=%#v err=%v", items, err)
+	}
+	for _, item := range items {
+		if item.ItemKey == "good" {
+			err = st.MarkSupplyImportItemImported(ctx, item.ID, now.UnixMilli())
+		} else {
+			err = st.MarkSupplyImportItemFailed(ctx, item.ID, "CPA auth initialization did not become ready", now.Add(time.Hour).UnixMilli())
+		}
+		if err != nil {
+			t.Fatalf("mark item %s: %v", item.ItemKey, err)
+		}
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), nil)
+	if err := service.importItems(ctx, store.ManagerConfig{}, &order); err != nil {
+		t.Fatalf("settle partial import: %v", err)
+	}
+	settled, found, err := st.GetSupplyOrder(ctx, order.OrderID)
+	if err != nil || !found {
+		t.Fatalf("load settled order found=%v err=%v", found, err)
+	}
+	if settled.Status != "completed_partial" || settled.ImportedCount != 1 || settled.ItemCount != 2 ||
+		settled.CompletedAtMS <= 0 || !strings.Contains(settled.LastError, "1 unusable account") {
+		t.Fatalf("settled order = %#v", settled)
+	}
+	open, err := st.ListOpenSupplyOrders(ctx, 10)
+	if err != nil || len(open) != 0 {
+		t.Fatalf("open orders=%#v err=%v", open, err)
+	}
+}
+
+func TestTerminalCPAAuthLifecycleErrorOnlyMatchesPermanentCredentialFailure(t *testing.T) {
+	permanent := cpaauthfiles.File{Name: "account.json", Raw: map[string]any{
+		"status":         "initialization_failed",
+		"status_message": `token refresh failed: {"code":"refresh_token_invalidated"}`,
+	}}
+	if err := terminalCPAAuthLifecycleError(permanent); err == nil || !strings.Contains(err.Error(), "refresh_token_invalidated") {
+		t.Fatalf("permanent lifecycle error = %v", err)
+	}
+
+	recoverable := cpaauthfiles.File{Name: "account.json", Raw: map[string]any{
+		"status":         "initialization_failed",
+		"status_message": "Rate limit exceeded; retrying after cooldown",
+	}}
+	if err := terminalCPAAuthLifecycleError(recoverable); err != nil {
+		t.Fatalf("recoverable lifecycle error = %v", err)
+	}
+}
+
 func TestAutomaticWaitingOrderRemainsTrackedWhenCPATargetIsAlreadySatisfied(t *testing.T) {
 	var createCalls atomic.Int32
 	var authListCalls atomic.Int32

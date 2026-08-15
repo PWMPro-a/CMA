@@ -5608,6 +5608,7 @@
     "snapshot_coverage_pending": "巡检覆盖 {{coverage}}%，自动刷新中",
     "status_cancelled": "已取消",
     "status_completed": "已完成",
+    "status_completed_partial": "部分交付已结算",
     "status_create_uncertain": "创建结果未知",
     "status_created": "已创建",
     "status_creating": "正在创建",

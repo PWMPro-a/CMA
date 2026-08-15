@@ -331,6 +331,7 @@ const orderTone = (status: string) => {
   if (status === 'failed' || status === 'cancelled' || status === 'dismissed') return styles.error;
   if (
     status === 'partial' ||
+    status === 'completed_partial' ||
     status === 'recovery_partial' ||
     status === 'create_uncertain' ||
     status === 'retry_scheduled' ||
@@ -3804,6 +3805,7 @@ function OrderSummary({
     order.itemCount > 0 ||
     order.status === 'importing' ||
     order.status === 'partial' ||
+    order.status === 'completed_partial' ||
     order.status === 'recovery_importing' ||
     order.status === 'recovery_partial';
   const progressValue = importing

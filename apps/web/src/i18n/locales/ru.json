@@ -5608,6 +5608,7 @@
     "snapshot_coverage_pending": "Покрытие проверки {{coverage}} %, обновление",
     "status_cancelled": "Отменён",
     "status_completed": "Завершён",
+    "status_completed_partial": "Частичная поставка завершена",
     "status_create_uncertain": "Результат создания неизвестен",
     "status_created": "Создан",
     "status_creating": "Создание",

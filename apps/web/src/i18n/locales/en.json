@@ -5608,6 +5608,7 @@
     "snapshot_coverage_pending": "Inspection coverage {{coverage}}%, refreshing",
     "status_cancelled": "Cancelled",
     "status_completed": "Completed",
+    "status_completed_partial": "Partial delivery settled",
     "status_create_uncertain": "Creation result unknown",
     "status_created": "Created",
     "status_creating": "Creating",
