@@ -79,6 +79,17 @@ func rootHandler(
 	proxyHandler *proxycontroller.Handler,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Older saved panel sessions and manually pasted panel URLs can retain
+		// `/management.html` as the API base. Accept that legacy request shape so
+		// an already-open browser recovers immediately, while the frontend
+		// normalizer repairs the persisted base on its next session restore.
+		const legacyPanelManagementPrefix = "/management.html/v0/management/"
+		if strings.HasPrefix(r.URL.Path, legacyPanelManagementPrefix) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/management.html")
+			if r.URL.RawPath != "" {
+				r.URL.RawPath = strings.TrimPrefix(r.URL.RawPath, "/management.html")
+			}
+		}
 		// Management responses are live operational snapshots. The panel polls
 		// these stable URLs repeatedly, so allowing a browser or intermediary to
 		// reuse an older JSON response can make the account and supply pages show

@@ -1,5 +1,25 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_DOCKER_CPA_BASE_URL, resolveDefaultCPAConnectionBase } from './connection';
+import {
+  DEFAULT_DOCKER_CPA_BASE_URL,
+  normalizeApiBase,
+  resolveDefaultCPAConnectionBase,
+} from './connection';
+
+describe('normalizeApiBase', () => {
+  it('strips a pasted management panel path and hash route', () => {
+    expect(
+      normalizeApiBase(
+        'http://45.126.209.111:18317/management.html#/accounts?status=available'
+      )
+    ).toBe('http://45.126.209.111:18317');
+  });
+
+  it('preserves a reverse-proxy path before management.html', () => {
+    expect(normalizeApiBase('https://panel.example/cpa/management.html?from=bookmark')).toBe(
+      'https://panel.example/cpa'
+    );
+  });
+});
 
 describe('resolveDefaultCPAConnectionBase', () => {
   it('uses the explicit environment default first', () => {

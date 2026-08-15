@@ -5,6 +5,13 @@ export const DEFAULT_DOCKER_CPA_BASE_URL = 'http://host.docker.internal:8317';
 export const normalizeApiBase = (input: string): string => {
   let base = (input || '').trim();
   if (!base) return '';
+  // Users commonly paste the full panel URL (including its hash route) into
+  // the connection field. Keeping `/management.html` in the API base makes
+  // requests resolve to `/management.html/v0/management/...`, so the UI keeps
+  // rendering its last in-memory account snapshot after every 404. Normalize
+  // both current and persisted legacy values back to the panel origin/path.
+  base = base.replace(/[?#].*$/, '');
+  base = base.replace(/\/management\.html\/?$/i, '');
   base = base.replace(/\/?v0\/management\/?$/i, '');
   base = base.replace(/\/+$/i, '');
   if (!/^https?:\/\//i.test(base)) {

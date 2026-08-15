@@ -163,6 +163,22 @@ func TestServerCompatContainerOpsInfoRequiresPanelAuth(t *testing.T) {
 	}
 }
 
+func TestServerCompatLegacyPanelManagementAPIPath(t *testing.T) {
+	cfg := testutil.NewConfig(t)
+	handler, _ := newCompatHandler(t, cfg, nil)
+
+	rr := testutil.Request(
+		t,
+		handler,
+		http.MethodGet,
+		"/management.html/v0/management/container-ops/info",
+		"",
+		testutil.AdminKey,
+	)
+	testutil.RequireStatus(t, rr, http.StatusOK)
+	assertManagementNoStore(t, rr)
+}
+
 func assertManagementNoStore(t *testing.T, rr *httptest.ResponseRecorder) {
 	t.Helper()
 	if got, want := rr.Header().Get("Cache-Control"), "no-store, max-age=0"; got != want {
