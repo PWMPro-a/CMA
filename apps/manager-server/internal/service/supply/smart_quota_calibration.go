@@ -151,9 +151,11 @@ type smartQuotaWindowEvidence struct {
 	concrete    bool
 }
 
-// smartQuotaWindowBaseline is a complete account-scoped Token aggregate for
-// the quota window observed by one inspection result. It repairs the in-memory
-// tail sampler without carrying raw request rows into the supply planner.
+// smartQuotaWindowBaseline is an account-scoped Token aggregate for the quota
+// window observed by one inspection result. firstSeenMS proves whether the
+// local database covered the complete provider window; an account imported in
+// the middle of a 7-day window must not divide its partial local usage by the
+// provider's absolute used percentage.
 type smartQuotaWindowBaseline struct {
 	requestIndex int
 	identity     string
@@ -165,8 +167,11 @@ type smartQuotaWindowBaseline struct {
 	recoverAtMS  int64
 	observedMS   int64
 	windowTokens int64
+	firstSeenMS  int64
 	lastSeenMS   int64
 }
+
+const smartQuotaCompleteWindowCoverageSlack = 5 * time.Minute
 
 func newSmartQuotaCalibrationState() smartQuotaCalibrationState {
 	return smartQuotaCalibrationState{
@@ -259,18 +264,50 @@ func smartQuotaPublicContextKey(supplierID, planType string) string {
 }
 
 func smartQuotaCalibrationResultIdentities(fileName, authIndex, accountKey, accountID string) []string {
-	values := []struct {
+	credentialValues := []struct {
 		prefix string
 		value  string
 	}{
 		{prefix: "file:", value: fileName},
 		{prefix: "auth:", value: authIndex},
+	}
+	accountValues := []struct {
+		prefix string
+		value  string
+	}{
 		{prefix: "account:", value: accountKey},
 		{prefix: "account:", value: accountID},
 	}
-	result := make([]string, 0, len(values))
-	seen := make(map[string]struct{}, len(values))
-	for _, item := range values {
+	result := make([]string, 0, len(credentialValues))
+	seen := make(map[string]struct{}, len(credentialValues))
+	appendValues := func(values []struct {
+		prefix string
+		value  string
+	}) {
+		for _, item := range values {
+			value := normalizeSmartQuotaIdentity(item.value)
+			if value == "" {
+				continue
+			}
+			key := item.prefix + value
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, key)
+		}
+	}
+	appendValues(credentialValues)
+	if len(result) > 0 {
+		// Team deliveries may expose multiple independent spaces under one shared
+		// account_id. File/auth identities are space-specific; adding the shared
+		// account alias here would merge sibling quota samples and corrupt each
+		// space's independent capacity estimate.
+		return result
+	}
+	result = make([]string, 0, len(accountValues))
+	seen = make(map[string]struct{}, len(accountValues))
+	for _, item := range accountValues {
 		value := normalizeSmartQuotaIdentity(item.value)
 		if value == "" {
 			continue
@@ -474,14 +511,10 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 			!smartQuotaClassificationFractionEligible(baseline.fraction) {
 			continue
 		}
-		capacityM := float64(baseline.windowTokens) / baseline.fraction / 1_000_000
-		if capacityM < smartQuotaCalibrationMinCapacityM || capacityM > smartQuotaCalibrationMaxCapacityM {
-			continue
-		}
 
-		// The targeted aggregate is authoritative through observedMS. Discard
-		// samples for the same account that came from a truncated global tail,
-		// while retaining newer samples produced after this inspection.
+		// The targeted aggregate is authoritative through observedMS for the
+		// local observation baseline. Discard older runtime deltas for this exact
+		// credential while retaining samples produced after the inspection.
 		kept := s.smartQuotaState.samples[:0]
 		for _, sample := range s.smartQuotaState.samples {
 			if sample.identity == baseline.identity && sample.observedMS <= baseline.observedMS {
@@ -512,6 +545,26 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 			observation.supplierID = baseline.supplierID
 		}
 		s.smartQuotaState.observations[baseline.identity] = observation
+
+		// Supplier credentials commonly arrive after their weekly quota window
+		// has already started and may already show 20-80% used. The local Token
+		// database then contains only post-import traffic. Treating that partial
+		// tail as a complete-window numerator produced false 10-30M account
+		// estimates and collapsed a 16 x 60M pool to roughly 250M. Keep the
+		// observation as the baseline for future percentage deltas, but retain the
+		// configured per-plan fallback until complete coverage is proven.
+		if !smartQuotaWindowBaselineHasCompleteCoverage(baseline) {
+			delete(s.smartQuotaState.directSamples, baseline.identity)
+			delete(s.smartQuotaState.provisionalSamples, baseline.identity)
+			continue
+		}
+
+		capacityM := float64(baseline.windowTokens) / baseline.fraction / 1_000_000
+		if capacityM < smartQuotaCalibrationMinCapacityM || capacityM > smartQuotaCalibrationMaxCapacityM {
+			delete(s.smartQuotaState.directSamples, baseline.identity)
+			delete(s.smartQuotaState.provisionalSamples, baseline.identity)
+			continue
+		}
 		sample := smartQuotaCalibrationSample{
 			identity:           baseline.identity,
 			supplierID:         observation.supplierID,
@@ -531,6 +584,13 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 		}
 	}
 	s.pruneSmartQuotaCalibrationLocked(now)
+}
+
+func smartQuotaWindowBaselineHasCompleteCoverage(baseline smartQuotaWindowBaseline) bool {
+	if baseline.fromMS <= 0 || baseline.firstSeenMS <= 0 || baseline.observedMS <= baseline.fromMS {
+		return false
+	}
+	return baseline.firstSeenMS <= baseline.fromMS+smartQuotaCompleteWindowCoverageSlack.Milliseconds()
 }
 
 func (s *Service) recordSmartQuotaCalibrationEventsLocked(events []usage.Event, now time.Time) {

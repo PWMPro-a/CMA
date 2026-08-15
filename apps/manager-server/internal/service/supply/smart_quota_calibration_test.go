@@ -151,8 +151,10 @@ func TestSmartQuotaWindowBaselinesReplaceTruncatedTailAndTrimAccountExtremes(t *
 			identity:     identity,
 			planType:     "team",
 			fraction:     1,
+			fromMS:       now.Add(-7 * 24 * time.Hour).UnixMilli(),
 			observedMS:   now.UnixMilli(),
 			windowTokens: int64(capacityM * 1_000_000),
+			firstSeenMS:  now.Add(-7 * 24 * time.Hour).UnixMilli(),
 			lastSeenMS:   now.UnixMilli(),
 		})
 	}
@@ -177,8 +179,10 @@ func TestSmartQuotaCompleteWindowUsesIndependentAccountFormula(t *testing.T) {
 		identity:     "file:active.json",
 		planType:     "team",
 		fraction:     0.11,
+		fromMS:       now.Add(-7 * 24 * time.Hour).UnixMilli(),
 		observedMS:   now.UnixMilli(),
 		windowTokens: 4_400_000,
+		firstSeenMS:  now.Add(-7 * 24 * time.Hour).UnixMilli(),
 		lastSeenMS:   now.UnixMilli(),
 	}}, now)
 
@@ -203,16 +207,20 @@ func TestSmartQuotaCalibrationRequiresStrictlyMoreThanTenPercentUsed(t *testing.
 			identity:     "file:exact-ten.json",
 			planType:     "team",
 			fraction:     0.10,
+			fromMS:       now.Add(-7 * 24 * time.Hour).UnixMilli(),
 			observedMS:   now.UnixMilli(),
 			windowTokens: 4_000_000,
+			firstSeenMS:  now.Add(-7 * 24 * time.Hour).UnixMilli(),
 			lastSeenMS:   now.UnixMilli(),
 		},
 		{
 			identity:     "file:above-ten.json",
 			planType:     "team",
 			fraction:     0.11,
+			fromMS:       now.Add(-7 * 24 * time.Hour).UnixMilli(),
 			observedMS:   now.UnixMilli(),
 			windowTokens: 4_400_000,
+			firstSeenMS:  now.Add(-7 * 24 * time.Hour).UnixMilli(),
 			lastSeenMS:   now.UnixMilli(),
 		},
 	}, now)
@@ -239,6 +247,43 @@ func TestSmartQuotaCalibrationRequiresStrictlyMoreThanTenPercentUsed(t *testing.
 		weight: 1, usedFraction: 0.10, observedMS: now.UnixMilli(),
 	}}, smartQuotaEstimateSourceCurrent, 1, 0.1, now); ok {
 		t.Fatalf("an in-memory sample at exactly 10%% entered estimation")
+	}
+}
+
+func TestSmartQuotaIncompleteWindowKeepsTeamFallbackUntilDeltaEvidence(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	identity := "file:mid-window-import.json"
+	service.smartQuotaState.directSamples[identity] = smartQuotaCalibrationSample{
+		identity: identity, planType: "team", capacityM: 20,
+		weight: 1, usedFraction: 0.60, observedMS: now.Add(-time.Minute).UnixMilli(), completeWindow: true,
+	}
+	service.recordSmartQuotaWindowBaselines([]smartQuotaWindowBaseline{{
+		identity:     identity,
+		planType:     "team",
+		fraction:     0.60,
+		fromMS:       now.Add(-7 * 24 * time.Hour).UnixMilli(),
+		observedMS:   now.UnixMilli(),
+		windowTokens: 12_000_000,
+		firstSeenMS:  now.Add(-30 * time.Minute).UnixMilli(),
+		lastSeenMS:   now.UnixMilli(),
+	}}, now)
+
+	if _, ok := service.smartQuotaState.directSamples[identity]; ok {
+		t.Fatal("partial local window retained a false complete-window estimate")
+	}
+	estimate := service.smartQuotaEstimateForInspectionResult(
+		store.CodexInspectionResult{FileName: "mid-window-import.json", PlanType: "team"},
+		smartQuotaEstimate{CapacityM: 60, Source: smartQuotaEstimateSourceDefault},
+		now,
+	)
+	if estimate.CapacityM != 60 || estimate.Source != smartQuotaEstimateSourceDefault {
+		t.Fatalf("partial local window replaced Team fallback: %#v", estimate)
+	}
+	observation := service.smartQuotaState.observations[identity]
+	if observation.windowTokens != 12_000_000 || observation.lastFraction != 0.60 ||
+		observation.lastSampleTokens != 12_000_000 || observation.lastSampleFraction != 0.60 {
+		t.Fatalf("partial window did not seed the future delta baseline: %#v", observation)
 	}
 }
 
@@ -335,6 +380,27 @@ func TestNormalizeSmartQuotaFractionTreatsSubOneValuesAsPercent(t *testing.T) {
 	}
 	if _, ok := normalizeSmartQuotaFraction(100.01); ok {
 		t.Fatal("quota percentage above 100 must be rejected")
+	}
+}
+
+func TestSmartQuotaResultIdentitiesKeepTeamSpacesIndependent(t *testing.T) {
+	first := smartQuotaCalibrationResultIdentities("space-a.json", "auth-a", "member@example.com", "shared-account")
+	second := smartQuotaCalibrationResultIdentities("space-b.json", "auth-b", "member@example.com", "shared-account")
+	if len(first) != 2 || first[0] != "file:space-a.json" || first[1] != "auth:auth-a" {
+		t.Fatalf("first space identities = %#v", first)
+	}
+	if len(second) != 2 || second[0] != "file:space-b.json" || second[1] != "auth:auth-b" {
+		t.Fatalf("second space identities = %#v", second)
+	}
+	for _, identity := range append(append([]string{}, first...), second...) {
+		if identity == "account:shared-account" || identity == "account:member@example.com" {
+			t.Fatalf("shared account alias leaked into space-scoped identities: %#v / %#v", first, second)
+		}
+	}
+
+	legacy := smartQuotaCalibrationResultIdentities("", "", "member@example.com", "shared-account")
+	if len(legacy) != 2 || legacy[0] != "account:member@example.com" || legacy[1] != "account:shared-account" {
+		t.Fatalf("legacy account-only identities = %#v", legacy)
 	}
 }
 

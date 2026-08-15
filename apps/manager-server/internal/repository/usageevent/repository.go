@@ -85,6 +85,7 @@ type SupplyQuotaWindowUsageQuery struct {
 type SupplyQuotaWindowUsage struct {
 	RequestIndex int
 	TotalTokens  int64
+	FirstSeenMS  int64
 	LastSeenMS   int64
 }
 
@@ -540,13 +541,14 @@ func (r *repository) ListSupplyQuotaWindowUsage(ctx context.Context, targets []S
 		rows, err := r.db.QueryContext(ctx, `with quota_targets(
 			request_index, auth_file_snapshot, auth_index, from_ms, to_ms
 		) as (values `+strings.Join(values, ",")+`)
-		select
-			t.request_index,
-			coalesce(sum(case when coalesce(e.failed, 0) = 0 then max(
-				coalesce(e.total_tokens, 0),
-				coalesce(e.input_tokens, 0) + coalesce(e.output_tokens, 0) + coalesce(e.reasoning_tokens, 0)
-			) else 0 end), 0),
-			coalesce(max(e.timestamp_ms), 0)
+			select
+				t.request_index,
+				coalesce(sum(case when coalesce(e.failed, 0) = 0 then max(
+					coalesce(e.total_tokens, 0),
+					coalesce(e.input_tokens, 0) + coalesce(e.output_tokens, 0) + coalesce(e.reasoning_tokens, 0)
+				) else 0 end), 0),
+				coalesce(min(e.timestamp_ms), 0),
+				coalesce(max(e.timestamp_ms), 0)
 		from quota_targets t
 		left join usage_events e indexed by idx_usage_events_latest_request_auth_file
 			on e.auth_file_snapshot = t.auth_file_snapshot collate nocase
@@ -560,7 +562,7 @@ func (r *repository) ListSupplyQuotaWindowUsage(ctx context.Context, targets []S
 		}
 		for rows.Next() {
 			var item SupplyQuotaWindowUsage
-			if err := rows.Scan(&item.RequestIndex, &item.TotalTokens, &item.LastSeenMS); err != nil {
+			if err := rows.Scan(&item.RequestIndex, &item.TotalTokens, &item.FirstSeenMS, &item.LastSeenMS); err != nil {
 				_ = rows.Close()
 				return nil, err
 			}

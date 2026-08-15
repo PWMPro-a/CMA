@@ -170,7 +170,9 @@ func TestListSupplyQuotaWindowUsageAggregatesCompleteCredentialWindow(t *testing
 		t.Fatalf("list quota window usage: %v", err)
 	}
 	if len(rows) != 2 || rows[0].RequestIndex != 10 || rows[0].TotalTokens != 50_000_000 ||
-		rows[1].RequestIndex != 20 || rows[1].TotalTokens != 7_000_000 {
+		rows[0].FirstSeenMS != base.Add(time.Minute).UnixMilli() || rows[0].LastSeenMS != base.Add(3*time.Minute).UnixMilli() ||
+		rows[1].RequestIndex != 20 || rows[1].TotalTokens != 7_000_000 ||
+		rows[1].FirstSeenMS != base.Add(5*time.Minute).UnixMilli() || rows[1].LastSeenMS != base.Add(5*time.Minute).UnixMilli() {
 		t.Fatalf("quota window rows = %#v", rows)
 	}
 }

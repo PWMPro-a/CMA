@@ -1898,6 +1898,7 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context, configs
 			for index := range quotaWindowUsage {
 				usageRow := usageByRequest[quotaWindowUsage[index].requestIndex]
 				quotaWindowUsage[index].windowTokens = usageRow.TotalTokens
+				quotaWindowUsage[index].firstSeenMS = usageRow.FirstSeenMS
 				quotaWindowUsage[index].lastSeenMS = usageRow.LastSeenMS
 			}
 		}

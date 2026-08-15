@@ -929,6 +929,12 @@ func TestCachedInspectionSnapshotSeedsCompleteIndependentQuotaUsage(t *testing.T
 	events := make([]usage.Event, 0, 4)
 	for index := 0; index < 4; index++ {
 		timestamp := now.Add(-time.Duration(4-index) * time.Minute)
+		if index == 0 {
+			// The provider window below starts one day before the inspection.
+			// Seed one event at that boundary so this fixture genuinely proves a
+			// complete local quota history rather than a mid-window import tail.
+			timestamp = now.Add(-24 * time.Hour)
+		}
 		events = append(events, usage.Event{
 			EventHash:        fmt.Sprintf("independent-window-%d", index),
 			TimestampMS:      timestamp.UnixMilli(),
@@ -971,6 +977,70 @@ func TestCachedInspectionSnapshotSeedsCompleteIndependentQuotaUsage(t *testing.T
 	estimate := service.smartQuotaEstimateForInspectionResult(snapshot.results[0], defaultSmartQuotaEstimate(), time.Now())
 	if estimate.CapacityM != 40 || !estimate.IndependentAccount || estimate.Source != smartQuotaEstimateSourceCurrent {
 		t.Fatalf("independent snapshot estimate = %#v", estimate)
+	}
+}
+
+func TestSmartResourceKeepsSixteenMidWindowTeamAccountsAboveSevenHundredMillion(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	weeklySeconds := float64(smartQuotaWeekSeconds)
+	usedPercent := 20.0
+	statusOK := http.StatusOK
+	results := make([]store.CodexInspectionResult, 0, 16)
+	baselines := make([]smartQuotaWindowBaseline, 0, 16)
+	for index := 0; index < 16; index++ {
+		fileName := fmt.Sprintf("mid-window-team-%02d.json", index)
+		authIndex := fmt.Sprintf("mid-window-auth-%02d", index)
+		results = append(results, store.CodexInspectionResult{
+			FileName:    fileName,
+			AuthIndex:   authIndex,
+			Provider:    "codex",
+			Status:      "active",
+			Action:      "keep",
+			StatusCode:  &statusOK,
+			PlanType:    "team",
+			UsedPercent: &usedPercent,
+			QuotaWindows: []model.CodexInspectionQuotaWindow{{
+				ID:                 "weekly",
+				UsedPercent:        &usedPercent,
+				ResetAtMS:          now.Add(6 * 24 * time.Hour).UnixMilli(),
+				LimitWindowSeconds: &weeklySeconds,
+			}},
+		})
+		baselines = append(baselines, smartQuotaWindowBaseline{
+			identity:     "file:" + fileName,
+			planType:     "team",
+			fraction:     0.20,
+			fromMS:       now.Add(-24 * time.Hour).UnixMilli(),
+			observedMS:   now.UnixMilli(),
+			windowTokens: 4_000_000,
+			firstSeenMS:  now.Add(-30 * time.Minute).UnixMilli(),
+			lastSeenMS:   now.UnixMilli(),
+		})
+	}
+	service.recordSmartQuotaWindowBaselines(baselines, now)
+	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{}, inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{
+			ID:            1,
+			Status:        model.CodexInspectionStatusCompleted,
+			ProbeSetCount: 16,
+			SampledCount:  16,
+			FinishedAtMS:  now.UnixMilli(),
+		},
+		results:     results,
+		generatedAt: now,
+	}, now)
+
+	if resource.NormalAccounts != 16 || resource.AvailableAccounts != 16 || resource.AccountQuotaEstimateM != 60 {
+		t.Fatalf("sixteen Team account counts/estimate = %#v", resource)
+	}
+	if resource.RawCapacityTokenM != 768 || resource.RawCapacityTokenM <= 700 {
+		t.Fatalf("sixteen mid-window Team capacity = %.2fM, want 768M", resource.RawCapacityTokenM)
+	}
+	for _, result := range results {
+		if _, ok := service.smartQuotaState.directSamples["file:"+result.FileName]; ok {
+			t.Fatalf("mid-window account %q created an absolute quota sample", result.FileName)
+		}
 	}
 }
 
