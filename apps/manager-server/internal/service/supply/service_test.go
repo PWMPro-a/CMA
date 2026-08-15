@@ -896,6 +896,49 @@ func TestAccountPoolStatsSeparateTotalAvailableHealthyAndDisabled(t *testing.T) 
 	}
 }
 
+func TestOperatorAccountPoolStatsSharesOneSnapshotUntilInvalidated(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/auth-files" {
+			http.NotFound(w, r)
+			return
+		}
+		request := requests.Add(1)
+		if request == 1 {
+			_, _ = w.Write([]byte(`{"files":[{"name":"first.json","provider":"codex","status":"active","auth_index":"first"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"files":[{"name":"second.json","provider":"codex","status":"disabled","disabled":true,"auth_index":"second"}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	service := New(nil, nil, server.Client())
+	cfg := store.ManagerConfig{CPAConnection: store.ManagerCPAConnectionConfig{
+		CPABaseURL:    server.URL,
+		ManagementKey: "management-key",
+	}}
+	first, err := service.countOperatorAccountPoolStats(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("load first operator snapshot: %v", err)
+	}
+	second, err := service.countOperatorAccountPoolStats(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("load shared operator snapshot: %v", err)
+	}
+	if requests.Load() != 1 || first.total != 1 || first.enabled != 1 || second.total != first.total || second.enabled != first.enabled {
+		t.Fatalf("shared operator snapshot requests=%d first=%#v second=%#v", requests.Load(), first, second)
+	}
+
+	service.invalidateAuthFilesCache()
+	refreshed, err := service.countOperatorAccountPoolStats(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("refresh invalidated operator snapshot: %v", err)
+	}
+	if requests.Load() != 2 || refreshed.total != 1 || refreshed.enabled != 0 {
+		t.Fatalf("invalidated operator snapshot requests=%d refreshed=%#v", requests.Load(), refreshed)
+	}
+}
+
 func TestCPAAuthLifecyclePendingIsNotSchedulableCapacity(t *testing.T) {
 	for _, status := range []string{
 		"initializing",

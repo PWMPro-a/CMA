@@ -572,6 +572,8 @@ type Service struct {
 	quotaSnapshot            inspectionQuotaSnapshot
 	operatorHeadersMu        sync.Mutex
 	operatorHeaders          operatorHeaderSnapshotCache
+	operatorPoolMu           sync.Mutex
+	operatorPool             operatorAccountPoolCache
 	smartResourceState       SmartResource
 	automation               AutomationExecution
 	recoveryMu               sync.Mutex
@@ -620,10 +622,18 @@ type operatorHeaderSnapshotCache struct {
 	items     []store.HeaderSnapshot
 }
 
+type operatorAccountPoolCache struct {
+	key       string
+	generated time.Time
+	stats     accountPoolStats
+	err       error
+}
+
 const (
 	supplyAccountListCacheTTL = 15 * time.Second
 	supplyOrdersCacheTTL      = 5 * time.Second
 	operatorHeaderCacheTTL    = 15 * time.Second
+	operatorAccountPoolTTL    = 15 * time.Second
 )
 
 const (
@@ -5420,6 +5430,37 @@ func (s *Service) countOperatorAccountPoolStats(
 	ctx context.Context,
 	cfg store.ManagerConfig,
 ) (accountPoolStats, error) {
+	if s == nil {
+		return accountPoolStats{}, errors.New("supply service is unavailable")
+	}
+	now := time.Now()
+	cacheKey := strings.TrimSpace(cfg.CPAConnection.CPABaseURL) + "\x00" + strings.TrimSpace(cfg.CPAConnection.ManagementKey)
+	s.operatorPoolMu.Lock()
+	defer s.operatorPoolMu.Unlock()
+	if s.operatorPool.key == cacheKey && !s.operatorPool.generated.IsZero() &&
+		now.Sub(s.operatorPool.generated) <= operatorAccountPoolTTL {
+		return s.operatorPool.stats, s.operatorPool.err
+	}
+	stats, err := s.loadOperatorAccountPoolStats(ctx, cfg)
+	if err == nil || stats.liveObserved {
+		s.operatorPool = operatorAccountPoolCache{
+			key:       cacheKey,
+			generated: time.Now(),
+			stats:     stats,
+			err:       err,
+		}
+		return stats, err
+	}
+	if s.operatorPool.key == cacheKey && !s.operatorPool.generated.IsZero() {
+		return s.operatorPool.stats, err
+	}
+	return stats, err
+}
+
+func (s *Service) loadOperatorAccountPoolStats(
+	ctx context.Context,
+	cfg store.ManagerConfig,
+) (accountPoolStats, error) {
 	if strings.TrimSpace(cfg.CPAConnection.CPABaseURL) == "" || strings.TrimSpace(cfg.CPAConnection.ManagementKey) == "" {
 		return accountPoolStats{}, errors.New("CPA connection is not configured")
 	}
@@ -8797,6 +8838,9 @@ func (s *Service) invalidateAuthFilesCache() {
 	s.authCacheMu.Lock()
 	s.authCache = authFileSnapshot{}
 	s.authCacheMu.Unlock()
+	s.operatorPoolMu.Lock()
+	s.operatorPool = operatorAccountPoolCache{}
+	s.operatorPoolMu.Unlock()
 }
 
 func (s *Service) recordError(err error) {

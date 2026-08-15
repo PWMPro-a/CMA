@@ -565,6 +565,7 @@ export function AccountsPage() {
   const [accountPoolSummary, setAccountPoolSummary] = useState<SupplyAccountPoolSummary | null>(
     null
   );
+  const [accountPoolSummaryLoading, setAccountPoolSummaryLoading] = useState(true);
   const oauthState = useAuthFilesOauth({
     viewMode: oauthViewMode,
     files,
@@ -866,6 +867,7 @@ export function AccountsPage() {
     accountPoolSummaryRequestIdRef.current = requestId;
     if (!managerStorageAvailable) {
       setAccountPoolSummary(null);
+      setAccountPoolSummaryLoading(false);
       return;
     }
     try {
@@ -875,6 +877,10 @@ export function AccountsPage() {
       }
     } catch {
       // Keep the last complete pool split on transient storage/API failures.
+    } finally {
+      if (accountPoolSummaryRequestIdRef.current === requestId) {
+        setAccountPoolSummaryLoading(false);
+      }
     }
   }, [managerStorageAvailable]);
 
@@ -956,6 +962,7 @@ export function AccountsPage() {
     detailEventsAutoLoadKeyRef.current = null;
     setQuotaCooldowns(new Map());
     setAccountPoolSummary(null);
+    setAccountPoolSummaryLoading(true);
     setAccountActionCandidates([]);
     setHeaderSnapshotLoadedKey('');
     setAccountHistoryByRowKey((current) => (current.size === 0 ? current : new Map()));
@@ -1107,11 +1114,17 @@ export function AccountsPage() {
     void loadAccountPoolSummary();
   }, [activeView, loadAccountPoolSummary, managerStorageAvailable]);
 
+  useEffect(() => {
+    if (activeView === 'accounts' && managerStorageAvailable && accountPoolSummary === null) {
+      setAccountPoolSummaryLoading(true);
+    }
+  }, [accountPoolSummary, activeView, managerStorageAvailable]);
+
   useInterval(
     () => {
       void loadAccountPoolSummary();
     },
-    activeView === 'accounts' && documentVisible && managerStorageAvailable ? 15_000 : null
+    activeView === 'accounts' && documentVisible && managerStorageAvailable ? 10_000 : null
   );
 
   useEffect(
@@ -4874,9 +4887,12 @@ export function AccountsPage() {
 
   const renderAccountsOverview = () => (
     <>
-      <AccountMetricsGrid metrics={metrics} />
+      <AccountMetricsGrid
+        metrics={metrics}
+        loading={managerStorageAvailable && accountPoolSummaryLoading}
+      />
       {error ? <div className={styles.errorBox}>{error}</div> : null}
-      {loading ? (
+      {loading || (managerStorageAvailable && accountPoolSummaryLoading) ? (
         <div className={styles.loadingPanel}>
           <LoadingSpinner />
         </div>

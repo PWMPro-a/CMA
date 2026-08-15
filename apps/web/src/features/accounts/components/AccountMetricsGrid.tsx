@@ -9,9 +9,10 @@ import styles from '../AccountsPage.module.scss';
 
 interface AccountMetricsGridProps {
   metrics: AccountMetrics;
+  loading?: boolean;
 }
 
-export function AccountMetricsGrid({ metrics }: AccountMetricsGridProps) {
+export function AccountMetricsGrid({ metrics, loading = false }: AccountMetricsGridProps) {
   const { t } = useTranslation();
   const cards = [
     {
@@ -78,7 +79,7 @@ export function AccountMetricsGrid({ metrics }: AccountMetricsGridProps) {
           <SummaryCard
             key={card.key}
             label={card.label}
-            value={String(card.value)}
+            value={loading ? '...' : String(card.value)}
             meta={card.meta}
             icon={card.icon}
             accent={card.accent}
