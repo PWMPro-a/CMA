@@ -101,6 +101,7 @@ import {
   sortAccountRows,
   type AccountQuotaBand,
   type AccountRow,
+  type AccountPoolCredentialBucket,
   type AccountRowSort,
   type AccountStatusFilter,
 } from '@/features/accounts/model/accountRows';
@@ -1415,6 +1416,17 @@ export function AccountsPage() {
       ),
     [quotaCooldowns, rows]
   );
+  const accountPoolStatusByRowKey = useMemo(() => {
+    const itemsByRowKey = buildAccountOperationalItemsByRowKey(
+      rows,
+      accountPoolSummary?.credentials ?? []
+    );
+    return new Map<string, AccountPoolCredentialBucket>(
+      Array.from(itemsByRowKey, ([rowKey, items]) => [rowKey, items[0]?.bucket]).filter(
+        (entry): entry is [string, AccountPoolCredentialBucket] => Boolean(entry[1])
+      )
+    );
+  }, [accountPoolSummary?.credentials, rows]);
   const metrics = useMemo(
     () =>
       buildAccountMetricsWithCodexPoolSummary(
@@ -1443,8 +1455,10 @@ export function AccountsPage() {
         quotaBand: quotaBandFilter,
         search,
         codexStatusBySelectionKey,
+        poolStatusBySelectionKey: accountPoolStatusByRowKey,
       }),
     [
+      accountPoolStatusByRowKey,
       codexStatusBySelectionKey,
       planFilter,
       providerFilter,

@@ -130,14 +130,29 @@ type Status struct {
 // for purchasing without being authoritative for whether a live CPA account
 // should be shown as broken.
 type AccountPoolSummary struct {
-	CheckedAtMS            int64 `json:"checkedAtMs"`
-	Total                  int   `json:"total"`
-	Normal                 int   `json:"normal"`
-	NeedsAttention         int   `json:"needsAttention"`
-	QuotaRisk              int   `json:"quotaRisk"`
-	Disabled               int   `json:"disabled"`
-	Unconfirmed            int   `json:"unconfirmed"`
-	ClassificationObserved bool  `json:"classificationObserved"`
+	CheckedAtMS            int64                          `json:"checkedAtMs"`
+	Total                  int                            `json:"total"`
+	Normal                 int                            `json:"normal"`
+	NeedsAttention         int                            `json:"needsAttention"`
+	QuotaRisk              int                            `json:"quotaRisk"`
+	Disabled               int                            `json:"disabled"`
+	Unconfirmed            int                            `json:"unconfirmed"`
+	ClassificationObserved bool                           `json:"classificationObserved"`
+	Credentials            []AccountPoolCredentialSummary `json:"credentials,omitempty"`
+}
+
+// AccountPoolCredentialSummary publishes the exact credential-level bucket
+// used to build AccountPoolSummary. The credential page consumes this list so
+// its status cards and filters cannot drift from the supply page's live pool
+// classification while local quota requests are still catching up.
+type AccountPoolCredentialSummary struct {
+	AuthFileName    string `json:"authFileName"`
+	RuntimeID       string `json:"runtimeId,omitempty"`
+	Provider        string `json:"provider,omitempty"`
+	AuthIndex       string `json:"authIndex,omitempty"`
+	AccountID       string `json:"accountId,omitempty"`
+	AccountSnapshot string `json:"accountSnapshot,omitempty"`
+	Bucket          string `json:"bucket"`
 }
 
 // ActiveOrderStatus is deliberately smaller than Status. The management page
@@ -878,7 +893,9 @@ func (s *Service) GetAccountPoolSummary(ctx context.Context) (AccountPoolSummary
 	if statsErr != nil && !stats.liveObserved {
 		return AccountPoolSummary{}, statsErr
 	}
-	return accountPoolSummaryFromStats(stats, time.Now()), nil
+	summary := accountPoolSummaryFromStats(stats, time.Now())
+	summary.Credentials = accountPoolCredentialSummaries(stats)
+	return summary, nil
 }
 
 func accountPoolSummaryFromStats(stats accountPoolStats, checkedAt time.Time) AccountPoolSummary {
@@ -891,6 +908,66 @@ func accountPoolSummaryFromStats(stats accountPoolStats, checkedAt time.Time) Ac
 		Disabled:               max(0, stats.total-stats.enabled),
 		Unconfirmed:            max(0, stats.unconfirmed),
 		ClassificationObserved: stats.classificationObserved,
+	}
+}
+
+func accountPoolCredentialSummaries(stats accountPoolStats) []AccountPoolCredentialSummary {
+	if len(stats.files) == 0 {
+		return nil
+	}
+	filesByName := make(map[string]int, len(stats.files))
+	for _, file := range stats.files {
+		if isCodexAuthFile(file) {
+			filesByName[strings.TrimSpace(file.Name)]++
+		}
+	}
+	items := make([]AccountPoolCredentialSummary, 0, stats.total)
+	for _, file := range stats.files {
+		if !isCodexAuthFile(file) {
+			continue
+		}
+		bucket := "disabled"
+		if !file.Disabled {
+			classified, matched := stats.bucketByCredential[operatorCredentialKey(file.Name, file.AuthIndex)]
+			if !matched && filesByName[strings.TrimSpace(file.Name)] == 1 {
+				classified, matched = stats.bucketByCredential[operatorFileCredentialKey(file.Name)]
+			}
+			if !matched {
+				classified = operatorAccountUnconfirmed
+			}
+			bucket = operatorAccountBucketName(classified)
+		}
+		items = append(items, AccountPoolCredentialSummary{
+			AuthFileName:    strings.TrimSpace(file.Name),
+			RuntimeID:       strings.TrimSpace(file.ID),
+			Provider:        strings.TrimSpace(file.Provider),
+			AuthIndex:       strings.TrimSpace(file.AuthIndex),
+			AccountID:       strings.TrimSpace(file.AccountID),
+			AccountSnapshot: strings.TrimSpace(file.AccountSnapshot),
+			Bucket:          bucket,
+		})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		leftName := strings.ToLower(items[i].AuthFileName)
+		rightName := strings.ToLower(items[j].AuthFileName)
+		if leftName != rightName {
+			return leftName < rightName
+		}
+		return strings.ToLower(items[i].AuthIndex) < strings.ToLower(items[j].AuthIndex)
+	})
+	return items
+}
+
+func operatorAccountBucketName(bucket operatorAccountBucket) string {
+	switch bucket {
+	case operatorAccountNormal:
+		return "normal"
+	case operatorAccountNeedsAttention:
+		return "needs_attention"
+	case operatorAccountQuotaRisk:
+		return "quota_risk"
+	default:
+		return "unconfirmed"
 	}
 }
 

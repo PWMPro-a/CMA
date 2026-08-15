@@ -995,6 +995,32 @@ func TestAccountPoolSummarySeparatesEnabledPoolFromDisabledArchive(t *testing.T)
 	}
 }
 
+func TestAccountPoolCredentialSummariesPublishExactSharedBuckets(t *testing.T) {
+	files := []cpaauthfiles.File{
+		{Name: "normal.json", Provider: "codex", AuthIndex: "normal", AccountID: "account-normal", Raw: map[string]any{"status": "active"}},
+		{Name: "risk.json", Provider: "codex", AuthIndex: "risk", Raw: map[string]any{"status": "active"}},
+		{Name: "disabled.json", Provider: "codex", AuthIndex: "disabled", Disabled: true, Raw: map[string]any{"status": "disabled"}},
+		{Name: "claude.json", Provider: "claude", Raw: map[string]any{"status": "active"}},
+	}
+	stats := accountPoolStatsFromFilesAndInspection(files, []store.CodexInspectionResult{
+		{FileName: "normal.json", Provider: "codex", AuthIndex: "normal", Action: "keep", UsedPercent: float64Ptr(10)},
+		{FileName: "risk.json", Provider: "codex", AuthIndex: "risk", Action: "keep", UsedPercent: float64Ptr(95)},
+	})
+
+	items := accountPoolCredentialSummaries(stats)
+	if len(items) != 3 {
+		t.Fatalf("credential summaries = %#v", items)
+	}
+	byName := make(map[string]AccountPoolCredentialSummary, len(items))
+	for _, item := range items {
+		byName[item.AuthFileName] = item
+	}
+	if byName["normal.json"].Bucket != "normal" || byName["normal.json"].AccountID != "account-normal" ||
+		byName["risk.json"].Bucket != "quota_risk" || byName["disabled.json"].Bucket != "disabled" {
+		t.Fatalf("credential summary buckets = %#v", items)
+	}
+}
+
 func TestAccountPoolStatsParsesConcurrencyAliasesWithoutConstrainingUnlimitedAccounts(t *testing.T) {
 	files := []cpaauthfiles.File{
 		{Name: "finite.json", Provider: "codex", Raw: map[string]any{"max_concurrency": 2}},

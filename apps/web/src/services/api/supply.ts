@@ -165,6 +165,24 @@ export interface SupplyAccountPoolSummary {
   disabled: number;
   unconfirmed: number;
   classificationObserved: boolean;
+  credentials?: SupplyAccountPoolCredentialSummary[];
+}
+
+export type SupplyAccountPoolCredentialBucket =
+  | 'normal'
+  | 'needs_attention'
+  | 'quota_risk'
+  | 'unconfirmed'
+  | 'disabled';
+
+export interface SupplyAccountPoolCredentialSummary {
+  authFileName: string;
+  runtimeId?: string;
+  provider?: string;
+  authIndex?: string;
+  accountId?: string;
+  accountSnapshot?: string;
+  bucket: SupplyAccountPoolCredentialBucket;
 }
 
 export interface SupplySmartResource {
