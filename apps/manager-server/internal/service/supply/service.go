@@ -3028,7 +3028,7 @@ const minimumUsefulSupplyImportLease = 5 * time.Minute
 func (s *Service) supplyImportFailuresSettled(ctx context.Context, order store.SupplyOrder, now time.Time) (bool, string, error) {
 	if s == nil || s.store == nil || strings.HasPrefix(order.OrderID, "recovery-") ||
 		strings.EqualFold(strings.TrimSpace(order.Strategy), "recovery") ||
-		!isSuccessfulRemoteStatus(order.RemoteStatus) {
+		!supplyDeliveryFinishedForImportSettlement(order) {
 		return false, "", nil
 	}
 	items, err := s.store.ListSupplyImportItemsByOrderIDs(ctx, []string{order.OrderID})
@@ -3057,6 +3057,22 @@ func (s *Service) supplyImportFailuresSettled(ctx context.Context, order store.S
 		message += ": " + lastError
 	}
 	return true, message, nil
+}
+
+func supplyDeliveryFinishedForImportSettlement(order store.SupplyOrder) bool {
+	if isSuccessfulRemoteStatus(order.RemoteStatus) {
+		return true
+	}
+	status := strings.ToLower(strings.TrimSpace(order.RemoteStatus))
+	switch status {
+	case "partial", "completed_partial", "partially_completed":
+		// Some suppliers finalize a short delivery as partial and release the
+		// unused hold. Progress below 100 still means more inventory may arrive.
+		return order.Progress >= 100 &&
+			(order.ItemCount > 0 || order.ReadyQuantity > 0 || order.ReleasedFen > 0)
+	default:
+		return false
+	}
 }
 
 func terminalSupplyImportItem(item store.SupplyImportItem, now time.Time) bool {

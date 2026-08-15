@@ -4036,6 +4036,66 @@ func TestExpiredPartialImportSettlesOrderAndReleasesOpenSlot(t *testing.T) {
 	}
 }
 
+func TestFinishedPartialDeliverySettlesPermanentImportFailure(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "finished-partial-import.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	order, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "order-finished-partial", Product: "oauth_7d", RequestedQuantity: 3,
+		Automatic: true, Status: "partial", RemoteStatus: "partial", Progress: 100,
+		ReleasedFen: 100,
+	})
+	if err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	now := time.Now()
+	if _, err := st.InsertSupplyImportItems(ctx, order.OrderID, []store.SupplyImportItem{
+		{OrderID: order.OrderID, ItemKey: "good", FileName: "good.json", PayloadJSON: `{}`,
+			LeaseExpiresAtMS: now.Add(30 * time.Minute).UnixMilli()},
+		{OrderID: order.OrderID, ItemKey: "revoked", FileName: "revoked.json", PayloadJSON: `{}`,
+			LeaseExpiresAtMS: now.Add(30 * time.Minute).UnixMilli()},
+	}); err != nil {
+		t.Fatalf("insert items: %v", err)
+	}
+	items, err := st.ListSupplyImportItemsByOrderIDs(ctx, []string{order.OrderID})
+	if err != nil || len(items) != 2 {
+		t.Fatalf("list items=%#v err=%v", items, err)
+	}
+	for _, item := range items {
+		if item.ItemKey == "good" {
+			err = st.MarkSupplyImportItemImported(ctx, item.ID, now.UnixMilli())
+		} else {
+			err = st.MarkSupplyImportItemFailed(ctx, item.ID, "token refresh failed: refresh_token_invalidated", now.Add(time.Hour).UnixMilli())
+		}
+		if err != nil {
+			t.Fatalf("mark item %s: %v", item.ItemKey, err)
+		}
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), nil)
+	if err := service.importItems(ctx, store.ManagerConfig{}, &order); err != nil {
+		t.Fatalf("settle finished partial import: %v", err)
+	}
+	settled, found, err := st.GetSupplyOrder(ctx, order.OrderID)
+	if err != nil || !found {
+		t.Fatalf("load settled order found=%v err=%v", found, err)
+	}
+	if settled.Status != "completed_partial" || settled.ImportedCount != 1 || settled.ItemCount != 2 ||
+		settled.CompletedAtMS <= 0 || !strings.Contains(settled.LastError, "refresh_token_invalidated") {
+		t.Fatalf("settled order = %#v", settled)
+	}
+
+	inProgress := order
+	inProgress.Progress = 99
+	if supplyDeliveryFinishedForImportSettlement(inProgress) {
+		t.Fatal("in-progress partial delivery was treated as terminal")
+	}
+}
+
 func TestTerminalCPAAuthLifecycleErrorOnlyMatchesPermanentCredentialFailure(t *testing.T) {
 	permanent := cpaauthfiles.File{Name: "account.json", Raw: map[string]any{
 		"status":         "initialization_failed",
