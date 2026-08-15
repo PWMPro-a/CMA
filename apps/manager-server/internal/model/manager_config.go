@@ -34,6 +34,7 @@ type ManagerSupplyConfig struct {
 	Enabled                 *bool  `json:"enabled,omitempty"`
 	BaseURL                 string `json:"baseUrl"`
 	Username                string `json:"username"`
+	ClearUsername           bool   `json:"clearUsername,omitempty"`
 	Password                string `json:"password,omitempty"`
 	PasswordConfigured      bool   `json:"passwordConfigured,omitempty"`
 	Product                 string `json:"product"`
@@ -91,6 +92,7 @@ type ManagerSupplyPlatformConfig struct {
 	Enabled                 *bool                                         `json:"enabled,omitempty"`
 	BaseURL                 string                                        `json:"baseUrl"`
 	Username                string                                        `json:"username,omitempty"`
+	ClearUsername           bool                                          `json:"clearUsername,omitempty"`
 	Password                string                                        `json:"password,omitempty"`
 	PasswordConfigured      bool                                          `json:"passwordConfigured,omitempty"`
 	Token                   string                                        `json:"token,omitempty"`

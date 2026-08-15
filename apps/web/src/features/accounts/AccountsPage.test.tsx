@@ -344,11 +344,9 @@ const { mocks } = vi.hoisted(() => {
           pendingCount: 0,
         })
       ),
-      getAccountPoolSummary: vi.fn(
-        async (): Promise<SupplyAccountPoolSummary> => {
-          throw new Error('account pool unavailable');
-        }
-      ),
+      getAccountPoolSummary: vi.fn(async (): Promise<SupplyAccountPoolSummary> => {
+        throw new Error('account pool unavailable');
+      }),
       listAccountLeases: vi.fn(async () => []),
       getAnalytics: vi.fn(
         async (_base: string, _key: string | undefined, _request: unknown): Promise<unknown> => ({
@@ -2940,6 +2938,28 @@ describe('AccountsPage replacement flows', () => {
     expect(mocks.getAccountPoolSummary).toHaveBeenCalled();
     expect(treeText(renderer)).toContain('normal@example.com');
     expect(treeText(renderer)).not.toContain('accounts.empty_title');
+  });
+
+  it('shows the bound source IP and enabled WebSocket state above the account identity', async () => {
+    if (typeof window === 'undefined') {
+      vi.stubGlobal('window', {
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      });
+    }
+    mocks.files = [
+      {
+        ...makeCodexFile('networked.json', 'auth-networked', 'networked@example.com'),
+        source_ip: '144.172.117.179',
+        websockets: true,
+      },
+    ];
+
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+
+    expect(treeText(renderer)).toContain('144.172.117.179');
+    expect(renderer.root.findByProps({ 'aria-label': 'auth_files.websockets_label' })).toBeTruthy();
   });
 
   it('uses unique table row keys for shared auth accounts', async () => {

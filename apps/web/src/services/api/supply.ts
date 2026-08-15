@@ -18,6 +18,7 @@ export interface SupplyPlatformConfig {
   enabled?: boolean;
   baseUrl: string;
   username?: string;
+  clearUsername?: boolean;
   password?: string;
   passwordConfigured?: boolean;
   token?: string;
@@ -31,6 +32,7 @@ export interface SupplyConfig {
   enabled?: boolean;
   baseUrl: string;
   username: string;
+  clearUsername?: boolean;
   password?: string;
   passwordConfigured?: boolean;
   product: SupplyProduct | string;

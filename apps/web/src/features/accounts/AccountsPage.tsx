@@ -45,6 +45,7 @@ import {
   IconSlidersHorizontal,
   IconTimer,
   IconTrash2,
+  IconWifi,
   IconX,
 } from '@/components/ui/icons';
 import {
@@ -66,7 +67,7 @@ import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useInterval } from '@/hooks/useInterval';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
-import { getAuthFileIcon } from '@/features/authFiles/constants';
+import { getAuthFileIcon, readAuthFileWebsockets } from '@/features/authFiles/constants';
 import { useAuthFilesData } from '@/features/authFiles/hooks/useAuthFilesData';
 import { useAuthFilesOauth } from '@/features/authFiles/hooks/useAuthFilesOauth';
 import { useAuthFilesModels } from '@/features/authFiles/hooks/useAuthFilesModels';
@@ -326,6 +327,9 @@ const getHealthStatusClass = (status: AccountListHealthStatusKey) => {
       return styles.badgeNeutral;
   }
 };
+
+const getAccountSourceIp = (file: AuthFileItem): string =>
+  String(file.sourceIp ?? file.source_ip ?? file['source-ip'] ?? '').trim();
 
 const getRemainingBarClass = (row: AccountRow) => {
   if (row.quota.status === 'exhausted' || row.quota.status === 'error') return styles.quotaBarBad;
@@ -4215,6 +4219,8 @@ export function AccountsPage() {
                   ? t('accounts.history_syncing')
                   : null;
             const recentRequestCount = row.usage.success + row.usage.failure;
+            const sourceIp = getAccountSourceIp(row.raw);
+            const websocketsEnabled = readAuthFileWebsockets(row.raw);
             const accountHistoryRequestValue = accountHistoryMatched
               ? formatCompactNumber(accountHistory.total_requests)
               : recentRequestCount > 0
@@ -4253,6 +4259,25 @@ export function AccountsPage() {
                     </span>
                     {item.identity.planType ? (
                       <span className={styles.accountMetaPill}>{item.identity.planType}</span>
+                    ) : null}
+                    {sourceIp ? (
+                      <span
+                        className={`${styles.accountMetaPill} ${styles.accountSourceIpPill}`}
+                        title={t('auth_files.source_ip_card_title', { ip: sourceIp })}
+                      >
+                        <span aria-hidden="true">IP</span>
+                        <strong>{sourceIp}</strong>
+                      </span>
+                    ) : null}
+                    {websocketsEnabled ? (
+                      <span
+                        className={`${styles.accountMetaPill} ${styles.accountWebsocketPill}`}
+                        title={t('auth_files.websockets_label')}
+                        aria-label={t('auth_files.websockets_label')}
+                      >
+                        <IconWifi size={13} aria-hidden="true" />
+                        <span>WS</span>
+                      </span>
                     ) : null}
                     {row.workspaceName || row.workspaceId ? (
                       <span

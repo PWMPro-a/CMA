@@ -14,6 +14,7 @@ import {
   IconTimer,
   IconTrash2,
   IconTrendingUp,
+  IconX,
 } from '@/components/ui/icons';
 import {
   supplyApi,
@@ -47,6 +48,7 @@ const newSupplyPlatform = (type: 'legacy' | 'bugteam', index: number): SupplyPla
   enabled: true,
   baseUrl: type === 'bugteam' ? 'https://bugteam.team' : 'https://sogouedu.cc',
   username: '',
+  clearUsername: false,
   password: '',
   passwordConfigured: false,
   token: '',
@@ -60,7 +62,12 @@ const normalizeSupplyConfigForEditor = (config: SupplyConfig): SupplyConfig => {
   const configuredPlatforms = config.platforms;
   const platforms =
     configuredPlatforms !== undefined
-      ? configuredPlatforms.map((platform) => ({ ...platform, password: '', token: '' }))
+      ? configuredPlatforms.map((platform) => ({
+          ...platform,
+          clearUsername: false,
+          password: '',
+          token: '',
+        }))
       : config.baseUrl || config.username || config.passwordConfigured
         ? [
             {
@@ -70,6 +77,7 @@ const normalizeSupplyConfigForEditor = (config: SupplyConfig): SupplyConfig => {
               enabled: true,
               baseUrl: config.baseUrl,
               username: config.username,
+              clearUsername: false,
               password: '',
               passwordConfigured: config.passwordConfigured,
               product: config.product,
@@ -85,6 +93,7 @@ const emptyConfig: SupplyConfig = {
   enabled: false,
   baseUrl: 'https://sogouedu.cc',
   username: '',
+  clearUsername: false,
   password: '',
   passwordConfigured: false,
   product: 'oauth_30d',
@@ -2432,8 +2441,38 @@ export function SupplyPage() {
                           <Input
                             label={t('supply.username')}
                             value={platform.username ?? ''}
-                            onChange={(event) =>
-                              updateSupplyPlatform(platformIndex, { username: event.target.value })
+                            onChange={(event) => {
+                              const username = event.target.value;
+                              const clearUsername = username.trim() === '';
+                              updateSupplyPlatform(platformIndex, {
+                                username,
+                                clearUsername,
+                                ...(clearUsername
+                                  ? { password: '', passwordConfigured: false }
+                                  : {}),
+                              });
+                            }}
+                            rightElement={
+                              platform.username?.trim() ? (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="xs"
+                                  iconOnly
+                                  title={t('common.reset')}
+                                  aria-label={t('common.reset')}
+                                  onClick={() =>
+                                    updateSupplyPlatform(platformIndex, {
+                                      username: '',
+                                      clearUsername: true,
+                                      password: '',
+                                      passwordConfigured: false,
+                                    })
+                                  }
+                                >
+                                  <IconX size={14} />
+                                </Button>
+                              ) : undefined
                             }
                             autoComplete="username"
                           />

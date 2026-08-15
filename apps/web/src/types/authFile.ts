@@ -115,6 +115,9 @@ export interface AuthFileItem {
   projectId?: string;
   source_ip?: string;
   sourceIp?: string;
+  'source-ip'?: string;
+  websockets?: boolean;
+  websocket?: boolean;
   gemini_virtual_project?: string;
   geminiVirtualProject?: string;
   recent_requests?: RecentRequestBucket[];
