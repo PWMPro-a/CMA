@@ -5,6 +5,7 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -60,12 +61,14 @@ type Overview struct {
 	// that stricter capacity count here made the legacy overview disagree with
 	// the credential-management metrics (for example 9 normal vs 14 verified
 	// capacity accounts).
-	CPAAvailable int                     `json:"cpaAvailable"`
-	CPATarget    int                     `json:"cpaTarget"`
-	CPADeficit   int                     `json:"cpaDeficit"`
-	Inventory    *supplyclient.Inventory `json:"inventory,omitempty"`
-	Balance      *supplyclient.Balance   `json:"balance,omitempty"`
-	LastError    string                  `json:"lastError,omitempty"`
+	CPAAvailable       int                     `json:"cpaAvailable"`
+	CPATarget          int                     `json:"cpaTarget"`
+	CPADeficit         int                     `json:"cpaDeficit"`
+	Inventory          *supplyclient.Inventory `json:"inventory,omitempty"`
+	Balance            *supplyclient.Balance   `json:"balance,omitempty"`
+	SelectedPlatformID string                  `json:"selectedPlatformId,omitempty"`
+	Platforms          []PlatformOverview      `json:"platforms,omitempty"`
+	LastError          string                  `json:"lastError,omitempty"`
 }
 
 type Status struct {
@@ -976,7 +979,11 @@ func (s *Service) refreshActiveOrderRemoteStatus(ctx context.Context, cfg store.
 	if s == nil || order == nil {
 		return nil
 	}
-	credentials := credentialsFromConfig(cfg.Supply)
+	platform, err := resolveSupplyPlatform(cfg.Supply, order.SupplierID, order.Product)
+	if err != nil {
+		return err
+	}
+	credentials := supplyPlatformCredentials(platform)
 	remote, err := s.supplyClient.GetOrder(ctx, credentials, order.OrderID, order.StatusURL)
 	if err != nil {
 		if isHTTPStatus(err, http.StatusConflict) {
@@ -1096,7 +1103,7 @@ func (s *Service) SyncRecoveriesIfDue(ctx context.Context) (RecoverySummary, err
 		return RecoverySummary{}, err
 	}
 	summary := s.currentRecoverySummary(ctx, cfg.Supply)
-	if !summary.Enabled || !supplyCredentialsConfigured(cfg.Supply) {
+	if !summary.Enabled || !recoverySupplyPlatformConfigured(cfg.Supply) {
 		return summary, nil
 	}
 	now := time.Now()
@@ -1136,7 +1143,7 @@ func (s *Service) SyncRecoveries(ctx context.Context, req RecoverySyncRequest) (
 		s.recordRecoveryError(ctx, cfg.Supply, err)
 		return RecoverySummary{}, err
 	}
-	if !recoverySyncEnabled(cfg.Supply) || !supplyCredentialsConfigured(cfg.Supply) {
+	if !recoverySyncEnabled(cfg.Supply) || !recoverySupplyPlatformConfigured(cfg.Supply) {
 		summary := s.currentRecoverySummary(ctx, cfg.Supply)
 		s.recoveryMu.Lock()
 		s.recoveryState = summary
@@ -1844,7 +1851,7 @@ func parallelSupplyCompetitionForOrders(
 	found := false
 	for _, order := range openOrders {
 		if !order.Automatic || isParallelSupplyOrder(order) || !isSupplierPurchaseHistoryOrder(order) ||
-			(strings.TrimSpace(cfg.Product) != "" && !sameSupplyProduct(order.Product, cfg.Product)) {
+			!supplyProductConfigured(cfg, order.Product) {
 			continue
 		}
 		if !found || order.CreatedAtMS < anchor.CreatedAtMS ||
@@ -1863,7 +1870,7 @@ func parallelSupplyCompetitionForOrders(
 	seen := make(map[string]struct{}, len(openOrders)+len(history))
 	add := func(order store.SupplyOrder) {
 		if !isParallelSupplyOrder(order) || !isSupplierPurchaseHistoryOrder(order) ||
-			(strings.TrimSpace(cfg.Product) != "" && !sameSupplyProduct(order.Product, cfg.Product)) ||
+			!supplyProductConfigured(cfg, order.Product) ||
 			(anchor.CreatedAtMS > 0 && order.CreatedAtMS > 0 && order.CreatedAtMS < anchor.CreatedAtMS) {
 			return
 		}
@@ -2231,10 +2238,13 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		quantity = min(quantity, retryQuantity)
 	}
 
-	inventory, balance, err := s.fetchSupplyOverview(ctx, supplyCfg, quantity)
+	selection, err := s.selectSupplyPlatform(ctx, supplyCfg, quantity, openOrders)
 	if err != nil {
 		return err
 	}
+	platform := selection.platform
+	inventory := *selection.status.Inventory
+	balance := *selection.status.Balance
 	if useSmart {
 		pressure := s.smartSupplyPressure(ctx, supplyCfg, inventory, quantity)
 		applySmartSupplyPressure(&resource, pressure)
@@ -2255,10 +2265,13 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		}
 		if adjustedQuantity > 0 && adjustedQuantity != quantity {
 			quantity = adjustedQuantity
-			inventory, balance, err = s.fetchSupplyOverview(ctx, supplyCfg, quantity)
+			selection, err = s.selectSupplyPlatform(ctx, supplyCfg, quantity, openOrders)
 			if err != nil {
 				return err
 			}
+			platform = selection.platform
+			inventory = *selection.status.Inventory
+			balance = *selection.status.Balance
 			pressure = s.smartSupplyPressure(ctx, supplyCfg, inventory, quantity)
 			applySmartSupplyPressure(&resource, pressure)
 		}
@@ -2290,21 +2303,26 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 				}
 			case stagedQuantity != quantity:
 				quantity = stagedQuantity
-				inventory, balance, err = s.fetchSupplyOverview(ctx, supplyCfg, quantity)
+				selection, err = s.selectSupplyPlatform(ctx, supplyCfg, quantity, openOrders)
 				if err != nil {
 					return err
 				}
+				platform = selection.platform
+				inventory = *selection.status.Inventory
+				balance = *selection.status.Balance
 				applySmartSupplyPressure(&resource, s.smartSupplyPressure(ctx, supplyCfg, inventory, quantity))
 			}
 		}
 	}
 	s.setOverview(Overview{
-		CheckedAtMS:  time.Now().UnixMilli(),
-		CPAAvailable: available,
-		CPATarget:    supplyCfg.TargetAvailableAccounts,
-		CPADeficit:   max(0, supplyCfg.TargetAvailableAccounts-available),
-		Inventory:    &inventory,
-		Balance:      &balance,
+		CheckedAtMS:        time.Now().UnixMilli(),
+		CPAAvailable:       available,
+		CPATarget:          supplyCfg.TargetAvailableAccounts,
+		CPADeficit:         max(0, supplyCfg.TargetAvailableAccounts-available),
+		Inventory:          &inventory,
+		Balance:            &balance,
+		SelectedPlatformID: platform.ID,
+		Platforms:          selection.all,
 	})
 	if quantity <= 0 {
 		s.setSmartResource(resource)
@@ -2350,7 +2368,8 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	}
 	attempt := store.SupplyOrder{
 		OrderID:           newCreateAttemptID(),
-		Product:           supplyCfg.Product,
+		SupplierID:        platform.ID,
+		Product:           platform.Product,
 		RequestedQuantity: quantity,
 		Automatic:         manualQuantity == 0,
 		Strategy:          supplyOrderStrategy(supplyCfg, manualQuantity == 0),
@@ -2370,8 +2389,8 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		s.markAutomaticCreate()
 	}
 
-	credentials := credentialsFromConfig(supplyCfg)
-	remote, err := s.supplyClient.CreateOrder(ctx, credentials, supplyCfg.Product, quantity, attempt.OrderID)
+	credentials := supplyPlatformCredentials(platform)
+	remote, err := s.supplyClient.CreateOrder(ctx, credentials, platform.Product, quantity, attempt.OrderID)
 	if err != nil {
 		if isDefiniteCreateFailure(err) {
 			attempt.Status = "failed"
@@ -2426,7 +2445,6 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	if order.Status == "create_uncertain" {
 		return s.retryUncertainCreate(ctx, cfg, order)
 	}
-	credentials := credentialsFromConfig(cfg.Supply)
 	total, imported, err := s.store.SupplyImportCounts(ctx, order.OrderID)
 	if err != nil {
 		return err
@@ -2437,6 +2455,11 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	if released, err := s.autoReleaseAutomaticOrderIfNotNeeded(ctx, cfg, &order, true); released || err != nil {
 		return err
 	}
+	platform, err := resolveSupplyPlatform(cfg.Supply, order.SupplierID, order.Product)
+	if err != nil {
+		return err
+	}
+	credentials := supplyPlatformCredentials(platform)
 	remote, err := s.supplyClient.GetOrder(ctx, credentials, order.OrderID, order.StatusURL)
 	if err != nil {
 		if isHTTPStatus(err, http.StatusConflict) {
@@ -2553,7 +2576,18 @@ func (s *Service) syncTakeReplacementFiles(ctx context.Context, cfg store.Manage
 	if len(files) == 0 {
 		return nil
 	}
-	credentials := credentialsFromConfig(cfg.Supply)
+	order, found, err := s.store.GetSupplyOrder(ctx, sourceOrderID)
+	if err != nil {
+		return err
+	}
+	platform, err := resolveSupplyPlatform(cfg.Supply, order.SupplierID, order.Product)
+	if err != nil || !found {
+		platform, err = recoverySupplyPlatform(cfg.Supply)
+	}
+	if err != nil {
+		return err
+	}
+	credentials := supplyPlatformCredentials(platform)
 	recoveries := make([]store.SupplyRecovery, 0, len(files))
 	for _, file := range files {
 		file.SourceOrderID = firstNonEmptyString(file.SourceOrderID, sourceOrderID)
@@ -2585,7 +2619,7 @@ func (s *Service) syncTakeReplacementFiles(ctx context.Context, cfg store.Manage
 		}
 		recoveries = append(recoveries, supplyRecoveryFromClient(remote))
 	}
-	_, err := s.store.UpsertSupplyRecoveries(ctx, recoveries)
+	_, err = s.store.UpsertSupplyRecoveries(ctx, recoveries)
 	return err
 }
 
@@ -2632,7 +2666,11 @@ func mergeSupplyRecovery(target *supplyclient.Recovery, source supplyclient.Reco
 }
 
 func (s *Service) retryUncertainCreate(ctx context.Context, cfg store.ManagerConfig, attempt store.SupplyOrder) error {
-	remote, err := s.supplyClient.CreateOrder(ctx, credentialsFromConfig(cfg.Supply), attempt.Product, attempt.RequestedQuantity, attempt.OrderID)
+	platform, err := resolveSupplyPlatform(cfg.Supply, attempt.SupplierID, attempt.Product)
+	if err != nil {
+		return err
+	}
+	remote, err := s.supplyClient.CreateOrder(ctx, supplyPlatformCredentials(platform), attempt.Product, attempt.RequestedQuantity, attempt.OrderID)
 	if err != nil {
 		attempt.LastError = safeError(err)
 		attempt.NextPollAtMS = nextSupplierRetryAt(cfg.Supply, err)
@@ -2659,6 +2697,7 @@ func supplyOrderFromCreateResponse(attempt store.SupplyOrder, remote supplyclien
 	order := store.SupplyOrder{
 		ID:                   attempt.ID,
 		OrderID:              remote.ID,
+		SupplierID:           attempt.SupplierID,
 		Product:              attempt.Product,
 		RequestedQuantity:    attempt.RequestedQuantity,
 		Automatic:            attempt.Automatic,
@@ -3007,17 +3046,19 @@ func (s *Service) refreshOverview(ctx context.Context, cfg store.ManagerConfig, 
 }
 
 func (s *Service) refreshSupplyOverview(ctx context.Context, cfg store.ManagerSupplyConfig, available int, quantity int) error {
-	inventory, balance, err := s.fetchSupplyOverview(ctx, cfg, quantity)
+	selection, err := s.selectSupplyPlatform(ctx, cfg, quantity, nil)
 	if err != nil {
 		return err
 	}
 	s.setOverview(Overview{
-		CheckedAtMS:  time.Now().UnixMilli(),
-		CPAAvailable: available,
-		CPATarget:    cfg.TargetAvailableAccounts,
-		CPADeficit:   max(0, cfg.TargetAvailableAccounts-available),
-		Inventory:    &inventory,
-		Balance:      &balance,
+		CheckedAtMS:        time.Now().UnixMilli(),
+		CPAAvailable:       available,
+		CPATarget:          cfg.TargetAvailableAccounts,
+		CPADeficit:         max(0, cfg.TargetAvailableAccounts-available),
+		Inventory:          selection.status.Inventory,
+		Balance:            selection.status.Balance,
+		SelectedPlatformID: selection.platform.ID,
+		Platforms:          selection.all,
 	})
 	return nil
 }
@@ -3043,7 +3084,7 @@ func (s *Service) hydrateOverviewIfNeeded(ctx context.Context, cfg store.Manager
 	}
 
 	refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	inventory, balance, err := s.fetchSupplyOverview(refreshCtx, cfg, max(1, cfg.ReplenishBatchSize))
+	selection, err := s.selectSupplyPlatform(refreshCtx, cfg, max(1, cfg.ReplenishBatchSize), nil)
 	cancel()
 
 	s.stateMu.Lock()
@@ -3060,15 +3101,20 @@ func (s *Service) hydrateOverviewIfNeeded(ctx context.Context, cfg store.Manager
 		s.overview.LastError = safeError(err)
 		return
 	}
-	s.overview.Inventory = &inventory
-	s.overview.Balance = &balance
+	s.overview.Inventory = selection.status.Inventory
+	s.overview.Balance = selection.status.Balance
+	s.overview.SelectedPlatformID = selection.platform.ID
+	s.overview.Platforms = selection.all
 	s.overview.LastError = ""
 }
 
 func supplyCredentialsConfigured(cfg store.ManagerSupplyConfig) bool {
-	return strings.TrimSpace(cfg.BaseURL) != "" &&
-		strings.TrimSpace(cfg.Username) != "" &&
-		strings.TrimSpace(cfg.Password) != ""
+	for _, platform := range supplyPlatforms(cfg) {
+		if supplyPlatformConfigured(platform) {
+			return true
+		}
+	}
+	return false
 }
 
 func cpaManagementConfigured(cfg store.ManagerConfig) bool {
@@ -3460,6 +3506,9 @@ func supplyAccountStatus(item store.SupplyImportItem, file cpaauthfiles.File, cp
 	if !cpaFound {
 		return "missing"
 	}
+	if isCPAAuthLifecyclePending(file) {
+		return "cooldown"
+	}
 	if !isAvailableCodexFile(file) {
 		return "disabled"
 	}
@@ -3495,6 +3544,11 @@ func supplyAccountStatusReason(accountStatus string, item store.SupplyImportItem
 			return reason
 		}
 		return "CPA 账号已停用或当前不可用"
+	case "cooldown":
+		if reason := supplyCPAUnavailableReason(file); reason != "" {
+			return reason
+		}
+		return "CPA 账号正在初始化或自动恢复"
 	default:
 		if status := reportKey(item.Status); status != "" && status != "imported" {
 			if item.LastError != "" {
@@ -3507,6 +3561,13 @@ func supplyAccountStatusReason(accountStatus string, item store.SupplyImportItem
 }
 
 func supplyCPAUnavailableReason(file cpaauthfiles.File) string {
+	if isCPAAuthLifecyclePending(file) {
+		status := strings.ToLower(textField(file.Raw, "status", "state"))
+		if reason := cpaStatusReasonField(file.Raw, "status_message", "statusMessage", "last_error", "lastError"); reason != "" {
+			return compactAccountStatusReason(reason)
+		}
+		return fmt.Sprintf("CPA 账号正在自动恢复（%s）", status)
+	}
 	if reason := cpaStatusReasonField(file.Raw,
 		"reason", "disabled_reason", "disabledReason", "disable_reason", "disableReason",
 		"status_reason", "statusReason", "last_error", "lastError", "error",
@@ -4534,16 +4595,11 @@ func reportRatioFloat(numerator float64, denominator float64) float64 {
 }
 
 func (s *Service) fetchSupplyOverview(ctx context.Context, cfg store.ManagerSupplyConfig, quantity int) (supplyclient.Inventory, supplyclient.Balance, error) {
-	credentials := credentialsFromConfig(cfg)
-	inventory, err := s.supplyClient.Inventory(ctx, credentials, cfg.Product, quantity)
+	selection, err := s.selectSupplyPlatform(ctx, cfg, quantity, nil)
 	if err != nil {
 		return supplyclient.Inventory{}, supplyclient.Balance{}, err
 	}
-	balance, err := s.supplyClient.Balance(ctx, credentials)
-	if err != nil {
-		return supplyclient.Inventory{}, supplyclient.Balance{}, err
-	}
-	return inventory, balance, nil
+	return *selection.status.Inventory, *selection.status.Balance, nil
 }
 
 func (s *Service) syncRecoveriesOnce(ctx context.Context, cfg store.ManagerConfig, autoClaim bool, limit int, recoveryID string) (RecoverySyncResult, error) {
@@ -4569,7 +4625,14 @@ func (s *Service) syncRecoveriesOnce(ctx context.Context, cfg store.ManagerConfi
 	} else {
 		mergePendingResult(imported, failed, nil)
 	}
-	credentials := credentialsFromConfig(cfg.Supply)
+	platform, err := recoverySupplyPlatform(cfg.Supply)
+	if err != nil {
+		if firstErr != nil {
+			return result, errors.Join(firstErr, err)
+		}
+		return result, err
+	}
+	credentials := supplyPlatformCredentials(platform)
 	remoteRecoveries, err := s.supplyClient.Recoveries(ctx, credentials)
 	if err != nil {
 		if firstErr != nil {
@@ -4656,7 +4719,11 @@ func (s *Service) syncRecoveriesOnce(ctx context.Context, cfg store.ManagerConfi
 }
 
 func (s *Service) claimRecovery(ctx context.Context, cfg store.ManagerConfig, recovery store.SupplyRecovery) error {
-	claimed, err := s.supplyClient.ClaimRecovery(ctx, credentialsFromConfig(cfg.Supply), recovery.RecoveryID, recovery.ClaimURL)
+	platform, err := recoverySupplyPlatform(cfg.Supply)
+	if err != nil {
+		return err
+	}
+	claimed, err := s.supplyClient.ClaimRecovery(ctx, supplyPlatformCredentials(platform), recovery.RecoveryID, recovery.ClaimURL)
 	if err != nil {
 		return err
 	}
@@ -5123,7 +5190,7 @@ func accountPoolStatsFromFiles(files []cpaauthfiles.File) accountPoolStats {
 		stats.total++
 		if !file.Disabled {
 			stats.enabled++
-			if textField(file.Raw, "status_message", "statusMessage") != "" || smartAccountCapacityHardBlocked(file.Raw) {
+			if smartAccountNeedsAttention(file.Raw) {
 				stats.needsAttention++
 			} else {
 				stats.unconfirmed++
@@ -5231,7 +5298,7 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 			headerMatched = false
 		}
 		bucket := operatorAccountUnconfirmed
-		if textField(file.Raw, "status_message", "statusMessage") != "" || smartAccountCapacityHardBlocked(file.Raw) {
+		if smartAccountNeedsAttention(file.Raw) {
 			bucket = operatorAccountNeedsAttention
 		} else if headerMatched && (!inspectionAuthoritative || !matched || header.TimestampMS > result.CreatedAtMS) {
 			bucket = classifyOperatorAccountFromHeader(header)
@@ -5444,7 +5511,7 @@ func directOperatorAccountSnapshot(fileName, snapshot string) string {
 }
 
 func classifyOperatorAccount(file cpaauthfiles.File, result store.CodexInspectionResult) operatorAccountBucket {
-	if textField(file.Raw, "status_message", "statusMessage") != "" || smartAccountCapacityHardBlocked(file.Raw) {
+	if smartAccountNeedsAttention(file.Raw) {
 		return operatorAccountNeedsAttention
 	}
 	action := strings.ToLower(strings.TrimSpace(result.Action))
@@ -6111,7 +6178,7 @@ func smartSupplyPressureFromOrders(cfg store.ManagerSupplyConfig, inventory supp
 		if order.CreatedAtMS > 0 && order.CreatedAtMS < cutoffMS {
 			break
 		}
-		if !isSupplierPurchaseHistoryOrder(order) || !order.Automatic || !sameSupplyProduct(order.Product, cfg.Product) {
+		if !isSupplierPurchaseHistoryOrder(order) || !order.Automatic || !supplyProductConfigured(cfg, order.Product) {
 			continue
 		}
 		delivered := automaticOrderDeliveredQuantity(order)
@@ -6786,7 +6853,7 @@ func (s *Service) automaticZeroDeliveryBurst(
 		return 0, 0, err
 	}
 	for _, order := range orders {
-		if !order.Automatic || !sameSupplyProduct(order.Product, cfg.Product) ||
+		if !order.Automatic || !supplyProductConfigured(cfg, order.Product) ||
 			!isSupplierPurchaseHistoryOrder(order) {
 			continue
 		}
@@ -6863,7 +6930,7 @@ func (s *Service) automaticParallelCreateBlocked(ctx context.Context, cfg store.
 // partially delivered orders: those still require normal reconciliation and
 // aggregate capacity admission before another purchase is considered.
 func automaticImmediateRetryEligible(cfg store.ManagerSupplyConfig, order store.SupplyOrder) bool {
-	if !order.Automatic || (strings.TrimSpace(cfg.Product) != "" && !sameSupplyProduct(order.Product, cfg.Product)) ||
+	if !order.Automatic || !supplyProductConfigured(cfg, order.Product) ||
 		strings.EqualFold(strings.TrimSpace(order.Strategy), "recovery") ||
 		strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.OrderID)), "recovery-") ||
 		order.ChargedFen > 0 || order.ReadyQuantity > 0 || order.ItemCount > 0 || order.ImportedCount > 0 {
@@ -6945,7 +7012,7 @@ func automaticRetryLadderStateForOrders(
 	latestTerminalAtMS := smartSupplyOrderTerminalAtMS(latest)
 	started := false
 	add := func(order store.SupplyOrder) bool {
-		if !order.Automatic || !sameSupplyProduct(order.Product, cfg.Product) ||
+		if !order.Automatic || !supplyProductConfigured(cfg, order.Product) ||
 			!isSupplierPurchaseHistoryOrder(order) {
 			return true
 		}
@@ -7101,7 +7168,7 @@ func (s *Service) applySmartEmergencyRetryPlan(ctx context.Context, cfg store.Ma
 
 func smartEmergencyRetryPlanForOrder(cfg store.ManagerSupplyConfig, resource SmartResource, order store.SupplyOrder, now time.Time) smartEmergencyRetryPlan {
 	if !smartShortageFastRetryAllowed(resource) || !order.Automatic ||
-		(strings.TrimSpace(cfg.Product) != "" && !sameSupplyProduct(order.Product, cfg.Product)) ||
+		!supplyProductConfigured(cfg, order.Product) ||
 		strings.EqualFold(strings.TrimSpace(order.Strategy), "recovery") ||
 		strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.OrderID)), "recovery-") ||
 		order.ChargedFen > 0 || order.ItemCount > 0 || order.ImportedCount > 0 || order.ReadyQuantity > 0 {
@@ -7349,15 +7416,24 @@ func (s *Service) resetCriticalConfirm(orderID string) {
 }
 
 func (s *Service) requireCredentials(cfg store.ManagerSupplyConfig) error {
-	if strings.TrimSpace(cfg.BaseURL) == "" || strings.TrimSpace(cfg.Username) == "" || strings.TrimSpace(cfg.Password) == "" {
+	configured := 0
+	for _, platform := range supplyPlatforms(cfg) {
+		if !supplyPlatformConfigured(platform) {
+			continue
+		}
+		parsed, err := url.Parse(platform.BaseURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("account supply platform %s base URL is invalid", platform.ID)
+		}
+		switch strings.ToLower(strings.TrimSpace(platform.Product)) {
+		case "oauth_30d", "oauth_7d", "team_1h":
+			configured++
+		default:
+			return fmt.Errorf("account supply platform %s product is invalid", platform.ID)
+		}
+	}
+	if configured == 0 {
 		return ErrNotConfigured
-	}
-	parsed, err := url.Parse(cfg.BaseURL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return errors.New("account supply base URL is invalid")
-	}
-	if cfg.Product != "oauth_30d" && cfg.Product != "oauth_7d" {
-		return errors.New("account supply product is invalid")
 	}
 	return nil
 }
@@ -7446,7 +7522,7 @@ func (s *Service) currentAutomationExecution(enabled bool) AutomationExecution {
 }
 
 func (s *Service) currentRecoverySummary(ctx context.Context, cfg store.ManagerSupplyConfig) RecoverySummary {
-	enabled := recoverySyncEnabled(cfg) && supplyCredentialsConfigured(cfg)
+	enabled := recoverySyncEnabled(cfg) && recoverySupplyPlatformConfigured(cfg)
 	s.recoveryMu.Lock()
 	summary := s.recoveryState
 	s.recoveryMu.Unlock()
@@ -7507,31 +7583,35 @@ func (s *Service) updateCPAOverviewIfLegacy(cfg store.ManagerSupplyConfig, avail
 }
 
 func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.ManagerConfig, fileName string, payload []byte, importAction string, account normalizedSupplyAccount) error {
-	find := func() error {
-		file, found, err := s.authFiles.Find(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName, "")
+	find := func(findCtx context.Context) (cpaauthfiles.File, error) {
+		file, found, err := s.authFiles.Find(findCtx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName, "")
 		if err != nil {
-			return err
+			return cpaauthfiles.File{}, err
 		}
 		if !found {
-			return errors.New("CPA did not register the imported auth file")
+			return cpaauthfiles.File{}, errors.New("CPA did not register the imported auth file")
 		}
 		provider := strings.ToLower(strings.TrimSpace(file.Provider))
 		if provider != "codex" && provider != "openai-codex" {
-			return fmt.Errorf("CPA registered imported auth file with unsupported provider %q", provider)
+			return file, fmt.Errorf("CPA registered imported auth file with unsupported provider %q", provider)
 		}
 		if !isAvailableCodexFile(file) {
-			return errors.New("CPA registered imported auth file but it is not available")
+			return file, errors.New("CPA registered imported auth file but it is not available")
 		}
-		return nil
+		return file, nil
 	}
 	if existing, found, err := s.authFiles.Find(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName, ""); err != nil {
 		return err
-	} else if found && strings.EqualFold(strings.TrimSpace(importAction), "add") {
-		if !supplyCPAFileMatchesAccount(existing, account) {
+	} else if found {
+		matchesAccount := supplyCPAFileMatchesAccount(existing, account)
+		if strings.EqualFold(strings.TrimSpace(importAction), "add") && !matchesAccount {
 			return fmt.Errorf("CPA auth file %q already belongs to another account", fileName)
 		}
-		if err := find(); err == nil {
+		if _, err := find(ctx); err == nil {
 			return nil
+		}
+		if matchesAccount && isCPAAuthLifecyclePending(existing) {
+			return s.waitForCPAAuthLifecycle(ctx, find)
 		}
 	}
 	if strings.EqualFold(strings.TrimSpace(importAction), "replace") {
@@ -7546,16 +7626,49 @@ func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.Manage
 		fileName, payload, cfg.Supply.DefaultWebsockets); err != nil {
 		return err
 	}
-	var lastErr error
-	for attempt := 0; attempt < 5; attempt++ {
-		if err := find(); err == nil {
-			return nil
-		} else {
-			lastErr = err
-		}
-		time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
+	return s.waitForCPAAuthLifecycle(ctx, find)
+}
+
+const cpaAuthLifecycleWaitTimeout = 45 * time.Second
+
+func (s *Service) waitForCPAAuthLifecycle(ctx context.Context, find func(context.Context) (cpaauthfiles.File, error)) error {
+	if find == nil {
+		return errors.New("CPA auth lifecycle lookup is unavailable")
 	}
-	return lastErr
+	waitCtx, cancel := context.WithTimeout(ctx, cpaAuthLifecycleWaitTimeout)
+	defer cancel()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		file, err := find(waitCtx)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if file.Name != "" && !isCPAAuthLifecyclePending(file) {
+			return err
+		}
+		select {
+		case <-waitCtx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("CPA auth initialization did not become ready: %w", lastErr)
+			}
+			return waitCtx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func isCPAAuthLifecyclePending(file cpaauthfiles.File) bool {
+	status := strings.ToLower(textField(file.Raw, "status", "state"))
+	switch status {
+	case "initializing", "refreshing_token", "refreshing_quota", "initialization_failed",
+		"recovering_token", "recovering_quota", "recovery_failed":
+		return true
+	default:
+		return false
+	}
 }
 
 type supplyImportPlan struct {
@@ -7584,7 +7697,15 @@ func (s *Service) resolveSupplyImportPlan(ctx context.Context, cfg store.Manager
 		}
 	}
 
-	bindings, err := s.store.ListCurrentSupplyImportItemsByNameKey(ctx, account.nameKey)
+	bindings, err := s.store.ListCurrentSupplyImportItemsByItemKey(ctx, account.itemKey)
+	if err != nil {
+		return supplyImportPlan{}, err
+	}
+	if len(bindings) > 0 {
+		return s.planForBoundFile(ctx, cfg, bindings[0].FileName)
+	}
+
+	bindings, err = s.store.ListCurrentSupplyImportItemsByNameKey(ctx, account.nameKey)
 	if err != nil {
 		return supplyImportPlan{}, err
 	}
@@ -7708,15 +7829,13 @@ func supplyCPAFileMatchesAccount(file cpaauthfiles.File, account normalizedSuppl
 	if json.Unmarshal(account.payload, &metadata) != nil {
 		return false
 	}
-	accountID := stringFromMap(metadata, "account_id", "chatgpt_account_id")
-	email := stringFromMap(metadata, "email")
-	if accountID != "" && file.AccountID != "" {
-		return strings.EqualFold(accountID, file.AccountID)
-	}
-	if email != "" && file.AccountSnapshot != "" {
-		return strings.EqualFold(email, file.AccountSnapshot)
-	}
-	return false
+	expected := supplyAccountIdentityPartsFromMetadata(metadata)
+	actualMetadata := cloneMap(file.Raw)
+	setStringIfEmpty(actualMetadata, "account_id", file.AccountID)
+	setStringIfEmpty(actualMetadata, "email", file.AccountSnapshot)
+	normalizeCodexPayloadAliases(actualMetadata)
+	actual := supplyAccountIdentityPartsFromMetadata(actualMetadata)
+	return supplyAccountIdentityPartsMatch(expected, actual)
 }
 
 func safeSupplyAuthFileName(fileName string) bool {
@@ -7875,8 +7994,8 @@ func supplyAccountWithCPAIdentity(account normalizedSupplyAccount, file cpaauthf
 
 func withSupplyAccountName(account normalizedSupplyAccount, accountName string) normalizedSupplyAccount {
 	account.accountName = strings.TrimSpace(accountName)
-	account.nameKey = supplyAccountNameKey(account.accountName)
-	account.fileName = stableSupplyAccountFileName(account.accountName)
+	account.nameKey = supplyAccountNameKey(account.accountName, account.workspaceKey)
+	account.fileName = stableSupplyAccountFileName(account.accountName, account.workspaceKey)
 	return account
 }
 
@@ -7887,7 +8006,7 @@ func looksLikeSupplyAccountEmail(value string) bool {
 }
 
 func (s *Service) findCanonicalSupplyAuthFile(ctx context.Context, cfg store.ManagerConfig, account normalizedSupplyAccount) (string, cpaauthfiles.File, bool, error) {
-	baseName := stableSupplyAccountFileName(account.accountName)
+	baseName := stableSupplyAccountFileName(account.accountName, account.workspaceKey)
 	candidates := []string{baseName, supplyAccountFileNameWithIdentity(account.accountName, account.itemKey)}
 	for attempt := 2; attempt < 100; attempt++ {
 		base := strings.TrimSuffix(candidates[1], ".json")
@@ -7938,11 +8057,21 @@ func (s *Service) recordError(err error) {
 func sanitizeConfig(cfg store.ManagerSupplyConfig) store.ManagerSupplyConfig {
 	cfg.PasswordConfigured = strings.TrimSpace(cfg.Password) != ""
 	cfg.Password = ""
+	for index := range cfg.Platforms {
+		cfg.Platforms[index].PasswordConfigured = strings.TrimSpace(cfg.Platforms[index].Password) != ""
+		cfg.Platforms[index].TokenConfigured = strings.TrimSpace(cfg.Platforms[index].Token) != ""
+		cfg.Platforms[index].Password = ""
+		cfg.Platforms[index].Token = ""
+	}
 	return cfg
 }
 
 func credentialsFromConfig(cfg store.ManagerSupplyConfig) supplyclient.Credentials {
-	return supplyclient.Credentials{BaseURL: cfg.BaseURL, Username: cfg.Username, Password: cfg.Password}
+	platform, err := resolveSupplyPlatform(cfg, "", cfg.Product)
+	if err != nil {
+		return supplyclient.Credentials{BaseURL: cfg.BaseURL, Username: cfg.Username, Password: cfg.Password}
+	}
+	return supplyPlatformCredentials(platform)
 }
 
 func recoverySyncEnabled(cfg store.ManagerSupplyConfig) bool {
@@ -8266,6 +8395,7 @@ type normalizedSupplyAccount struct {
 	itemKey          string
 	accountName      string
 	nameKey          string
+	workspaceKey     string
 	fileName         string
 	leaseExpiresAtMS int64
 	basePriceFen     int64
@@ -8386,6 +8516,7 @@ func normalizeSupplyAccountObject(object map[string]any, exportedAt any) (normal
 	} else {
 		return normalizedSupplyAccount{}, errors.New("account does not contain OAuth token data")
 	}
+	enrichCodexIdentityFromTokens(metadata)
 	pinSupplyCodexPlanType(metadata)
 	// Supplier-managed pool accounts must remain immediately selectable after
 	// account-level or model-selection errors. An explicit zero is required:
@@ -8423,19 +8554,30 @@ func normalizeSupplyAccountObject(object map[string]any, exportedAt any) (normal
 		stringFromMap(metadata, "name"),
 		"OpenAI OAuth Account",
 	)
-	nameKey := supplyAccountNameKey(accountName)
+	workspaceKey := supplyAccountWorkspaceKey(metadata)
+	nameKey := supplyAccountNameKey(accountName, workspaceKey)
 	return normalizedSupplyAccount{
 		payload:          normalized,
 		itemKey:          digest,
 		accountName:      accountName,
 		nameKey:          nameKey,
-		fileName:         stableSupplyAccountFileName(accountName),
+		workspaceKey:     workspaceKey,
+		fileName:         stableSupplyAccountFileName(accountName, workspaceKey),
 		leaseExpiresAtMS: supplyDeliveryLeaseExpiresAtMS(object, time.Now()),
 	}, nil
 }
 
-func stableSupplyAccountFileName(accountName string) string {
-	return "codex-" + safeSupplyFileComponent(accountName) + ".json"
+func stableSupplyAccountFileName(accountName string, workspaceKeys ...string) string {
+	base := "codex-" + safeSupplyFileComponent(accountName)
+	workspaceKey := ""
+	if len(workspaceKeys) > 0 {
+		workspaceKey = strings.TrimSpace(workspaceKeys[0])
+	}
+	if workspaceKey == "" {
+		return base + ".json"
+	}
+	sum := sha256.Sum256([]byte(strings.ToLower(workspaceKey)))
+	return base + "-space-" + hex.EncodeToString(sum[:4]) + ".json"
 }
 
 func supplyAccountFileNameWithIdentity(accountName string, itemKey string) string {
@@ -8450,8 +8592,20 @@ func supplyAccountFileNameWithIdentity(accountName string, itemKey string) strin
 	return "codex-" + safeSupplyFileComponent(accountName) + "-" + digest + ".json"
 }
 
-func supplyAccountNameKey(accountName string) string {
-	return strings.ToLower(safeSupplyFileComponent(accountName))
+func supplyAccountNameKey(accountName string, workspaceKeys ...string) string {
+	nameKey := strings.ToLower(safeSupplyFileComponent(accountName))
+	if len(workspaceKeys) == 0 || strings.TrimSpace(workspaceKeys[0]) == "" {
+		return nameKey
+	}
+	return nameKey + "|" + strings.ToLower(strings.TrimSpace(workspaceKeys[0]))
+}
+
+func supplyAccountWorkspaceKey(metadata map[string]any) string {
+	return firstNonEmptyString(
+		stringFromMap(metadata, "workspace_id", "workspaceId", "chatgpt_workspace_id", "chatgptWorkspaceId", "workspace"),
+		stringFromMap(metadata, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"),
+		stringFromMap(metadata, "organization_id", "organizationId", "org_id", "orgId", "poid"),
+	)
 }
 
 func safeSupplyFileComponent(value string) string {
@@ -8600,12 +8754,15 @@ func convertSub2AccountToCPAPayload(account map[string]any, credentials map[stri
 	}
 	normalizeCodexPayloadAliases(metadata)
 
-	email := stringFromMaps([]map[string]any{metadata, extra}, "email", "email_address", "emailAddress")
-	accountID := stringFromMaps([]map[string]any{metadata, extra}, "chatgpt_account_id", "chatgptAccountId", "account_id", "accountId")
-	userID := stringFromMaps([]map[string]any{metadata, extra}, "chatgpt_user_id", "chatgptUserId", "user_id", "userId")
-	organizationID := stringFromMaps([]map[string]any{metadata, extra}, "organization_id", "organizationId", "org_id", "orgId", "poid")
-	workspaceID := stringFromMaps([]map[string]any{metadata, extra}, "workspace_id", "workspaceId", "chatgpt_workspace_id", "chatgptWorkspaceId", "workspace")
-	planType := resolveSupplyPlanType(metadata, extra)
+	identitySources := []map[string]any{metadata, extra, account}
+	email := stringFromMaps(identitySources, "email", "email_address", "emailAddress")
+	accountID := stringFromMaps(identitySources, "chatgpt_account_id", "chatgptAccountId", "account_id", "accountId")
+	userID := stringFromMaps(identitySources, "chatgpt_user_id", "chatgptUserId", "user_id", "userId")
+	accountUserID := stringFromMaps(identitySources, "chatgpt_account_user_id", "chatgptAccountUserId")
+	organizationID := stringFromMaps(identitySources, "organization_id", "organizationId", "org_id", "orgId", "poid")
+	workspaceID := stringFromMaps(identitySources, "workspace_id", "workspaceId", "chatgpt_workspace_id", "chatgptWorkspaceId", "workspace")
+	workspaceName := stringFromMaps(identitySources, "workspace_name", "workspaceName", "organization_name", "organizationName", "team_name", "teamName")
+	planType := resolveSupplyPlanType(metadata, extra, account)
 	expiresAt := stringFromMaps([]map[string]any{metadata, account}, "expires_at", "expiresAt", "expired")
 	lastRefresh := stringFromMaps([]map[string]any{metadata, extra, account}, "last_refresh", "lastRefresh", "exported_at", "exportedAt")
 	if lastRefresh == "" && exportedAt != nil {
@@ -8620,8 +8777,10 @@ func convertSub2AccountToCPAPayload(account map[string]any, credentials map[stri
 		metadata["chatgpt_account_id"] = accountID
 	}
 	setString(metadata, "chatgpt_user_id", userID)
+	setString(metadata, "chatgpt_account_user_id", accountUserID)
 	setString(metadata, "organization_id", organizationID)
 	setString(metadata, "workspace_id", workspaceID)
+	setString(metadata, "workspace_name", workspaceName)
 	if planType != "" {
 		metadata["plan_type"] = planType
 		metadata["chatgpt_plan_type"] = planType
@@ -8644,6 +8803,7 @@ func convertSub2AccountToCPAPayload(account map[string]any, credentials map[stri
 	} else if status := strings.ToLower(stringFromMap(account, "status", "state")); status == "disabled" || status == "inactive" || status == "expired" || status == "revoked" || status == "deleted" {
 		metadata["disabled"] = true
 	}
+	enrichCodexIdentityFromTokens(metadata)
 	return stripEmptyValues(metadata)
 }
 
@@ -8660,6 +8820,12 @@ func normalizeCodexPayloadAliases(metadata map[string]any) {
 	}
 	if workspaceID := stringFromMap(metadata, "workspace_id", "workspaceId", "chatgpt_workspace_id", "chatgptWorkspaceId", "workspace"); workspaceID != "" {
 		metadata["workspace_id"] = workspaceID
+	}
+	if userID := stringFromMap(metadata, "chatgpt_user_id", "chatgptUserId", "user_id", "userId"); userID != "" {
+		metadata["chatgpt_user_id"] = userID
+	}
+	if accountUserID := stringFromMap(metadata, "chatgpt_account_user_id", "chatgptAccountUserId"); accountUserID != "" {
+		metadata["chatgpt_account_user_id"] = accountUserID
 	}
 	if planType := resolveSupplyPlanType(metadata); planType != "" {
 		metadata["plan_type"] = planType
@@ -8712,22 +8878,184 @@ func pinSupplyCodexPlanType(metadata map[string]any) {
 }
 
 func supplyAccountIdentity(metadata map[string]any) string {
-	accountID := stringFromMap(metadata, "account_id", "chatgpt_account_id")
-	email := stringFromMap(metadata, "email")
-	planType := stringFromMap(metadata, "plan_type", "chatgpt_plan_type")
-	if accountID != "" && email != "" {
-		return accountID + "|" + email
+	parts := supplyAccountIdentityPartsFromMetadata(metadata)
+	if parts.workspaceID != "" && parts.memberID != "" {
+		return "workspace:" + parts.workspaceID + "|member:" + parts.memberID
 	}
+	if parts.workspaceID != "" && parts.email != "" {
+		return "workspace:" + parts.workspaceID + "|email:" + parts.email
+	}
+	if parts.organizationID != "" && parts.memberID != "" {
+		return "organization:" + parts.organizationID + "|member:" + parts.memberID
+	}
+	if parts.memberID != "" {
+		return "member:" + parts.memberID
+	}
+	if parts.email != "" {
+		return "email:" + parts.email
+	}
+	if parts.accountID != "" {
+		return "account:" + parts.accountID
+	}
+	return strings.TrimSpace(stringFromMap(metadata, "refresh_token", "access_token", "id_token"))
+}
+
+type supplyAccountIdentityParts struct {
+	workspaceID    string
+	accountID      string
+	memberID       string
+	email          string
+	organizationID string
+}
+
+func supplyAccountIdentityPartsFromMetadata(metadata map[string]any) supplyAccountIdentityParts {
+	accountID := normalizedSupplyIdentityValue(stringFromMap(metadata,
+		"account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"))
+	workspaceID := normalizedSupplyIdentityValue(firstNonEmptyString(
+		stringFromMap(metadata, "workspace_id", "workspaceId", "chatgpt_workspace_id", "chatgptWorkspaceId", "workspace"),
+		accountID,
+	))
+	return supplyAccountIdentityParts{
+		workspaceID: workspaceID,
+		accountID:   accountID,
+		memberID: normalizedSupplyIdentityValue(firstNonEmptyString(
+			stringFromMap(metadata, "chatgpt_user_id", "chatgptUserId", "user_id", "userId"),
+			stringFromMap(metadata, "chatgpt_account_user_id", "chatgptAccountUserId"),
+		)),
+		email: normalizedSupplyIdentityValue(stringFromMap(metadata,
+			"email", "email_address", "emailAddress", "account")),
+		organizationID: normalizedSupplyIdentityValue(stringFromMap(metadata,
+			"organization_id", "organizationId", "org_id", "orgId", "poid")),
+	}
+}
+
+func supplyAccountIdentityPartsMatch(expected supplyAccountIdentityParts, actual supplyAccountIdentityParts) bool {
+	if expected.workspaceID != "" && expected.memberID != "" && actual.workspaceID != "" && actual.memberID != "" {
+		return expected.workspaceID == actual.workspaceID && expected.memberID == actual.memberID
+	}
+	if expected.workspaceID != "" && expected.email != "" && actual.workspaceID != "" && actual.email != "" {
+		return expected.workspaceID == actual.workspaceID && expected.email == actual.email
+	}
+	if expected.accountID != "" && expected.email != "" && actual.accountID != "" && actual.email != "" {
+		return expected.accountID == actual.accountID && expected.email == actual.email
+	}
+	if expected.memberID != "" && actual.memberID != "" {
+		return expected.memberID == actual.memberID
+	}
+	return expected.email != "" && actual.email != "" && expected.email == actual.email
+}
+
+func normalizedSupplyIdentityValue(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+const maxSupplyJWTPayloadSegmentBytes = 64 * 1024
+
+func enrichCodexIdentityFromTokens(metadata map[string]any) {
+	if len(metadata) == 0 {
+		return
+	}
+	claims := make([]map[string]any, 0, 2)
+	for _, token := range []string{
+		stringFromMap(metadata, "access_token", "accessToken", "session_access_token", "sessionAccessToken"),
+		stringFromMap(metadata, "id_token", "idToken"),
+	} {
+		if payload := decodeSupplyJWTPayload(token); payload != nil {
+			claims = append(claims, payload)
+		}
+	}
+	if len(claims) == 0 {
+		return
+	}
+	authClaims := make([]map[string]any, 0, len(claims))
+	for _, claim := range claims {
+		if auth, ok := claim["https://api.openai.com/auth"].(map[string]any); ok {
+			authClaims = append(authClaims, auth)
+		}
+	}
+	accountID := firstNonEmptyString(
+		stringFromMap(metadata, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"),
+		stringFromMaps(authClaims, "chatgpt_account_id", "chatgptAccountId", "account_id", "accountId"),
+	)
+	memberID := firstNonEmptyString(
+		stringFromMap(metadata, "chatgpt_user_id", "chatgptUserId", "user_id", "userId"),
+		stringFromMaps(authClaims, "chatgpt_user_id", "chatgptUserId", "user_id", "userId"),
+	)
+	accountUserID := firstNonEmptyString(
+		stringFromMap(metadata, "chatgpt_account_user_id", "chatgptAccountUserId"),
+		stringFromMaps(authClaims, "chatgpt_account_user_id", "chatgptAccountUserId"),
+	)
+	organizationID := firstNonEmptyString(
+		stringFromMap(metadata, "organization_id", "organizationId", "org_id", "orgId", "poid"),
+		stringFromMaps(authClaims, "poid", "organization_id", "organizationId", "org_id", "orgId"),
+		defaultOrganizationIDFromJWTClaims(claims),
+	)
+	workspaceID := firstNonEmptyString(
+		stringFromMap(metadata, "workspace_id", "workspaceId", "chatgpt_workspace_id", "chatgptWorkspaceId", "workspace"),
+		accountID,
+	)
+	email := firstNonEmptyString(
+		stringFromMap(metadata, "email", "email_address", "emailAddress", "account"),
+		stringFromMaps(claims, "email"),
+	)
 	if accountID != "" {
-		return accountID
+		metadata["account_id"] = accountID
+		metadata["chatgpt_account_id"] = accountID
 	}
-	if userID := stringFromMap(metadata, "chatgpt_user_id"); userID != "" {
-		return userID
+	setStringIfEmpty(metadata, "chatgpt_user_id", memberID)
+	setStringIfEmpty(metadata, "chatgpt_account_user_id", accountUserID)
+	setStringIfEmpty(metadata, "organization_id", organizationID)
+	setStringIfEmpty(metadata, "workspace_id", workspaceID)
+	setStringIfEmpty(metadata, "email", email)
+}
+
+func decodeSupplyJWTPayload(token string) map[string]any {
+	token = strings.TrimSpace(token)
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 || parts[1] == "" || len(parts[1]) > maxSupplyJWTPayloadSegmentBytes {
+		return nil
 	}
-	if email != "" {
-		return email + "|" + planType
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		payload, err = base64.URLEncoding.DecodeString(parts[1])
 	}
-	return stringFromMap(metadata, "refresh_token", "access_token", "id_token")
+	if err != nil || len(payload) == 0 || len(payload) > maxSupplyJWTPayloadSegmentBytes {
+		return nil
+	}
+	var claims map[string]any
+	if json.Unmarshal(payload, &claims) != nil {
+		return nil
+	}
+	return claims
+}
+
+func defaultOrganizationIDFromJWTClaims(claims []map[string]any) string {
+	for _, claim := range claims {
+		auth, _ := claim["https://api.openai.com/auth"].(map[string]any)
+		organizations, _ := auth["organizations"].([]any)
+		for _, raw := range organizations {
+			organization, _ := raw.(map[string]any)
+			if boolField(organization, "is_default", "isDefault") {
+				if id := stringFromMap(organization, "id", "organization_id", "organizationId"); id != "" {
+					return id
+				}
+			}
+		}
+		for _, raw := range organizations {
+			if organization, ok := raw.(map[string]any); ok {
+				if id := stringFromMap(organization, "id", "organization_id", "organizationId"); id != "" {
+					return id
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func setStringIfEmpty(values map[string]any, key string, value string) {
+	if strings.TrimSpace(stringFromMap(values, key)) == "" {
+		setString(values, key, value)
+	}
 }
 
 func stableCodexIdentityFingerprint(identity string) string {
@@ -8957,7 +9285,9 @@ func isSmartCapacityCodexFile(file cpaauthfiles.File) bool {
 	}
 	status := strings.ToLower(textField(file.Raw, "status", "state"))
 	switch status {
-	case "disabled", "inactive", "invalid", "expired", "revoked", "deleted":
+	case "disabled", "inactive", "invalid", "expired", "revoked", "deleted",
+		"initializing", "refreshing_token", "refreshing_quota", "initialization_failed",
+		"recovering_token", "recovering_quota", "recovery_failed":
 		return false
 	}
 	if smartAccountCapacityHardBlocked(file.Raw) {

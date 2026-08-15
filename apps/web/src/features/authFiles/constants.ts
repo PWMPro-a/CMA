@@ -179,6 +179,53 @@ export const getAuthFileStatusMessage = (file: AuthFileItem): string => {
 export const hasAuthFileStatusMessage = (file: AuthFileItem): boolean =>
   getAuthFileStatusMessage(file).length > 0;
 
+export type AuthFileOperationalState = 'healthy' | 'cooldown' | 'failed';
+
+const AUTH_FILE_COOLDOWN_MARKERS = [
+  'rate limit exceeded',
+  'rate_limit',
+  'rate-limit',
+  'too many requests',
+  'http 429',
+  'status 429',
+  'status_code:429',
+  'status_code\":429',
+  'cooldown',
+  'cooling',
+  'retry_after',
+  'retry after',
+  'quota cooldown',
+  'quota window',
+  'waiting for quota',
+  'quota reset',
+  'initializing',
+  'initialization queued',
+  'initialization failed; retrying',
+  'refreshing token',
+  'refreshing quota',
+  'recovering token',
+  'recovering quota',
+  'recovery failed; retrying',
+];
+
+const AUTH_FILE_TRANSIENT_UPSTREAM_MARKERS = [
+  'temporarily unavailable',
+  'temporary unavailable',
+  'service unavailable',
+  'server overloaded',
+  'upstream unavailable',
+];
+
+export const isAuthFileCoolingStatusText = (value: string, hasRecentSuccess = false): boolean => {
+  const message = value.trim().toLowerCase();
+  if (!message) return false;
+  if (AUTH_FILE_COOLDOWN_MARKERS.some((marker) => message.includes(marker))) return true;
+  return (
+    hasRecentSuccess &&
+    AUTH_FILE_TRANSIENT_UPSTREAM_MARKERS.some((marker) => message.includes(marker))
+  );
+};
+
 const AUTH_FILE_HEALTH_MIN_RECENT_SAMPLES = 5;
 const AUTH_FILE_HEALTH_MIN_RAW_SAMPLES = 10;
 const AUTH_FILE_HEALTH_SUCCESS_RATE = 0.8;
@@ -205,6 +252,11 @@ const getAuthFileSuccessRate = (file: AuthFileItem): number | null => {
   return null;
 };
 
+export const hasRecentAuthFileSuccess = (file: AuthFileItem): boolean => {
+  const recent = normalizeRecentRequestBuckets(file.recent_requests ?? file.recentRequests);
+  return recent.some((bucket) => bucket.success > 0);
+};
+
 const hasDefiniteAuthFileAvailabilityFailure = (file: AuthFileItem): boolean => {
   const status = String(file.status ?? file['state'] ?? '')
     .trim()
@@ -221,7 +273,6 @@ const hasDefiniteAuthFileAvailabilityFailure = (file: AuthFileItem): boolean => 
     'expired',
     'login_required',
     'reauth',
-    'server overloaded',
   ].some((keyword) => message.includes(keyword));
 };
 
@@ -260,15 +311,29 @@ const isCapacityOnlyRuntimeStatus = (file: AuthFileItem): boolean => {
 };
 
 export const isHealthyAuthFile = (file: AuthFileItem): boolean => {
-  if (file.disabled === true || file.unavailable === true) return false;
+  if (file.disabled === true) return false;
+  if (hasDefiniteAuthFileAvailabilityFailure(file)) return false;
+  if (isAuthFileCoolingStatusText(getAuthFileStatusMessage(file), hasRecentAuthFileSuccess(file))) {
+    return true;
+  }
+  if (file.unavailable === true) return false;
   const successRate = getAuthFileSuccessRate(file);
   if (successRate !== null) return successRate >= AUTH_FILE_HEALTH_SUCCESS_RATE;
-  if (hasDefiniteAuthFileAvailabilityFailure(file)) return false;
   const provider = normalizeProviderKey(String(file.type ?? file.provider ?? ''));
   if ((provider === 'codex' || provider === 'openai-codex') && isCapacityOnlyRuntimeStatus(file)) {
     return true;
   }
   return !hasAuthFileStatusMessage(file);
+};
+
+export const classifyAuthFileOperationalState = (file: AuthFileItem): AuthFileOperationalState => {
+  if (file.disabled === true) return 'failed';
+  if (hasDefiniteAuthCredentialFailure(file)) return 'failed';
+  if (isAuthFileCoolingStatusText(getAuthFileStatusMessage(file), hasRecentAuthFileSuccess(file))) {
+    return 'cooldown';
+  }
+  if (file.unavailable === true || hasAuthFileStatusMessage(file)) return 'failed';
+  return 'healthy';
 };
 
 export const isUsableAuthCredential = (

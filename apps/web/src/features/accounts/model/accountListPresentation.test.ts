@@ -322,6 +322,21 @@ describe('accountListPresentation', () => {
     expect(exceptionItem.health.reasonParams).toEqual({ detail: 'custom problem' });
     expect(exceptionItem.health.reasonTone).toBe('danger');
 
+    const cooldownItem = buildAccountListItem(
+      makeRow({
+        statusMessage: '{"detail":"Rate limit exceeded"}',
+        usage: {
+          success: 8,
+          failure: 2,
+          successRate: 80,
+          recentRequests: [{ time: 'now', success: 8, failed: 2 }],
+        },
+      })
+    );
+    expect(cooldownItem.health.status).toBe('cooldown');
+    expect(cooldownItem.health.reasonKey).toBe('accounts.health_reason_cooldown_status');
+    expect(cooldownItem.health.reasonTone).toBe('warning');
+
     const disabledItem = buildAccountListItem(
       makeRow({
         disabled: true,

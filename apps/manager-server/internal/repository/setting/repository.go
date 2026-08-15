@@ -296,6 +296,20 @@ func (r *repository) protectManagerConfig(cfg model.ManagerConfig) (model.Manage
 	}
 	cfg.Supply.Password = value
 	cfg.Supply.PasswordConfigured = false
+	for index := range cfg.Supply.Platforms {
+		value, err = r.protector.ProtectString(cfg.Supply.Platforms[index].Password)
+		if err != nil {
+			return model.ManagerConfig{}, err
+		}
+		cfg.Supply.Platforms[index].Password = value
+		value, err = r.protector.ProtectString(cfg.Supply.Platforms[index].Token)
+		if err != nil {
+			return model.ManagerConfig{}, err
+		}
+		cfg.Supply.Platforms[index].Token = value
+		cfg.Supply.Platforms[index].PasswordConfigured = false
+		cfg.Supply.Platforms[index].TokenConfigured = false
+	}
 	return cfg, nil
 }
 
@@ -314,5 +328,19 @@ func (r *repository) unprotectManagerConfig(cfg model.ManagerConfig) (model.Mana
 	}
 	cfg.Supply.Password = value
 	cfg.Supply.PasswordConfigured = value != ""
+	for index := range cfg.Supply.Platforms {
+		value, err = r.protector.UnprotectString(cfg.Supply.Platforms[index].Password)
+		if err != nil {
+			return model.ManagerConfig{}, err
+		}
+		cfg.Supply.Platforms[index].Password = value
+		cfg.Supply.Platforms[index].PasswordConfigured = value != ""
+		value, err = r.protector.UnprotectString(cfg.Supply.Platforms[index].Token)
+		if err != nil {
+			return model.ManagerConfig{}, err
+		}
+		cfg.Supply.Platforms[index].Token = value
+		cfg.Supply.Platforms[index].TokenConfigured = value != ""
+	}
 	return cfg, nil
 }

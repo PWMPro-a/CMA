@@ -303,6 +303,38 @@
   gap: 6px 12px;
 }
 
+.quotaClassList {
+  display: grid;
+  gap: 6px;
+}
+
+.quotaClassItem {
+  display: grid;
+  gap: 4px;
+  padding: 8px 9px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 16%, var(--border-color));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--primary-color) 4%, var(--bg-primary));
+
+  > div {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  strong {
+    color: var(--text-primary);
+    font-size: 12px;
+  }
+
+  span,
+  small {
+    color: var(--text-secondary);
+    font-size: 10px;
+  }
+}
+
 .quotaEstimateAlert,
 .quotaEstimateNotice {
   padding: 8px 9px;
@@ -893,6 +925,94 @@
   gap: 12px;
 }
 
+.platformList {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--border-color);
+}
+
+.platformRow {
+  display: grid;
+  gap: 12px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.platformRowHeader,
+.platformIdentity,
+.platformActions,
+.platformRuntime {
+  display: flex;
+  align-items: center;
+}
+
+.platformRowHeader {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.platformIdentity,
+.platformActions,
+.platformRuntime {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.platformIdentity strong {
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.platformIdentity > span:not(.statusPill) {
+  color: var(--text-tertiary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.platformFormGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.platformQuotaGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.platformQuotaRow {
+  display: grid;
+  grid-template-columns: minmax(56px, 0.45fr) minmax(110px, 0.8fr) minmax(100px, 1fr);
+  gap: 8px;
+  align-items: end;
+  padding: 9px 10px;
+  border-left: 3px solid color-mix(in srgb, var(--primary-color) 65%, transparent);
+  background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
+}
+
+.platformQuotaRow strong {
+  align-self: center;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.platformRuntime {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.platformRuntime strong {
+  color: var(--failure-badge-text);
+  overflow-wrap: anywhere;
+}
+
+.platformGlobalFields {
+  display: grid;
+  grid-template-columns: minmax(180px, 320px);
+  padding-top: 12px;
+}
+
 .strategySelector {
   display: grid;
   gap: 10px;
@@ -1418,6 +1538,8 @@
   .ordersGrid,
   .reportsGrid,
   .formGrid,
+  .platformFormGrid,
+  .platformQuotaGrid,
   .smartToggles,
   .orderComposer,
   .demandMetricGrid,
@@ -1437,6 +1559,10 @@
 
   .quotaPolicyFields {
     grid-template-columns: 1fr;
+  }
+
+  .platformQuotaRow {
+    grid-template-columns: minmax(64px, 0.45fr) minmax(110px, 0.8fr) minmax(100px, 1fr);
   }
 
   .poolSummaryItem {
@@ -1491,6 +1617,15 @@
   .quotaPolicyConfigHeader {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .platformRowHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .platformQuotaRow {
+    grid-template-columns: 1fr;
   }
 
   .quotaPolicyConfigHeader span {

@@ -18,6 +18,10 @@ import {
 import { resolveCodexPlanType, resolveEffectiveCodexPlanType } from '@/utils/quota/resolvers';
 import { getCredentialScopedQuotaState } from '@/utils/quota/credentialScope';
 import {
+  classifyAuthFileOperationalState,
+  isAuthFileCoolingStatusText,
+} from '@/features/authFiles/constants';
+import {
   compareQuotaResetLabels,
   compareQuotaResets,
   normalizeAccountProvider,
@@ -122,6 +126,8 @@ export interface AccountRow {
   statusMessage: string;
   authIndex: string;
   projectId: string;
+  workspaceId?: string;
+  workspaceName?: string;
   note?: string;
   priority: number | null;
   createdAtMs: number | null;
@@ -286,6 +292,55 @@ const resolveAccountLabel = (file: AuthFileItem): string =>
 const resolveStatusMessage = (file: AuthFileItem): string =>
   readString(file.statusMessage ?? file['status_message']);
 
+const readNestedAuthFileString = (file: AuthFileItem, ...keys: string[]): string => {
+  const records: Array<Record<string, unknown>> = [file];
+  for (const value of [file.id_token, file.metadata, file.attributes]) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      records.push(value as Record<string, unknown>);
+    }
+  }
+  for (const record of records) {
+    for (const key of keys) {
+      const value = readString(record[key]);
+      if (value) return value;
+    }
+  }
+  return '';
+};
+
+const resolveWorkspaceIdentity = (file: AuthFileItem, planType: string | null) => {
+  const workspaceName = readNestedAuthFileString(
+    file,
+    'workspace_name',
+    'workspaceName',
+    'organization_name',
+    'organizationName',
+    'team_name',
+    'teamName'
+  );
+  let workspaceId = readNestedAuthFileString(
+    file,
+    'workspace_id',
+    'workspaceId',
+    'chatgpt_workspace_id',
+    'chatgptWorkspaceId',
+    'organization_id',
+    'organizationId',
+    'org_id',
+    'orgId'
+  );
+  if (!workspaceId && planType === 'team') {
+    workspaceId = readNestedAuthFileString(
+      file,
+      'chatgpt_account_id',
+      'chatgptAccountId',
+      'account_id',
+      'accountId'
+    );
+  }
+  return { workspaceId, workspaceName };
+};
+
 const buildInspectionMap = (
   results: AccountInspectionResult[] | undefined
 ): Map<string, AccountInspectionSummary> => {
@@ -398,22 +453,26 @@ export const buildAccountRows = (
         ? null
         : matchedInspection;
     const quota = resolveAccountQuota(file, stores, overrides, currentCodexSources?.inspection);
+    const effectivePlanType =
+      provider === 'codex'
+        ? resolveEffectiveCodexPlanType(file, quota.planType)
+        : (quota.planType ?? readPlanType(file));
+    const workspace = resolveWorkspaceIdentity(file, effectivePlanType);
     return {
       key: file.name,
       selectionKey,
       fileName: file.name,
       accountLabel: resolveAccountLabel(file),
       provider,
-      planType:
-        provider === 'codex'
-          ? resolveEffectiveCodexPlanType(file, quota.planType)
-          : (quota.planType ?? readPlanType(file)),
+      planType: effectivePlanType,
       disabled: file.disabled === true,
       runtimeOnly:
         file.runtimeOnly === true || file.runtimeOnly === 'true' || file.runtime_only === true,
       statusMessage: resolveStatusMessage(file),
       authIndex,
       projectId: readProjectId(file),
+      workspaceId: workspace.workspaceId,
+      workspaceName: workspace.workspaceName,
       note: readString(file.note),
       priority: readNumber(file.priority),
       createdAtMs: readAuthFileCreatedAtMs(file),
@@ -466,29 +525,52 @@ const hasOperationalItems = (
 const hasPartialGroupedQuota = (row: AccountRow): boolean =>
   row.quota.groupedAvailabilityState === 'partial';
 
+const getAccountOperationalState = (row: AccountRow) =>
+  classifyAuthFileOperationalState(row.raw);
+
+const getAccountDiagnosticText = (row: AccountRow): string =>
+  [
+    row.statusMessage,
+    row.quota.error,
+    row.quota.observedErrorKind,
+    row.quota.observedErrorCode,
+    row.quota.rateLimitReachedType,
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+const hasCoolingAccountDiagnostic = (row: AccountRow): boolean =>
+  isAuthFileCoolingStatusText(getAccountDiagnosticText(row), row.usage.success > 0);
+
+const hasBlockingQuotaError = (row: AccountRow): boolean =>
+  Boolean((row.quota.status === 'error' || row.quota.error) && !hasCoolingAccountDiagnostic(row));
+
 const needsAccountAttention = (
   row: AccountRow,
   context: AccountMetricOperationalContext
 ): boolean =>
   Boolean(
-    (row.statusMessage && !hasPartialGroupedQuota(row)) ||
-    row.quota.status === 'error' ||
-    row.quota.error ||
+    (getAccountOperationalState(row) === 'failed' && !hasPartialGroupedQuota(row)) ||
+    hasBlockingQuotaError(row) ||
     (row.inspection && row.inspection.action !== 'keep') ||
     hasOperationalItems(context.pendingActionsByRowKey, row.selectionKey)
   );
 
-const hasAccountQuotaRisk = (row: AccountRow, context: AccountMetricOperationalContext): boolean =>
+const hasAccountQuotaRisk = (row: AccountRow, _context: AccountMetricOperationalContext): boolean =>
   row.quota.status === 'low' ||
   row.quota.status === 'exhausted' ||
-  hasPartialGroupedQuota(row) ||
-  hasOperationalItems(context.quotaCooldownsByRowKey, row.selectionKey);
+  hasPartialGroupedQuota(row);
 
 const hasConfirmedAvailableEvidence = (row: AccountRow): boolean =>
-  row.quota.status === 'ok' || row.inspection?.action === 'keep';
+  row.quota.status === 'ok' ||
+  row.inspection?.action === 'keep' ||
+  getAccountOperationalState(row) === 'cooldown';
 
 const hasAccountDiagnosticException = (row: AccountRow): boolean =>
-  Boolean(row.quota.observedErrorKind || row.quota.observedErrorCode);
+  Boolean(
+    (row.quota.observedErrorKind || row.quota.observedErrorCode) &&
+      !hasCoolingAccountDiagnostic(row)
+  );
 
 const classifyAccountMetricStatus = (
   row: AccountRow,
@@ -498,6 +580,7 @@ const classifyAccountMetricStatus = (
   if (needsAccountAttention(row, context)) return 'needsAttention';
   if (hasAccountQuotaRisk(row, context)) return 'quotaRisk';
   if (hasAccountDiagnosticException(row)) return 'needsAttention';
+  if (hasOperationalItems(context.quotaCooldownsByRowKey, row.selectionKey)) return 'available';
   if (!hasConfirmedAvailableEvidence(row)) return 'unconfirmed';
   return 'available';
 };
@@ -576,9 +659,8 @@ export const buildAccountMetricsWithCodexPoolSummary = (
 
 const isAccountRowAvailable = (row: AccountRow): boolean =>
   !row.disabled &&
-  (!row.statusMessage || hasPartialGroupedQuota(row)) &&
-  !row.quota.error &&
-  row.quota.status !== 'error' &&
+  (getAccountOperationalState(row) !== 'failed' || hasPartialGroupedQuota(row)) &&
+  !hasBlockingQuotaError(row) &&
   row.quota.status !== 'exhausted' &&
   (!row.inspection || row.inspection.action === 'keep');
 
@@ -680,8 +762,10 @@ const matchesStatusFilter = (
   if (status === 'disabled') return row.disabled;
   if (status === 'problem') {
     return (
-      Boolean((row.statusMessage && !hasPartialGroupedQuota(row)) || row.quota.error) ||
-      row.quota.status === 'error'
+      Boolean(
+        (getAccountOperationalState(row) === 'failed' && !hasPartialGroupedQuota(row)) ||
+          hasBlockingQuotaError(row)
+      )
     );
   }
   if (status === 'low') return row.quota.status === 'low';

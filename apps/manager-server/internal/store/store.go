@@ -43,6 +43,7 @@ type ManagerCodexInspectionConfig = model.ManagerCodexInspectionConfig
 type ManagerCodexInspectionScheduleConfig = model.ManagerCodexInspectionScheduleConfig
 type ManagerExternalUsageServiceConfig = model.ManagerExternalUsageServiceConfig
 type ManagerSupplyConfig = model.ManagerSupplyConfig
+type ManagerSupplyPlatformConfig = model.ManagerSupplyPlatformConfig
 type ManagerSupplyQuotaEstimationPolicy = model.ManagerSupplyQuotaEstimationPolicy
 type SupplyOrder = model.SupplyOrder
 type SupplyImportItem = model.SupplyImportItem
@@ -560,6 +561,10 @@ func (s *Store) UpdateSupplyImportItemAccountMetadata(ctx context.Context, id in
 
 func (s *Store) ListSupplyImportItemsMissingAccountMetadata(ctx context.Context, limit int) ([]SupplyImportItem, error) {
 	return s.SupplyOrders.ListItemsMissingAccountMetadata(ctx, limit)
+}
+
+func (s *Store) ListCurrentSupplyImportItemsByItemKey(ctx context.Context, itemKey string) ([]SupplyImportItem, error) {
+	return s.SupplyOrders.ListCurrentItemsByItemKey(ctx, itemKey)
 }
 
 func (s *Store) ListCurrentSupplyImportItemsByNameKey(ctx context.Context, nameKey string) ([]SupplyImportItem, error) {

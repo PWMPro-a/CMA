@@ -41,6 +41,7 @@ type Repository interface {
 	UpdateItemImportPlan(ctx context.Context, id int64, accountName string, nameKey string, fileName string, importAction string, replacedFileName string) error
 	UpdateItemAccountMetadata(ctx context.Context, id int64, accountName string, nameKey string) error
 	ListItemsMissingAccountMetadata(ctx context.Context, limit int) ([]model.SupplyImportItem, error)
+	ListCurrentItemsByItemKey(ctx context.Context, itemKey string) ([]model.SupplyImportItem, error)
 	ListCurrentItemsByNameKey(ctx context.Context, nameKey string) ([]model.SupplyImportItem, error)
 	Counts(ctx context.Context, orderID string) (total int, imported int, err error)
 }
@@ -81,18 +82,18 @@ func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model
 	}
 	order.UpdatedAtMS = now
 	statement := `insert into supply_orders (
-		order_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
+		order_id, supplier_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
 		ready_quantity, progress, status_url, take_url, charged_fen, released_fen,
 		item_count, imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms,
 		created_at_ms, updated_at_ms
-	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	if isOpenOrderStatus(order.Status) && isPurchaseOrder(order) && !isParallelPurchaseOrder(order) {
 		statement = `insert into supply_orders (
-			order_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
+			order_id, supplier_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
 			ready_quantity, progress, status_url, take_url, charged_fen, released_fen,
 			item_count, imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms,
 			created_at_ms, updated_at_ms
-		) select ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		) select ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		where not exists (select 1 from supply_orders where status in (` + openOrderStatusClause + `)
 			and ` + supplyPurchaseOrderPredicate + `)`
 	}
@@ -100,7 +101,7 @@ func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model
 	err := sqliterepo.WithBusyRetry(ctx, func() error {
 		var execErr error
 		result, execErr = r.db.ExecContext(ctx, statement,
-			order.OrderID, order.Product, order.RequestedQuantity, boolInt(order.Automatic),
+			order.OrderID, strings.TrimSpace(order.SupplierID), order.Product, order.RequestedQuantity, boolInt(order.Automatic),
 			nullString(order.Strategy), nullString(order.TriggerReason), order.Status,
 			nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress, nullString(order.StatusURL),
 			nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen, order.ItemCount,
@@ -308,11 +309,11 @@ func (r *repository) PromoteCreateAttempt(ctx context.Context, localOrderID stri
 	}
 	order.UpdatedAtMS = time.Now().UnixMilli()
 	result, err := r.db.ExecContext(ctx, `update supply_orders set
-		order_id = ?, strategy = ?, trigger_reason = ?, status = ?, remote_status = ?, ready_quantity = ?, progress = ?,
+		order_id = ?, supplier_id = ?, strategy = ?, trigger_reason = ?, status = ?, remote_status = ?, ready_quantity = ?, progress = ?,
 		status_url = ?, take_url = ?, charged_fen = ?, released_fen = ?, last_error = null,
 		next_poll_at_ms = ?, supplier_retry_until_ms = ?, completed_at_ms = ?, updated_at_ms = ?
 		where order_id = ? and status in ('creating','create_uncertain')`,
-		order.OrderID, nullString(order.Strategy), nullString(order.TriggerReason), order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
+		order.OrderID, strings.TrimSpace(order.SupplierID), nullString(order.Strategy), nullString(order.TriggerReason), order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
 		nullString(order.StatusURL), nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen,
 		nullPositive(order.NextPollAtMS), nullPositive(order.SupplierRetryUntilMS), nullPositive(order.CompletedAtMS), order.UpdatedAtMS, localOrderID,
 	)
@@ -361,10 +362,10 @@ func (r *repository) Update(ctx context.Context, order model.SupplyOrder) error 
 	order.UpdatedAtMS = time.Now().UnixMilli()
 	return sqliterepo.WithBusyRetry(ctx, func() error {
 		_, err := r.db.ExecContext(ctx, `update supply_orders set
-			strategy = ?, trigger_reason = ?, status = ?, remote_status = ?, ready_quantity = ?, progress = ?, status_url = ?,
+			supplier_id = ?, strategy = ?, trigger_reason = ?, status = ?, remote_status = ?, ready_quantity = ?, progress = ?, status_url = ?,
 			take_url = ?, charged_fen = ?, released_fen = ?, item_count = ?, imported_count = ?,
 			last_error = ?, next_poll_at_ms = ?, supplier_retry_until_ms = ?, completed_at_ms = ?, updated_at_ms = ? where order_id = ?`,
-			nullString(order.Strategy), nullString(order.TriggerReason), order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
+			strings.TrimSpace(order.SupplierID), nullString(order.Strategy), nullString(order.TriggerReason), order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
 			nullString(order.StatusURL), nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen,
 			order.ItemCount, order.ImportedCount, nullString(order.LastError), nullPositive(order.NextPollAtMS),
 			nullPositive(order.SupplierRetryUntilMS), nullPositive(order.CompletedAtMS), order.UpdatedAtMS, order.OrderID,
@@ -785,6 +786,25 @@ func (r *repository) ListItemsMissingAccountMetadata(ctx context.Context, limit 
 	return items, rows.Err()
 }
 
+func (r *repository) ListCurrentItemsByItemKey(ctx context.Context, itemKey string) ([]model.SupplyImportItem, error) {
+	rows, err := r.db.QueryContext(ctx, importItemSelect+` from supply_import_items
+		where item_key = ? and status = 'imported' and coalesce(superseded_at_ms, 0) = 0
+		order by coalesce(effective_from_ms, imported_at_ms, updated_at_ms) desc, id desc`, strings.TrimSpace(itemKey))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]model.SupplyImportItem, 0)
+	for rows.Next() {
+		item, err := r.scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (r *repository) ListCurrentItemsByNameKey(ctx context.Context, nameKey string) ([]model.SupplyImportItem, error) {
 	rows, err := r.db.QueryContext(ctx, importItemSelect+` from supply_import_items
 		where name_key = ? and status = 'imported' and coalesce(superseded_at_ms, 0) = 0
@@ -811,7 +831,7 @@ func (r *repository) Counts(ctx context.Context, orderID string) (int, int, erro
 	return total, imported, err
 }
 
-const orderSelect = `select id, order_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
+const orderSelect = `select id, order_id, supplier_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
 	ready_quantity, progress, status_url, take_url, charged_fen, released_fen, item_count,
 	imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms, created_at_ms, updated_at_ms
 	from supply_orders`
@@ -828,7 +848,7 @@ func scanOrder(row scanner) (model.SupplyOrder, error) {
 	var automatic int
 	var strategy, triggerReason, remoteStatus, statusURL, takeURL, lastError sql.NullString
 	var nextPollAtMS, supplierRetryUntilMS, completedAtMS sql.NullInt64
-	err := row.Scan(&order.ID, &order.OrderID, &order.Product, &order.RequestedQuantity, &automatic,
+	err := row.Scan(&order.ID, &order.OrderID, &order.SupplierID, &order.Product, &order.RequestedQuantity, &automatic,
 		&strategy, &triggerReason, &order.Status, &remoteStatus, &order.ReadyQuantity, &order.Progress, &statusURL, &takeURL,
 		&order.ChargedFen, &order.ReleasedFen, &order.ItemCount,
 		&order.ImportedCount, &lastError, &nextPollAtMS, &supplierRetryUntilMS, &completedAtMS, &order.CreatedAtMS, &order.UpdatedAtMS)

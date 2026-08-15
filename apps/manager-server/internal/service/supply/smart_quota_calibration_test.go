@@ -220,6 +220,10 @@ func TestSmartQuotaCalibrationRequiresStrictlyMoreThanTenPercentUsed(t *testing.
 	if _, ok := service.smartQuotaState.directSamples["file:exact-ten.json"]; ok {
 		t.Fatalf("an account at exactly 10%% entered direct calibration")
 	}
+	if sample, ok := service.smartQuotaState.provisionalSamples["file:exact-ten.json"]; !ok ||
+		!sample.classificationOnly || sample.capacityM != 40 {
+		t.Fatalf("an account at exactly 10%% was not retained for provisional classification: %#v/%v", sample, ok)
+	}
 	if sample, ok := service.smartQuotaState.directSamples["file:above-ten.json"]; !ok || sample.capacityM != 40 {
 		t.Fatalf("account above 10%% was not calibrated: %#v/%v", sample, ok)
 	}
@@ -347,8 +351,37 @@ func TestSmartQuotaCalibrationRequiresAtLeastTenPercentUsage(t *testing.T) {
 		t.Fatalf("usage below 10%% created quota samples: %#v", service.smartQuotaState.samples)
 	}
 	estimate := service.smartQuotaEstimateForAt(now, "team", "file:low.json")
-	if estimate.CapacityM != 60 || estimate.Source != smartQuotaEstimateSourceDefault {
-		t.Fatalf("low-usage team estimate = %#v, want stable 60M baseline", estimate)
+	if len(service.smartQuotaState.provisionalSamples) != 1 {
+		t.Fatalf("usage below 10%% did not create one provisional sample: %#v", service.smartQuotaState.provisionalSamples)
+	}
+	if estimate.CapacityM != 60 || estimate.Source != smartQuotaEstimateSourceClassified ||
+		!estimate.Provisional || estimate.SampleCount != 1 || estimate.QuotaClassID == "" ||
+		len(estimate.QuotaClasses) != 1 || estimate.QuotaClasses[0].TrustedAccounts != 0 {
+		t.Fatalf("low-usage team pre-classification = %#v", estimate)
+	}
+}
+
+func TestSmartQuotaClassesSeparateStandardAndHighCapacityTeamAccounts(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	samples := []smartQuotaCalibrationSample{
+		{identity: "file:standard-1.json", planType: "team", capacityM: 44, weight: 1, usedFraction: 0.20, observedMS: now.UnixMilli()},
+		{identity: "file:standard-2.json", planType: "team", capacityM: 48, weight: 1, usedFraction: 0.30, observedMS: now.UnixMilli()},
+		{identity: "file:standard-provisional.json", planType: "team", capacityM: 46, weight: 1, usedFraction: 0.05, observedMS: now.UnixMilli(), classificationOnly: true},
+		{identity: "file:high-1.json", planType: "team", capacityM: 238, weight: 1, usedFraction: 0.25, observedMS: now.UnixMilli()},
+		{identity: "file:high-provisional.json", planType: "team", capacityM: 244, weight: 1, usedFraction: 0.06, observedMS: now.UnixMilli(), classificationOnly: true},
+	}
+
+	classes := estimateSmartQuotaClassesAt(samples, now)
+	if len(classes) != 2 {
+		t.Fatalf("quota classes = %#v, want two distinct tiers", classes)
+	}
+	if classes[0].CenterM < 44 || classes[0].CenterM > 48 || classes[0].AccountCount != 3 ||
+		classes[0].TrustedAccounts != 2 || classes[0].ProvisionalAccounts != 1 {
+		t.Fatalf("standard quota class = %#v", classes[0])
+	}
+	if classes[1].CenterM < 238 || classes[1].CenterM > 244 || classes[1].AccountCount != 2 ||
+		classes[1].TrustedAccounts != 1 || classes[1].ProvisionalAccounts != 1 {
+		t.Fatalf("high quota class = %#v", classes[1])
 	}
 }
 

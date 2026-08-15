@@ -309,6 +309,7 @@ const getHealthStatusClass = (status: AccountListHealthStatusKey) => {
     case 'five_hour_cooldown':
     case 'weekly_cooldown':
     case 'monthly_cooldown':
+    case 'cooldown':
     case 'limited':
     case 'partial':
       return styles.badgeWarn;
@@ -4220,6 +4221,16 @@ export function AccountsPage() {
                     </span>
                     {item.identity.planType ? (
                       <span className={styles.accountMetaPill}>{item.identity.planType}</span>
+                    ) : null}
+                    {row.workspaceName || row.workspaceId ? (
+                      <span
+                        className={`${styles.accountMetaPill} ${styles.accountWorkspacePill}`}
+                        title={`${t('accounts.workspace')}: ${row.workspaceName || row.workspaceId}${
+                          row.workspaceName && row.workspaceId ? ` (${row.workspaceId})` : ''
+                        }`}
+                      >
+                        {t('accounts.workspace_short')} {row.workspaceName || row.workspaceId}
+                      </span>
                     ) : null}
                     <AccountExpiryBadge
                       expiresAtMs={row.expiresAtMs}

@@ -260,25 +260,41 @@ type SmartResource struct {
 }
 
 type SmartQuotaPlanEstimate struct {
-	PlanType               string  `json:"planType"`
-	Mode                   string  `json:"mode"`
-	AccountCount           int     `json:"accountCount"`
-	FallbackM              float64 `json:"fallbackM"`
-	FixedM                 float64 `json:"fixedM,omitempty"`
-	ObservedM              float64 `json:"observedM,omitempty"`
-	AdoptedM               float64 `json:"adoptedM"`
-	Source                 string  `json:"source"`
-	SampleCount            int     `json:"sampleCount"`
-	UniqueAccounts         int     `json:"uniqueAccounts"`
-	CompleteWindowAccounts int     `json:"completeWindowAccounts,omitempty"`
-	MinimumUniqueAccounts  int     `json:"minimumUniqueAccounts,omitempty"`
-	DivergencePercent      float64 `json:"divergencePercent,omitempty"`
-	PendingConfirmation    bool    `json:"pendingConfirmation,omitempty"`
-	ConfirmationRounds     int     `json:"confirmationRounds,omitempty"`
-	RequiredRounds         int     `json:"requiredRounds,omitempty"`
-	ValidationState        string  `json:"validationState,omitempty"`
-	OrderingBlocked        bool    `json:"orderingBlocked,omitempty"`
-	LastInspectionRunID    int64   `json:"lastInspectionRunId,omitempty"`
+	Key                    string                    `json:"key"`
+	SupplierID             string                    `json:"supplierId,omitempty"`
+	SupplierName           string                    `json:"supplierName,omitempty"`
+	PlanType               string                    `json:"planType"`
+	Mode                   string                    `json:"mode"`
+	AccountCount           int                       `json:"accountCount"`
+	FallbackM              float64                   `json:"fallbackM"`
+	FixedM                 float64                   `json:"fixedM,omitempty"`
+	ObservedM              float64                   `json:"observedM,omitempty"`
+	AdoptedM               float64                   `json:"adoptedM"`
+	Source                 string                    `json:"source"`
+	SampleCount            int                       `json:"sampleCount"`
+	UniqueAccounts         int                       `json:"uniqueAccounts"`
+	CompleteWindowAccounts int                       `json:"completeWindowAccounts,omitempty"`
+	MinimumUniqueAccounts  int                       `json:"minimumUniqueAccounts,omitempty"`
+	DivergencePercent      float64                   `json:"divergencePercent,omitempty"`
+	PendingConfirmation    bool                      `json:"pendingConfirmation,omitempty"`
+	ConfirmationRounds     int                       `json:"confirmationRounds,omitempty"`
+	RequiredRounds         int                       `json:"requiredRounds,omitempty"`
+	ValidationState        string                    `json:"validationState,omitempty"`
+	OrderingBlocked        bool                      `json:"orderingBlocked,omitempty"`
+	LastInspectionRunID    int64                     `json:"lastInspectionRunId,omitempty"`
+	QuotaClasses           []SmartQuotaClassEstimate `json:"quotaClasses,omitempty"`
+}
+
+type SmartQuotaClassEstimate struct {
+	ID                  string  `json:"id"`
+	CenterM             float64 `json:"centerM"`
+	MinimumM            float64 `json:"minimumM"`
+	MaximumM            float64 `json:"maximumM"`
+	AccountCount        int     `json:"accountCount"`
+	TrustedAccounts     int     `json:"trustedAccounts"`
+	ProvisionalAccounts int     `json:"provisionalAccounts"`
+	SharePercent        float64 `json:"sharePercent"`
+	Confidence          string  `json:"confidence"`
 }
 
 type smartUsageBucket struct {
@@ -308,6 +324,7 @@ type inspectionQuotaSnapshot struct {
 	results            []store.CodexInspectionResult
 	quotaWindowUsage   []smartQuotaWindowBaseline
 	leaseExpiresByFile map[string]int64
+	supplierByFile     map[string]string
 	activeImportItems  []store.SupplyImportItem
 	generatedAt        time.Time
 	attemptedAt        time.Time
@@ -517,18 +534,32 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		snapshot.results,
 		quotaInspectionRunID,
 		now,
+		snapshot.supplierByFile,
 	)
 	resource.AccountQuotaPlanEstimates = planQuotaEstimates
+	blockedSuppliers := make(map[string]struct{})
 	for _, estimate := range planQuotaEstimates {
 		if estimate.PendingConfirmation {
 			resource.QuotaEstimatePendingPlans++
 		}
-		if estimate.OrderingBlocked {
-			resource.QuotaEstimateOrderingBlocked = true
+		if estimate.OrderingBlocked && strings.EqualFold(estimate.PlanType, "team") {
+			blockedSuppliers[normalizeSmartQuotaSupplierID(estimate.SupplierID)] = struct{}{}
 		}
 	}
-	dominantPlan := dominantSmartQuotaPlan(snapshot.results)
-	poolQuotaEstimate := smartQuotaPlanningEstimateForPlan(planningByPlan, dominantPlan)
+	platforms := supplyPlatforms(cfg)
+	if len(platforms) == 0 {
+		_, resource.QuotaEstimateOrderingBlocked = blockedSuppliers[""]
+	} else {
+		resource.QuotaEstimateOrderingBlocked = true
+		for _, platform := range platforms {
+			if _, blocked := blockedSuppliers[normalizeSmartQuotaSupplierID(platform.ID)]; !blocked {
+				resource.QuotaEstimateOrderingBlocked = false
+				break
+			}
+		}
+	}
+	dominantSupplier, dominantPlan := dominantSmartQuotaContext(snapshot.results, snapshot.supplierByFile, platforms)
+	poolQuotaEstimate := smartQuotaPlanningEstimateForPlan(planningByPlan, dominantSupplier, dominantPlan)
 	s.applySmartQuotaEstimate(cfg, &resource, poolQuotaEstimate)
 	consumeRCUPerMinute := applySmartUsage(&resource, usageStats, resource.UnitCapacityRCU)
 
@@ -607,7 +638,11 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		if planType == "" {
 			planType = "unknown"
 		}
-		planQuotaEstimate := smartQuotaPlanningEstimateForPlan(planningByPlan, planType)
+		supplierID := normalizeSmartQuotaSupplierID(snapshot.supplierByFile[fileName])
+		if supplierID == "" && len(platforms) == 1 {
+			supplierID = normalizeSmartQuotaSupplierID(platforms[0].ID)
+		}
+		planQuotaEstimate := smartQuotaPlanningEstimateForPlan(planningByPlan, supplierID, planType)
 		accountQuotaEstimate := s.smartQuotaEstimateForInspectionResult(result, planQuotaEstimate, now)
 		switch {
 		case hasCapacityQuota:
@@ -669,7 +704,12 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		}
 		overlaidFiles[fileName] = struct{}{}
 		remainingMinutes := clampFloat(time.UnixMilli(item.LeaseExpiresAtMS).Sub(now).Minutes(), 0, float64(smartUsefulAccountLifetimeMinutes()))
-		capacity := smartEstimatedNewAccountTokenCapacityRCU(cfg, resource.AccountQuotaEstimateM)
+		supplierID := normalizeSmartQuotaSupplierID(snapshot.supplierByFile[fileName])
+		if supplierID == "" && len(platforms) == 1 {
+			supplierID = normalizeSmartQuotaSupplierID(platforms[0].ID)
+		}
+		accountQuotaEstimate := smartQuotaPlanningEstimateForPlan(planningByPlan, supplierID, "team")
+		capacity := smartEstimatedNewAccountTokenCapacityRCU(cfg, accountQuotaEstimate.CapacityM)
 		if capacity <= 0 {
 			continue
 		}
@@ -812,7 +852,7 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		expiredSupplyLease := suppliedAccount && !leaseExpiresAt.After(now)
 		if !file.Disabled && !expiredSupplyLease {
 			resource.EnabledAccounts++
-			if textField(file.Raw, "status_message", "statusMessage") != "" || smartAccountCapacityHardBlocked(file.Raw) {
+			if smartAccountNeedsAttention(file.Raw) {
 				resource.NeedsAttentionAccounts++
 			} else {
 				resource.UnconfirmedAccounts++
@@ -1651,7 +1691,7 @@ func (s *Service) cachedInspectionQuotaSnapshot(ctx context.Context, cfg store.M
 	}
 	s.quotaSnapshotMu.Unlock()
 
-	refreshed, err := s.loadLatestInspectionQuotaSnapshot(ctx)
+	refreshed, err := s.loadLatestInspectionQuotaSnapshot(ctx, cfg)
 	attemptedAt := time.Now()
 	if err == nil {
 		s.recordSmartQuotaWindowBaselines(refreshed.quotaWindowUsage, attemptedAt)
@@ -1670,7 +1710,11 @@ func (s *Service) cachedInspectionQuotaSnapshot(ctx context.Context, cfg store.M
 	return snapshot, err
 }
 
-func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context) (inspectionQuotaSnapshot, error) {
+func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context, configs ...store.ManagerSupplyConfig) (inspectionQuotaSnapshot, error) {
+	var cfg store.ManagerSupplyConfig
+	if len(configs) > 0 {
+		cfg = configs[0]
+	}
 	runs, err := s.store.ListCodexInspectionRuns(ctx, 20)
 	if err != nil {
 		return inspectionQuotaSnapshot{}, err
@@ -1702,7 +1746,45 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context) (inspec
 			return inspectionQuotaSnapshot{}, err
 		}
 		activeLeaseItems := make([]store.SupplyImportItem, 0, len(leaseItems))
-		quotaWindowUsage, quotaWindowTargets := smartQuotaWindowBaselinesForInspection(filtered, run)
+		orderIDs := make([]string, 0, len(leaseItems))
+		orderSeen := make(map[string]struct{}, len(leaseItems))
+		for _, item := range leaseItems {
+			orderID := strings.TrimSpace(item.OrderID)
+			if orderID == "" {
+				continue
+			}
+			if _, exists := orderSeen[orderID]; exists {
+				continue
+			}
+			orderSeen[orderID] = struct{}{}
+			orderIDs = append(orderIDs, orderID)
+		}
+		orders, err := s.store.ListSupplyOrdersByIDs(ctx, orderIDs)
+		if err != nil {
+			return inspectionQuotaSnapshot{}, err
+		}
+		orderByID := make(map[string]store.SupplyOrder, len(orders))
+		for _, order := range orders {
+			orderByID[strings.TrimSpace(order.OrderID)] = order
+		}
+		supplierByFile := make(map[string]string, len(leaseItems))
+		for _, item := range leaseItems {
+			fileName := strings.TrimSpace(item.FileName)
+			if fileName == "" {
+				continue
+			}
+			order := orderByID[strings.TrimSpace(item.OrderID)]
+			supplierID := normalizeSmartQuotaSupplierID(order.SupplierID)
+			if supplierID == "" && strings.TrimSpace(order.Product) != "" {
+				if platform, resolveErr := resolveSupplyPlatform(cfg, "", order.Product); resolveErr == nil {
+					supplierID = normalizeSmartQuotaSupplierID(platform.ID)
+				}
+			}
+			if supplierID != "" {
+				supplierByFile[fileName] = supplierID
+			}
+		}
+		quotaWindowUsage, quotaWindowTargets := smartQuotaWindowBaselinesForInspection(filtered, run, supplierByFile)
 		if len(quotaWindowTargets) > 0 {
 			usageRows, err := s.store.ListSupplyQuotaWindowUsage(ctx, quotaWindowTargets)
 			if err != nil {
@@ -1738,6 +1820,7 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context) (inspec
 			results:            filtered,
 			quotaWindowUsage:   quotaWindowUsage,
 			leaseExpiresByFile: leaseExpiresByFile,
+			supplierByFile:     supplierByFile,
 			activeImportItems:  activeLeaseItems,
 			generatedAt:        generatedAt,
 		}, nil
@@ -1767,6 +1850,11 @@ func cloneInspectionQuotaSnapshot(snapshot inspectionQuotaSnapshot) inspectionQu
 		leases[fileName] = expiresAtMS
 	}
 	snapshot.leaseExpiresByFile = leases
+	suppliers := make(map[string]string, len(snapshot.supplierByFile))
+	for fileName, supplierID := range snapshot.supplierByFile {
+		suppliers[fileName] = supplierID
+	}
+	snapshot.supplierByFile = suppliers
 	return snapshot
 }
 
@@ -2368,6 +2456,8 @@ func smartNewAccountConfidence(cfg store.ManagerSupplyConfig) float64 {
 
 func smartProductUnitCapacity(product string) float64 {
 	switch strings.ToLower(strings.TrimSpace(product)) {
+	case "team_1h":
+		return 60
 	case "oauth_7d":
 		return 40
 	case "oauth_30d":
@@ -2500,6 +2590,97 @@ func smartAccountCapacityHardBlocked(values map[string]any) bool {
 	default:
 		return false
 	}
+}
+
+func smartAccountNeedsAttention(values map[string]any) bool {
+	if smartAccountCapacityHardBlocked(values) {
+		return true
+	}
+	message := strings.ToLower(textField(
+		values,
+		"status_message", "statusMessage",
+		"error_kind", "errorKind",
+		"header_error_kind", "headerErrorKind",
+		"last_error", "lastError",
+	))
+	if message == "" || smartAccountHealthyStatusMessage(message) {
+		return false
+	}
+	return !smartAccountRuntimeCooling(values, message)
+}
+
+func smartAccountHealthyStatusMessage(message string) bool {
+	message = strings.TrimSpace(strings.ToLower(message))
+	switch message {
+	case "ok", "healthy", "ready", "success", "available", "active":
+		return true
+	default:
+		return false
+	}
+}
+
+func smartAccountRuntimeCooling(values map[string]any, message string) bool {
+	combined := strings.ToLower(strings.TrimSpace(strings.Join([]string{
+		textField(values, "status", "state", "runtime_status", "runtimeStatus"),
+		message,
+		textField(values, "status_code", "statusCode", "http_status", "httpStatus", "last_status_code", "lastStatusCode"),
+	}, " ")))
+	for _, marker := range []string{
+		"rate limit exceeded",
+		"rate_limit",
+		"rate-limit",
+		"too many requests",
+		"http 429",
+		"status 429",
+		"status_code:429",
+		"status_code\":429",
+		"cooldown",
+		"cooling",
+		"retry_after",
+		"retry after",
+		"quota cooldown",
+		"quota window",
+		"waiting for quota",
+		"quota reset",
+	} {
+		if strings.Contains(combined, marker) {
+			return true
+		}
+	}
+	for _, marker := range []string{
+		"temporarily unavailable",
+		"temporary unavailable",
+		"service unavailable",
+		"server overloaded",
+		"upstream unavailable",
+	} {
+		if strings.Contains(combined, marker) {
+			return smartAccountHasRecentSuccess(values)
+		}
+	}
+	return false
+}
+
+func smartAccountHasRecentSuccess(values map[string]any) bool {
+	raw := values["recent_requests"]
+	if raw == nil {
+		raw = values["recentRequests"]
+	}
+	switch buckets := raw.(type) {
+	case []any:
+		for _, bucket := range buckets {
+			if item, ok := bucket.(map[string]any); ok && numberField(item, "success", "successful") > 0 {
+				return true
+			}
+		}
+	case []map[string]any:
+		for _, bucket := range buckets {
+			if numberField(bucket, "success", "successful") > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func smartAccountCapacityRCU(values map[string]any, unit float64, accountQuotaM float64) (float64, bool) {

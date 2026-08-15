@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  classifyAuthFileOperationalState,
   hasAuthFileFreezeConfig,
   hasAuthFileRateLimitConfig,
   isAuthFileRuntimeUnlimited,
@@ -90,5 +91,50 @@ describe('auth file runtime limits', () => {
       isUsableAuthCredential({ name: 'reauth.json', statusMessage: 'invalid_grant login_required' })
     ).toBe(false);
     expect(isUsableAuthCredential({ name: '401.json' }, { isHttp401: true })).toBe(false);
+  });
+
+  it('classifies temporary rate limits as cooldown without hiding hard failures', () => {
+    expect(
+      classifyAuthFileOperationalState({
+        name: 'limited.json',
+        statusMessage: '{"detail":"Rate limit exceeded"}',
+        recent_requests: [{ time: 'now', success: 8, failed: 2 }],
+      })
+    ).toBe('cooldown');
+    expect(
+      classifyAuthFileOperationalState({
+        name: '429.json',
+        statusMessage: 'HTTP 429 too many requests',
+      })
+    ).toBe('cooldown');
+    expect(
+      classifyAuthFileOperationalState({
+        name: 'invalid.json',
+        statusMessage: 'invalid_grant login_required',
+      })
+    ).toBe('failed');
+    expect(
+      classifyAuthFileOperationalState({
+        name: 'disabled-limited.json',
+        disabled: true,
+        statusMessage: 'HTTP 429 too many requests',
+      })
+    ).toBe('failed');
+    expect(
+      classifyAuthFileOperationalState({
+        name: 'temporary-upstream.json',
+        unavailable: true,
+        statusMessage: 'service temporarily unavailable',
+        recent_requests: [{ time: 'now', success: 1, failed: 1 }],
+      })
+    ).toBe('cooldown');
+    expect(
+      classifyAuthFileOperationalState({
+        name: 'recovering.json',
+        status: 'recovery_failed',
+        unavailable: true,
+        statusMessage: 'recovery failed; retrying: usage endpoint returned 429',
+      })
+    ).toBe('cooldown');
   });
 });

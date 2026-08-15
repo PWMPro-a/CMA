@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,8 @@ const (
 	smartQuotaCalibrationRecentWindow       = 6 * time.Hour
 	smartQuotaCalibrationMaxObservationGap  = 2 * time.Hour
 	smartQuotaCalibrationMinDelta           = 0.005
+	smartQuotaClassificationMinDelta        = 0.01
+	smartQuotaClassificationMinUsedFraction = 0.02
 	smartQuotaCalibrationMinUsedFraction    = 0.10
 	smartQuotaCalibrationMinCapacityM       = 0.5
 	smartQuotaCalibrationMaxCapacityM       = 500.0
@@ -29,6 +32,7 @@ const (
 	smartQuotaEstimateSourcePlan         = "runtime_plan"
 	smartQuotaEstimateSourceIdentity     = "runtime_identity" // legacy API value
 	smartQuotaEstimateSourceCurrent      = "runtime_current"
+	smartQuotaEstimateSourceClassified   = "runtime_classified"
 	smartQuotaEstimateSourceRecentPlan   = "runtime_recent_plan"
 	smartQuotaEstimateSourceRecalibrated = "runtime_recalibrated"
 )
@@ -49,25 +53,29 @@ type smartQuotaCalibrationObservation struct {
 	lastSampleTokens   int64
 	hasFraction        bool
 	recoverAtMS        int64
+	supplierID         string
 	planType           string
 	windowTokens       int64
 }
 
 type smartQuotaCalibrationSample struct {
-	identity       string
-	planType       string
-	capacityM      float64
-	weight         float64
-	usedFraction   float64
-	observedMS     int64
-	completeWindow bool
+	identity           string
+	supplierID         string
+	planType           string
+	capacityM          float64
+	weight             float64
+	usedFraction       float64
+	observedMS         int64
+	completeWindow     bool
+	classificationOnly bool
 }
 
 type smartQuotaCalibrationState struct {
-	observations      map[string]smartQuotaCalibrationObservation
-	samples           []smartQuotaCalibrationSample
-	samplesByIdentity map[string][]smartQuotaCalibrationSample
-	directSamples     map[string]smartQuotaCalibrationSample
+	observations       map[string]smartQuotaCalibrationObservation
+	samples            []smartQuotaCalibrationSample
+	samplesByIdentity  map[string][]smartQuotaCalibrationSample
+	directSamples      map[string]smartQuotaCalibrationSample
+	provisionalSamples map[string]smartQuotaCalibrationSample
 }
 
 type smartQuotaEstimate struct {
@@ -84,6 +92,9 @@ type smartQuotaEstimate struct {
 	HistoricalEstimateM    float64
 	DivergencePercent      float64
 	IndependentAccount     bool
+	Provisional            bool
+	QuotaClassID           string
+	QuotaClasses           []SmartQuotaClassEstimate
 }
 
 type smartQuotaPlanAdoptionState struct {
@@ -121,6 +132,17 @@ type smartQuotaWeightedPoint struct {
 	weight    float64
 }
 
+type smartQuotaClassPoint struct {
+	identity  string
+	capacityM float64
+	weight    float64
+	trusted   bool
+}
+
+type smartQuotaClassGroup struct {
+	points []smartQuotaClassPoint
+}
+
 type smartQuotaWindowEvidence struct {
 	fraction    float64
 	recoverAtMS int64
@@ -134,6 +156,7 @@ type smartQuotaWindowEvidence struct {
 type smartQuotaWindowBaseline struct {
 	requestIndex int
 	identity     string
+	supplierID   string
 	planType     string
 	fraction     float64
 	fromMS       int64
@@ -146,10 +169,11 @@ type smartQuotaWindowBaseline struct {
 
 func newSmartQuotaCalibrationState() smartQuotaCalibrationState {
 	return smartQuotaCalibrationState{
-		observations:      make(map[string]smartQuotaCalibrationObservation),
-		samples:           make([]smartQuotaCalibrationSample, 0, 256),
-		samplesByIdentity: make(map[string][]smartQuotaCalibrationSample),
-		directSamples:     make(map[string]smartQuotaCalibrationSample),
+		observations:       make(map[string]smartQuotaCalibrationObservation),
+		samples:            make([]smartQuotaCalibrationSample, 0, 256),
+		samplesByIdentity:  make(map[string][]smartQuotaCalibrationSample),
+		directSamples:      make(map[string]smartQuotaCalibrationSample),
+		provisionalSamples: make(map[string]smartQuotaCalibrationSample),
 	}
 }
 
@@ -162,6 +186,9 @@ func (s *Service) ensureSmartQuotaCalibrationStateLocked() {
 	}
 	if s.smartQuotaState.directSamples == nil {
 		s.smartQuotaState.directSamples = make(map[string]smartQuotaCalibrationSample)
+	}
+	if s.smartQuotaState.provisionalSamples == nil {
+		s.smartQuotaState.provisionalSamples = make(map[string]smartQuotaCalibrationSample)
 	}
 }
 
@@ -193,6 +220,10 @@ func smartQuotaCalibrationUsedFractionEligible(fraction float64) bool {
 	return fraction > smartQuotaCalibrationMinUsedFraction
 }
 
+func smartQuotaClassificationFractionEligible(fraction float64) bool {
+	return fraction >= smartQuotaClassificationMinUsedFraction
+}
+
 func smartQuotaCalibrationEventIdentity(event usage.Event) string {
 	if value := normalizeSmartQuotaIdentity(event.AuthFileSnapshot); value != "" {
 		return "file:" + value
@@ -208,6 +239,22 @@ func smartQuotaCalibrationEventIdentity(event usage.Event) string {
 
 func normalizeSmartQuotaIdentity(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func normalizeSmartQuotaSupplierID(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func smartQuotaContextKey(supplierID, planType string) string {
+	return normalizeSmartQuotaSupplierID(supplierID) + "\x00" + strings.ToLower(strings.TrimSpace(planType))
+}
+
+func smartQuotaPublicContextKey(supplierID, planType string) string {
+	supplierID = normalizeSmartQuotaSupplierID(supplierID)
+	if supplierID == "" {
+		supplierID = "unassigned"
+	}
+	return supplierID + ":" + strings.ToLower(strings.TrimSpace(planType))
 }
 
 func smartQuotaCalibrationResultIdentities(fileName, authIndex, accountKey, accountID string) []string {
@@ -329,7 +376,15 @@ func smartQuotaWindowRecoverAtMS(window *usage.HeaderQuotaWindow, eventTimestamp
 	return 0
 }
 
-func smartQuotaWindowBaselinesForInspection(results []store.CodexInspectionResult, run store.CodexInspectionRun) ([]smartQuotaWindowBaseline, []store.SupplyQuotaWindowUsageQuery) {
+func smartQuotaWindowBaselinesForInspection(
+	results []store.CodexInspectionResult,
+	run store.CodexInspectionRun,
+	supplierMaps ...map[string]string,
+) ([]smartQuotaWindowBaseline, []store.SupplyQuotaWindowUsageQuery) {
+	var supplierByFile map[string]string
+	if len(supplierMaps) > 0 {
+		supplierByFile = supplierMaps[0]
+	}
 	baselines := make([]smartQuotaWindowBaseline, 0, len(results))
 	targets := make([]store.SupplyQuotaWindowUsageQuery, 0, len(results))
 	for _, result := range results {
@@ -342,7 +397,7 @@ func smartQuotaWindowBaselinesForInspection(results []store.CodexInspectionResul
 			continue
 		}
 		fraction, ok := normalizeSmartQuotaFraction(*window.UsedPercent)
-		if !ok || !smartQuotaCalibrationUsedFractionEligible(fraction) {
+		if !ok || !smartQuotaClassificationFractionEligible(fraction) {
 			continue
 		}
 		observedMS := result.CreatedAtMS
@@ -365,6 +420,7 @@ func smartQuotaWindowBaselinesForInspection(results []store.CodexInspectionResul
 		baseline := smartQuotaWindowBaseline{
 			requestIndex: requestIndex,
 			identity:     "file:" + normalizeSmartQuotaIdentity(fileName),
+			supplierID:   normalizeSmartQuotaSupplierID(supplierByFile[fileName]),
 			planType:     strings.ToLower(strings.TrimSpace(result.PlanType)),
 			fraction:     fraction,
 			fromMS:       fromMS,
@@ -414,7 +470,7 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 
 	for _, baseline := range baselines {
 		if baseline.identity == "" || baseline.windowTokens <= 0 ||
-			!smartQuotaCalibrationUsedFractionEligible(baseline.fraction) {
+			!smartQuotaClassificationFractionEligible(baseline.fraction) {
 			continue
 		}
 		capacityM := float64(baseline.windowTokens) / baseline.fraction / 1_000_000
@@ -435,7 +491,8 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 		s.smartQuotaState.samples = kept
 
 		observation := s.smartQuotaState.observations[baseline.identity]
-		if observation.recoverAtMS > 0 && baseline.recoverAtMS > 0 && observation.recoverAtMS != baseline.recoverAtMS {
+		if (observation.recoverAtMS > 0 && baseline.recoverAtMS > 0 && observation.recoverAtMS != baseline.recoverAtMS) ||
+			(observation.supplierID != "" && baseline.supplierID != "" && observation.supplierID != baseline.supplierID) {
 			observation = smartQuotaCalibrationObservation{}
 		}
 		observation.windowTokens = baseline.windowTokens
@@ -450,15 +507,26 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 		if baseline.planType != "" {
 			observation.planType = baseline.planType
 		}
+		if baseline.supplierID != "" {
+			observation.supplierID = baseline.supplierID
+		}
 		s.smartQuotaState.observations[baseline.identity] = observation
-		s.smartQuotaState.directSamples[baseline.identity] = smartQuotaCalibrationSample{
-			identity:       baseline.identity,
-			planType:       observation.planType,
-			capacityM:      capacityM,
-			weight:         1,
-			usedFraction:   baseline.fraction,
-			observedMS:     baseline.observedMS,
-			completeWindow: true,
+		sample := smartQuotaCalibrationSample{
+			identity:           baseline.identity,
+			supplierID:         observation.supplierID,
+			planType:           observation.planType,
+			capacityM:          capacityM,
+			weight:             1,
+			usedFraction:       baseline.fraction,
+			observedMS:         baseline.observedMS,
+			completeWindow:     true,
+			classificationOnly: !smartQuotaCalibrationUsedFractionEligible(baseline.fraction),
+		}
+		if sample.classificationOnly {
+			s.smartQuotaState.provisionalSamples[baseline.identity] = sample
+		} else {
+			delete(s.smartQuotaState.provisionalSamples, baseline.identity)
+			s.smartQuotaState.directSamples[baseline.identity] = sample
 		}
 	}
 	s.pruneSmartQuotaCalibrationLocked(now)
@@ -552,21 +620,33 @@ func (s *Service) recordSmartQuotaCalibrationEventLocked(event usage.Event, now 
 
 	delta := fraction - observation.lastSampleFraction
 	deltaTokens := observation.windowTokens - observation.lastSampleTokens
-	if deltaTokens > 0 && smartQuotaCalibrationUsedFractionEligible(fraction) && delta >= smartQuotaCalibrationMinDelta {
+	minimumDelta := smartQuotaCalibrationMinDelta
+	if !smartQuotaCalibrationUsedFractionEligible(fraction) {
+		minimumDelta = smartQuotaClassificationMinDelta
+	}
+	if deltaTokens > 0 && smartQuotaClassificationFractionEligible(fraction) && delta >= minimumDelta {
 		// Runtime events are valid only as an observed delta. Dividing a partial
 		// post-restart Token tail by an absolute 10%+ quota percentage creates the
 		// false 8M/30M account estimates seen in production. Complete inspection
 		// windows use the independent absolute formula in recordSmartQuotaWindowBaselines.
 		capacityM := float64(deltaTokens) / delta / 1_000_000
 		if capacityM >= smartQuotaCalibrationMinCapacityM && capacityM <= smartQuotaCalibrationMaxCapacityM {
-			s.appendSmartQuotaCalibrationSampleLocked(smartQuotaCalibrationSample{
-				identity:     identity,
-				planType:     observation.planType,
-				capacityM:    capacityM,
-				weight:       math.Max(delta, smartQuotaCalibrationMinDelta),
-				usedFraction: fraction,
-				observedMS:   ts,
-			})
+			sample := smartQuotaCalibrationSample{
+				identity:           identity,
+				supplierID:         observation.supplierID,
+				planType:           observation.planType,
+				capacityM:          capacityM,
+				weight:             math.Max(delta, smartQuotaCalibrationMinDelta),
+				usedFraction:       fraction,
+				observedMS:         ts,
+				classificationOnly: !smartQuotaCalibrationUsedFractionEligible(fraction),
+			}
+			if sample.classificationOnly {
+				s.smartQuotaState.provisionalSamples[identity] = sample
+			} else {
+				delete(s.smartQuotaState.provisionalSamples, identity)
+				s.appendSmartQuotaCalibrationSampleLocked(sample)
+			}
 		}
 		observation.lastSampleFraction = fraction
 		observation.lastSampleTokens = observation.windowTokens
@@ -602,6 +682,11 @@ func (s *Service) pruneSmartQuotaCalibrationLocked(now time.Time) {
 			delete(s.smartQuotaState.directSamples, identity)
 		}
 	}
+	for identity, sample := range s.smartQuotaState.provisionalSamples {
+		if sample.observedMS < cutoff {
+			delete(s.smartQuotaState.provisionalSamples, identity)
+		}
+	}
 	for identity, observation := range s.smartQuotaState.observations {
 		if observation.lastEventMS < cutoff {
 			delete(s.smartQuotaState.observations, identity)
@@ -614,11 +699,16 @@ func (s *Service) smartQuotaEstimateFor(planType string, identities ...string) s
 }
 
 func (s *Service) smartQuotaEstimateForAt(now time.Time, planType string, identities ...string) smartQuotaEstimate {
+	return s.smartQuotaEstimateForSupplierAt(now, "", planType, identities...)
+}
+
+func (s *Service) smartQuotaEstimateForSupplierAt(now time.Time, supplierID string, planType string, identities ...string) smartQuotaEstimate {
 	if s == nil {
 		return defaultSmartQuotaEstimate()
 	}
 	cutoff := now.Add(-smartQuotaCalibrationSampleTTL).UnixMilli()
 	recentCutoff := now.Add(-smartQuotaCalibrationRecentWindow).UnixMilli()
+	supplierID = normalizeSmartQuotaSupplierID(supplierID)
 	planType = strings.ToLower(strings.TrimSpace(planType))
 	normalizedIdentities := make(map[string]struct{}, len(identities))
 	for _, identity := range identities {
@@ -628,18 +718,30 @@ func (s *Service) smartQuotaEstimateForAt(now time.Time, planType string, identi
 		}
 	}
 	s.smartMu.RLock()
-	samples := make([]smartQuotaCalibrationSample, 0, len(s.smartQuotaState.samples)+len(s.smartQuotaState.directSamples))
+	samples := make([]smartQuotaCalibrationSample, 0, len(s.smartQuotaState.samples)+len(s.smartQuotaState.directSamples)+len(s.smartQuotaState.provisionalSamples))
 	for _, sample := range s.smartQuotaState.samples {
-		if sample.observedMS >= cutoff {
+		if sample.observedMS >= cutoff && (supplierID == "" || sample.supplierID == supplierID) {
 			samples = append(samples, sample)
 		}
 	}
 	for _, sample := range s.smartQuotaState.directSamples {
-		if sample.observedMS >= cutoff {
+		if sample.observedMS >= cutoff && (supplierID == "" || sample.supplierID == supplierID) {
+			samples = append(samples, sample)
+		}
+	}
+	for _, sample := range s.smartQuotaState.provisionalSamples {
+		if sample.observedMS >= cutoff && (supplierID == "" || sample.supplierID == supplierID) {
 			samples = append(samples, sample)
 		}
 	}
 	s.smartMu.RUnlock()
+	classSamples := samples
+	if planType != "" {
+		classSamples = filterSmartQuotaSamples(samples, func(sample smartQuotaCalibrationSample) bool {
+			return sample.planType == planType
+		})
+	}
+	quotaClasses := estimateSmartQuotaClassesAt(classSamples, now)
 
 	recentSamples := filterSmartQuotaSamples(samples, func(sample smartQuotaCalibrationSample) bool {
 		return sample.observedMS >= recentCutoff
@@ -660,6 +762,7 @@ func (s *Service) smartQuotaEstimateForAt(now time.Time, planType string, identi
 
 	recentEstimate, recentOK := smartQuotaPlanOrGlobalEstimate(
 		recentSamples,
+		supplierID,
 		planType,
 		smartQuotaEstimateSourceRecentPlan,
 		6,
@@ -670,6 +773,7 @@ func (s *Service) smartQuotaEstimateForAt(now time.Time, planType string, identi
 	)
 	historicalEstimate, historicalOK := smartQuotaPlanOrGlobalEstimate(
 		olderSamples,
+		supplierID,
 		planType,
 		smartQuotaEstimateSourcePlan,
 		6,
@@ -680,6 +784,7 @@ func (s *Service) smartQuotaEstimateForAt(now time.Time, planType string, identi
 	)
 	allEstimate, allOK := smartQuotaPlanOrGlobalEstimate(
 		samples,
+		supplierID,
 		planType,
 		smartQuotaEstimateSourcePlan,
 		20,
@@ -690,26 +795,26 @@ func (s *Service) smartQuotaEstimateForAt(now time.Time, planType string, identi
 	)
 
 	if currentOK {
-		return calibrateSmartQuotaCurrentEstimate(
+		return attachSmartQuotaClasses(calibrateSmartQuotaCurrentEstimate(
 			currentEstimate,
 			recentEstimate,
 			recentOK,
 			historicalEstimate,
 			historicalOK,
-		)
+		), quotaClasses)
 	}
 	if recentOK {
 		recentEstimate.RecentEstimateM = recentEstimate.CapacityM
 		if historicalOK {
 			recentEstimate.HistoricalEstimateM = historicalEstimate.CapacityM
 		}
-		return recentEstimate
+		return attachSmartQuotaClasses(recentEstimate, quotaClasses)
 	}
 	if allOK {
 		allEstimate.HistoricalEstimateM = allEstimate.CapacityM
-		return allEstimate
+		return attachSmartQuotaClasses(allEstimate, quotaClasses)
 	}
-	return defaultSmartQuotaEstimateForPlan(planType)
+	return attachSmartQuotaClasses(defaultSmartQuotaEstimateForPlan(planType), quotaClasses)
 }
 
 func (s *Service) smartQuotaCurrentEstimateForAt(now time.Time, identities ...string) (smartQuotaEstimate, bool) {
@@ -740,6 +845,9 @@ func (s *Service) smartQuotaCurrentEstimateForAt(now time.Time, identities ...st
 				}
 			}
 		}
+		if sample, ok := s.smartQuotaState.provisionalSamples[identity]; ok && sample.observedMS >= cutoff {
+			samples = append(samples, sample)
+		}
 	}
 	// Tests and legacy in-memory state may predate the identity index. Keep a
 	// bounded compatibility scan only when no indexed samples were found.
@@ -760,11 +868,17 @@ func estimateSmartQuotaCurrentSamplesAt(samples []smartQuotaCalibrationSample, n
 	// One complete-window estimate or one observed >=0.5% runtime delta is
 	// sufficient for that exact account. Absolute point-in-time ratios never
 	// enter this sample set.
-	return estimateSmartQuotaSamplesAt(samples, smartQuotaEstimateSourceCurrent, 1, 0.005, now)
+	estimate, ok := estimateSmartQuotaSamplesAtMode(samples, smartQuotaEstimateSourceCurrent, 1, 0.005, now, true)
+	if ok && estimate.Provisional {
+		estimate.Source = smartQuotaEstimateSourceClassified
+		estimate.Confidence = smartConfidenceLow
+	}
+	return estimate, ok
 }
 
 func smartQuotaPlanOrGlobalEstimate(
 	samples []smartQuotaCalibrationSample,
+	supplierID string,
 	planType string,
 	planSource string,
 	planMinSamples int,
@@ -773,6 +887,12 @@ func smartQuotaPlanOrGlobalEstimate(
 	globalMinWeight float64,
 	now time.Time,
 ) (smartQuotaEstimate, bool) {
+	supplierID = normalizeSmartQuotaSupplierID(supplierID)
+	if supplierID != "" {
+		samples = filterSmartQuotaSamples(samples, func(sample smartQuotaCalibrationSample) bool {
+			return sample.supplierID == supplierID
+		})
+	}
 	if planType != "" {
 		planSamples := filterSmartQuotaSamples(samples, func(sample smartQuotaCalibrationSample) bool {
 			return sample.planType == planType
@@ -791,8 +911,13 @@ func calibrateSmartQuotaCurrentEstimate(
 	historical smartQuotaEstimate,
 	historicalOK bool,
 ) smartQuotaEstimate {
-	current.Source = smartQuotaEstimateSourceCurrent
 	current.CurrentEstimateM = current.CapacityM
+	if current.Provisional {
+		current.Source = smartQuotaEstimateSourceClassified
+		current.Confidence = smartConfidenceLow
+		return current
+	}
+	current.Source = smartQuotaEstimateSourceCurrent
 	if recentOK {
 		current.RecentEstimateM = recent.CapacityM
 	}
@@ -883,6 +1008,47 @@ func dominantSmartQuotaPlan(results []store.CodexInspectionResult) string {
 	return best
 }
 
+func dominantSmartQuotaContext(
+	results []store.CodexInspectionResult,
+	supplierByFile map[string]string,
+	platforms []store.ManagerSupplyPlatformConfig,
+) (string, string) {
+	counts := make(map[string]int)
+	for _, result := range results {
+		if !isSmartCapacityInspectionResult(result) || inspectionResultCapacityExcluded(result) {
+			continue
+		}
+		planType := strings.ToLower(strings.TrimSpace(result.PlanType))
+		if planType == "" {
+			planType = "unknown"
+		}
+		supplierID := normalizeSmartQuotaSupplierID(supplierByFile[strings.TrimSpace(result.FileName)])
+		if supplierID == "" && len(platforms) == 1 {
+			supplierID = normalizeSmartQuotaSupplierID(platforms[0].ID)
+		}
+		counts[smartQuotaContextKey(supplierID, planType)]++
+	}
+	bestKey := ""
+	bestCount := 0
+	for key, count := range counts {
+		if count > bestCount || (count == bestCount && key < bestKey) {
+			bestKey = key
+			bestCount = count
+		}
+	}
+	if bestKey == "" {
+		if len(platforms) == 1 {
+			return normalizeSmartQuotaSupplierID(platforms[0].ID), "team"
+		}
+		return "", dominantSmartQuotaPlan(results)
+	}
+	parts := strings.SplitN(bestKey, "\x00", 2)
+	if len(parts) != 2 {
+		return "", "team"
+	}
+	return parts[0], parts[1]
+}
+
 func smartQuotaFallbackForPlan(planType string) float64 {
 	if strings.EqualFold(strings.TrimSpace(planType), "team") {
 		return smartDefaultTeamAccountQuotaMillionTokens
@@ -911,8 +1077,40 @@ func smartQuotaPolicyForPlan(cfg store.ManagerSupplyConfig, planType string) sto
 	return policy
 }
 
+func smartQuotaPolicyForSupplier(cfg store.ManagerSupplyConfig, supplierID, planType string) store.ManagerSupplyQuotaEstimationPolicy {
+	policy := smartQuotaPolicyForPlan(cfg, planType)
+	supplierID = normalizeSmartQuotaSupplierID(supplierID)
+	if supplierID == "" {
+		return policy
+	}
+	planType = strings.ToLower(strings.TrimSpace(planType))
+	for _, platform := range supplyPlatforms(cfg) {
+		if normalizeSmartQuotaSupplierID(platform.ID) != supplierID {
+			continue
+		}
+		configured, ok := platform.QuotaEstimationPolicies[planType]
+		if !ok {
+			return policy
+		}
+		if strings.EqualFold(configured.Mode, smartQuotaPolicyModeFixed) {
+			policy.Mode = smartQuotaPolicyModeFixed
+		} else {
+			policy.Mode = smartQuotaPolicyModeAuto
+		}
+		if configured.FallbackM > 0 {
+			policy.FallbackM = clampFloat(configured.FallbackM, smartQuotaCalibrationMinCapacityM, smartQuotaCalibrationMaxCapacityM)
+		}
+		if configured.FixedM > 0 {
+			policy.FixedM = clampFloat(configured.FixedM, smartQuotaCalibrationMinCapacityM, smartQuotaCalibrationMaxCapacityM)
+		}
+		return policy
+	}
+	return policy
+}
+
 func smartQuotaEstimateHasValidData(estimate smartQuotaEstimate) bool {
-	return estimate.Source != smartQuotaEstimateSourceDefault && estimate.SampleCount > 0 && estimate.CapacityM > 0
+	return estimate.Source != smartQuotaEstimateSourceDefault && !estimate.Provisional &&
+		estimate.SampleCount > 0 && estimate.CapacityM > 0
 }
 
 func smartQuotaEstimateHasTrustedPlanData(estimate smartQuotaEstimate) bool {
@@ -954,16 +1152,60 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 	results []store.CodexInspectionResult,
 	runID int64,
 	now time.Time,
+	supplierMaps ...map[string]string,
 ) ([]SmartQuotaPlanEstimate, map[string]smartQuotaEstimate) {
 	type planContext struct {
-		accounts   int
-		identities []string
+		supplierID   string
+		supplierName string
+		planType     string
+		accounts     int
+		identities   []string
+	}
+	var supplierByFile map[string]string
+	if len(supplierMaps) > 0 {
+		supplierByFile = supplierMaps[0]
 	}
 	contexts := make(map[string]*planContext)
-	for planType := range cfg.QuotaEstimationPolicies {
+	ensureContext := func(supplierID, supplierName, planType string) *planContext {
+		supplierID = normalizeSmartQuotaSupplierID(supplierID)
 		planType = strings.ToLower(strings.TrimSpace(planType))
-		if planType != "" {
-			contexts[planType] = &planContext{}
+		if planType == "" {
+			planType = "unknown"
+		}
+		key := smartQuotaContextKey(supplierID, planType)
+		if existing := contexts[key]; existing != nil {
+			return existing
+		}
+		context := &planContext{supplierID: supplierID, supplierName: strings.TrimSpace(supplierName), planType: planType}
+		contexts[key] = context
+		return context
+	}
+
+	platforms := supplyPlatforms(cfg)
+	platformNames := make(map[string]string, len(platforms))
+	for _, platform := range platforms {
+		supplierID := normalizeSmartQuotaSupplierID(platform.ID)
+		platformNames[supplierID] = firstNonEmptyString(platform.Name, platform.ID)
+		plans := make(map[string]struct{}, len(cfg.QuotaEstimationPolicies)+len(platform.QuotaEstimationPolicies)+2)
+		plans["team"] = struct{}{}
+		plans["free"] = struct{}{}
+		for planType := range cfg.QuotaEstimationPolicies {
+			plans[strings.ToLower(strings.TrimSpace(planType))] = struct{}{}
+		}
+		for planType := range platform.QuotaEstimationPolicies {
+			plans[strings.ToLower(strings.TrimSpace(planType))] = struct{}{}
+		}
+		for planType := range plans {
+			if planType != "" {
+				ensureContext(supplierID, platformNames[supplierID], planType)
+			}
+		}
+	}
+	if len(platforms) == 0 {
+		for planType := range cfg.QuotaEstimationPolicies {
+			if strings.TrimSpace(planType) != "" {
+				ensureContext("", "", planType)
+			}
 		}
 	}
 	for _, result := range results {
@@ -974,11 +1216,15 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 		if planType == "" {
 			planType = "unknown"
 		}
-		context := contexts[planType]
-		if context == nil {
-			context = &planContext{}
-			contexts[planType] = context
+		supplierID := normalizeSmartQuotaSupplierID(supplierByFile[strings.TrimSpace(result.FileName)])
+		if supplierID == "" && len(platforms) == 1 {
+			supplierID = normalizeSmartQuotaSupplierID(platforms[0].ID)
 		}
+		supplierName := platformNames[supplierID]
+		if supplierID == "" && len(platforms) > 1 {
+			supplierName = "Unassigned/manual"
+		}
+		context := ensureContext(supplierID, supplierName, planType)
 		context.accounts++
 		if inspectionResultUsabilityUnverified(result) {
 			continue
@@ -991,26 +1237,36 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 		)...)
 	}
 	if len(contexts) == 0 {
-		contexts["team"] = &planContext{}
+		ensureContext("", "", "team")
 	}
 
-	plans := make([]string, 0, len(contexts))
-	for planType := range contexts {
-		plans = append(plans, planType)
+	keys := make([]string, 0, len(contexts))
+	for key := range contexts {
+		keys = append(keys, key)
 	}
-	sort.Strings(plans)
+	sort.Slice(keys, func(i, j int) bool {
+		left := contexts[keys[i]]
+		right := contexts[keys[j]]
+		leftSupplier := strings.ToLower(firstNonEmptyString(left.supplierName, left.supplierID))
+		rightSupplier := strings.ToLower(firstNonEmptyString(right.supplierName, right.supplierID))
+		if leftSupplier != rightSupplier {
+			return leftSupplier < rightSupplier
+		}
+		return left.planType < right.planType
+	})
 
 	s.quotaPolicyMu.Lock()
 	defer s.quotaPolicyMu.Unlock()
 	if s.quotaPolicyState == nil {
 		s.quotaPolicyState = make(map[string]smartQuotaPlanAdoptionState)
 	}
-	items := make([]SmartQuotaPlanEstimate, 0, len(plans))
-	planning := make(map[string]smartQuotaEstimate, len(plans))
-	for _, planType := range plans {
-		context := contexts[planType]
-		policy := smartQuotaPolicyForPlan(cfg, planType)
-		observed := s.smartQuotaEstimateForAt(now, planType, context.identities...)
+	items := make([]SmartQuotaPlanEstimate, 0, len(keys))
+	planning := make(map[string]smartQuotaEstimate, len(keys))
+	for _, key := range keys {
+		context := contexts[key]
+		planType := context.planType
+		policy := smartQuotaPolicyForSupplier(cfg, context.supplierID, planType)
+		observed := s.smartQuotaEstimateForSupplierAt(now, context.supplierID, planType, context.identities...)
 		// Historical samples for a configured type remain useful once that type
 		// appears again, but a type with zero current accounts must not raise a
 		// calibration warning or influence this pool's ordering decision.
@@ -1029,7 +1285,7 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 			}
 		}
 
-		state := s.quotaPolicyState[planType]
+		state := s.quotaPolicyState[key]
 		if state.mode != policy.Mode || state.adoptedM <= 0 {
 			state = smartQuotaPlanAdoptionState{
 				mode:            policy.Mode,
@@ -1101,7 +1357,7 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 				}
 			}
 		}
-		s.quotaPolicyState[planType] = state
+		s.quotaPolicyState[key] = state
 
 		// A higher observed quota is safe to keep handling with the currently
 		// adopted (lower) estimate while independent inspections confirm and
@@ -1130,6 +1386,9 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 			source = smartQuotaPolicyModeFixed
 		}
 		items = append(items, SmartQuotaPlanEstimate{
+			Key:                    smartQuotaPublicContextKey(context.supplierID, planType),
+			SupplierID:             context.supplierID,
+			SupplierName:           context.supplierName,
 			PlanType:               planType,
 			Mode:                   policy.Mode,
 			AccountCount:           context.accounts,
@@ -1149,6 +1408,7 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 			ValidationState:        state.validationState,
 			OrderingBlocked:        orderingBlocked,
 			LastInspectionRunID:    state.lastInspectionRunID,
+			QuotaClasses:           observed.QuotaClasses,
 		})
 		planningSource := source
 		if policy.Mode == smartQuotaPolicyModeAuto && !hasData {
@@ -1161,23 +1421,27 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 		planningEstimate := planningObserved
 		planningEstimate.CapacityM = state.adoptedM
 		planningEstimate.Source = planningSource
-		planning[planType] = planningEstimate
+		planning[key] = planningEstimate
+		if context.supplierID == "" {
+			planning[planType] = planningEstimate
+		}
 	}
 	return items, planning
 }
 
-func smartQuotaPlanningEstimateForPlan(planning map[string]smartQuotaEstimate, planType string) smartQuotaEstimate {
+func smartQuotaPlanningEstimateForPlan(planning map[string]smartQuotaEstimate, supplierID, planType string) smartQuotaEstimate {
+	supplierID = normalizeSmartQuotaSupplierID(supplierID)
 	planType = strings.ToLower(strings.TrimSpace(planType))
-	if estimate, ok := planning[planType]; ok && estimate.CapacityM > 0 {
+	if estimate, ok := planning[smartQuotaContextKey(supplierID, planType)]; ok && estimate.CapacityM > 0 {
 		return estimate
 	}
-	if estimate, ok := planning["team"]; ok && estimate.CapacityM > 0 {
-		return estimate
-	}
-	for _, estimate := range planning {
-		if estimate.CapacityM > 0 {
+	if supplierID == "" {
+		if estimate, ok := planning[planType]; ok && estimate.CapacityM > 0 {
 			return estimate
 		}
+	}
+	if estimate, ok := planning[smartQuotaContextKey(supplierID, "team")]; ok && estimate.CapacityM > 0 {
+		return estimate
 	}
 	return defaultSmartQuotaEstimateForPlan(planType)
 }
@@ -1239,14 +1503,42 @@ func estimateSmartQuotaSamples(samples []smartQuotaCalibrationSample, source str
 }
 
 func estimateSmartQuotaSamplesAt(samples []smartQuotaCalibrationSample, source string, minSamples int, minWeight float64, now time.Time) (smartQuotaEstimate, bool) {
+	return estimateSmartQuotaSamplesAtMode(samples, source, minSamples, minWeight, now, false)
+}
+
+func estimateSmartQuotaSamplesAtMode(
+	samples []smartQuotaCalibrationSample,
+	source string,
+	minSamples int,
+	minWeight float64,
+	now time.Time,
+	allowClassification bool,
+) (smartQuotaEstimate, bool) {
 	valid := make([]smartQuotaCalibrationSample, 0, len(samples))
+	hasTrustedEligibleSample := false
+	if allowClassification {
+		for _, sample := range samples {
+			if !sample.classificationOnly && smartQuotaCalibrationUsedFractionEligible(sample.usedFraction) {
+				hasTrustedEligibleSample = true
+				break
+			}
+		}
+	}
 	totalObservedWeight := 0.0
 	identitySet := make(map[string]struct{})
 	independentAccount := false
+	hasTrustedSample := false
 	for _, sample := range samples {
+		if allowClassification && hasTrustedEligibleSample && sample.classificationOnly {
+			continue
+		}
+		fractionEligible := smartQuotaCalibrationUsedFractionEligible(sample.usedFraction)
+		if allowClassification && sample.classificationOnly {
+			fractionEligible = smartQuotaClassificationFractionEligible(sample.usedFraction)
+		}
 		if sample.capacityM < smartQuotaCalibrationMinCapacityM || sample.capacityM > smartQuotaCalibrationMaxCapacityM ||
 			sample.weight <= 0 || sample.observedMS <= 0 ||
-			!smartQuotaCalibrationUsedFractionEligible(sample.usedFraction) {
+			!fractionEligible || (!allowClassification && sample.classificationOnly) {
 			continue
 		}
 		recencyWeight := smartQuotaSampleRecencyWeight(now, sample.observedMS)
@@ -1256,6 +1548,9 @@ func estimateSmartQuotaSamplesAt(samples []smartQuotaCalibrationSample, source s
 		valid = append(valid, sample)
 		if sample.completeWindow {
 			independentAccount = true
+		}
+		if !sample.classificationOnly {
+			hasTrustedSample = true
 		}
 		totalObservedWeight += sample.weight * recencyWeight
 		identitySet[sample.identity] = struct{}{}
@@ -1331,7 +1626,212 @@ func estimateSmartQuotaSamplesAt(samples []smartQuotaCalibrationSample, source s
 		UniqueAccounts:         len(accountPoints),
 		CompleteWindowAccounts: completeWindowAccounts,
 		IndependentAccount:     independentAccount,
+		Provisional:            !hasTrustedSample,
 	}, true
+}
+
+func estimateSmartQuotaClassesAt(samples []smartQuotaCalibrationSample, now time.Time) []SmartQuotaClassEstimate {
+	cutoff := now.Add(-smartQuotaCalibrationSampleTTL).UnixMilli()
+	grouped := make(map[string][]smartQuotaCalibrationSample)
+	for _, sample := range samples {
+		if sample.identity == "" || sample.observedMS < cutoff || sample.weight <= 0 ||
+			sample.capacityM < smartQuotaCalibrationMinCapacityM || sample.capacityM > smartQuotaCalibrationMaxCapacityM ||
+			!smartQuotaClassificationFractionEligible(sample.usedFraction) {
+			continue
+		}
+		grouped[sample.identity] = append(grouped[sample.identity], sample)
+	}
+
+	trustedPoints := make([]smartQuotaClassPoint, 0, len(grouped))
+	provisionalPoints := make([]smartQuotaClassPoint, 0, len(grouped))
+	for identity, identitySamples := range grouped {
+		trusted := filterSmartQuotaSamples(identitySamples, func(sample smartQuotaCalibrationSample) bool {
+			return !sample.classificationOnly && smartQuotaCalibrationUsedFractionEligible(sample.usedFraction)
+		})
+		selected := trusted
+		isTrusted := len(trusted) > 0
+		if !isTrusted {
+			selected = filterSmartQuotaSamples(identitySamples, func(sample smartQuotaCalibrationSample) bool {
+				return sample.classificationOnly && smartQuotaClassificationFractionEligible(sample.usedFraction)
+			})
+		}
+		if len(selected) == 0 {
+			continue
+		}
+		if isTrusted {
+			complete := filterSmartQuotaSamples(selected, func(sample smartQuotaCalibrationSample) bool {
+				return sample.completeWindow
+			})
+			if len(complete) > 0 {
+				selected = complete
+			}
+		}
+		selected = trimSmartQuotaSampleExtremes(selected)
+		weighted := make([]smartQuotaWeightedPoint, 0, len(selected))
+		totalWeight := 0.0
+		for _, sample := range selected {
+			weight := sample.weight * smartQuotaSampleRecencyWeight(now, sample.observedMS) *
+				clampFloat(sample.usedFraction, smartQuotaClassificationMinUsedFraction, 1)
+			if weight <= 0 {
+				continue
+			}
+			weighted = append(weighted, smartQuotaWeightedPoint{capacityM: sample.capacityM, weight: weight})
+			totalWeight += weight
+		}
+		if len(weighted) == 0 || totalWeight <= 0 {
+			continue
+		}
+		point := smartQuotaClassPoint{
+			identity:  identity,
+			capacityM: weightedSmartQuotaMedian(weighted),
+			weight:    math.Min(totalWeight, 1),
+			trusted:   isTrusted,
+		}
+		if isTrusted {
+			trustedPoints = append(trustedPoints, point)
+		} else {
+			provisionalPoints = append(provisionalPoints, point)
+		}
+	}
+
+	groups := clusterSmartQuotaClassPoints(trustedPoints)
+	unassigned := make([]smartQuotaClassPoint, 0, len(provisionalPoints))
+	for _, point := range provisionalPoints {
+		groupIndex, distance := nearestSmartQuotaClassGroup(groups, point.capacityM, true)
+		if groupIndex < 0 {
+			unassigned = append(unassigned, point)
+			continue
+		}
+		center := smartQuotaClassGroupCenter(groups[groupIndex], true)
+		if distance > math.Max(15, center*0.35) {
+			unassigned = append(unassigned, point)
+			continue
+		}
+		groups[groupIndex].points = append(groups[groupIndex].points, point)
+	}
+	groups = append(groups, clusterSmartQuotaClassPoints(unassigned)...)
+	if len(groups) == 0 {
+		return nil
+	}
+	sort.SliceStable(groups, func(i, j int) bool {
+		return smartQuotaClassGroupCenter(groups[i], false) < smartQuotaClassGroupCenter(groups[j], false)
+	})
+	totalAccounts := 0
+	for _, group := range groups {
+		totalAccounts += len(group.points)
+	}
+	items := make([]SmartQuotaClassEstimate, 0, len(groups))
+	usedIDs := make(map[string]int)
+	for _, group := range groups {
+		if len(group.points) == 0 {
+			continue
+		}
+		center := smartQuotaClassGroupCenter(group, false)
+		minimumM := group.points[0].capacityM
+		maximumM := group.points[0].capacityM
+		trustedAccounts := 0
+		for _, point := range group.points {
+			minimumM = math.Min(minimumM, point.capacityM)
+			maximumM = math.Max(maximumM, point.capacityM)
+			if point.trusted {
+				trustedAccounts++
+			}
+		}
+		confidence := smartConfidenceLow
+		if trustedAccounts >= smartQuotaPolicyMinUniqueAccounts {
+			confidence = smartConfidenceHigh
+		} else if trustedAccounts > 0 {
+			confidence = smartConfidenceMedium
+		}
+		baseID := "quota-" + strconv.Itoa(int(math.Round(center))) + "m"
+		usedIDs[baseID]++
+		id := baseID
+		if usedIDs[baseID] > 1 {
+			id += "-" + strconv.Itoa(usedIDs[baseID])
+		}
+		items = append(items, SmartQuotaClassEstimate{
+			ID:                  id,
+			CenterM:             round2(center),
+			MinimumM:            round2(minimumM),
+			MaximumM:            round2(maximumM),
+			AccountCount:        len(group.points),
+			TrustedAccounts:     trustedAccounts,
+			ProvisionalAccounts: len(group.points) - trustedAccounts,
+			SharePercent:        round2(float64(len(group.points)) / float64(max(1, totalAccounts)) * 100),
+			Confidence:          confidence,
+		})
+	}
+	return items
+}
+
+func clusterSmartQuotaClassPoints(points []smartQuotaClassPoint) []smartQuotaClassGroup {
+	if len(points) == 0 {
+		return nil
+	}
+	ordered := append([]smartQuotaClassPoint(nil), points...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].capacityM < ordered[j].capacityM
+	})
+	groups := []smartQuotaClassGroup{{points: []smartQuotaClassPoint{ordered[0]}}}
+	for _, point := range ordered[1:] {
+		last := &groups[len(groups)-1]
+		center := smartQuotaClassGroupCenter(*last, false)
+		if point.capacityM-center > math.Max(15, center*0.35) {
+			groups = append(groups, smartQuotaClassGroup{points: []smartQuotaClassPoint{point}})
+			continue
+		}
+		last.points = append(last.points, point)
+	}
+	return groups
+}
+
+func smartQuotaClassGroupCenter(group smartQuotaClassGroup, trustedOnly bool) float64 {
+	points := make([]smartQuotaWeightedPoint, 0, len(group.points))
+	for _, point := range group.points {
+		if trustedOnly && !point.trusted {
+			continue
+		}
+		points = append(points, smartQuotaWeightedPoint{capacityM: point.capacityM, weight: point.weight})
+	}
+	if len(points) == 0 && trustedOnly {
+		return smartQuotaClassGroupCenter(group, false)
+	}
+	return weightedSmartQuotaMedian(points)
+}
+
+func nearestSmartQuotaClassGroup(groups []smartQuotaClassGroup, capacityM float64, trustedOnly bool) (int, float64) {
+	bestIndex := -1
+	bestDistance := math.MaxFloat64
+	for index, group := range groups {
+		center := smartQuotaClassGroupCenter(group, trustedOnly)
+		distance := math.Abs(capacityM - center)
+		if distance < bestDistance {
+			bestIndex = index
+			bestDistance = distance
+		}
+	}
+	return bestIndex, bestDistance
+}
+
+func attachSmartQuotaClasses(estimate smartQuotaEstimate, classes []SmartQuotaClassEstimate) smartQuotaEstimate {
+	estimate.QuotaClasses = append([]SmartQuotaClassEstimate(nil), classes...)
+	if estimate.CapacityM <= 0 || len(classes) == 0 {
+		return estimate
+	}
+	best := classes[0]
+	bestDistance := math.Abs(estimate.CapacityM - best.CenterM)
+	for _, class := range classes[1:] {
+		distance := math.Abs(estimate.CapacityM - class.CenterM)
+		if distance < bestDistance {
+			best = class
+			bestDistance = distance
+		}
+	}
+	estimate.QuotaClassID = best.ID
+	if estimate.Provisional {
+		estimate.CapacityM = best.CenterM
+	}
+	return estimate
 }
 
 func selectSmartQuotaRepresentativePoints(points []smartQuotaWeightedPoint, limit int) []smartQuotaWeightedPoint {

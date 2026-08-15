@@ -10,12 +10,17 @@ import type { QuotaResetAccuracy } from '@/types';
 import type { AccountRecommendation } from './quotaRecommendations';
 import type { UsageValueSource } from './usageValueRows';
 import { isValidQuotaResetAtMs } from '@/utils/quota/formatters';
+import {
+  classifyAuthFileOperationalState,
+  isAuthFileCoolingStatusText,
+} from '@/features/authFiles/constants';
 
 export type AccountListHealthStatusKey =
   | 'reauth'
   | 'five_hour_cooldown'
   | 'weekly_cooldown'
   | 'monthly_cooldown'
+  | 'cooldown'
   | 'five_hour_exhausted'
   | 'weekly_exhausted'
   | 'monthly_exhausted'
@@ -602,6 +607,23 @@ const resolveHealthStatus = (
     };
   }
 
+  const diagnosticText = getExceptionDetail(row);
+  if (
+    !row.disabled &&
+    row.quota.status !== 'disabled' &&
+    (classifyAuthFileOperationalState(row.raw) === 'cooldown' ||
+      isAuthFileCoolingStatusText(diagnosticText, row.usage.success > 0))
+  ) {
+    return {
+      status: 'cooldown',
+      tooltipKey: 'accounts.health_tip_cooldown_status',
+      tooltipParams: { detail: diagnosticText },
+      reasonKey: 'accounts.health_reason_cooldown_status',
+      reasonParams: { detail: diagnosticText },
+      reasonTone: 'warning',
+    };
+  }
+
   if (row.disabled || row.quota.status === 'disabled') {
     return {
       status: 'disabled',
@@ -614,7 +636,11 @@ const resolveHealthStatus = (
 
   if (
     row.quota.status === 'error' ||
-    (row.statusMessage && antigravityAvailability?.state !== 'partial') ||
+    (classifyAuthFileOperationalState(row.raw) === 'failed' &&
+      antigravityAvailability?.state !== 'partial') ||
+    (row.statusMessage &&
+      !isAuthFileCoolingStatusText(row.statusMessage, row.usage.success > 0) &&
+      antigravityAvailability?.state !== 'partial') ||
     row.quota.error ||
     row.quota.observedErrorKind ||
     row.quota.observedErrorCode ||
@@ -672,7 +698,12 @@ const resolveHealthStatus = (
 };
 
 const buildIdentitySubtitle = (row: AccountRow) =>
-  [row.fileName, row.authIndex ? `#${row.authIndex}` : '', row.projectId || '']
+  [
+    row.fileName,
+    row.workspaceName || row.workspaceId ? `workspace:${row.workspaceName || row.workspaceId}` : '',
+    row.authIndex ? `#${row.authIndex}` : '',
+    row.projectId || '',
+  ]
     .filter(Boolean)
     .join(' · ');
 

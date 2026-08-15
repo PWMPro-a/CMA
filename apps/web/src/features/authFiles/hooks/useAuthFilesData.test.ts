@@ -96,6 +96,12 @@ import {
   recordCodexInspectionDisableOwnership,
 } from '@/features/monitoring/model/codexInspectionOwnership';
 
+const encodeBase64UrlJson = (value: unknown) =>
+  btoa(JSON.stringify(value)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+
+const buildSignedJwt = (payload: Record<string, unknown>) =>
+  `${encodeBase64UrlJson({ alg: 'RS256', typ: 'JWT' })}.${encodeBase64UrlJson(payload)}.signature`;
+
 type UseAuthFilesDataHarness = {
   getCurrent: () => ReturnType<typeof useAuthFilesData>;
   getSavingHistory: () => boolean[];
@@ -321,21 +327,55 @@ describe('buildPastedAuthJsonPayloads', () => {
 });
 
 describe('prepareAuthFilesForUpload', () => {
-  it('preserves ordinary CPA auth JSON files without rewriting them', async () => {
+  it('renames a Codex CPA auth file from account identity instead of its source file name', async () => {
     const file = new File(
       [JSON.stringify({ type: 'codex', email: 'user@example.com', access_token: 'token' })],
-      'existing-auth.json',
+      'item-0001.json',
       { type: 'application/json' }
     );
 
     const result = await prepareAuthFilesForUpload([file]);
 
-    expect(result).toEqual({
-      files: [file],
-      failures: [],
-      convertedSourceCount: 0,
-    });
-    expect(result.files[0]).toBe(file);
+    expect(result.failures).toEqual([]);
+    expect(result.convertedSourceCount).toBe(1);
+    expect(result.files).toHaveLength(1);
+    expect(result.files[0].name).toMatch(/^codex-[a-f0-9]{8}-user@example\.com\.json$/);
+    expect(result.files[0].name).not.toBe(file.name);
+  });
+
+  it('keeps shared-workspace members separate even when source names are generic', async () => {
+    const buildFile = (name: string, email: string, memberId: string) => {
+      const accessToken = buildSignedJwt({
+        email,
+        'https://api.openai.com/auth': {
+          chatgpt_account_id: 'workspace-shared',
+          chatgpt_user_id: memberId,
+          user_id: memberId,
+        },
+      });
+      return new File(
+        [
+          JSON.stringify({
+            type: 'codex',
+            email,
+            account_id: 'workspace-shared',
+            access_token: accessToken,
+          }),
+        ],
+        name,
+        { type: 'application/json' }
+      );
+    };
+    const result = await prepareAuthFilesForUpload([
+      buildFile('item-0001.json', 'first@example.com', 'member-one'),
+      buildFile('item-0002.json', 'second@example.com', 'member-two'),
+    ]);
+
+    expect(result.failures).toEqual([]);
+    expect(result.files).toHaveLength(2);
+    expect(result.files[0].name).not.toBe(result.files[1].name);
+    expect(result.files.map((item) => item.name)).not.toContain('item-0001.json');
+    expect(result.files.map((item) => item.name)).not.toContain('item-0002.json');
   });
 
   it('preserves valid CPA auth JSON with export-like metadata without rewriting it', async () => {

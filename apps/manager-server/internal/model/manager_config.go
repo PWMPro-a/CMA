@@ -77,6 +77,27 @@ type ManagerSupplyConfig struct {
 	RecoveryClaimBatchSize      int                                           `json:"recoveryClaimBatchSize,omitempty"`
 	RecoveryDisableOriginal     *bool                                         `json:"recoveryDisableOriginal,omitempty"`
 	QuotaEstimationPolicies     map[string]ManagerSupplyQuotaEstimationPolicy `json:"quotaEstimationPolicies,omitempty"`
+	// Platforms is the multi-supplier configuration. The legacy top-level
+	// connection fields remain available for backward compatibility and are
+	// synthesized as one platform when this slice is absent.
+	Platforms                 []ManagerSupplyPlatformConfig `json:"platforms,omitempty"`
+	PlatformSelectionStrategy string                        `json:"platformSelectionStrategy,omitempty"`
+}
+
+type ManagerSupplyPlatformConfig struct {
+	ID                      string                                        `json:"id"`
+	Name                    string                                        `json:"name,omitempty"`
+	Type                    string                                        `json:"type"`
+	Enabled                 *bool                                         `json:"enabled,omitempty"`
+	BaseURL                 string                                        `json:"baseUrl"`
+	Username                string                                        `json:"username,omitempty"`
+	Password                string                                        `json:"password,omitempty"`
+	PasswordConfigured      bool                                          `json:"passwordConfigured,omitempty"`
+	Token                   string                                        `json:"token,omitempty"`
+	TokenConfigured         bool                                          `json:"tokenConfigured,omitempty"`
+	Product                 string                                        `json:"product"`
+	Priority                int                                           `json:"priority,omitempty"`
+	QuotaEstimationPolicies map[string]ManagerSupplyQuotaEstimationPolicy `json:"quotaEstimationPolicies,omitempty"`
 }
 
 type ManagerSupplyQuotaEstimationPolicy struct {

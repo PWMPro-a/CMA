@@ -661,6 +661,13 @@
   white-space: nowrap;
 }
 
+.accountWorkspacePill {
+  max-width: 168px;
+  border: 1px solid color-mix(in srgb, var(--accounts-warning) 32%, var(--accounts-border));
+  background: color-mix(in srgb, var(--accounts-warning) 8%, var(--accounts-surface));
+  color: color-mix(in srgb, var(--accounts-warning) 78%, var(--accounts-text));
+}
+
 .accountCardSectionTitle {
   display: none;
 }
@@ -1927,6 +1934,15 @@
     color: var(--accounts-text);
     font-size: 12px;
     line-height: 1.45;
+  }
+}
+
+.overviewRecentStatusMessageWarning {
+  border-color: color-mix(in srgb, var(--accounts-warning) 38%, var(--accounts-border));
+  background: color-mix(in srgb, var(--accounts-warning) 8%, var(--accounts-surface));
+
+  span {
+    color: var(--accounts-warning);
   }
 }
 

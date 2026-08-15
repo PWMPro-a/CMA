@@ -3,6 +3,7 @@ package model
 type SupplyOrder struct {
 	ID                int64  `json:"id"`
 	OrderID           string `json:"orderId"`
+	SupplierID        string `json:"supplierId,omitempty"`
 	Product           string `json:"product"`
 	RequestedQuantity int    `json:"requestedQuantity"`
 	Automatic         bool   `json:"automatic"`

@@ -62,6 +62,57 @@ const buildAccountRows = (
 ) => buildAccountRowsBase(files, scopeTestQuotaStores(files, stores), inspectionResults, overrides);
 
 describe('accountRows', () => {
+  it('keeps same-email workspaces distinct in row identity', () => {
+    const rows = buildAccountRows(
+      [
+        {
+          name: 'alpha.json',
+          type: 'codex',
+          email: 'shared@example.com',
+          account_id: 'same-account',
+          workspace_id: 'workspace-alpha',
+          workspace_name: 'Alpha Team',
+          plan_type: 'team',
+        },
+        {
+          name: 'beta.json',
+          type: 'codex',
+          email: 'shared@example.com',
+          account_id: 'same-account',
+          workspace_id: 'workspace-beta',
+          workspace_name: 'Beta Team',
+          plan_type: 'team',
+        },
+      ],
+      emptyStores()
+    );
+
+    expect(rows.map((row) => [row.accountLabel, row.workspaceId, row.workspaceName])).toEqual([
+      ['shared@example.com', 'workspace-alpha', 'Alpha Team'],
+      ['shared@example.com', 'workspace-beta', 'Beta Team'],
+    ]);
+    expect(rows[0].selectionKey).not.toBe(rows[1].selectionKey);
+  });
+
+  it('counts a rate-limited credential as available while preserving its warning detail', () => {
+    const rows = buildAccountRows(
+      [
+        {
+          name: 'limited.json',
+          type: 'codex',
+          status_message: '{"detail":"Rate limit exceeded"}',
+          recent_requests: [{ time: 'now', success: 8, failed: 2 }],
+        },
+      ],
+      emptyStores()
+    );
+
+    expect(rows[0].statusMessage).toContain('Rate limit exceeded');
+    expect(buildAccountMetrics(rows)).toMatchObject({ available: 1, needsAttention: 0 });
+    expect(filterAccountRows(rows, { provider: 'all', status: 'available', plan: 'all', quotaBand: 'all', search: '' })).toHaveLength(1);
+    expect(filterAccountRows(rows, { provider: 'all', status: 'problem', plan: 'all', quotaBand: 'all', search: '' })).toHaveLength(0);
+  });
+
   it('exposes supplier expiry and runtime current concurrency', () => {
     const expiresAtMs = Date.now() + 45 * 60_000;
     const [row] = buildAccountRows(
@@ -1434,9 +1485,9 @@ describe('accountRows', () => {
 
     expect(metrics).toEqual({
       total: 6,
-      available: 1,
+      available: 2,
       needsAttention: 1,
-      quotaRisk: 2,
+      quotaRisk: 1,
       disabled: 1,
       unconfirmed: 1,
       needsInspectionAction: 0,

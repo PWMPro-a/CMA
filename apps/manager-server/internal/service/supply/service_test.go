@@ -2,6 +2,7 @@ package supply
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -797,6 +798,36 @@ func TestAccountPoolStatsSeparateTotalAvailableHealthyAndDisabled(t *testing.T) 
 	}
 }
 
+func TestCPAAuthLifecyclePendingIsNotSchedulableCapacity(t *testing.T) {
+	for _, status := range []string{
+		"initializing",
+		"refreshing_token",
+		"refreshing_quota",
+		"initialization_failed",
+		"recovering_token",
+		"recovering_quota",
+		"recovery_failed",
+	} {
+		t.Run(status, func(t *testing.T) {
+			file := cpaauthfiles.File{
+				Name:     status + ".json",
+				Provider: "codex",
+				Raw:      map[string]any{"status": status},
+			}
+			if !isCPAAuthLifecyclePending(file) {
+				t.Fatalf("status %q was not recognized as pending", status)
+			}
+			if isAvailableCodexFile(file) {
+				t.Fatalf("status %q was counted as schedulable", status)
+			}
+			item := store.SupplyImportItem{Status: "imported"}
+			if got := supplyAccountStatus(item, file, true, true, time.Now()); got != "cooldown" {
+				t.Fatalf("supply account status = %q, want cooldown", got)
+			}
+		})
+	}
+}
+
 func TestAccountPoolStatsKeepsPopulationIdentityAcrossLiveAndInspectionBuckets(t *testing.T) {
 	remainingNormal := 10.0
 	remainingRisk := 90.0
@@ -923,6 +954,49 @@ func TestAccountPoolStatsMatchesCredentialStatusBuckets(t *testing.T) {
 	}
 	if resource.NormalAccounts+resource.AtRiskAccounts+resource.DisabledAccounts != resource.TotalAccounts {
 		t.Fatalf("account bucket identity does not hold: %#v", resource)
+	}
+}
+
+func TestAccountPoolStatsKeepsRateLimitedCredentialsAvailable(t *testing.T) {
+	files := []cpaauthfiles.File{
+		{
+			Name: "rate-limit.json", Provider: "codex", AuthIndex: "rate-limit",
+			Raw: map[string]any{
+				"status":         "error",
+				"status_message": `{"detail":"Rate limit exceeded"}`,
+				"recent_requests": []any{
+					map[string]any{"success": 8, "failed": 2},
+				},
+			},
+		},
+		{
+			Name: "http-429.json", Provider: "codex", AuthIndex: "http-429",
+			Raw: map[string]any{
+				"status":         "error",
+				"status_message": "HTTP 429 too many requests",
+			},
+		},
+		{
+			Name: "invalid-grant.json", Provider: "codex", AuthIndex: "invalid-grant",
+			Raw: map[string]any{
+				"status":         "error",
+				"status_message": "invalid_grant login_required",
+			},
+		},
+	}
+	results := []store.CodexInspectionResult{
+		{FileName: "rate-limit.json", Provider: "codex", AuthIndex: "rate-limit", Action: "keep"},
+		{FileName: "http-429.json", Provider: "codex", AuthIndex: "http-429", Action: "keep"},
+		{FileName: "invalid-grant.json", Provider: "codex", AuthIndex: "invalid-grant", Action: "keep"},
+	}
+
+	stats := accountPoolStatsFromFilesAndInspection(files, results)
+	if stats.schedulable != 2 || stats.normal != 2 || stats.needsAttention != 1 ||
+		stats.quotaRisk != 0 || stats.unconfirmed != 0 {
+		t.Fatalf("rate-limit account buckets = %#v", stats)
+	}
+	if stats.normal+stats.needsAttention+stats.quotaRisk+stats.unconfirmed+(stats.total-stats.enabled) != stats.total {
+		t.Fatalf("rate-limit account identity does not hold: %#v", stats)
 	}
 }
 
@@ -2924,7 +2998,7 @@ func TestNormalizeSub2AccountPayloadForCPA(t *testing.T) {
 		result["codex_cli_only_allow_app_server"] != true || stringFromMap(result, "codex_identity_fingerprint") == "" {
 		t.Fatalf("normalized metadata = %#v", result)
 	}
-	if len(key) != 64 || fileName != "codex-user@example.com.json" {
+	if len(key) != 64 || fileName != stableSupplyAccountFileName("user@example.com", "workspace-1") {
 		t.Fatalf("stable identity outputs key=%q file=%q", key, fileName)
 	}
 }
@@ -2945,7 +3019,7 @@ func TestNormalizeDirectCPAAccountPayloadDisablesSelectionErrorFreeze(t *testing
 	}
 }
 
-func TestSupplyFileNameStaysStableWhenCredentialsChange(t *testing.T) {
+func TestSupplyFileNameSeparatesDifferentAccountsWithSameEmail(t *testing.T) {
 	first, err := normalizeAccountPayloads([]byte(`{"name":"普通 Team · 7D · 有效期 51 分钟","type":"oauth","platform":"openai","credentials":{"access_token":"access-one","refresh_token":"refresh-one","chatgpt_account_id":"account-one","email":"stable@example.com"}}`))
 	if err != nil || len(first) != 1 {
 		t.Fatalf("normalize first account: %#v err=%v", first, err)
@@ -2955,11 +3029,79 @@ func TestSupplyFileNameStaysStableWhenCredentialsChange(t *testing.T) {
 		t.Fatalf("normalize replacement account: %#v err=%v", second, err)
 	}
 	if first[0].accountName != "stable@example.com" || second[0].accountName != first[0].accountName ||
-		first[0].fileName != "codex-stable@example.com.json" || second[0].fileName != first[0].fileName {
-		t.Fatalf("stable account filenames first=%q second=%q", first[0].fileName, second[0].fileName)
+		first[0].fileName == second[0].fileName {
+		t.Fatalf("different account filenames first=%q second=%q", first[0].fileName, second[0].fileName)
 	}
 	if first[0].itemKey == second[0].itemKey {
 		t.Fatal("credential identity should still distinguish different underlying accounts")
+	}
+}
+
+func TestNormalizeDirectCPAJWTSeparatesSharedWorkspaceMembers(t *testing.T) {
+	const workspaceID = "3bbcf0cc-c729-4062-9455-649a9190d673"
+	buildAccount := func(email string, memberID string, tokenMarker string) normalizedSupplyAccount {
+		t.Helper()
+		token := buildSupplyTestJWT(t, map[string]any{
+			"sub":   "auth0|" + tokenMarker,
+			"email": email,
+			"https://api.openai.com/auth": map[string]any{
+				"chatgpt_account_id":      workspaceID,
+				"chatgpt_account_user_id": memberID + "__" + workspaceID,
+				"chatgpt_user_id":         memberID,
+				"user_id":                 memberID,
+				"poid":                    "org-" + tokenMarker,
+			},
+		})
+		raw, err := json.Marshal(map[string]any{
+			"type":               "codex",
+			"email":              email,
+			"account_id":         workspaceID,
+			"chatgpt_account_id": workspaceID,
+			"access_token":       token,
+		})
+		if err != nil {
+			t.Fatalf("marshal account: %v", err)
+		}
+		account, err := normalizeAccountForImport(string(raw))
+		if err != nil {
+			t.Fatalf("normalize account: %v", err)
+		}
+		return account
+	}
+
+	first := buildAccount("taliapalk11093@outlook.com", "user-Lu9u9QrXpBTOuEwK14qBHUIv", "first")
+	second := buildAccount("yoshiohumpal42085@outlook.com", "user-H3Ibbb6Qvpx4FJ29qBlI8GFG", "second")
+	if first.itemKey == second.itemKey || first.nameKey == second.nameKey || first.fileName == second.fileName {
+		t.Fatalf("shared-workspace members collided: first=%#v second=%#v", first, second)
+	}
+	var firstPayload map[string]any
+	if err := json.Unmarshal(first.payload, &firstPayload); err != nil {
+		t.Fatalf("decode first payload: %v", err)
+	}
+	if stringFromMap(firstPayload, "workspace_id") != workspaceID ||
+		stringFromMap(firstPayload, "chatgpt_user_id") != "user-Lu9u9QrXpBTOuEwK14qBHUIv" {
+		t.Fatalf("JWT identity was not extracted: %#v", firstPayload)
+	}
+	firstFile := cpaauthfiles.File{
+		AccountID:       workspaceID,
+		AccountSnapshot: "taliapalk11093@outlook.com",
+		Raw: map[string]any{
+			"account_id":      workspaceID,
+			"workspace_id":    workspaceID,
+			"chatgpt_user_id": "user-Lu9u9QrXpBTOuEwK14qBHUIv",
+			"email":           "taliapalk11093@outlook.com",
+		},
+	}
+	if !supplyCPAFileMatchesAccount(firstFile, first) {
+		t.Fatal("same workspace member should match its CPA file")
+	}
+	if supplyCPAFileMatchesAccount(firstFile, second) {
+		t.Fatal("different members in one shared workspace must not match")
+	}
+
+	firstRefreshed := buildAccount("taliapalk11093@outlook.com", "user-Lu9u9QrXpBTOuEwK14qBHUIv", "refreshed")
+	if firstRefreshed.itemKey != first.itemKey || firstRefreshed.fileName != first.fileName {
+		t.Fatalf("same member refresh changed identity: first=%#v refreshed=%#v", first, firstRefreshed)
 	}
 }
 
@@ -3112,11 +3254,11 @@ func TestBackfillSupplyAccountMetadataRenamesLegacySupplierLabelFile(t *testing.
 	if err != nil || len(items) != 1 {
 		t.Fatalf("reload import items: %#v err=%v", items, err)
 	}
-	const expectedFileName = "codex-stable@example.com.json"
+	expectedFileName := stableSupplyAccountFileName("stable@example.com", "account-stable")
 	if uploadedName != expectedFileName || deletedName != oldFileName {
 		t.Fatalf("migration uploaded=%q deleted=%q", uploadedName, deletedName)
 	}
-	if items[0].AccountName != "stable@example.com" || items[0].NameKey != "stable@example.com" || items[0].FileName != expectedFileName {
+	if items[0].AccountName != "stable@example.com" || items[0].NameKey != supplyAccountNameKey("stable@example.com", "account-stable") || items[0].FileName != expectedFileName {
 		t.Fatalf("migrated import item = %#v", items[0])
 	}
 	if _, exists := files[oldFileName]; exists {
@@ -3214,7 +3356,7 @@ func TestStableFileCredentialVersionsRemainDistinctAndUseTheOverlappingVersion(t
 	}
 }
 
-func TestRecoveryWithoutOriginalFileReusesUniqueAccountNameBinding(t *testing.T) {
+func TestRecoveryWithoutOriginalIdentityDoesNotReplaceDifferentAccount(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/management/auth-files" || r.Method != http.MethodGet {
 			http.NotFound(w, r)
@@ -3262,7 +3404,7 @@ func TestRecoveryWithoutOriginalFileReusesUniqueAccountNameBinding(t *testing.T)
 	if err != nil {
 		t.Fatalf("resolve recovery plan: %v", err)
 	}
-	if plan.action != "replace" || plan.fileName != "legacy-stable-file.json" || plan.replacedFileName != "legacy-stable-file.json" {
+	if plan.action != "add" || plan.fileName != stableSupplyAccountFileName("old@example.com", "new-account") || plan.replacedFileName != "" {
 		t.Fatalf("recovery plan = %#v", plan)
 	}
 	secondAccount, err := normalizeAccountForImport(`{"type":"codex","name":"Second Team","email":"second@example.com","account_id":"second-account","access_token":"second-token"}`)
@@ -3275,7 +3417,7 @@ func TestRecoveryWithoutOriginalFileReusesUniqueAccountNameBinding(t *testing.T)
 	if err != nil {
 		t.Fatalf("resolve second recovery plan: %v", err)
 	}
-	if secondPlan.action != "add" || secondPlan.fileName != "codex-second@example.com.json" {
+	if secondPlan.action != "add" || secondPlan.fileName != stableSupplyAccountFileName("second@example.com", "second-account") {
 		t.Fatalf("second recovery plan reused original file: %#v", secondPlan)
 	}
 }
@@ -3955,9 +4097,83 @@ func TestLegacySupplyImportRepairConvertsAndVerifiesCPAFile(t *testing.T) {
 	if err != nil || !found || repaired.Status != "completed" || repaired.ImportedCount != 1 {
 		t.Fatalf("repaired order=%#v found=%v err=%v", repaired, found, err)
 	}
-	if uploadCalls.Load() != 1 || uploadedName != "codex-legacy@example.com.json" {
+	if uploadCalls.Load() != 1 || uploadedName != stableSupplyAccountFileName("legacy@example.com", "account-legacy") {
 		t.Fatalf("upload calls=%d uploaded name=%q", uploadCalls.Load(), uploadedName)
 	}
+}
+
+func TestResolveSupplyImportPlanUsesAccountIdentityBeforeFileName(t *testing.T) {
+	const boundFileName = "legacy-item-0001.json"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/auth-files" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		if name := r.URL.Query().Get("name"); name != "" && name != boundFileName {
+			_, _ = w.Write([]byte(`{"files":[]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"files":[{"name":"legacy-item-0001.json","auth_index":"17","provider":"codex","account":"old@example.com","account_id":"workspace-shared","workspace_id":"workspace-shared","chatgpt_user_id":"member-one"}]}`))
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-item-key-binding.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{OrderID: "original", Product: "team_1h", Status: "completed"}); err != nil {
+		t.Fatalf("create original order: %v", err)
+	}
+	original, err := normalizeAccountForImport(`{"type":"codex","email":"old@example.com","account_id":"workspace-shared","workspace_id":"workspace-shared","chatgpt_user_id":"member-one","access_token":"old"}`)
+	if err != nil {
+		t.Fatalf("normalize original: %v", err)
+	}
+	if _, err := st.InsertSupplyImportItems(ctx, "original", []store.SupplyImportItem{{
+		ItemKey: original.itemKey, AccountName: original.accountName, NameKey: original.nameKey,
+		FileName: boundFileName, ImportAction: "add", PayloadJSON: string(original.payload),
+	}}); err != nil {
+		t.Fatalf("insert original item: %v", err)
+	}
+	items, err := st.ListSupplyImportItems(ctx, 10, "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("list original item: %#v err=%v", items, err)
+	}
+	if err := st.MarkSupplyImportItemImported(ctx, items[0].ID, 1000); err != nil {
+		t.Fatalf("mark original imported: %v", err)
+	}
+
+	refreshed, err := normalizeAccountForImport(`{"type":"codex","email":"renamed@example.com","account_id":"workspace-shared","workspace_id":"workspace-shared","chatgpt_user_id":"member-one","access_token":"new"}`)
+	if err != nil {
+		t.Fatalf("normalize refreshed account: %v", err)
+	}
+	if refreshed.itemKey != original.itemKey || refreshed.nameKey == original.nameKey {
+		t.Fatalf("test identity setup invalid: original=%#v refreshed=%#v", original, refreshed)
+	}
+	service := New(st, nil, server.Client())
+	plan, err := service.resolveSupplyImportPlan(ctx, store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+	}, store.SupplyOrder{OrderID: "replacement", Product: "team_1h"}, store.SupplyImportItem{}, refreshed, false)
+	if err != nil {
+		t.Fatalf("resolve import plan: %v", err)
+	}
+	if plan.action != "replace" || plan.fileName != boundFileName || plan.replacedFileName != boundFileName {
+		t.Fatalf("identity binding was not reused: %#v", plan)
+	}
+}
+
+func buildSupplyTestJWT(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	header, err := json.Marshal(map[string]any{"alg": "RS256", "typ": "JWT"})
+	if err != nil {
+		t.Fatalf("marshal JWT header: %v", err)
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal JWT claims: %v", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
 }
 
 func TestSupplyOrderDatabaseAllowsOnlyOneOpenOrder(t *testing.T) {

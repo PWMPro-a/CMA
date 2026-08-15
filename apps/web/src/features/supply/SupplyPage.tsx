@@ -9,8 +9,10 @@ import {
   IconDatabaseZap,
   IconDollarSign,
   IconInbox,
+  IconPlus,
   IconRefreshCw,
   IconTimer,
+  IconTrash2,
   IconTrendingUp,
 } from '@/components/ui/icons';
 import {
@@ -19,6 +21,7 @@ import {
   type SupplyActiveOrderStatus,
   type SupplyConfig,
   type SupplyOrder,
+  type SupplyPlatformConfig,
   type SupplyQuotaEstimationPolicy,
   type SupplyReport,
   type SupplyReportDimensionStat,
@@ -35,6 +38,47 @@ import styles from './SupplyPage.module.scss';
 const DEFAULT_QUOTA_ESTIMATION_POLICIES: Record<string, SupplyQuotaEstimationPolicy> = {
   team: { mode: 'auto', fallbackM: 60, fixedM: 60 },
   free: { mode: 'auto', fallbackM: 10, fixedM: 10 },
+};
+
+const newSupplyPlatform = (type: 'legacy' | 'bugteam', index: number): SupplyPlatformConfig => ({
+  id: `${type}-${Date.now().toString(36)}-${index + 1}`,
+  name: type === 'bugteam' ? 'BugTeam' : `Supply ${index + 1}`,
+  type,
+  enabled: true,
+  baseUrl: type === 'bugteam' ? 'https://bugteam.team' : 'https://sogouedu.cc',
+  username: '',
+  password: '',
+  passwordConfigured: false,
+  token: '',
+  tokenConfigured: false,
+  product: type === 'bugteam' ? 'team_1h' : 'oauth_30d',
+  priority: index + 1,
+  quotaEstimationPolicies: {},
+});
+
+const normalizeSupplyConfigForEditor = (config: SupplyConfig): SupplyConfig => {
+  const configuredPlatforms = config.platforms;
+  const platforms =
+    configuredPlatforms !== undefined
+      ? configuredPlatforms.map((platform) => ({ ...platform, password: '', token: '' }))
+      : config.baseUrl || config.username || config.passwordConfigured
+        ? [
+            {
+              id: 'legacy',
+              name: 'Legacy supplier',
+              type: 'legacy',
+              enabled: true,
+              baseUrl: config.baseUrl,
+              username: config.username,
+              password: '',
+              passwordConfigured: config.passwordConfigured,
+              product: config.product,
+              priority: 1,
+              quotaEstimationPolicies: {},
+            },
+          ]
+        : [];
+  return { ...config, password: '', platforms };
 };
 
 const emptyConfig: SupplyConfig = {
@@ -82,6 +126,8 @@ const emptyConfig: SupplyConfig = {
   recoveryClaimBatchSize: 20,
   recoveryDisableOriginal: true,
   quotaEstimationPolicies: DEFAULT_QUOTA_ESTIMATION_POLICIES,
+  platforms: [newSupplyPlatform('legacy', 0)],
+  platformSelectionStrategy: 'best_available',
 };
 
 type SupplyWorkspaceTab =
@@ -97,6 +143,7 @@ type AccountStatusFilter =
   | 'all'
   | 'active'
   | 'imported'
+  | 'cooldown'
   | 'disabled'
   | 'expired'
   | 'missing'
@@ -163,6 +210,7 @@ const ACCOUNT_STATUS_FILTERS: Array<{ id: AccountStatusFilter; labelKey: string 
   { id: 'all', labelKey: 'supply.account_filter_all' },
   { id: 'active', labelKey: 'supply.account_status_active' },
   { id: 'imported', labelKey: 'supply.account_status_imported' },
+  { id: 'cooldown', labelKey: 'supply.account_status_cooldown' },
   { id: 'disabled', labelKey: 'supply.account_status_disabled' },
   { id: 'expired', labelKey: 'supply.account_status_expired' },
   { id: 'missing', labelKey: 'supply.account_status_missing' },
@@ -299,7 +347,8 @@ const orderTone = (status: string) => {
 const accountTone = (status: string) => {
   if (status === 'active' || status === 'imported') return styles.success;
   if (status === 'disabled' || status === 'missing' || status === 'failed') return styles.error;
-  if (status === 'expired' || status === 'pending' || status === 'unknown') return styles.warning;
+  if (status === 'cooldown' || status === 'expired' || status === 'pending' || status === 'unknown')
+    return styles.warning;
   return styles.active;
 };
 
@@ -418,6 +467,80 @@ export function SupplyPage() {
     []
   );
 
+  const updateSupplyPlatform = useCallback(
+    (index: number, patch: Partial<SupplyPlatformConfig>) => {
+      configDirtyRef.current = true;
+      setDraft((current) => {
+        const platforms = [...(current.platforms ?? [])];
+        const existing = platforms[index];
+        if (!existing) return current;
+        let next = { ...existing, ...patch };
+        if (patch.type === 'bugteam') {
+          next = {
+            ...next,
+            type: 'bugteam',
+            baseUrl: 'https://bugteam.team',
+            product: 'team_1h',
+          };
+        }
+        platforms[index] = next;
+        return { ...current, platforms };
+      });
+    },
+    []
+  );
+
+  const updatePlatformQuotaEstimationPolicy = useCallback(
+    (index: number, planType: string, patch: Partial<SupplyQuotaEstimationPolicy>) => {
+      configDirtyRef.current = true;
+      setDraft((current) => {
+        const platforms = [...(current.platforms ?? [])];
+        const existing = platforms[index];
+        if (!existing) return current;
+        const normalizedPlan = planType.trim().toLowerCase();
+        const globalPolicy = current.quotaEstimationPolicies?.[normalizedPlan];
+        const defaultPolicy = globalPolicy ??
+          DEFAULT_QUOTA_ESTIMATION_POLICIES[normalizedPlan] ?? {
+            mode: 'auto',
+            fallbackM: 10,
+            fixedM: 10,
+          };
+        platforms[index] = {
+          ...existing,
+          quotaEstimationPolicies: {
+            ...(existing.quotaEstimationPolicies ?? {}),
+            [normalizedPlan]: {
+              ...defaultPolicy,
+              ...existing.quotaEstimationPolicies?.[normalizedPlan],
+              ...patch,
+            },
+          },
+        };
+        return { ...current, platforms };
+      });
+    },
+    []
+  );
+
+  const addSupplyPlatform = useCallback(() => {
+    configDirtyRef.current = true;
+    setDraft((current) => {
+      const platforms = current.platforms ?? [];
+      return {
+        ...current,
+        platforms: [...platforms, newSupplyPlatform('bugteam', platforms.length)],
+      };
+    });
+  }, []);
+
+  const removeSupplyPlatform = useCallback((index: number) => {
+    configDirtyRef.current = true;
+    setDraft((current) => ({
+      ...current,
+      platforms: (current.platforms ?? []).filter((_, platformIndex) => platformIndex !== index),
+    }));
+  }, []);
+
   const selectSupplyStrategy = useCallback((strategy: SupplyStrategy) => {
     configDirtyRef.current = true;
     setDraft((current) => ({
@@ -430,7 +553,7 @@ export function SupplyPage() {
   const applyStatus = useCallback((next: SupplyStatus) => {
     setStatus(next);
     if (!configDirtyRef.current && next.config) {
-      setDraft({ ...next.config, password: '' });
+      setDraft(normalizeSupplyConfigForEditor(next.config));
     }
     setManualQuantity((current) =>
       current > 0 ? current : Math.max(1, next.config?.replenishBatchSize || 10)
@@ -783,6 +906,13 @@ export function SupplyPage() {
   const inventory = overview?.inventory;
   const balance = overview?.balance;
   const smart = status?.smartResource;
+  const platformOverviewById = useMemo(
+    () =>
+      new Map(
+        (overview?.platforms ?? []).map((platform) => [platform.id.trim().toLowerCase(), platform])
+      ),
+    [overview?.platforms]
+  );
   const poolAccounts = resolveSupplyPoolAccountStats(
     smart,
     overview?.cpaAvailable,
@@ -1500,16 +1630,6 @@ export function SupplyPage() {
       return rank(left) - rank(right) || left.localeCompare(right);
     });
   }, [draft.quotaEstimationPolicies, smart?.accountQuotaPlanEstimates]);
-  const quotaPlanEstimateByType = useMemo(
-    () =>
-      new Map(
-        (smart?.accountQuotaPlanEstimates ?? []).map((estimate) => [
-          estimate.planType.trim().toLowerCase(),
-          estimate,
-        ])
-      ),
-    [smart?.accountQuotaPlanEstimates]
-  );
   const quotaPolicyForPlan = (planType: string): SupplyQuotaEstimationPolicy => {
     const defaultPolicy = DEFAULT_QUOTA_ESTIMATION_POLICIES[planType] ?? {
       mode: 'auto',
@@ -1521,6 +1641,20 @@ export function SupplyPage() {
       ...draft.quotaEstimationPolicies?.[planType],
     };
   };
+  const quotaPolicyForSupplier = (
+    supplierId: string | undefined,
+    planType: string
+  ): SupplyQuotaEstimationPolicy => {
+    const globalPolicy = quotaPolicyForPlan(planType);
+    const platform = (draft.platforms ?? []).find(
+      (item) => item.id.trim().toLowerCase() === (supplierId ?? '').trim().toLowerCase()
+    );
+    return {
+      ...globalPolicy,
+      ...platform?.quotaEstimationPolicies?.[planType],
+    };
+  };
+  const quotaEstimateItems = smart?.accountQuotaPlanEstimates ?? [];
 
   if (loading && !status) {
     return <div className={styles.loading}>{t('common.loading')}</div>;
@@ -1639,9 +1773,9 @@ export function SupplyPage() {
           ) : null}
         </div>
         <div className={styles.quotaEstimateGrid}>
-          {quotaPlanTypes.map((planType) => {
-            const estimate = quotaPlanEstimateByType.get(planType);
-            const policy = quotaPolicyForPlan(planType);
+          {quotaEstimateItems.map((estimate) => {
+            const planType = estimate.planType.trim().toLowerCase();
+            const policy = quotaPolicyForSupplier(estimate.supplierId, planType);
             const mode = estimate?.mode ?? policy.mode;
             const adoptedM =
               estimate?.adoptedM ?? (mode === 'fixed' ? policy.fixedM : policy.fallbackM);
@@ -1668,11 +1802,15 @@ export function SupplyPage() {
                       ? styles.quotaEstimateWarning
                       : ''
                 }`}
-                key={planType}
+                key={estimate.key || `${estimate.supplierId || 'unassigned'}:${planType}`}
               >
                 <div className={styles.quotaEstimateCardHeader}>
                   <div>
-                    <span>{t('supply.quota_plan_type')}</span>
+                    <span>
+                      {estimate.supplierName ||
+                        estimate.supplierId ||
+                        t('supply.platform_unassigned')}
+                    </span>
                     <strong>
                       {t(`supply.quota_plan_type_${planType}`, {
                         defaultValue: planType.toUpperCase(),
@@ -1712,6 +1850,35 @@ export function SupplyPage() {
                     {formatTokenM(estimate?.fallbackM ?? policy.fallbackM, 1)}
                   </span>
                 </div>
+                {(estimate.quotaClasses?.length ?? 0) > 0 ? (
+                  <div className={styles.quotaClassList}>
+                    {estimate.quotaClasses?.map((quotaClass) => (
+                      <div className={styles.quotaClassItem} key={quotaClass.id}>
+                        <div>
+                          <strong>
+                            {t('supply.quota_class_center', {
+                              value: formatTokenM(quotaClass.centerM, 1),
+                            })}
+                          </strong>
+                          <span>
+                            {t('supply.quota_class_accounts', {
+                              count: quotaClass.accountCount,
+                              share: formatNumber(quotaClass.sharePercent, 1),
+                            })}
+                          </span>
+                        </div>
+                        <small>
+                          {t('supply.quota_class_evidence', {
+                            trusted: quotaClass.trustedAccounts,
+                            provisional: quotaClass.provisionalAccounts,
+                            minimum: formatTokenM(quotaClass.minimumM, 1),
+                            maximum: formatTokenM(quotaClass.maximumM, 1),
+                          })}
+                        </small>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 {showValidationNotice ? (
                   <div className={blocked ? styles.quotaEstimateAlert : styles.quotaEstimateNotice}>
                     {t(
@@ -2129,49 +2296,215 @@ export function SupplyPage() {
 
           {activeTab === 'automation' ? (
             <section className={styles.automationGrid}>
-              <article className={styles.panel}>
+              <article className={`${styles.panel} ${styles.fullSpan}`}>
                 <div className={styles.panelHeader}>
                   <div>
                     <h2>{t('supply.supply_connection_title')}</h2>
                     <p>{t('supply.supply_connection_hint')}</p>
                   </div>
+                  <Button variant="secondary" size="sm" onClick={addSupplyPlatform}>
+                    <IconPlus size={15} />
+                    {t('supply.platform_add')}
+                  </Button>
                 </div>
-                <div className={styles.formGrid}>
-                  <Input
-                    label={t('supply.base_url')}
-                    value={draft.baseUrl}
-                    onChange={(event) => updateDraft({ baseUrl: event.target.value })}
-                    placeholder="https://sogouedu.cc"
-                  />
-                  <Input
-                    label={t('supply.username')}
-                    value={draft.username}
-                    onChange={(event) => updateDraft({ username: event.target.value })}
-                    autoComplete="username"
-                  />
-                  <Input
-                    label={t('supply.password')}
-                    type="password"
-                    value={draft.password ?? ''}
-                    onChange={(event) => updateDraft({ password: event.target.value })}
-                    placeholder={
-                      draft.passwordConfigured
-                        ? t('supply.password_saved')
-                        : t('supply.password_placeholder')
-                    }
-                    autoComplete="new-password"
-                  />
-                  <div className={styles.field}>
-                    <label>{t('supply.product')}</label>
-                    <Select
-                      value={draft.product}
-                      options={[
-                        { value: 'oauth_30d', label: t('supply.product_30d') },
-                        { value: 'oauth_7d', label: t('supply.product_7d') },
-                      ]}
-                      onChange={(product) => updateDraft({ product })}
-                    />
-                  </div>
+                <div className={styles.platformList}>
+                  {(draft.platforms ?? []).map((platform, platformIndex) => {
+                    const live = platformOverviewById.get(platform.id.trim().toLowerCase());
+                    return (
+                      <section className={styles.platformRow} key={platform.id || platformIndex}>
+                        <div className={styles.platformRowHeader}>
+                          <div className={styles.platformIdentity}>
+                            <strong>{platform.name || platform.id}</strong>
+                            <span>{platform.id}</span>
+                            {live?.selected ? (
+                              <span className={`${styles.statusPill} ${styles.active}`}>
+                                {t('supply.platform_selected')}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className={styles.platformActions}>
+                            <ToggleSwitch
+                              checked={platform.enabled !== false}
+                              onChange={(enabled) =>
+                                updateSupplyPlatform(platformIndex, { enabled })
+                              }
+                              label={t('supply.platform_enabled')}
+                            />
+                            <Button
+                              variant="ghost"
+                              size="xs"
+                              iconOnly
+                              disabled={(draft.platforms?.length ?? 0) <= 1}
+                              title={t('supply.platform_remove')}
+                              aria-label={t('supply.platform_remove')}
+                              onClick={() => removeSupplyPlatform(platformIndex)}
+                            >
+                              <IconTrash2 size={14} />
+                            </Button>
+                          </div>
+                        </div>
+                        <div className={styles.platformFormGrid}>
+                          <div className={styles.field}>
+                            <label>{t('supply.platform_type')}</label>
+                            <Select
+                              value={platform.type}
+                              options={[
+                                { value: 'legacy', label: t('supply.platform_type_legacy') },
+                                { value: 'bugteam', label: t('supply.platform_type_bugteam') },
+                              ]}
+                              onChange={(type) => updateSupplyPlatform(platformIndex, { type })}
+                            />
+                          </div>
+                          <Input
+                            label={t('supply.platform_name')}
+                            value={platform.name ?? ''}
+                            onChange={(event) =>
+                              updateSupplyPlatform(platformIndex, { name: event.target.value })
+                            }
+                          />
+                          <Input
+                            label={t('supply.base_url')}
+                            value={platform.baseUrl}
+                            disabled={platform.type === 'bugteam'}
+                            onChange={(event) =>
+                              updateSupplyPlatform(platformIndex, { baseUrl: event.target.value })
+                            }
+                          />
+                          <Input
+                            label={t('supply.username')}
+                            value={platform.username ?? ''}
+                            onChange={(event) =>
+                              updateSupplyPlatform(platformIndex, { username: event.target.value })
+                            }
+                            autoComplete="username"
+                          />
+                          <Input
+                            label={t('supply.password')}
+                            type="password"
+                            value={platform.password ?? ''}
+                            onChange={(event) =>
+                              updateSupplyPlatform(platformIndex, { password: event.target.value })
+                            }
+                            placeholder={
+                              platform.passwordConfigured
+                                ? t('supply.password_saved')
+                                : t('supply.password_placeholder')
+                            }
+                            autoComplete="new-password"
+                          />
+                          <Input
+                            label={t('supply.platform_token')}
+                            type="password"
+                            value={platform.token ?? ''}
+                            onChange={(event) =>
+                              updateSupplyPlatform(platformIndex, { token: event.target.value })
+                            }
+                            placeholder={
+                              platform.tokenConfigured
+                                ? t('supply.platform_token_saved')
+                                : t('supply.platform_token_placeholder')
+                            }
+                            autoComplete="off"
+                          />
+                          <div className={styles.field}>
+                            <label>{t('supply.product')}</label>
+                            <Select
+                              value={platform.product}
+                              options={
+                                platform.type === 'bugteam'
+                                  ? [{ value: 'team_1h', label: t('supply.product_team_1h') }]
+                                  : [
+                                      { value: 'oauth_30d', label: t('supply.product_30d') },
+                                      { value: 'oauth_7d', label: t('supply.product_7d') },
+                                    ]
+                              }
+                              onChange={(product) =>
+                                updateSupplyPlatform(platformIndex, { product })
+                              }
+                            />
+                          </div>
+                          <Input
+                            label={t('supply.platform_priority')}
+                            type="number"
+                            min={1}
+                            max={1000}
+                            value={platform.priority ?? platformIndex + 1}
+                            onChange={(event) =>
+                              updateSupplyPlatform(platformIndex, {
+                                priority: Number(event.target.value),
+                              })
+                            }
+                          />
+                        </div>
+                        <div className={styles.platformQuotaGrid}>
+                          {(['team', 'free'] as const).map((planType) => {
+                            const globalPolicy = quotaPolicyForPlan(planType);
+                            const policy = {
+                              ...globalPolicy,
+                              ...platform.quotaEstimationPolicies?.[planType],
+                            };
+                            return (
+                              <div className={styles.platformQuotaRow} key={planType}>
+                                <strong>
+                                  {t(`supply.quota_plan_type_${planType}`, {
+                                    defaultValue: planType.toUpperCase(),
+                                  })}
+                                </strong>
+                                <Select
+                                  value={policy.mode}
+                                  options={[
+                                    { value: 'auto', label: t('supply.quota_plan_mode_auto') },
+                                    { value: 'fixed', label: t('supply.quota_plan_mode_fixed') },
+                                  ]}
+                                  onChange={(mode) =>
+                                    updatePlatformQuotaEstimationPolicy(platformIndex, planType, {
+                                      mode,
+                                    })
+                                  }
+                                  ariaLabel={t('supply.quota_plan_mode')}
+                                />
+                                <Input
+                                  aria-label={
+                                    policy.mode === 'fixed'
+                                      ? t('supply.quota_plan_fixed_input')
+                                      : t('supply.quota_plan_fallback_input')
+                                  }
+                                  type="number"
+                                  min={0.5}
+                                  max={500}
+                                  step={0.5}
+                                  value={policy.mode === 'fixed' ? policy.fixedM : policy.fallbackM}
+                                  onChange={(event) =>
+                                    updatePlatformQuotaEstimationPolicy(platformIndex, planType, {
+                                      [policy.mode === 'fixed' ? 'fixedM' : 'fallbackM']: Number(
+                                        event.target.value
+                                      ),
+                                    })
+                                  }
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div className={styles.platformRuntime}>
+                          <span>
+                            {t('supply.supply_inventory')}: {live?.inventory?.available ?? '-'}
+                          </span>
+                          <span>
+                            {t('supply.available_balance')}:{' '}
+                            {live?.balance ? formatMoney(live.balance.availableFen) : '-'}
+                          </span>
+                          <span>
+                            {t('supply.estimated_total')}:{' '}
+                            {live?.inventory ? formatMoney(live.inventory.estimatedTotalFen) : '-'}
+                          </span>
+                          {live?.lastError ? <strong>{live.lastError}</strong> : null}
+                        </div>
+                      </section>
+                    );
+                  })}
+                </div>
+                <div className={styles.platformGlobalFields}>
                   <Input
                     label={t('supply.revenue_multiplier')}
                     type="number"

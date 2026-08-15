@@ -1,13 +1,30 @@
 import { apiClient } from './client';
 
-export type SupplyProduct = 'oauth_30d' | 'oauth_7d';
+export type SupplyProduct = 'oauth_30d' | 'oauth_7d' | 'team_1h';
 export type SupplyStrategy = 'strong_supply' | 'balanced' | 'cost_first' | 'custom';
 export type SupplyQuotaEstimationMode = 'auto' | 'fixed' | string;
+export type SupplyPlatformType = 'legacy' | 'bugteam' | string;
 
 export interface SupplyQuotaEstimationPolicy {
   mode: SupplyQuotaEstimationMode;
   fallbackM: number;
   fixedM: number;
+}
+
+export interface SupplyPlatformConfig {
+  id: string;
+  name?: string;
+  type: SupplyPlatformType;
+  enabled?: boolean;
+  baseUrl: string;
+  username?: string;
+  password?: string;
+  passwordConfigured?: boolean;
+  token?: string;
+  tokenConfigured?: boolean;
+  product: SupplyProduct | string;
+  priority?: number;
+  quotaEstimationPolicies?: Record<string, SupplyQuotaEstimationPolicy>;
 }
 
 export interface SupplyConfig {
@@ -55,6 +72,8 @@ export interface SupplyConfig {
   recoveryClaimBatchSize?: number;
   recoveryDisableOriginal?: boolean;
   quotaEstimationPolicies?: Record<string, SupplyQuotaEstimationPolicy>;
+  platforms?: SupplyPlatformConfig[];
+  platformSelectionStrategy?: string;
 }
 
 export interface SupplyInventory {
@@ -79,6 +98,7 @@ export interface SupplyBalance {
 export interface SupplyOrder {
   id: number;
   orderId: string;
+  supplierId?: string;
   product: string;
   requestedQuantity: number;
   automatic: boolean;
@@ -116,6 +136,21 @@ export interface SupplyOverview {
   cpaAvailable: number;
   cpaTarget: number;
   cpaDeficit: number;
+  inventory?: SupplyInventory;
+  balance?: SupplyBalance;
+  selectedPlatformId?: string;
+  platforms?: SupplyPlatformOverview[];
+  lastError?: string;
+}
+
+export interface SupplyPlatformOverview {
+  id: string;
+  name?: string;
+  type: string;
+  product: string;
+  priority?: number;
+  selected: boolean;
+  checkedAtMs: number;
   inventory?: SupplyInventory;
   balance?: SupplyBalance;
   lastError?: string;
@@ -297,6 +332,9 @@ export interface SupplySmartResource {
 }
 
 export interface SupplyQuotaPlanEstimate {
+  key: string;
+  supplierId?: string;
+  supplierName?: string;
   planType: string;
   mode: SupplyQuotaEstimationMode;
   accountCount: number;
@@ -316,6 +354,19 @@ export interface SupplyQuotaPlanEstimate {
   validationState?: 'fixed' | 'insufficient' | 'confirming' | 'quarantined' | 'accepted' | string;
   orderingBlocked?: boolean;
   lastInspectionRunId?: number;
+  quotaClasses?: SupplyQuotaClassEstimate[];
+}
+
+export interface SupplyQuotaClassEstimate {
+  id: string;
+  centerM: number;
+  minimumM: number;
+  maximumM: number;
+  accountCount: number;
+  trustedAccounts: number;
+  provisionalAccounts: number;
+  sharePercent: number;
+  confidence: string;
 }
 
 export interface SupplyAutomationExecution {

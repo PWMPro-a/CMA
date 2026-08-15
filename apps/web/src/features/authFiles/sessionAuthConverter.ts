@@ -254,6 +254,97 @@ const parseJwtPayload = (token: unknown): JsonRecord | undefined => parseJwtSegm
 
 const parseJwtHeader = (token: unknown): JsonRecord | undefined => parseJwtSegment(token, 0);
 
+const OPENAI_AUTH_CLAIMS_KEY = 'https://api.openai.com/auth';
+
+const getDefaultOrganizationId = (claims: JsonRecord[]) => {
+  for (const claim of claims) {
+    const authClaims = isRecord(claim[OPENAI_AUTH_CLAIMS_KEY])
+      ? claim[OPENAI_AUTH_CLAIMS_KEY]
+      : undefined;
+    const organizations = Array.isArray(authClaims?.organizations)
+      ? authClaims.organizations.filter((item): item is JsonRecord => isRecord(item))
+      : [];
+    const defaultOrganization = organizations.find(
+      (organization) => organization.is_default === true || organization.isDefault === true
+    );
+    const organizationId = firstNonEmptyString(
+      defaultOrganization?.id,
+      defaultOrganization?.organization_id,
+      defaultOrganization?.organizationId,
+      organizations[0]?.id,
+      organizations[0]?.organization_id,
+      organizations[0]?.organizationId
+    );
+    if (organizationId) return organizationId;
+  }
+  return undefined;
+};
+
+const enrichCodexAuthJsonIdentity = (record: JsonRecord): JsonRecord => {
+  const provider = firstNonEmptyString(record.type, record.provider)?.toLowerCase();
+  if (provider !== 'codex' && provider !== 'openai-codex') return record;
+
+  const claims = [
+    parseJwtPayload(firstNonEmptyString(record.access_token, record.accessToken)),
+    parseJwtPayload(firstNonEmptyString(record.id_token, record.idToken)),
+  ].filter((claim): claim is JsonRecord => Boolean(claim));
+  if (claims.length === 0) return record;
+
+  const authClaims = claims
+    .map((claim) => claim[OPENAI_AUTH_CLAIMS_KEY])
+    .filter((claim): claim is JsonRecord => isRecord(claim));
+  const readAuthClaim = (...keys: string[]) =>
+    firstNonEmptyString(...authClaims.flatMap((claim) => keys.map((key) => claim[key])));
+  const readRootClaim = (...keys: string[]) =>
+    firstNonEmptyString(...claims.flatMap((claim) => keys.map((key) => claim[key])));
+
+  const accountId = firstNonEmptyString(
+    record.account_id,
+    record.accountId,
+    record.chatgpt_account_id,
+    record.chatgptAccountId,
+    readAuthClaim('chatgpt_account_id', 'chatgptAccountId', 'account_id', 'accountId')
+  );
+  const memberId = firstNonEmptyString(
+    record.chatgpt_user_id,
+    record.chatgptUserId,
+    record.user_id,
+    record.userId,
+    readAuthClaim('chatgpt_user_id', 'chatgptUserId', 'user_id', 'userId')
+  );
+  const accountUserId = firstNonEmptyString(
+    record.chatgpt_account_user_id,
+    record.chatgptAccountUserId,
+    readAuthClaim('chatgpt_account_user_id', 'chatgptAccountUserId')
+  );
+  const organizationId = firstNonEmptyString(
+    record.organization_id,
+    record.organizationId,
+    record.poid,
+    readAuthClaim('poid', 'organization_id', 'organizationId', 'org_id', 'orgId'),
+    getDefaultOrganizationId(claims)
+  );
+  const workspaceId = firstNonEmptyString(
+    record.workspace_id,
+    record.workspaceId,
+    record.chatgpt_workspace_id,
+    record.chatgptWorkspaceId,
+    readAuthClaim('chatgpt_account_id', 'chatgptAccountId')
+  );
+  const email = firstNonEmptyString(record.email, record.email_address, readRootClaim('email'));
+
+  return stripUnavailable({
+    ...record,
+    account_id: accountId,
+    chatgpt_account_id: accountId,
+    chatgpt_user_id: memberId,
+    chatgpt_account_user_id: accountUserId,
+    organization_id: organizationId,
+    workspace_id: workspaceId,
+    email,
+  }) as JsonRecord;
+};
+
 const isUnsignedJwtToken = (token: unknown): boolean => {
   const header = parseJwtHeader(token);
   if (!header) return false;
@@ -865,11 +956,12 @@ export const isSub2ApiAuthJsonInput = (
 };
 
 const readSub2ApiCredentialString = (
+  account: JsonRecord,
   credentials: JsonRecord,
   extra: JsonRecord | undefined,
   ...keys: string[]
 ) => {
-  const values = keys.flatMap((key) => [credentials[key], extra?.[key]]);
+  const values = keys.flatMap((key) => [credentials[key], extra?.[key], account[key]]);
   return firstNonEmptyString(...values);
 };
 
@@ -918,6 +1010,7 @@ const convertSub2ApiAccountToCpaAuthJson = (
   const inputIdToken = firstNonEmptyString(credentials.id_token, credentials.idToken);
   const idToken = isUnsafeIdToken(inputIdToken) ? undefined : firstNonEmptyString(inputIdToken);
   const email = readSub2ApiCredentialString(
+    account,
     credentials,
     extra,
     'email',
@@ -925,6 +1018,7 @@ const convertSub2ApiAccountToCpaAuthJson = (
     'emailAddress'
   );
   const accountId = readSub2ApiCredentialString(
+    account,
     credentials,
     extra,
     'chatgpt_account_id',
@@ -933,6 +1027,7 @@ const convertSub2ApiAccountToCpaAuthJson = (
     'accountId'
   );
   const userId = readSub2ApiCredentialString(
+    account,
     credentials,
     extra,
     'chatgpt_user_id',
@@ -942,6 +1037,7 @@ const convertSub2ApiAccountToCpaAuthJson = (
   );
   const planType = resolveSub2ApiPlanType(credentials, extra);
   const organizationId = readSub2ApiCredentialString(
+    account,
     credentials,
     extra,
     'organization_id',
@@ -951,6 +1047,7 @@ const convertSub2ApiAccountToCpaAuthJson = (
     'poid'
   );
   const workspaceId = readSub2ApiCredentialString(
+    account,
     credentials,
     extra,
     'workspace_id',
@@ -958,6 +1055,17 @@ const convertSub2ApiAccountToCpaAuthJson = (
     'chatgpt_workspace_id',
     'chatgptWorkspaceId',
     'workspace'
+  );
+  const workspaceName = readSub2ApiCredentialString(
+    account,
+    credentials,
+    extra,
+    'workspace_name',
+    'workspaceName',
+    'organization_name',
+    'organizationName',
+    'team_name',
+    'teamName'
   );
   const expiresAt = firstNonEmpty(
     normalizeTimestamp(credentials.expires_at),
@@ -979,13 +1087,14 @@ const convertSub2ApiAccountToCpaAuthJson = (
         : undefined;
   const name = firstNonEmpty(account.name, email, accountId, 'OpenAI OAuth Account');
 
-  return stripUnavailable({
+  return enrichCodexAuthJsonIdentity(stripUnavailable({
     type: 'codex',
     account_id: accountId,
     chatgpt_account_id: accountId,
     chatgpt_user_id: userId,
     organization_id: organizationId,
     workspace_id: workspaceId,
+    workspace_name: workspaceName,
     email,
     name,
     plan_type: planType,
@@ -997,7 +1106,7 @@ const convertSub2ApiAccountToCpaAuthJson = (
     last_refresh: lastRefresh,
     expired: expiresAt,
     disabled,
-  }) as JsonRecord;
+  }) as JsonRecord);
 };
 
 const convertSub2ApiToCpaAuthJson = (value: unknown, now: Date): AuthJsonConversionResult => {
@@ -1046,7 +1155,7 @@ export const convertAuthJsonInput = (
     if (!isRecord(parsed) || !hasCpaAuthFileShape(parsed)) {
       throw new AuthJsonConversionError('CPA auth JSON is missing required auth fields');
     }
-    return parsed;
+    return enrichCodexAuthJsonIdentity(parsed);
   }
 
   if (type === 'sub2api') {
@@ -1117,12 +1226,37 @@ const buildSafeFileNameSegment = (
 };
 
 const getDefaultAuthFileIdSegment = (authJson: JsonRecord) => {
-  const rawId = firstNonEmpty(
-    authJson.account_id,
-    authJson.chatgpt_account_id,
-    authJson.organization_id
+  const workspaceId = firstNonEmpty(
+    authJson.workspace_id,
+    authJson.workspaceId,
+    authJson.chatgpt_workspace_id,
+    authJson.chatgptWorkspaceId,
+    authJson.organization_id,
+    authJson.organizationId
   );
-  return buildSafeFileNameSegment(rawId, { maxLength: 8 }) || buildAuthFileFingerprint(authJson);
+  const accountId = firstNonEmpty(
+    authJson.account_id,
+    authJson.chatgpt_account_id
+  );
+  const memberId = firstNonEmpty(
+    authJson.chatgpt_user_id,
+    authJson.chatgptUserId,
+    authJson.user_id,
+    authJson.userId,
+    authJson.chatgpt_account_user_id,
+    authJson.chatgptAccountUserId,
+    authJson.email
+  );
+  if (workspaceId) {
+    const readable = buildSafeFileNameSegment(workspaceId, { maxLength: 8 });
+    const scopeHash = buildAuthFileFingerprint({ accountId, memberId, workspaceId }).slice(0, 6);
+    return [readable, scopeHash].filter(Boolean).join('-');
+  }
+  return (
+    buildSafeFileNameSegment(firstNonEmpty(accountId, authJson.organization_id), {
+      maxLength: 8,
+    }) || buildAuthFileFingerprint(authJson)
+  );
 };
 
 export const getDefaultSessionAuthFileName = (authJson: JsonRecord) => {
@@ -1150,26 +1284,22 @@ export const getDefaultSessionAuthFileName = (authJson: JsonRecord) => {
   return `${baseName}.json`;
 };
 
-const appendJsonFileNameSuffix = (fileName: string, suffix: number) => {
-  const baseName = fileName.toLowerCase().endsWith('.json')
-    ? fileName.slice(0, -'.json'.length)
-    : fileName;
-  return `${baseName}-${suffix}.json`;
-};
-
 const ensureUniqueAuthJsonFilePayloadNames = (payloads: AuthJsonFilePayload[]) => {
-  const usedNames = new Set<string>();
-
-  return payloads.map((payload) => {
-    let fileName = payload.fileName;
-    let suffix = 2;
-    while (usedNames.has(fileName.toLowerCase())) {
-      fileName = appendJsonFileNameSuffix(payload.fileName, suffix);
-      suffix += 1;
+  const indexes = new Map<string, number>();
+  const unique: AuthJsonFilePayload[] = [];
+  payloads.forEach((payload) => {
+    const key = payload.fileName.toLowerCase();
+    const existingIndex = indexes.get(key);
+    if (existingIndex === undefined) {
+      indexes.set(key, unique.length);
+      unique.push(payload);
+      return;
     }
-    usedNames.add(fileName.toLowerCase());
-    return fileName === payload.fileName ? payload : { ...payload, fileName };
+    // Multiple files for the same account are one logical import. Keep the
+    // newest payload instead of inventing a suffixed duplicate auth file.
+    unique[existingIndex] = payload;
   });
+  return unique;
 };
 
 export const buildAuthJsonFilePayloads = (
@@ -1184,8 +1314,15 @@ export const buildAuthJsonFilePayloads = (
 
   if (authJsonRecords.length === 1) {
     const authJson = authJsonRecords[0];
+    const provider = firstNonEmptyString(authJson.type, authJson.provider)?.toLowerCase();
+    const useIdentityFileName =
+      requestedFileName === 'codex-account.json' &&
+      (type === 'session' ||
+        type === 'sub2api' ||
+        provider === 'codex' ||
+        provider === 'openai-codex');
     const fileName =
-      (type === 'session' || type === 'sub2api') && requestedFileName === 'codex-account.json'
+      useIdentityFileName
         ? getDefaultSessionAuthFileName(authJson)
         : requestedFileName;
     return [{ fileName, authJson }];

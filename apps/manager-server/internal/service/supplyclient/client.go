@@ -1,6 +1,7 @@
 package supplyclient
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +22,7 @@ const (
 	defaultTimeout       = 30 * time.Second
 	defaultTakeTimeout   = 3 * time.Minute
 	maxResponseBodyBytes = 16 * 1024 * 1024
+	maxDownloadBodyBytes = 64 * 1024 * 1024
 )
 
 type HTTPError struct {
@@ -45,9 +48,13 @@ func (e *HTTPError) Error() string {
 }
 
 type Credentials struct {
-	BaseURL  string
-	Username string
-	Password string
+	ID           string
+	PlatformType string
+	BaseURL      string
+	Username     string
+	Password     string
+	Token        string
+	DeliveryMode string
 }
 
 type Inventory struct {
@@ -151,6 +158,7 @@ type Client struct {
 	takeTimeout time.Duration
 	mu          sync.Mutex
 	token       tokenState
+	tokens      map[string]tokenState
 }
 
 func New(httpClient *http.Client, timeout ...time.Duration) *Client {
@@ -165,7 +173,7 @@ func New(httpClient *http.Client, timeout ...time.Duration) *Client {
 	if requestTimeout > takeTimeout {
 		takeTimeout = requestTimeout
 	}
-	return &Client{httpClient: httpClient, timeout: requestTimeout, takeTimeout: takeTimeout}
+	return &Client{httpClient: httpClient, timeout: requestTimeout, takeTimeout: takeTimeout, tokens: make(map[string]tokenState)}
 }
 
 // DefaultTakeTimeout is intentionally longer than the normal API timeout.
@@ -243,6 +251,9 @@ func (c *Client) GetOrder(ctx context.Context, credentials Credentials, orderID 
 }
 
 func (c *Client) Take(ctx context.Context, credentials Credentials, orderID string, takeURL ...string) (TakeResult, error) {
+	if strings.EqualFold(strings.TrimSpace(credentials.DeliveryMode), "cpa_zip") {
+		return c.downloadCPA(ctx, credentials, orderID)
+	}
 	endpoint := "/api/customer/pickup/orders/" + url.PathEscape(strings.TrimSpace(orderID)) + "/take"
 	if len(takeURL) > 0 && strings.TrimSpace(takeURL[0]) != "" {
 		endpoint = strings.TrimSpace(takeURL[0])
@@ -265,6 +276,139 @@ func (c *Client) Take(ctx context.Context, credentials Credentials, orderID stri
 		ReplacementFiles:     replacementFiles(value),
 		Pending:              status == http.StatusAccepted,
 	}, nil
+}
+
+func (c *Client) downloadCPA(ctx context.Context, credentials Credentials, orderID string) (TakeResult, error) {
+	endpoint := "/api/customer/pickup/orders/" + url.PathEscape(strings.TrimSpace(orderID)) + "/download?format=cpa"
+	data, status, err := c.doAuthenticatedBytes(ctx, credentials, http.MethodGet, endpoint, c.takeTimeout)
+	if err != nil {
+		return TakeResult{}, err
+	}
+	accounts, err := cpaAccountsFromZIP(data)
+	if err != nil {
+		return TakeResult{}, err
+	}
+	return TakeResult{
+		Order: Order{
+			ID:     strings.TrimSpace(orderID),
+			Status: "completed",
+		},
+		Accounts: accounts,
+		Pending:  status == http.StatusAccepted,
+	}, nil
+}
+
+func (c *Client) doAuthenticatedBytes(ctx context.Context, credentials Credentials, method string, path string, requestTimeout time.Duration) ([]byte, int, error) {
+	token, err := c.login(ctx, credentials, false)
+	if err != nil {
+		return nil, 0, err
+	}
+	data, status, err := c.requestBytes(ctx, credentials.BaseURL, method, path, token, requestTimeout)
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized || strings.TrimSpace(credentials.Token) != "" {
+		return data, status, err
+	}
+	c.invalidate(credentials)
+	token, err = c.login(ctx, credentials, true)
+	if err != nil {
+		return nil, 0, err
+	}
+	return c.requestBytes(ctx, credentials.BaseURL, method, path, token, requestTimeout)
+}
+
+func (c *Client) requestBytes(ctx context.Context, baseURL string, method string, endpointRef string, token string, requestTimeout time.Duration) ([]byte, int, error) {
+	if requestTimeout <= 0 {
+		requestTimeout = c.timeout
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	endpoint, err := resolveEndpoint(baseURL, endpointRef)
+	if err != nil {
+		return nil, 0, err
+	}
+	req, err := http.NewRequestWithContext(reqCtx, method, endpoint, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	if token != "" {
+		req.Header.Set("X-Customer-Token", token)
+	}
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("%s %s: %w", method, endpointRef, err)
+	}
+	defer res.Body.Close()
+	limited := &io.LimitedReader{R: res.Body, N: maxDownloadBodyBytes + 1}
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, res.StatusCode, err
+	}
+	if limited.N == 0 {
+		return nil, res.StatusCode, errors.New("supply download exceeded size limit")
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, res.StatusCode, &HTTPError{
+			StatusCode:        res.StatusCode,
+			Message:           errorMessage(data),
+			Code:              errorCode(data),
+			RetryAfterSeconds: retryAfterSeconds(res.Header.Get("Retry-After"), time.Now()),
+		}
+	}
+	return data, res.StatusCode, nil
+}
+
+func cpaAccountsFromZIP(data []byte) ([]json.RawMessage, error) {
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, fmt.Errorf("decode supply CPA ZIP: %w", err)
+	}
+	accounts := make([]json.RawMessage, 0, len(reader.File))
+	for _, file := range reader.File {
+		name := strings.ToLower(filepath.Base(file.Name))
+		if file.FileInfo().IsDir() || filepath.Ext(name) != ".json" || strings.Contains(name, "manifest") {
+			continue
+		}
+		if file.UncompressedSize64 > maxResponseBodyBytes {
+			return nil, fmt.Errorf("supply CPA ZIP entry %s exceeded size limit", filepath.Base(file.Name))
+		}
+		entry, err := file.Open()
+		if err != nil {
+			return nil, err
+		}
+		payload, readErr := io.ReadAll(io.LimitReader(entry, maxResponseBodyBytes+1))
+		closeErr := entry.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		payload = bytes.TrimSpace(payload)
+		if len(payload) == 0 || len(payload) > maxResponseBodyBytes || !json.Valid(payload) || !looksLikeCPAAccount(payload) {
+			continue
+		}
+		accounts = append(accounts, append(json.RawMessage(nil), payload...))
+	}
+	if len(accounts) == 0 {
+		return nil, errors.New("supply CPA ZIP did not include importable account JSON files")
+	}
+	return accounts, nil
+}
+
+func looksLikeCPAAccount(payload []byte) bool {
+	var value map[string]any
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return false
+	}
+	if _, ok := value["accounts"]; ok {
+		return true
+	}
+	for _, key := range []string{"access_token", "refresh_token", "id_token", "account", "email", "type", "provider"} {
+		if _, ok := value[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) Recoveries(ctx context.Context, credentials Credentials) ([]Recovery, error) {
@@ -379,6 +523,9 @@ func (c *Client) doAuthenticatedWithHeaders(ctx context.Context, credentials Cre
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized {
 		return value, status, err
 	}
+	if strings.TrimSpace(credentials.Token) != "" {
+		return value, status, err
+	}
 	c.invalidate(credentials)
 	token, err = c.login(ctx, credentials, true)
 	if err != nil {
@@ -388,16 +535,23 @@ func (c *Client) doAuthenticatedWithHeaders(ctx context.Context, credentials Cre
 }
 
 func (c *Client) login(ctx context.Context, credentials Credentials, force bool) (string, error) {
+	if token := strings.TrimSpace(credentials.Token); token != "" {
+		return token, nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	key := credentialKey(credentials)
-	if !force && c.token.key == key && c.token.token != "" && time.Now().Before(c.token.expiresAt) {
-		return c.token.token, nil
+	if state, ok := c.tokens[key]; !force && ok && state.token != "" && time.Now().Before(state.expiresAt) {
+		c.token = state
+		return state.token, nil
 	}
-	value, _, err := c.request(ctx, credentials.BaseURL, http.MethodPost, "/api/customer/login", map[string]any{
-		"username": strings.TrimSpace(credentials.Username),
-		"password": credentials.Password,
-	}, "")
+	payload := map[string]any{"password": credentials.Password}
+	if strings.EqualFold(strings.TrimSpace(credentials.PlatformType), "bugteam") {
+		payload["account"] = strings.TrimSpace(credentials.Username)
+	} else {
+		payload["username"] = strings.TrimSpace(credentials.Username)
+	}
+	value, _, err := c.request(ctx, credentials.BaseURL, http.MethodPost, "/api/customer/login", payload, "")
 	if err != nil {
 		return "", err
 	}
@@ -405,14 +559,18 @@ func (c *Client) login(ctx context.Context, credentials Credentials, force bool)
 	if token == "" {
 		return "", errors.New("supply login response did not include token")
 	}
-	c.token = tokenState{key: key, token: token, expiresAt: time.Now().Add(29 * 24 * time.Hour)}
+	state := tokenState{key: key, token: token, expiresAt: time.Now().Add(29 * 24 * time.Hour)}
+	c.tokens[key] = state
+	c.token = state
 	return token, nil
 }
 
 func (c *Client) invalidate(credentials Credentials) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.token.key == credentialKey(credentials) {
+	key := credentialKey(credentials)
+	delete(c.tokens, key)
+	if c.token.key == key {
 		c.token = tokenState{}
 	}
 }
@@ -1019,7 +1177,8 @@ func retryAfterSeconds(value string, now time.Time) int {
 }
 
 func credentialKey(credentials Credentials) string {
-	return strings.TrimRight(strings.TrimSpace(credentials.BaseURL), "/") + "\x00" + strings.TrimSpace(credentials.Username)
+	return strings.TrimSpace(credentials.ID) + "\x00" + strings.ToLower(strings.TrimSpace(credentials.PlatformType)) + "\x00" +
+		strings.TrimRight(strings.TrimSpace(credentials.BaseURL), "/") + "\x00" + strings.TrimSpace(credentials.Username)
 }
 
 func resolveEndpoint(baseURL string, endpointRef string) (string, error) {

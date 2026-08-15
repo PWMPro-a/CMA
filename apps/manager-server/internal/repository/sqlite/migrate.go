@@ -843,6 +843,7 @@ func Migrate(db *sql.DB) error {
 		`create table if not exists supply_orders (
 			id integer primary key autoincrement,
 			order_id text not null unique,
+			supplier_id text not null default '',
 			product text not null,
 			requested_quantity integer not null,
 			automatic integer not null default 0,
@@ -1206,6 +1207,7 @@ func ensureSupplyOrderColumns(db *sql.DB) error {
 		{name: "supplier_retry_until_ms", definition: "integer"},
 		{name: "strategy", definition: "text"},
 		{name: "trigger_reason", definition: "text"},
+		{name: "supplier_id", definition: "text not null default ''"},
 	} {
 		if _, ok := existing[column.name]; ok {
 			continue

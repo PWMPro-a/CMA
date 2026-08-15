@@ -3,6 +3,7 @@ package managerconfig
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -27,6 +28,13 @@ const (
 	SupplyStrategyCustom       = "custom"
 	SupplyQuotaEstimationAuto  = "auto"
 	SupplyQuotaEstimationFixed = "fixed"
+)
+
+const (
+	SupplyPlatformLegacy  = "legacy"
+	SupplyPlatformBugTeam = "bugteam"
+
+	SupplyPlatformSelectionBestAvailable = "best_available"
 )
 
 type supplyStrategyPreset struct {
@@ -174,6 +182,12 @@ func (s *Service) UpdateSupply(ctx context.Context, submitted store.ManagerSuppl
 	result := next.Supply
 	result.PasswordConfigured = strings.TrimSpace(result.Password) != ""
 	result.Password = ""
+	for index := range result.Platforms {
+		result.Platforms[index].PasswordConfigured = strings.TrimSpace(result.Platforms[index].Password) != ""
+		result.Platforms[index].TokenConfigured = strings.TrimSpace(result.Platforms[index].Token) != ""
+		result.Platforms[index].Password = ""
+		result.Platforms[index].Token = ""
+	}
 	return result, nil
 }
 
@@ -296,6 +310,7 @@ func (s *Service) DefaultManagerConfig() store.ManagerConfig {
 			RecoveryClaimBatchSize:      20,
 			RecoveryDisableOriginal:     BoolPtr(true),
 			QuotaEstimationPolicies:     defaultSupplyQuotaEstimationPolicies(),
+			PlatformSelectionStrategy:   SupplyPlatformSelectionBestAvailable,
 		},
 	}
 }
@@ -422,8 +437,191 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 		submitted.QuotaEstimationPolicies,
 		next.QuotaEstimationPolicies,
 	)
+	if submitted.Platforms != nil {
+		next.Platforms = normalizeSupplyPlatforms(submitted.Platforms, current)
+		if primary, ok := primarySupplyPlatform(next.Platforms); ok {
+			next.BaseURL = primary.BaseURL
+			next.Username = primary.Username
+			next.Password = primary.Password
+			next.Product = primary.Product
+		}
+	}
+	selection := strings.ToLower(strings.TrimSpace(submitted.PlatformSelectionStrategy))
+	if selection == "" {
+		selection = strings.ToLower(strings.TrimSpace(next.PlatformSelectionStrategy))
+	}
+	if selection != SupplyPlatformSelectionBestAvailable {
+		selection = SupplyPlatformSelectionBestAvailable
+	}
+	next.PlatformSelectionStrategy = selection
 	next.PasswordConfigured = next.Password != ""
 	return next
+}
+
+func normalizeSupplyPlatforms(submitted []store.ManagerSupplyPlatformConfig, current store.ManagerSupplyConfig) []store.ManagerSupplyPlatformConfig {
+	currentPlatforms := SupplyPlatforms(current)
+	currentByID := make(map[string]store.ManagerSupplyPlatformConfig, len(currentPlatforms))
+	for _, platform := range currentPlatforms {
+		currentByID[strings.ToLower(strings.TrimSpace(platform.ID))] = platform
+	}
+	result := make([]store.ManagerSupplyPlatformConfig, 0, len(submitted))
+	seen := make(map[string]struct{}, len(submitted))
+	for index, raw := range submitted {
+		platformType := normalizeSupplyPlatformType(raw.Type)
+		id := normalizeSupplyPlatformID(raw.ID)
+		if id == "" {
+			id = fmt.Sprintf("%s-%d", platformType, index+1)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		previous := currentByID[id]
+		platform := previous
+		platform.ID = id
+		platform.Type = platformType
+		if raw.Enabled != nil {
+			platform.Enabled = BoolPtr(*raw.Enabled)
+		} else if platform.Enabled == nil {
+			platform.Enabled = BoolPtr(true)
+		}
+		if value := strings.TrimSpace(raw.Name); value != "" {
+			platform.Name = value
+		} else if strings.TrimSpace(platform.Name) == "" {
+			platform.Name = defaultSupplyPlatformName(platformType)
+		}
+		identityChanged := false
+		if value := strings.TrimRight(strings.TrimSpace(raw.BaseURL), "/"); value != "" {
+			identityChanged = !strings.EqualFold(value, strings.TrimRight(strings.TrimSpace(previous.BaseURL), "/"))
+			platform.BaseURL = value
+		} else if strings.TrimSpace(platform.BaseURL) == "" && platformType == SupplyPlatformBugTeam {
+			platform.BaseURL = "https://bugteam.team"
+		}
+		if value := strings.TrimSpace(raw.Username); value != "" {
+			identityChanged = identityChanged || value != strings.TrimSpace(previous.Username)
+			platform.Username = value
+		}
+		if value := strings.TrimSpace(raw.Password); value != "" {
+			platform.Password = value
+		} else if identityChanged {
+			platform.Password = credentialDonorPassword(currentPlatforms, platform.Username)
+		}
+		if value := strings.TrimSpace(raw.Token); value != "" {
+			platform.Token = value
+		} else if identityChanged {
+			platform.Token = ""
+		}
+		if value := strings.ToLower(strings.TrimSpace(raw.Product)); value != "" {
+			platform.Product = value
+		} else if strings.TrimSpace(platform.Product) == "" {
+			if platformType == SupplyPlatformBugTeam {
+				platform.Product = "team_1h"
+			} else {
+				platform.Product = "oauth_30d"
+			}
+		}
+		if raw.Priority > 0 {
+			platform.Priority = clampInt(raw.Priority, 1, 1000)
+		} else if platform.Priority <= 0 {
+			platform.Priority = index + 1
+		}
+		if raw.QuotaEstimationPolicies != nil {
+			platform.QuotaEstimationPolicies = normalizeSupplyQuotaEstimationPolicyOverrides(
+				raw.QuotaEstimationPolicies,
+				previous.QuotaEstimationPolicies,
+			)
+		}
+		platform.PasswordConfigured = platform.Password != ""
+		platform.TokenConfigured = platform.Token != ""
+		result = append(result, platform)
+	}
+	return result
+}
+
+func credentialDonorPassword(platforms []store.ManagerSupplyPlatformConfig, username string) string {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return ""
+	}
+	for _, platform := range platforms {
+		if strings.EqualFold(strings.TrimSpace(platform.Username), username) && strings.TrimSpace(platform.Password) != "" {
+			return platform.Password
+		}
+	}
+	return ""
+}
+
+func normalizeSupplyPlatformType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case SupplyPlatformBugTeam:
+		return SupplyPlatformBugTeam
+	default:
+		return SupplyPlatformLegacy
+	}
+}
+
+func normalizeSupplyPlatformID(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var builder strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			builder.WriteRune(r)
+		case builder.Len() > 0:
+			builder.WriteByte('-')
+		}
+		if builder.Len() >= 64 {
+			break
+		}
+	}
+	return strings.Trim(builder.String(), "-_")
+}
+
+func defaultSupplyPlatformName(platformType string) string {
+	if platformType == SupplyPlatformBugTeam {
+		return "BugTeam"
+	}
+	return "Legacy supplier"
+}
+
+func primarySupplyPlatform(platforms []store.ManagerSupplyPlatformConfig) (store.ManagerSupplyPlatformConfig, bool) {
+	for _, platform := range platforms {
+		if SupplyPlatformEnabled(platform) {
+			return platform, true
+		}
+	}
+	if len(platforms) > 0 {
+		return platforms[0], true
+	}
+	return store.ManagerSupplyPlatformConfig{}, false
+}
+
+// SupplyPlatforms returns configured platforms or a synthesized legacy
+// platform for configurations saved by earlier Manager versions.
+func SupplyPlatforms(cfg store.ManagerSupplyConfig) []store.ManagerSupplyPlatformConfig {
+	if cfg.Platforms != nil {
+		return append([]store.ManagerSupplyPlatformConfig(nil), cfg.Platforms...)
+	}
+	if strings.TrimSpace(cfg.BaseURL) == "" && strings.TrimSpace(cfg.Username) == "" && strings.TrimSpace(cfg.Password) == "" {
+		return nil
+	}
+	enabled := true
+	return []store.ManagerSupplyPlatformConfig{{
+		ID:                 SupplyPlatformLegacy,
+		Name:               defaultSupplyPlatformName(SupplyPlatformLegacy),
+		Type:               SupplyPlatformLegacy,
+		Enabled:            &enabled,
+		BaseURL:            strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"),
+		Username:           strings.TrimSpace(cfg.Username),
+		Password:           cfg.Password,
+		PasswordConfigured: strings.TrimSpace(cfg.Password) != "",
+		Product:            strings.ToLower(strings.TrimSpace(cfg.Product)),
+		Priority:           1,
+	}}
+}
+
+func SupplyPlatformEnabled(cfg store.ManagerSupplyPlatformConfig) bool {
+	return cfg.Enabled == nil || *cfg.Enabled
 }
 
 func defaultSupplyQuotaEstimationPolicies() map[string]store.ManagerSupplyQuotaEstimationPolicy {
@@ -451,6 +649,36 @@ func normalizeSupplyQuotaEstimationPolicies(
 			continue
 		}
 		result[planType] = normalizeSupplyQuotaEstimationPolicy(planType, policy, result[planType])
+	}
+	return result
+}
+
+func normalizeSupplyQuotaEstimationPolicyOverrides(
+	submitted map[string]store.ManagerSupplyQuotaEstimationPolicy,
+	current map[string]store.ManagerSupplyQuotaEstimationPolicy,
+) map[string]store.ManagerSupplyQuotaEstimationPolicy {
+	result := make(map[string]store.ManagerSupplyQuotaEstimationPolicy, len(current)+len(submitted))
+	for planType, policy := range current {
+		planType = strings.ToLower(strings.TrimSpace(planType))
+		if planType == "" || len(planType) > 64 {
+			continue
+		}
+		fallback := defaultSupplyQuotaEstimationPolicies()[planType]
+		result[planType] = normalizeSupplyQuotaEstimationPolicy(planType, policy, fallback)
+	}
+	for planType, policy := range submitted {
+		planType = strings.ToLower(strings.TrimSpace(planType))
+		if planType == "" || len(planType) > 64 {
+			continue
+		}
+		fallback := result[planType]
+		if fallback.FallbackM <= 0 {
+			fallback = defaultSupplyQuotaEstimationPolicies()[planType]
+		}
+		result[planType] = normalizeSupplyQuotaEstimationPolicy(planType, policy, fallback)
+	}
+	if len(result) == 0 {
+		return nil
 	}
 	return result
 }
@@ -572,24 +800,65 @@ func ValidateSupplyConfig(cfg store.ManagerSupplyConfig) error {
 	if !SupplyEnabled(cfg) {
 		return nil
 	}
-	if strings.TrimSpace(cfg.BaseURL) == "" || strings.TrimSpace(cfg.Username) == "" || strings.TrimSpace(cfg.Password) == "" {
-		return errors.New("supply baseUrl, username and password are required when automatic replenishment is enabled")
+	platforms := SupplyPlatforms(cfg)
+	enabled := 0
+	for _, platform := range platforms {
+		if !SupplyPlatformEnabled(platform) {
+			continue
+		}
+		enabled++
+		if err := validateSupplyPlatform(platform); err != nil {
+			return fmt.Errorf("supply platform %s: %w", firstNonEmpty(platform.Name, platform.ID), err)
+		}
 	}
-	parsed, err := url.Parse(cfg.BaseURL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return errors.New("supply baseUrl must be a valid HTTP or HTTPS URL")
-	}
-	switch cfg.Product {
-	case "oauth_30d", "oauth_7d":
-	default:
-		return errors.New("supply product must be oauth_30d or oauth_7d")
+	if enabled == 0 {
+		return errors.New("at least one enabled supply platform is required")
 	}
 	return nil
+}
+
+func validateSupplyPlatform(platform store.ManagerSupplyPlatformConfig) error {
+	parsed, err := url.Parse(strings.TrimSpace(platform.BaseURL))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return errors.New("baseUrl must be a valid HTTP or HTTPS URL")
+	}
+	if strings.TrimSpace(platform.Token) == "" &&
+		(strings.TrimSpace(platform.Username) == "" || strings.TrimSpace(platform.Password) == "") {
+		return errors.New("token or username and password are required")
+	}
+	switch normalizeSupplyPlatformType(platform.Type) {
+	case SupplyPlatformBugTeam:
+		if !strings.EqualFold(strings.TrimSpace(platform.Product), "team_1h") {
+			return errors.New("product must be team_1h")
+		}
+	default:
+		switch strings.ToLower(strings.TrimSpace(platform.Product)) {
+		case "oauth_30d", "oauth_7d", "team_1h":
+		default:
+			return errors.New("product must be oauth_30d, oauth_7d or team_1h")
+		}
+	}
+	return nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return "unknown"
 }
 
 func SanitizeManagerConfig(cfg store.ManagerConfig) store.ManagerConfig {
 	cfg.Supply.PasswordConfigured = strings.TrimSpace(cfg.Supply.Password) != ""
 	cfg.Supply.Password = ""
+	for index := range cfg.Supply.Platforms {
+		cfg.Supply.Platforms[index].PasswordConfigured = strings.TrimSpace(cfg.Supply.Platforms[index].Password) != ""
+		cfg.Supply.Platforms[index].TokenConfigured = strings.TrimSpace(cfg.Supply.Platforms[index].Token) != ""
+		cfg.Supply.Platforms[index].Password = ""
+		cfg.Supply.Platforms[index].Token = ""
+	}
 	return cfg
 }
 

@@ -1,0 +1,295 @@
+package supply
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/supplyclient"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
+)
+
+type PlatformOverview struct {
+	ID          string                  `json:"id"`
+	Name        string                  `json:"name,omitempty"`
+	Type        string                  `json:"type"`
+	Product     string                  `json:"product"`
+	Priority    int                     `json:"priority,omitempty"`
+	Selected    bool                    `json:"selected"`
+	CheckedAtMS int64                   `json:"checkedAtMs"`
+	Inventory   *supplyclient.Inventory `json:"inventory,omitempty"`
+	Balance     *supplyclient.Balance   `json:"balance,omitempty"`
+	LastError   string                  `json:"lastError,omitempty"`
+}
+
+type supplyPlatformSelection struct {
+	platform store.ManagerSupplyPlatformConfig
+	status   PlatformOverview
+	all      []PlatformOverview
+}
+
+func supplyPlatforms(cfg store.ManagerSupplyConfig) []store.ManagerSupplyPlatformConfig {
+	platforms := managerconfigsvc.SupplyPlatforms(cfg)
+	result := make([]store.ManagerSupplyPlatformConfig, 0, len(platforms))
+	for _, platform := range platforms {
+		if !managerconfigsvc.SupplyPlatformEnabled(platform) {
+			continue
+		}
+		result = append(result, platform)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		left := result[i].Priority
+		right := result[j].Priority
+		if left <= 0 {
+			left = i + 1
+		}
+		if right <= 0 {
+			right = j + 1
+		}
+		return left < right
+	})
+	return result
+}
+
+func supplyPlatformCredentials(platform store.ManagerSupplyPlatformConfig) supplyclient.Credentials {
+	deliveryMode := "take_json"
+	if strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformBugTeam) {
+		deliveryMode = "cpa_zip"
+	}
+	return supplyclient.Credentials{
+		ID:           strings.TrimSpace(platform.ID),
+		PlatformType: strings.ToLower(strings.TrimSpace(platform.Type)),
+		BaseURL:      strings.TrimRight(strings.TrimSpace(platform.BaseURL), "/"),
+		Username:     strings.TrimSpace(platform.Username),
+		Password:     platform.Password,
+		Token:        strings.TrimSpace(platform.Token),
+		DeliveryMode: deliveryMode,
+	}
+}
+
+func supplyPlatformConfigured(platform store.ManagerSupplyPlatformConfig) bool {
+	credentials := supplyPlatformCredentials(platform)
+	if credentials.BaseURL == "" || strings.TrimSpace(platform.Product) == "" {
+		return false
+	}
+	return credentials.Token != "" || (credentials.Username != "" && credentials.Password != "")
+}
+
+func resolveSupplyPlatform(cfg store.ManagerSupplyConfig, supplierID string, product string) (store.ManagerSupplyPlatformConfig, error) {
+	platforms := supplyPlatforms(cfg)
+	supplierID = strings.TrimSpace(supplierID)
+	if supplierID != "" {
+		for _, platform := range platforms {
+			if strings.EqualFold(strings.TrimSpace(platform.ID), supplierID) {
+				return platform, nil
+			}
+		}
+		return store.ManagerSupplyPlatformConfig{}, fmt.Errorf("supply platform %s is not configured", supplierID)
+	}
+	product = strings.TrimSpace(product)
+	for _, platform := range platforms {
+		if strings.EqualFold(strings.TrimSpace(platform.Product), product) {
+			return platform, nil
+		}
+	}
+	if len(platforms) > 0 {
+		return platforms[0], nil
+	}
+	return store.ManagerSupplyPlatformConfig{}, ErrNotConfigured
+}
+
+func recoverySupplyPlatform(cfg store.ManagerSupplyConfig) (store.ManagerSupplyPlatformConfig, error) {
+	platforms := supplyPlatforms(cfg)
+	for _, platform := range platforms {
+		if strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformLegacy) {
+			return platform, nil
+		}
+	}
+	return store.ManagerSupplyPlatformConfig{}, errors.New("no recovery-capable supply platform is configured")
+}
+
+func recoverySupplyPlatformConfigured(cfg store.ManagerSupplyConfig) bool {
+	platform, err := recoverySupplyPlatform(cfg)
+	return err == nil && supplyPlatformConfigured(platform)
+}
+
+func supplyProductConfigured(cfg store.ManagerSupplyConfig, product string) bool {
+	product = strings.TrimSpace(product)
+	if product == "" {
+		return true
+	}
+	if strings.TrimSpace(cfg.Product) != "" && sameSupplyProduct(cfg.Product, product) {
+		return true
+	}
+	for _, platform := range supplyPlatforms(cfg) {
+		if sameSupplyProduct(platform.Product, product) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) selectSupplyPlatform(
+	ctx context.Context,
+	cfg store.ManagerSupplyConfig,
+	quantity int,
+	openOrders []store.SupplyOrder,
+) (supplyPlatformSelection, error) {
+	platforms := supplyPlatforms(cfg)
+	if len(platforms) == 0 {
+		return supplyPlatformSelection{}, ErrNotConfigured
+	}
+	statuses := make([]PlatformOverview, len(platforms))
+	type result struct {
+		index     int
+		inventory supplyclient.Inventory
+		balance   supplyclient.Balance
+		err       error
+	}
+	results := make(chan result, len(platforms))
+	var wait sync.WaitGroup
+	for index, platform := range platforms {
+		wait.Add(1)
+		go func(index int, platform store.ManagerSupplyPlatformConfig) {
+			defer wait.Done()
+			if !supplyPlatformConfigured(platform) {
+				results <- result{index: index, err: ErrNotConfigured}
+				return
+			}
+			credentials := supplyPlatformCredentials(platform)
+			inventory, err := s.supplyClient.Inventory(ctx, credentials, platform.Product, quantity)
+			if err != nil {
+				results <- result{index: index, err: err}
+				return
+			}
+			balance, err := s.supplyClient.Balance(ctx, credentials)
+			results <- result{index: index, inventory: inventory, balance: balance, err: err}
+		}(index, platform)
+	}
+	wait.Wait()
+	close(results)
+	checkedAtMS := time.Now().UnixMilli()
+	platformErrors := make([]error, 0, len(platforms))
+	for item := range results {
+		platform := platforms[item.index]
+		status := PlatformOverview{
+			ID:          platform.ID,
+			Name:        platform.Name,
+			Type:        platform.Type,
+			Product:     platform.Product,
+			Priority:    platform.Priority,
+			CheckedAtMS: checkedAtMS,
+		}
+		if item.err != nil {
+			status.LastError = safeError(item.err)
+			platformErrors = append(platformErrors, fmt.Errorf("%s: %w", firstNonEmptyString(platform.Name, platform.ID), item.err))
+		} else {
+			if strings.TrimSpace(item.inventory.Product) == "" {
+				item.inventory.Product = platform.Product
+			}
+			status.Inventory = &item.inventory
+			status.Balance = &item.balance
+		}
+		statuses[item.index] = status
+	}
+
+	used := make(map[string]struct{}, len(openOrders))
+	for _, order := range openOrders {
+		if strings.TrimSpace(order.SupplierID) != "" {
+			used[strings.ToLower(strings.TrimSpace(order.SupplierID))] = struct{}{}
+		}
+	}
+	candidates := make([]int, 0, len(platforms))
+	for index := range statuses {
+		if statuses[index].Inventory != nil && statuses[index].Balance != nil {
+			candidates = append(candidates, index)
+		}
+	}
+	if len(candidates) == 0 {
+		if len(platformErrors) > 0 {
+			return supplyPlatformSelection{all: statuses}, errors.Join(platformErrors...)
+		}
+		return supplyPlatformSelection{all: statuses}, ErrNotConfigured
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		leftIndex := candidates[i]
+		rightIndex := candidates[j]
+		left := statuses[leftIndex]
+		right := statuses[rightIndex]
+		return supplyPlatformLess(left, right, quantity, used)
+	})
+	selectedIndex := candidates[0]
+	statuses[selectedIndex].Selected = true
+	return supplyPlatformSelection{
+		platform: platforms[selectedIndex],
+		status:   statuses[selectedIndex],
+		all:      statuses,
+	}, nil
+}
+
+func supplyPlatformLess(left PlatformOverview, right PlatformOverview, quantity int, used map[string]struct{}) bool {
+	leftUsed := 0
+	if _, ok := used[strings.ToLower(strings.TrimSpace(left.ID))]; ok {
+		leftUsed = 1
+	}
+	rightUsed := 0
+	if _, ok := used[strings.ToLower(strings.TrimSpace(right.ID))]; ok {
+		rightUsed = 1
+	}
+	if leftUsed != rightUsed {
+		return leftUsed < rightUsed
+	}
+	leftTier := supplyPlatformAvailabilityTier(left, quantity)
+	rightTier := supplyPlatformAvailabilityTier(right, quantity)
+	if leftTier != rightTier {
+		return leftTier < rightTier
+	}
+	leftPrice := int64(math.MaxInt64)
+	if left.Inventory != nil && left.Inventory.EstimatedUnitPriceFen > 0 {
+		leftPrice = left.Inventory.EstimatedUnitPriceFen
+	}
+	rightPrice := int64(math.MaxInt64)
+	if right.Inventory != nil && right.Inventory.EstimatedUnitPriceFen > 0 {
+		rightPrice = right.Inventory.EstimatedUnitPriceFen
+	}
+	if leftPrice != rightPrice {
+		return leftPrice < rightPrice
+	}
+	leftLifetime := int64(0)
+	if left.Inventory != nil {
+		leftLifetime = left.Inventory.MaximumRemainingSeconds
+	}
+	rightLifetime := int64(0)
+	if right.Inventory != nil {
+		rightLifetime = right.Inventory.MaximumRemainingSeconds
+	}
+	if leftLifetime != rightLifetime {
+		return leftLifetime > rightLifetime
+	}
+	return left.Priority < right.Priority
+}
+
+func supplyPlatformAvailabilityTier(status PlatformOverview, quantity int) int {
+	if status.Inventory == nil || status.Balance == nil {
+		return 9
+	}
+	if status.Inventory.EstimatedTotalFen > 0 && status.Balance.AvailableFen < status.Inventory.EstimatedTotalFen {
+		return 8
+	}
+	if status.Inventory.Available >= max(1, quantity) {
+		return 0
+	}
+	if status.Inventory.Available > 0 {
+		return 1
+	}
+	if status.Inventory.NeedsProduction {
+		return 2
+	}
+	return 3
+}

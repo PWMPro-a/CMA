@@ -246,7 +246,11 @@ export function AccountOverviewTab({ detailView, getHealthStatusClass }: Account
 
         {hasStatusMessage ? (
           <div
-            className={styles.overviewRecentStatusMessage}
+            className={`${styles.overviewRecentStatusMessage} ${
+              detailView.health.status === 'cooldown'
+                ? styles.overviewRecentStatusMessageWarning
+                : ''
+            }`}
             data-overview-recent-status-message="true"
           >
             <span>{t('accounts.detail_overview_recent_status_message')}</span>

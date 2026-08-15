@@ -600,6 +600,22 @@ const createUniqueConvertedAuthFiles = (
   });
 };
 
+const ensureUniqueUploadFileNames = (files: File[]) => {
+  const usedNames = new Set<string>();
+  return files.map((file) => {
+    let fileName = file.name;
+    let suffix = 2;
+    while (usedNames.has(fileName.toLowerCase())) {
+      fileName = appendUploadFileNameSuffix(file.name, suffix);
+      suffix += 1;
+    }
+    usedNames.add(fileName.toLowerCase());
+    return fileName === file.name
+      ? file
+      : new File([file], fileName, { type: file.type || 'application/json' });
+  });
+};
+
 export const prepareAuthFilesForUpload = async (files: File[]): Promise<PreparedAuthFileUpload> => {
   const ordinaryFiles: File[] = [];
   const convertedPayloads: AuthJsonFilePayload[] = [];
@@ -618,36 +634,65 @@ export const prepareAuthFilesForUpload = async (files: File[]): Promise<Prepared
       continue;
     }
 
-    if (!isSub2ApiAuthJsonInput(text, MAX_AUTH_FILE_SIZE)) {
-      ordinaryFiles.push(file);
-      continue;
-    }
-
+    const isSub2ApiInput = isSub2ApiAuthJsonInput(text, MAX_AUTH_FILE_SIZE);
     try {
-      convertedPayloads.push(
-        ...buildAuthJsonFilePayloads(
-          'sub2api',
-          'codex-account.json',
-          text,
-          new Date(),
-          MAX_AUTH_FILE_SIZE
-        )
+      if (isSub2ApiInput) {
+        convertedPayloads.push(
+          ...buildAuthJsonFilePayloads(
+            'sub2api',
+            'codex-account.json',
+            text,
+            new Date(),
+            MAX_AUTH_FILE_SIZE
+          )
+        );
+        convertedSourceCount += 1;
+        continue;
+      }
+
+      const cpaPayloads = buildAuthJsonFilePayloads(
+        'cpa',
+        'codex-account.json',
+        text,
+        new Date(),
+        MAX_AUTH_FILE_SIZE
       );
-      convertedSourceCount += 1;
+      const provider = String(cpaPayloads[0]?.authJson.type ?? cpaPayloads[0]?.authJson.provider ?? '')
+        .trim()
+        .toLowerCase();
+      const converted =
+        cpaPayloads.length === 1 &&
+        (provider === 'codex' || provider === 'openai-codex') &&
+        cpaPayloads[0].fileName !== file.name;
+      if (converted) {
+        convertedPayloads.push(...cpaPayloads);
+        convertedSourceCount += 1;
+        continue;
+      }
+      ordinaryFiles.push(file);
     } catch (err) {
-      failures.push({
-        name: file.name,
-        error: err instanceof Error ? err.message : 'Failed to convert sub2api auth JSON',
-      });
+      if (isSub2ApiInput) {
+        failures.push({
+          name: file.name,
+          error: err instanceof Error ? err.message : 'Failed to convert sub2api auth JSON',
+        });
+      } else {
+        ordinaryFiles.push(file);
+      }
     }
   }
 
+  const uniqueConvertedPayloads = Array.from(
+    convertedPayloads
+      .reduce((items, payload) => items.set(payload.fileName.toLowerCase(), payload), new Map<string, AuthJsonFilePayload>())
+      .values()
+  );
   const convertedFiles = createUniqueConvertedAuthFiles(
-    convertedPayloads,
+    uniqueConvertedPayloads,
     ordinaryFiles.map((file) => file.name)
   );
   return {
-    files: [...ordinaryFiles, ...convertedFiles],
+    files: ensureUniqueUploadFileNames([...ordinaryFiles, ...convertedFiles]),
     failures,
     convertedSourceCount,
   };

@@ -122,6 +122,36 @@ describe('convertAuthJsonInput', () => {
     expect(result).toEqual(input);
   });
 
+  it('extracts workspace member identity from a direct CPA access token', () => {
+    const accessToken = buildSignedJwt({
+      email: 'member@example.com',
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'workspace-shared',
+        chatgpt_account_user_id: 'member-one__workspace-shared',
+        chatgpt_user_id: 'member-one',
+        user_id: 'member-one',
+        poid: 'organization-one',
+      },
+    });
+    const result = convertAuthJsonInput(
+      JSON.stringify({
+        type: 'codex',
+        email: 'member@example.com',
+        account_id: 'workspace-shared',
+        access_token: accessToken,
+      }),
+      'cpa'
+    );
+
+    expect(result).toMatchObject({
+      account_id: 'workspace-shared',
+      workspace_id: 'workspace-shared',
+      chatgpt_user_id: 'member-one',
+      chatgpt_account_user_id: 'member-one__workspace-shared',
+      organization_id: 'organization-one',
+    });
+  });
+
   it('converts a ChatGPT session object to CPA Codex auth JSON', () => {
     const accessToken = buildJwt({
       exp: 1_800_000_000,
@@ -1234,6 +1264,54 @@ describe('convertAuthJsonInput', () => {
     });
   });
 
+  it('keeps same-email accounts separate by workspace across repeated imports', () => {
+    const buildExport = (workspaceId: string, workspaceName: string) =>
+      JSON.stringify({
+        exported_at: '2026-08-15T00:00:00.000Z',
+        proxies: [],
+        accounts: [
+          {
+            name: workspaceName,
+            platform: 'openai',
+            type: 'oauth',
+            workspace_id: workspaceId,
+            workspace_name: workspaceName,
+            credentials: {
+              access_token: `token-${workspaceId}`,
+              email: 'shared@example.com',
+              account_id: 'same-user-account',
+              chatgpt_plan_type: 'team',
+            },
+          },
+        ],
+      });
+
+    const first = buildAuthJsonFilePayloads(
+      'sub2api',
+      'codex-account.json',
+      buildExport('workspace-alpha', 'Alpha Team')
+    );
+    const second = buildAuthJsonFilePayloads(
+      'sub2api',
+      'codex-account.json',
+      buildExport('workspace-beta', 'Beta Team')
+    );
+
+    expect(first[0].fileName).not.toBe(second[0].fileName);
+    expect(first[0].authJson).toMatchObject({
+      email: 'shared@example.com',
+      account_id: 'same-user-account',
+      workspace_id: 'workspace-alpha',
+      workspace_name: 'Alpha Team',
+    });
+    expect(second[0].authJson).toMatchObject({
+      email: 'shared@example.com',
+      account_id: 'same-user-account',
+      workspace_id: 'workspace-beta',
+      workspace_name: 'Beta Team',
+    });
+  });
+
   it('converts multiple sub2api OpenAI OAuth accounts to separate CPA auth files', () => {
     const input = JSON.stringify({
       exported_at: '2026-06-01T12:00:00.000Z',
@@ -1295,7 +1373,7 @@ describe('convertAuthJsonInput', () => {
     ]);
   });
 
-  it('deduplicates generated sub2api auth file names within one import', () => {
+  it('keeps the newest payload when one account appears twice in an import', () => {
     const result = buildAuthJsonFilePayloads(
       'sub2api',
       'codex-account.json',
@@ -1326,7 +1404,8 @@ describe('convertAuthJsonInput', () => {
       new Date('2026-06-02T00:00:00.000Z')
     );
 
-    expect(result[1].fileName).toBe(result[0].fileName.replace(/\.json$/, '-2.json'));
+    expect(result).toHaveLength(1);
+    expect(result[0].authJson).toMatchObject({ access_token: 'second-access-token' });
   });
 
   it('does not auto-detect ordinary CPA auth JSON as sub2api', () => {
@@ -1502,6 +1581,21 @@ describe('convertAuthJsonInput', () => {
 
     expect(getDefaultSessionAuthFileName(authJson)).toBe(
       'codex-0ded482d-user.name+tag@example.com-team.json'
+    );
+  });
+
+  it('separates members that share one Team workspace id', () => {
+    const buildAuthJson = (email: string, memberId: string) => ({
+      type: 'codex',
+      email,
+      account_id: 'workspace-shared',
+      workspace_id: 'workspace-shared',
+      chatgpt_user_id: memberId,
+      plan_type: 'team',
+    });
+
+    expect(getDefaultSessionAuthFileName(buildAuthJson('first@example.com', 'member-one'))).not.toBe(
+      getDefaultSessionAuthFileName(buildAuthJson('second@example.com', 'member-two'))
     );
   });
 
