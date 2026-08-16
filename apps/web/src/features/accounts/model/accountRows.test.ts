@@ -1539,6 +1539,76 @@ describe('accountRows', () => {
     });
   });
 
+  it('accepts a shared pool summary whose total describes only enabled credentials', () => {
+    const rows = buildAccountRows(
+      [
+        { name: 'enabled.json', type: 'codex', authIndex: 'enabled' },
+        { name: 'disabled.json', type: 'codex', authIndex: 'disabled', disabled: true },
+      ],
+      emptyStores()
+    );
+
+    expect(
+      buildAccountMetricsWithCodexPoolSummary(
+        rows,
+        {},
+        {
+          total: 1,
+          normal: 1,
+          needsAttention: 0,
+          quotaRisk: 0,
+          disabled: 1,
+          unconfirmed: 0,
+          classificationObserved: true,
+        }
+      )
+    ).toMatchObject({
+      total: 2,
+      available: 1,
+      needsAttention: 0,
+      quotaRisk: 0,
+      disabled: 1,
+      unconfirmed: 0,
+    });
+  });
+
+  it('uses the shared credential bucket for the available filter', () => {
+    const rows = buildAccountRows(
+      [
+        { name: 'normal.json', type: 'codex', authIndex: 'normal' },
+        { name: 'risk.json', type: 'codex', authIndex: 'risk' },
+      ],
+      {
+        ...emptyStores(),
+        codexQuota: {
+          'normal.json': {
+            status: 'success',
+            windows: [{ id: 'weekly', label: 'Weekly', usedPercent: 100, resetLabel: 'Mon' }],
+          },
+          'risk.json': {
+            status: 'success',
+            windows: [{ id: 'weekly', label: 'Weekly', usedPercent: 10, resetLabel: 'Mon' }],
+          },
+        },
+      }
+    );
+    const poolStatusBySelectionKey = new Map([
+      [rows[0].selectionKey, 'normal' as const],
+      [rows[1].selectionKey, 'quota_risk' as const],
+    ]);
+
+    expect(
+      filterAccountRows(rows, {
+        provider: 'all',
+        status: 'available',
+        plan: 'all',
+        quotaBand: 'all',
+        search: '',
+        poolStatusBySelectionKey,
+      }).map((row) => row.fileName)
+    ).toEqual(['normal.json']);
+  });
+
   it('filters rows by quota band and search text', () => {
     const rows = buildAccountRows(
       [

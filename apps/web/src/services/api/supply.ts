@@ -18,6 +18,7 @@ export interface SupplyPlatformConfig {
   enabled?: boolean;
   baseUrl: string;
   username?: string;
+  clearUsername?: boolean;
   password?: string;
   passwordConfigured?: boolean;
   token?: string;
@@ -31,6 +32,7 @@ export interface SupplyConfig {
   enabled?: boolean;
   baseUrl: string;
   username: string;
+  clearUsername?: boolean;
   password?: string;
   passwordConfigured?: boolean;
   product: SupplyProduct | string;
@@ -166,6 +168,24 @@ export interface SupplyAccountPoolSummary {
   disabled: number;
   unconfirmed: number;
   classificationObserved: boolean;
+  credentials?: SupplyAccountPoolCredentialSummary[];
+}
+
+export type SupplyAccountPoolCredentialBucket =
+  | 'normal'
+  | 'needs_attention'
+  | 'quota_risk'
+  | 'unconfirmed'
+  | 'disabled';
+
+export interface SupplyAccountPoolCredentialSummary {
+  authFileName: string;
+  runtimeId?: string;
+  provider?: string;
+  authIndex?: string;
+  accountId?: string;
+  accountSnapshot?: string;
+  bucket: SupplyAccountPoolCredentialBucket;
 }
 
 export interface SupplySmartResource {

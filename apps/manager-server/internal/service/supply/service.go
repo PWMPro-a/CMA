@@ -130,14 +130,29 @@ type Status struct {
 // for purchasing without being authoritative for whether a live CPA account
 // should be shown as broken.
 type AccountPoolSummary struct {
-	CheckedAtMS            int64 `json:"checkedAtMs"`
-	Total                  int   `json:"total"`
-	Normal                 int   `json:"normal"`
-	NeedsAttention         int   `json:"needsAttention"`
-	QuotaRisk              int   `json:"quotaRisk"`
-	Disabled               int   `json:"disabled"`
-	Unconfirmed            int   `json:"unconfirmed"`
-	ClassificationObserved bool  `json:"classificationObserved"`
+	CheckedAtMS            int64                          `json:"checkedAtMs"`
+	Total                  int                            `json:"total"`
+	Normal                 int                            `json:"normal"`
+	NeedsAttention         int                            `json:"needsAttention"`
+	QuotaRisk              int                            `json:"quotaRisk"`
+	Disabled               int                            `json:"disabled"`
+	Unconfirmed            int                            `json:"unconfirmed"`
+	ClassificationObserved bool                           `json:"classificationObserved"`
+	Credentials            []AccountPoolCredentialSummary `json:"credentials,omitempty"`
+}
+
+// AccountPoolCredentialSummary publishes the exact credential-level bucket
+// used to build AccountPoolSummary. The credential page consumes this list so
+// its status cards and filters cannot drift from the supply page's live pool
+// classification while local quota requests are still catching up.
+type AccountPoolCredentialSummary struct {
+	AuthFileName    string `json:"authFileName"`
+	RuntimeID       string `json:"runtimeId,omitempty"`
+	Provider        string `json:"provider,omitempty"`
+	AuthIndex       string `json:"authIndex,omitempty"`
+	AccountID       string `json:"accountId,omitempty"`
+	AccountSnapshot string `json:"accountSnapshot,omitempty"`
+	Bucket          string `json:"bucket"`
 }
 
 // ActiveOrderStatus is deliberately smaller than Status. The management page
@@ -557,6 +572,8 @@ type Service struct {
 	quotaSnapshot            inspectionQuotaSnapshot
 	operatorHeadersMu        sync.Mutex
 	operatorHeaders          operatorHeaderSnapshotCache
+	operatorPoolMu           sync.Mutex
+	operatorPool             operatorAccountPoolCache
 	smartResourceState       SmartResource
 	automation               AutomationExecution
 	recoveryMu               sync.Mutex
@@ -605,10 +622,18 @@ type operatorHeaderSnapshotCache struct {
 	items     []store.HeaderSnapshot
 }
 
+type operatorAccountPoolCache struct {
+	key       string
+	generated time.Time
+	stats     accountPoolStats
+	err       error
+}
+
 const (
 	supplyAccountListCacheTTL = 15 * time.Second
 	supplyOrdersCacheTTL      = 5 * time.Second
 	operatorHeaderCacheTTL    = 15 * time.Second
+	operatorAccountPoolTTL    = 15 * time.Second
 )
 
 const (
@@ -878,7 +903,9 @@ func (s *Service) GetAccountPoolSummary(ctx context.Context) (AccountPoolSummary
 	if statsErr != nil && !stats.liveObserved {
 		return AccountPoolSummary{}, statsErr
 	}
-	return accountPoolSummaryFromStats(stats, time.Now()), nil
+	summary := accountPoolSummaryFromStats(stats, time.Now())
+	summary.Credentials = accountPoolCredentialSummaries(stats)
+	return summary, nil
 }
 
 func accountPoolSummaryFromStats(stats accountPoolStats, checkedAt time.Time) AccountPoolSummary {
@@ -891,6 +918,66 @@ func accountPoolSummaryFromStats(stats accountPoolStats, checkedAt time.Time) Ac
 		Disabled:               max(0, stats.total-stats.enabled),
 		Unconfirmed:            max(0, stats.unconfirmed),
 		ClassificationObserved: stats.classificationObserved,
+	}
+}
+
+func accountPoolCredentialSummaries(stats accountPoolStats) []AccountPoolCredentialSummary {
+	if len(stats.files) == 0 {
+		return nil
+	}
+	filesByName := make(map[string]int, len(stats.files))
+	for _, file := range stats.files {
+		if isCodexAuthFile(file) {
+			filesByName[strings.TrimSpace(file.Name)]++
+		}
+	}
+	items := make([]AccountPoolCredentialSummary, 0, stats.total)
+	for _, file := range stats.files {
+		if !isCodexAuthFile(file) {
+			continue
+		}
+		bucket := "disabled"
+		if !file.Disabled {
+			classified, matched := stats.bucketByCredential[operatorCredentialKey(file.Name, file.AuthIndex)]
+			if !matched && filesByName[strings.TrimSpace(file.Name)] == 1 {
+				classified, matched = stats.bucketByCredential[operatorFileCredentialKey(file.Name)]
+			}
+			if !matched {
+				classified = operatorAccountUnconfirmed
+			}
+			bucket = operatorAccountBucketName(classified)
+		}
+		items = append(items, AccountPoolCredentialSummary{
+			AuthFileName:    strings.TrimSpace(file.Name),
+			RuntimeID:       strings.TrimSpace(file.ID),
+			Provider:        strings.TrimSpace(file.Provider),
+			AuthIndex:       strings.TrimSpace(file.AuthIndex),
+			AccountID:       strings.TrimSpace(file.AccountID),
+			AccountSnapshot: strings.TrimSpace(file.AccountSnapshot),
+			Bucket:          bucket,
+		})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		leftName := strings.ToLower(items[i].AuthFileName)
+		rightName := strings.ToLower(items[j].AuthFileName)
+		if leftName != rightName {
+			return leftName < rightName
+		}
+		return strings.ToLower(items[i].AuthIndex) < strings.ToLower(items[j].AuthIndex)
+	})
+	return items
+}
+
+func operatorAccountBucketName(bucket operatorAccountBucket) string {
+	switch bucket {
+	case operatorAccountNormal:
+		return "normal"
+	case operatorAccountNeedsAttention:
+		return "needs_attention"
+	case operatorAccountQuotaRisk:
+		return "quota_risk"
+	default:
+		return "unconfirmed"
 	}
 }
 
@@ -5343,6 +5430,37 @@ func (s *Service) countOperatorAccountPoolStats(
 	ctx context.Context,
 	cfg store.ManagerConfig,
 ) (accountPoolStats, error) {
+	if s == nil {
+		return accountPoolStats{}, errors.New("supply service is unavailable")
+	}
+	now := time.Now()
+	cacheKey := strings.TrimSpace(cfg.CPAConnection.CPABaseURL) + "\x00" + strings.TrimSpace(cfg.CPAConnection.ManagementKey)
+	s.operatorPoolMu.Lock()
+	defer s.operatorPoolMu.Unlock()
+	if s.operatorPool.key == cacheKey && !s.operatorPool.generated.IsZero() &&
+		now.Sub(s.operatorPool.generated) <= operatorAccountPoolTTL {
+		return s.operatorPool.stats, s.operatorPool.err
+	}
+	stats, err := s.loadOperatorAccountPoolStats(ctx, cfg)
+	if err == nil || stats.liveObserved {
+		s.operatorPool = operatorAccountPoolCache{
+			key:       cacheKey,
+			generated: time.Now(),
+			stats:     stats,
+			err:       err,
+		}
+		return stats, err
+	}
+	if s.operatorPool.key == cacheKey && !s.operatorPool.generated.IsZero() {
+		return s.operatorPool.stats, err
+	}
+	return stats, err
+}
+
+func (s *Service) loadOperatorAccountPoolStats(
+	ctx context.Context,
+	cfg store.ManagerConfig,
+) (accountPoolStats, error) {
 	if strings.TrimSpace(cfg.CPAConnection.CPABaseURL) == "" || strings.TrimSpace(cfg.CPAConnection.ManagementKey) == "" {
 		return accountPoolStats{}, errors.New("CPA connection is not configured")
 	}
@@ -8720,6 +8838,9 @@ func (s *Service) invalidateAuthFilesCache() {
 	s.authCacheMu.Lock()
 	s.authCache = authFileSnapshot{}
 	s.authCacheMu.Unlock()
+	s.operatorPoolMu.Lock()
+	s.operatorPool = operatorAccountPoolCache{}
+	s.operatorPoolMu.Unlock()
 }
 
 func (s *Service) recordError(err error) {

@@ -356,7 +356,10 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 		}
 		next.BaseURL = normalized
 	}
-	if value := strings.TrimSpace(submitted.Username); value != "" {
+	if submitted.ClearUsername {
+		credentialIdentityChanged = true
+		next.Username = ""
+	} else if value := strings.TrimSpace(submitted.Username); value != "" {
 		if value != strings.TrimSpace(current.Username) {
 			credentialIdentityChanged = true
 		}
@@ -368,6 +371,7 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	} else if credentialIdentityChanged {
 		next.Password = ""
 	}
+	next.ClearUsername = false
 	if value := strings.ToLower(strings.TrimSpace(submitted.Product)); value != "" {
 		next.Product = value
 	}
@@ -491,26 +495,38 @@ func normalizeSupplyPlatforms(submitted []store.ManagerSupplyPlatformConfig, cur
 			platform.Name = defaultSupplyPlatformName(platformType)
 		}
 		identityChanged := false
+		baseURLChanged := false
 		if value := strings.TrimRight(strings.TrimSpace(raw.BaseURL), "/"); value != "" {
-			identityChanged = !strings.EqualFold(value, strings.TrimRight(strings.TrimSpace(previous.BaseURL), "/"))
+			baseURLChanged = !strings.EqualFold(value, strings.TrimRight(strings.TrimSpace(previous.BaseURL), "/"))
+			identityChanged = baseURLChanged
 			platform.BaseURL = value
 		} else if strings.TrimSpace(platform.BaseURL) == "" && platformType == SupplyPlatformBugTeam {
 			platform.BaseURL = "https://bugteam.team"
 		}
-		if value := strings.TrimSpace(raw.Username); value != "" {
+		if raw.ClearUsername {
+			identityChanged = true
+			platform.Username = ""
+		} else if value := strings.TrimSpace(raw.Username); value != "" {
 			identityChanged = identityChanged || value != strings.TrimSpace(previous.Username)
 			platform.Username = value
 		}
 		if value := strings.TrimSpace(raw.Password); value != "" {
 			platform.Password = value
+		} else if raw.ClearUsername {
+			platform.Password = ""
 		} else if identityChanged {
 			platform.Password = credentialDonorPassword(currentPlatforms, platform.Username)
 		}
 		if value := strings.TrimSpace(raw.Token); value != "" {
 			platform.Token = value
 		} else if identityChanged {
-			platform.Token = ""
+			if raw.ClearUsername && !baseURLChanged {
+				platform.Token = previous.Token
+			} else {
+				platform.Token = ""
+			}
 		}
+		platform.ClearUsername = false
 		if value := strings.ToLower(strings.TrimSpace(raw.Product)); value != "" {
 			platform.Product = value
 		} else if strings.TrimSpace(platform.Product) == "" {

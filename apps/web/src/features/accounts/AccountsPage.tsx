@@ -45,6 +45,7 @@ import {
   IconSlidersHorizontal,
   IconTimer,
   IconTrash2,
+  IconWifi,
   IconX,
 } from '@/components/ui/icons';
 import {
@@ -66,7 +67,7 @@ import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useInterval } from '@/hooks/useInterval';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
-import { getAuthFileIcon } from '@/features/authFiles/constants';
+import { getAuthFileIcon, readAuthFileWebsockets } from '@/features/authFiles/constants';
 import { useAuthFilesData } from '@/features/authFiles/hooks/useAuthFilesData';
 import { useAuthFilesOauth } from '@/features/authFiles/hooks/useAuthFilesOauth';
 import { useAuthFilesModels } from '@/features/authFiles/hooks/useAuthFilesModels';
@@ -110,6 +111,7 @@ import {
   sortAccountRows,
   type AccountQuotaBand,
   type AccountRow,
+  type AccountPoolCredentialBucket,
   type AccountRowSort,
   type AccountStatusFilter,
 } from '@/features/accounts/model/accountRows';
@@ -337,6 +339,9 @@ const getHealthStatusClass = (status: AccountListHealthStatusKey) => {
   }
 };
 
+const getAccountSourceIp = (file: AuthFileItem): string =>
+  String(file.sourceIp ?? file.source_ip ?? file['source-ip'] ?? '').trim();
+
 const getRemainingBarClass = (row: AccountRow) => {
   if (row.quota.status === 'exhausted' || row.quota.status === 'error') return styles.quotaBarBad;
   if (row.quota.status === 'low') return styles.quotaBarWarn;
@@ -536,6 +541,11 @@ export function AccountsPage() {
     !featureAvailability.checking &&
     Boolean(featureAvailability.managerServiceBase) &&
     Boolean(managementKey);
+  const accountPoolSummaryAvailable =
+    !featureAvailability.checking &&
+    Boolean(managementKey) &&
+    (Boolean(featureAvailability.managerServiceBase) ||
+      featureAvailability.panelHostMode === 'manager_embedded');
   const requestHistoryAvailable =
     managerStorageAvailable && featureAvailability.requestMonitoringAvailable;
 
@@ -575,6 +585,7 @@ export function AccountsPage() {
   const [accountPoolSummary, setAccountPoolSummary] = useState<SupplyAccountPoolSummary | null>(
     null
   );
+  const [accountPoolSummaryLoading, setAccountPoolSummaryLoading] = useState(true);
   const oauthState = useAuthFilesOauth({
     viewMode: oauthViewMode,
     files,
@@ -906,8 +917,9 @@ export function AccountsPage() {
   const loadAccountPoolSummary = useCallback(async () => {
     const requestId = accountPoolSummaryRequestIdRef.current + 1;
     accountPoolSummaryRequestIdRef.current = requestId;
-    if (!managerStorageAvailable) {
+    if (!accountPoolSummaryAvailable) {
       setAccountPoolSummary(null);
+      setAccountPoolSummaryLoading(false);
       return;
     }
     try {
@@ -917,8 +929,12 @@ export function AccountsPage() {
       }
     } catch {
       // Keep the last complete pool split on transient storage/API failures.
+    } finally {
+      if (accountPoolSummaryRequestIdRef.current === requestId) {
+        setAccountPoolSummaryLoading(false);
+      }
     }
-  }, [managerStorageAvailable]);
+  }, [accountPoolSummaryAvailable]);
 
   const loadAccountActionCandidates = useCallback(async () => {
     const requestId = accountActionCandidatesReqIdRef.current + 1;
@@ -998,6 +1014,7 @@ export function AccountsPage() {
     detailEventsAutoLoadKeyRef.current = null;
     setQuotaCooldowns(new Map());
     setAccountPoolSummary(null);
+    setAccountPoolSummaryLoading(true);
     setAccountActionCandidates([]);
     setHeaderSnapshotLoadedKey('');
     setAccountHistoryByRowKey((current) => (current.size === 0 ? current : new Map()));
@@ -1146,15 +1163,21 @@ export function AccountsPage() {
   );
 
   useEffect(() => {
-    if (activeView !== 'accounts' || !managerStorageAvailable) return;
+    if (activeView !== 'accounts' || !accountPoolSummaryAvailable) return;
     void loadAccountPoolSummary();
-  }, [activeView, loadAccountPoolSummary, managerStorageAvailable]);
+  }, [accountPoolSummaryAvailable, activeView, loadAccountPoolSummary]);
+
+  useEffect(() => {
+    if (activeView === 'accounts' && accountPoolSummaryAvailable && accountPoolSummary === null) {
+      setAccountPoolSummaryLoading(true);
+    }
+  }, [accountPoolSummary, accountPoolSummaryAvailable, activeView]);
 
   useInterval(
     () => {
       void loadAccountPoolSummary();
     },
-    activeView === 'accounts' && documentVisible && managerStorageAvailable ? 15_000 : null
+    activeView === 'accounts' && documentVisible && accountPoolSummaryAvailable ? 10_000 : null
   );
 
   useEffect(
@@ -1459,6 +1482,17 @@ export function AccountsPage() {
       ),
     [quotaCooldowns, rows]
   );
+  const accountPoolStatusByRowKey = useMemo(() => {
+    const itemsByRowKey = buildAccountOperationalItemsByRowKey(
+      rows,
+      accountPoolSummary?.credentials ?? []
+    );
+    return new Map<string, AccountPoolCredentialBucket>(
+      Array.from(itemsByRowKey, ([rowKey, items]) => [rowKey, items[0]?.bucket]).filter(
+        (entry): entry is [string, AccountPoolCredentialBucket] => Boolean(entry[1])
+      )
+    );
+  }, [accountPoolSummary?.credentials, rows]);
   const metrics = useMemo(
     () =>
       buildAccountMetricsWithCodexPoolSummary(
@@ -1487,8 +1521,10 @@ export function AccountsPage() {
         quotaBand: quotaBandFilter,
         search,
         codexStatusBySelectionKey,
+        poolStatusBySelectionKey: accountPoolStatusByRowKey,
       }),
     [
+      accountPoolStatusByRowKey,
       codexStatusBySelectionKey,
       planFilter,
       providerFilter,
@@ -4330,6 +4366,8 @@ export function AccountsPage() {
                   ? t('accounts.history_syncing')
                   : null;
             const recentRequestCount = row.usage.success + row.usage.failure;
+            const sourceIp = getAccountSourceIp(row.raw);
+            const websocketsEnabled = readAuthFileWebsockets(row.raw);
             const accountHistoryRequestValue = accountHistoryMatched
               ? formatCompactNumber(accountHistory.total_requests)
               : recentRequestCount > 0
@@ -4387,6 +4425,25 @@ export function AccountsPage() {
                           showEmpty
                         />
                       </button>
+                    ) : null}
+                    {sourceIp ? (
+                      <span
+                        className={`${styles.accountMetaPill} ${styles.accountSourceIpPill}`}
+                        title={t('auth_files.source_ip_card_title', { ip: sourceIp })}
+                      >
+                        <span aria-hidden="true">IP</span>
+                        <strong>{sourceIp}</strong>
+                      </span>
+                    ) : null}
+                    {websocketsEnabled ? (
+                      <span
+                        className={`${styles.accountMetaPill} ${styles.accountWebsocketPill}`}
+                        title={t('auth_files.websockets_label')}
+                        aria-label={t('auth_files.websockets_label')}
+                      >
+                        <IconWifi size={13} aria-hidden="true" />
+                        <span>WS</span>
+                      </span>
                     ) : null}
                     {row.workspaceName || row.workspaceId ? (
                       <span
@@ -5026,9 +5083,12 @@ export function AccountsPage() {
 
   const renderAccountsOverview = () => (
     <>
-      <AccountMetricsGrid metrics={metrics} />
+      <AccountMetricsGrid
+        metrics={metrics}
+        loading={accountPoolSummaryAvailable && accountPoolSummaryLoading}
+      />
       {error ? <div className={styles.errorBox}>{error}</div> : null}
-      {loading ? (
+      {loading || (accountPoolSummaryAvailable && accountPoolSummaryLoading) ? (
         <div className={styles.loadingPanel}>
           <LoadingSpinner />
         </div>

@@ -48,4 +48,32 @@ describe('AccountMetricsGrid', () => {
     expect(renderer!.root.findAllByType('svg')).toHaveLength(12);
     expect(renderer!.root.findByProps({ 'aria-label': 'accounts.metrics_label' })).toBeTruthy();
   });
+
+  it('does not render local fallback counts while the shared pool snapshot is loading', () => {
+    let renderer: ReactTestRenderer;
+
+    act(() => {
+      renderer = create(
+        <AccountMetricsGrid
+          loading
+          metrics={{
+            total: 242,
+            available: 0,
+            needsAttention: 19,
+            quotaRisk: 26,
+            disabled: 197,
+            unconfirmed: 0,
+            needsInspectionAction: 0,
+          }}
+        />
+      );
+    });
+
+    const cards = renderer!.root.findAll(
+      (node) => typeof node.props['data-summary-icon'] === 'string'
+    );
+    expect(cards.map((card) => card.findByType('strong').children.join(''))).toEqual(
+      Array(6).fill('...')
+    );
+  });
 });

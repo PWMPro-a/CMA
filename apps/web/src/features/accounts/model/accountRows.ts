@@ -170,6 +170,13 @@ export interface CodexAccountPoolMetricSummary {
   classificationObserved: boolean;
 }
 
+export type AccountPoolCredentialBucket =
+  | 'normal'
+  | 'needs_attention'
+  | 'quota_risk'
+  | 'unconfirmed'
+  | 'disabled';
+
 export interface AccountMetricOperationalContext {
   pendingActionsByRowKey?: ReadonlyMap<string, readonly unknown[]>;
   quotaCooldownsByRowKey?: ReadonlyMap<string, readonly unknown[]>;
@@ -182,6 +189,7 @@ export interface AccountRowFilters {
   quotaBand: AccountQuotaBand;
   search: string;
   codexStatusBySelectionKey?: ReadonlyMap<string, AuthFileCodexStatusSummary>;
+  poolStatusBySelectionKey?: ReadonlyMap<string, AccountPoolCredentialBucket>;
 }
 
 const QUOTA_LOW_THRESHOLD = 20;
@@ -621,7 +629,6 @@ export const buildAccountMetricsWithCodexPoolSummary = (
   const local = buildAccountMetrics(rows, context);
   if (!summary?.classificationObserved) return local;
   const codexRows = rows.filter((row) => row.provider === 'codex');
-  const summaryCodexTotal = summary.total + summary.disabled;
   const summaryValues = [
     summary.total,
     summary.normal,
@@ -630,14 +637,16 @@ export const buildAccountMetricsWithCodexPoolSummary = (
     summary.disabled,
     summary.unconfirmed,
   ];
+  const enabledSummaryTotal =
+    summary.normal + summary.needsAttention + summary.quotaRisk + summary.unconfirmed;
+  const populationSummaryTotal = enabledSummaryTotal + summary.disabled;
+  const summaryUsesEnabledTotal =
+    summary.total === enabledSummaryTotal && summary.total + summary.disabled === codexRows.length;
+  const summaryUsesPopulationTotal =
+    summary.total === populationSummaryTotal && summary.total === codexRows.length;
   if (
-    summaryCodexTotal !== codexRows.length ||
     summaryValues.some((value) => !Number.isInteger(value) || value < 0) ||
-    summary.normal +
-      summary.needsAttention +
-      summary.quotaRisk +
-      summary.unconfirmed !==
-      summary.total
+    (!summaryUsesEnabledTotal && !summaryUsesPopulationTotal)
   ) {
     return local;
   }
@@ -647,7 +656,7 @@ export const buildAccountMetricsWithCodexPoolSummary = (
     context
   );
   return {
-    total: summaryCodexTotal + nonCodex.total,
+    total: populationSummaryTotal + nonCodex.total,
     available: summary.normal + nonCodex.available,
     needsAttention: summary.needsAttention + nonCodex.needsAttention,
     quotaRisk: summary.quotaRisk + nonCodex.quotaRisk,
@@ -680,7 +689,16 @@ export const filterAccountRows = (rows: AccountRow[], filters: AccountRowFilters
     if (filters.plan !== 'all' && getAccountPlanFilterValue(row.planType) !== filters.plan) {
       return false;
     }
-    if (!matchesStatusFilter(row, filters.status, filters.codexStatusBySelectionKey)) return false;
+    if (
+      !matchesStatusFilter(
+        row,
+        filters.status,
+        filters.codexStatusBySelectionKey,
+        filters.poolStatusBySelectionKey
+      )
+    ) {
+      return false;
+    }
     if (!matchesQuotaBand(row, filters.quotaBand)) return false;
     if (!search) return true;
     const values = [
@@ -751,21 +769,27 @@ export const getPlanOptions = (rows: AccountRow[]) => {
 const matchesStatusFilter = (
   row: AccountRow,
   status: AccountStatusFilter,
-  codexStatusBySelectionKey?: ReadonlyMap<string, AuthFileCodexStatusSummary>
+  codexStatusBySelectionKey?: ReadonlyMap<string, AuthFileCodexStatusSummary>,
+  poolStatusBySelectionKey?: ReadonlyMap<string, AccountPoolCredentialBucket>
 ) => {
   if (status === 'all') return true;
   if (isAccountCodexStatusFilter(status)) {
     const codexStatus = codexStatusBySelectionKey?.get(row.selectionKey);
     return codexStatus ? authFileMatchesCodexStatusFilter(codexStatus, status) : false;
   }
-  if (status === 'available') return isAccountRowAvailable(row);
-  if (status === 'disabled') return row.disabled;
+  const sharedPoolStatus =
+    row.provider === 'codex' ? poolStatusBySelectionKey?.get(row.selectionKey) : undefined;
+  if (status === 'available') {
+    return sharedPoolStatus ? sharedPoolStatus === 'normal' : isAccountRowAvailable(row);
+  }
+  if (status === 'disabled') {
+    return sharedPoolStatus ? sharedPoolStatus === 'disabled' : row.disabled;
+  }
   if (status === 'problem') {
-    return (
-      Boolean(
-        (getAccountOperationalState(row) === 'failed' && !hasPartialGroupedQuota(row)) ||
-          hasBlockingQuotaError(row)
-      )
+    if (sharedPoolStatus) return sharedPoolStatus === 'needs_attention';
+    return Boolean(
+      (getAccountOperationalState(row) === 'failed' && !hasPartialGroupedQuota(row)) ||
+      hasBlockingQuotaError(row)
     );
   }
   if (status === 'low') return row.quota.status === 'low';

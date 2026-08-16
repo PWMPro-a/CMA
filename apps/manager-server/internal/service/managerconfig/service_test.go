@@ -68,6 +68,65 @@ func TestNormalizeSupplyConfigReplacesPasswordWhenIdentityChangesWithPassword(t 
 	}
 }
 
+func TestNormalizeSupplyConfigExplicitlyClearsLegacyUsernameAndPassword(t *testing.T) {
+	current := store.ManagerSupplyConfig{
+		BaseURL:  "https://sogouedu.cc",
+		Username: "customer-a",
+		Password: "saved-password",
+		Product:  "oauth_7d",
+	}
+	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{
+		BaseURL:       "https://sogouedu.cc",
+		ClearUsername: true,
+		Product:       "oauth_7d",
+	}, current)
+	if next.Username != "" || next.Password != "" || next.PasswordConfigured {
+		t.Fatalf("cleared legacy credentials = %#v", next)
+	}
+	if next.ClearUsername {
+		t.Fatal("clearUsername is a request intent and must not be persisted")
+	}
+}
+
+func TestNormalizeSupplyConfigClearsPlatformUsernameButKeepsTokenAuthentication(t *testing.T) {
+	enabled := true
+	current := store.ManagerSupplyConfig{
+		Platforms: []store.ManagerSupplyPlatformConfig{{
+			ID:       "bugteam",
+			Type:     SupplyPlatformBugTeam,
+			Enabled:  &enabled,
+			BaseURL:  "https://bugteam.team",
+			Username: "customer-a",
+			Password: "saved-password",
+			Token:    "saved-token",
+			Product:  "team_1h",
+		}},
+	}
+	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{
+		Platforms: []store.ManagerSupplyPlatformConfig{{
+			ID:            "bugteam",
+			Type:          SupplyPlatformBugTeam,
+			Enabled:       &enabled,
+			BaseURL:       "https://bugteam.team",
+			ClearUsername: true,
+			Product:       "team_1h",
+		}},
+	}, current)
+	if len(next.Platforms) != 1 {
+		t.Fatalf("platforms = %#v", next.Platforms)
+	}
+	platform := next.Platforms[0]
+	if platform.Username != "" || platform.Password != "" || platform.PasswordConfigured {
+		t.Fatalf("cleared platform credentials = %#v", platform)
+	}
+	if platform.Token != "saved-token" || !platform.TokenConfigured {
+		t.Fatalf("token authentication should be preserved: %#v", platform)
+	}
+	if platform.ClearUsername {
+		t.Fatal("platform clearUsername is a request intent and must not be persisted")
+	}
+}
+
 func TestNormalizeSupplyConfigDefaultsRecoveryControls(t *testing.T) {
 	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{}, store.ManagerSupplyConfig{})
 	if next.RecoverySyncEnabled == nil || !*next.RecoverySyncEnabled {

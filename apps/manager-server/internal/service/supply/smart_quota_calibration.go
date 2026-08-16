@@ -24,6 +24,9 @@ const (
 	smartQuotaCalibrationMinCapacityM       = 0.5
 	smartQuotaCalibrationMaxCapacityM       = 500.0
 	smartQuotaCalibrationSamplesPerAccount  = 3
+	smartQuotaCalibrationMinRuntimeSamples  = 3
+	smartQuotaCalibrationMinObservedDelta   = 0.10
+	smartQuotaCalibrationMaxSampleDeviation = 0.25
 	smartQuotaCalibrationMaxRepresentatives = 24
 	smartQuotaCalibrationDivergencePct      = 25.0
 
@@ -923,12 +926,77 @@ func (s *Service) smartQuotaCurrentEstimateForAt(now time.Time, identities ...st
 }
 
 func estimateSmartQuotaCurrentSamplesAt(samples []smartQuotaCalibrationSample, now time.Time) (smartQuotaEstimate, bool) {
-	// Only samples whose account has consumed strictly more than 10% may
-	// replace the configured per-plan fallback in real capacity accounting.
-	// Provisional 2-10% observations remain useful for quota-class discovery,
-	// but applying them to an individual account produced the false low pool
-	// totals shown while the UI correctly reported zero valid samples.
-	return estimateSmartQuotaSamplesAtMode(samples, smartQuotaEstimateSourceCurrent, 1, 0.005, now, false)
+	completeWindowSamples := filterSmartQuotaSamples(samples, func(sample smartQuotaCalibrationSample) bool {
+		return sample.completeWindow
+	})
+	if len(completeWindowSamples) > 0 {
+		// A complete local quota window proves the absolute numerator and may be
+		// adopted immediately for this exact credential.
+		return estimateSmartQuotaSamplesAtMode(
+			completeWindowSamples,
+			smartQuotaEstimateSourceCurrent,
+			1,
+			0.005,
+			now,
+			false,
+		)
+	}
+
+	runtimeSamples := filterSmartQuotaSamples(samples, func(sample smartQuotaCalibrationSample) bool {
+		return !sample.completeWindow && !sample.classificationOnly
+	})
+	if !smartQuotaRuntimeEvidenceEligible(runtimeSamples, now) {
+		return smartQuotaEstimate{}, false
+	}
+	// Runtime percentages are integer-rounded and often advance one point well
+	// after the requests that consumed it. Do not let three 1% movements replace
+	// a 60M fallback with a noisy 3M/10M/120M estimate. The precheck requires at
+	// least three mutually consistent samples and more than ten percentage
+	// points of locally observed movement. The 0.06 recency-weighted floor is
+	// the equivalent of 10% raw evidence at the six-hour cutoff (weight 0.60).
+	return estimateSmartQuotaSamplesAtMode(
+		runtimeSamples,
+		smartQuotaEstimateSourceCurrent,
+		smartQuotaCalibrationMinRuntimeSamples,
+		smartQuotaCalibrationMinObservedDelta*0.60,
+		now,
+		false,
+	)
+}
+
+func smartQuotaRuntimeEvidenceEligible(samples []smartQuotaCalibrationSample, now time.Time) bool {
+	cutoff := now.Add(-smartQuotaCalibrationRecentWindow).UnixMilli()
+	capacities := make([]float64, 0, len(samples))
+	observedDelta := 0.0
+	for _, sample := range samples {
+		if sample.observedMS < cutoff || sample.weight <= 0 ||
+			sample.capacityM < smartQuotaCalibrationMinCapacityM ||
+			sample.capacityM > smartQuotaCalibrationMaxCapacityM ||
+			!smartQuotaCalibrationUsedFractionEligible(sample.usedFraction) {
+			continue
+		}
+		capacities = append(capacities, sample.capacityM)
+		// Runtime sample weight is the percentage delta observed since the prior
+		// sample. Complete-window samples use weight=1 and were handled above.
+		observedDelta += sample.weight
+	}
+	if len(capacities) < smartQuotaCalibrationMinRuntimeSamples ||
+		observedDelta <= smartQuotaCalibrationMinObservedDelta {
+		return false
+	}
+
+	sort.Float64s(capacities)
+	median := capacities[len(capacities)/2]
+	if median <= 0 {
+		return false
+	}
+	consistent := 0
+	for _, capacityM := range capacities {
+		if smartQuotaRelativeDifference(capacityM, median) <= smartQuotaCalibrationMaxSampleDeviation {
+			consistent++
+		}
+	}
+	return consistent >= 2
 }
 
 func smartQuotaPlanOrGlobalEstimate(

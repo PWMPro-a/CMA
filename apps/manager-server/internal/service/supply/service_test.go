@@ -896,6 +896,49 @@ func TestAccountPoolStatsSeparateTotalAvailableHealthyAndDisabled(t *testing.T) 
 	}
 }
 
+func TestOperatorAccountPoolStatsSharesOneSnapshotUntilInvalidated(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/auth-files" {
+			http.NotFound(w, r)
+			return
+		}
+		request := requests.Add(1)
+		if request == 1 {
+			_, _ = w.Write([]byte(`{"files":[{"name":"first.json","provider":"codex","status":"active","auth_index":"first"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"files":[{"name":"second.json","provider":"codex","status":"disabled","disabled":true,"auth_index":"second"}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	service := New(nil, nil, server.Client())
+	cfg := store.ManagerConfig{CPAConnection: store.ManagerCPAConnectionConfig{
+		CPABaseURL:    server.URL,
+		ManagementKey: "management-key",
+	}}
+	first, err := service.countOperatorAccountPoolStats(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("load first operator snapshot: %v", err)
+	}
+	second, err := service.countOperatorAccountPoolStats(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("load shared operator snapshot: %v", err)
+	}
+	if requests.Load() != 1 || first.total != 1 || first.enabled != 1 || second.total != first.total || second.enabled != first.enabled {
+		t.Fatalf("shared operator snapshot requests=%d first=%#v second=%#v", requests.Load(), first, second)
+	}
+
+	service.invalidateAuthFilesCache()
+	refreshed, err := service.countOperatorAccountPoolStats(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("refresh invalidated operator snapshot: %v", err)
+	}
+	if requests.Load() != 2 || refreshed.total != 1 || refreshed.enabled != 0 {
+		t.Fatalf("invalidated operator snapshot requests=%d refreshed=%#v", requests.Load(), refreshed)
+	}
+}
+
 func TestCPAAuthLifecyclePendingIsNotSchedulableCapacity(t *testing.T) {
 	for _, status := range []string{
 		"initializing",
@@ -992,6 +1035,32 @@ func TestAccountPoolSummarySeparatesEnabledPoolFromDisabledArchive(t *testing.T)
 	}
 	if summary.Normal+summary.NeedsAttention+summary.QuotaRisk+summary.Unconfirmed != summary.Total {
 		t.Fatalf("enabled pool identity does not hold: %#v", summary)
+	}
+}
+
+func TestAccountPoolCredentialSummariesPublishExactSharedBuckets(t *testing.T) {
+	files := []cpaauthfiles.File{
+		{Name: "normal.json", Provider: "codex", AuthIndex: "normal", AccountID: "account-normal", Raw: map[string]any{"status": "active"}},
+		{Name: "risk.json", Provider: "codex", AuthIndex: "risk", Raw: map[string]any{"status": "active"}},
+		{Name: "disabled.json", Provider: "codex", AuthIndex: "disabled", Disabled: true, Raw: map[string]any{"status": "disabled"}},
+		{Name: "claude.json", Provider: "claude", Raw: map[string]any{"status": "active"}},
+	}
+	stats := accountPoolStatsFromFilesAndInspection(files, []store.CodexInspectionResult{
+		{FileName: "normal.json", Provider: "codex", AuthIndex: "normal", Action: "keep", UsedPercent: float64Ptr(10)},
+		{FileName: "risk.json", Provider: "codex", AuthIndex: "risk", Action: "keep", UsedPercent: float64Ptr(95)},
+	})
+
+	items := accountPoolCredentialSummaries(stats)
+	if len(items) != 3 {
+		t.Fatalf("credential summaries = %#v", items)
+	}
+	byName := make(map[string]AccountPoolCredentialSummary, len(items))
+	for _, item := range items {
+		byName[item.AuthFileName] = item
+	}
+	if byName["normal.json"].Bucket != "normal" || byName["normal.json"].AccountID != "account-normal" ||
+		byName["risk.json"].Bucket != "quota_risk" || byName["disabled.json"].Bucket != "disabled" {
+		t.Fatalf("credential summary buckets = %#v", items)
 	}
 }
 
