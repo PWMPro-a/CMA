@@ -2658,7 +2658,9 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		return err
 	}
 	if total > imported {
-		return s.importItems(ctx, cfg, &order)
+		importCtx, cancelImport := supplyImportCompletionContext(ctx)
+		defer cancelImport()
+		return s.importItems(importCtx, cfg, &order)
 	}
 	if released, err := s.autoReleaseAutomaticOrderIfNotNeeded(ctx, cfg, &order, true); released || err != nil {
 		return err
@@ -2774,10 +2776,27 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	if err := s.store.UpdateSupplyOrder(ctx, order); err != nil {
 		return err
 	}
-	if err := s.importItems(ctx, cfg, &order); err != nil {
+	// The supplier delivery and its import tasks are durable at this point.
+	// Finish registering them even when the dashboard request disconnects or
+	// reaches its client-side timeout; otherwise a paid batch can be recorded as
+	// partially failed while CPA is still completing normal initialization.
+	importCtx, cancelImport := supplyImportCompletionContext(ctx)
+	defer cancelImport()
+	if err := s.importItems(importCtx, cfg, &order); err != nil {
 		return err
 	}
 	return replacementSyncErr
+}
+
+const supplyImportCompletionTimeout = 15 * time.Minute
+
+func supplyImportCompletionContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	} else {
+		parent = context.WithoutCancel(parent)
+	}
+	return context.WithTimeout(parent, supplyImportCompletionTimeout)
 }
 
 func (s *Service) syncTakeReplacementFiles(ctx context.Context, cfg store.ManagerConfig, sourceOrderID string, files []supplyclient.ReplacementFile) error {

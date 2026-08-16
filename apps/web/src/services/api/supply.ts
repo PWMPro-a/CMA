@@ -1,5 +1,7 @@
 import { apiClient } from './client';
 
+export const SUPPLY_REPLENISH_TIMEOUT_MS = 15 * 60 * 1000;
+
 export type SupplyProduct = 'oauth_30d' | 'oauth_7d' | 'team_1h';
 export type SupplyStrategy = 'strong_supply' | 'balanced' | 'cost_first' | 'custom';
 export type SupplyQuotaEstimationMode = 'auto' | 'fixed' | string;
@@ -865,7 +867,7 @@ export const supplyApi = {
     apiClient.post(`/supply/recoveries/${encodeURIComponent(recoveryId)}/retry-import`),
 
   replenish: (quantity: number): Promise<SupplyStatus> =>
-    apiClient.post('/supply/replenish', { quantity }),
+    apiClient.post('/supply/replenish', { quantity }, { timeout: SUPPLY_REPLENISH_TIMEOUT_MS }),
 
   dismissCreateUncertain: (orderId: string): Promise<SupplyStatus> =>
     apiClient.post(`/supply/orders/${encodeURIComponent(orderId)}/dismiss-uncertain`),

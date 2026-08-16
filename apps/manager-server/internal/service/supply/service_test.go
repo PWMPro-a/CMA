@@ -4435,6 +4435,95 @@ func TestTimedOutTakingOrderRetriesWithoutAutomaticRelease(t *testing.T) {
 	}
 }
 
+func TestProcessOrderCompletesPersistedImportsAfterRequestCancellation(t *testing.T) {
+	account, err := normalizeAccountForImport(`{"type":"codex","email":"durable-import@example.com","account_id":"workspace-durable","workspace_id":"workspace-durable","chatgpt_user_id":"member-durable","access_token":"access"}`)
+	if err != nil {
+		t.Fatalf("normalize account: %v", err)
+	}
+	var registered map[string]any
+	if err := json.Unmarshal(account.payload, &registered); err != nil {
+		t.Fatalf("decode normalized account: %v", err)
+	}
+	registered["name"] = account.fileName
+	registered["provider"] = "codex"
+	registered["status"] = "active"
+	registered["disabled"] = false
+
+	lookupStarted := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	var firstLookup sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v0/management/auth-files" {
+			http.NotFound(w, r)
+			return
+		}
+		firstLookup.Do(func() {
+			close(lookupStarted)
+			<-releaseLookup
+		})
+		_ = json.NewEncoder(w).Encode(map[string]any{"files": []any{registered}})
+	}))
+	t.Cleanup(server.Close)
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "durable-import.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	order, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "order-durable-import", Product: "oauth_7d", RequestedQuantity: 1,
+		Status: "partial", RemoteStatus: "completed", ItemCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	if _, err := st.InsertSupplyImportItems(ctx, order.OrderID, []store.SupplyImportItem{{
+		OrderID: order.OrderID, ItemKey: account.itemKey, AccountName: account.accountName,
+		NameKey: account.nameKey, FileName: account.fileName, ImportAction: "add",
+		PayloadJSON: string(account.payload), LeaseExpiresAtMS: time.Now().Add(time.Hour).UnixMilli(),
+	}}); err != nil {
+		t.Fatalf("insert import item: %v", err)
+	}
+
+	service := New(st, nil, server.Client())
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- service.processOrder(requestCtx, store.ManagerConfig{
+			CPAConnection: store.ManagerCPAConnectionConfig{
+				CPABaseURL: server.URL, ManagementKey: "management-key",
+			},
+		}, order)
+	}()
+
+	select {
+	case <-lookupStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CPA lookup did not start")
+	}
+	cancelRequest()
+	close(releaseLookup)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("process order after request cancellation: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("durable import did not complete")
+	}
+
+	items, err := st.ListSupplyImportItemsByOrderIDs(context.Background(), []string{order.OrderID})
+	if err != nil || len(items) != 1 || items[0].Status != "imported" {
+		t.Fatalf("import items=%#v err=%v", items, err)
+	}
+	completed, found, err := st.GetSupplyOrder(context.Background(), order.OrderID)
+	if err != nil || !found || completed.Status != "completed" || completed.ImportedCount != 1 || completed.LastError != "" {
+		t.Fatalf("completed order=%#v found=%v err=%v", completed, found, err)
+	}
+}
+
 func TestClaimSupplyOrderTakingAllowsOnlyOneWorker(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
 	if err != nil {
