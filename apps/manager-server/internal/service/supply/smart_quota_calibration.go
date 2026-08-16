@@ -938,7 +938,7 @@ func (s *Service) smartQuotaEstimateForSupplierAtWithMinimumOptions(
 
 	var currentEstimate smartQuotaEstimate
 	currentOK := false
-	currentQuotaClasses := quotaClasses
+	var currentQuotaClasses []SmartQuotaClassEstimate
 	if len(normalizedIdentities) > 0 {
 		currentSamples := filterSmartQuotaSamples(recentSamples, func(sample smartQuotaCalibrationSample) bool {
 			_, ok := normalizedIdentities[sample.identity]
@@ -989,7 +989,7 @@ func (s *Service) smartQuotaEstimateForSupplierAtWithMinimumOptions(
 	)
 
 	if currentOK {
-		return attachSmartQuotaCurrentClasses(calibrateSmartQuotaCurrentEstimate(
+		return attachSmartQuotaClassesForCurrentContext(calibrateSmartQuotaCurrentEstimate(
 			currentEstimate,
 			recentEstimate,
 			recentOK,
@@ -1002,11 +1002,11 @@ func (s *Service) smartQuotaEstimateForSupplierAtWithMinimumOptions(
 		if historicalOK {
 			recentEstimate.HistoricalEstimateM = historicalEstimate.CapacityM
 		}
-		return attachSmartQuotaClasses(recentEstimate, quotaClasses)
+		return attachSmartQuotaClassesForCurrentContext(recentEstimate, currentQuotaClasses, quotaClasses)
 	}
 	if allOK {
 		allEstimate.HistoricalEstimateM = allEstimate.CapacityM
-		return attachSmartQuotaClasses(allEstimate, quotaClasses)
+		return attachSmartQuotaClassesForCurrentContext(allEstimate, currentQuotaClasses, quotaClasses)
 	}
 	if classifiedEstimate, classifiedOK := estimateSmartQuotaTrustedRepresentativesAt(classSamples, now); classifiedOK {
 		// The plan/global estimators intentionally require several delta rows per
@@ -1016,9 +1016,9 @@ func (s *Service) smartQuotaEstimateForSupplierAtWithMinimumOptions(
 		// those account representatives instead of publishing either the rejected
 		// low current account or a contradictory "no data" value next to populated
 		// quota classes.
-		return attachSmartQuotaClasses(classifiedEstimate, quotaClasses)
+		return attachSmartQuotaClassesForCurrentContext(classifiedEstimate, currentQuotaClasses, quotaClasses)
 	}
-	return attachSmartQuotaClasses(defaultSmartQuotaEstimateForPlan(planType), quotaClasses)
+	return attachSmartQuotaClassesForCurrentContext(defaultSmartQuotaEstimateForPlan(planType), currentQuotaClasses, quotaClasses)
 }
 
 func smartQuotaSampleMatchesSupplier(
@@ -2350,6 +2350,17 @@ func attachSmartQuotaCurrentClasses(
 	estimate.CalibrationAccountCount = smartQuotaClassAccountCount(calibrationClasses)
 	estimate.CurrentCohortClasses = true
 	return estimate
+}
+
+func attachSmartQuotaClassesForCurrentContext(
+	estimate smartQuotaEstimate,
+	currentClasses []SmartQuotaClassEstimate,
+	calibrationClasses []SmartQuotaClassEstimate,
+) smartQuotaEstimate {
+	if len(currentClasses) > 0 {
+		return attachSmartQuotaCurrentClasses(estimate, currentClasses, calibrationClasses)
+	}
+	return attachSmartQuotaClasses(estimate, calibrationClasses)
 }
 
 func selectSmartQuotaRepresentativePoints(points []smartQuotaWeightedPoint, limit int) []smartQuotaWeightedPoint {
