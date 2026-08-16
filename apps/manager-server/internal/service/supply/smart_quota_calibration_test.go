@@ -858,7 +858,7 @@ func TestSmartQuotaPlanAdoptionRestartsConfirmationWhenCandidateShifts(t *testin
 	setSamples(20, now)
 	shifted, shiftedPlanning := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 202, now.Add(time.Minute))
 	if shifted[0].ObservedM != 0 || shifted[0].RejectedAccounts != 3 || shifted[0].UniqueAccounts != 0 ||
-		shifted[0].ConfirmationRounds != 1 || shifted[0].RequiredRounds != 5 ||
+		shifted[0].ConfirmationRounds != 0 || shifted[0].RequiredRounds != 5 ||
 		shifted[0].ValidationState != smartQuotaValidationQuarantined || !shifted[0].UsingFallback ||
 		shifted[0].OrderingBlocked || shifted[0].AdoptedM != 60 || !shiftedPlanning["team"].FallbackOnly {
 		t.Fatalf("shifted candidate state = %#v", shifted[0])
@@ -1011,6 +1011,36 @@ func TestSmartQuotaPlanQuotaClassesUseCurrentInspectionCohort(t *testing.T) {
 	}
 }
 
+func TestSmartQuotaPlanRemovesCurrentLowClassWhileSamplesAreInsufficient(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	trustedIdentity := "file:trusted.json"
+	trustedSamples := quotaSamplesForEstimate(trustedIdentity, "team", 78.15, now.Add(-time.Minute), 3)
+	service.smartQuotaState.samples = append(service.smartQuotaState.samples, trustedSamples...)
+	service.smartQuotaState.samplesByIdentity[trustedIdentity] = append([]smartQuotaCalibrationSample(nil), trustedSamples...)
+	for _, sample := range []smartQuotaCalibrationSample{
+		{identity: "file:low-provisional.json", planType: "team", capacityM: 19.29, weight: 0.05, usedFraction: 0.05, observedMS: now.UnixMilli(), classificationOnly: true},
+		{identity: "file:normal-provisional.json", planType: "team", capacityM: 46.36, weight: 0.05, usedFraction: 0.05, observedMS: now.UnixMilli(), classificationOnly: true},
+	} {
+		service.smartQuotaState.samples = append(service.smartQuotaState.samples, sample)
+		service.smartQuotaState.samplesByIdentity[sample.identity] = []smartQuotaCalibrationSample{sample}
+	}
+	results := []store.CodexInspectionResult{
+		{FileName: "trusted.json", Provider: "codex", Status: "active", PlanType: "team"},
+		{FileName: "low-provisional.json", Provider: "codex", Status: "active", PlanType: "team"},
+		{FileName: "normal-provisional.json", Provider: "codex", Status: "active", PlanType: "team"},
+	}
+
+	items, planning := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 458, now)
+	if len(items) != 1 || items[0].ObservedM != 78.15 || items[0].UniqueAccounts != 1 ||
+		items[0].RejectedAccounts != 1 || items[0].ValidationState != smartQuotaValidationInsufficient ||
+		len(items[0].QuotaClasses) != 2 || items[0].QuotaClasses[0].MinimumM != 46.36 ||
+		items[0].QuotaClasses[1].MaximumM != 78.15 || items[0].AdoptedM != 60 ||
+		planning["team"].CapacityM != 60 || planning["team"].Source != smartQuotaEstimateSourceDefault {
+		t.Fatalf("insufficient corrected quota statistics = items %#v planning %#v", items, planning["team"])
+	}
+}
+
 func TestSmartQuotaPlanRebuildsObservedValueFromTrustedNormalRepresentatives(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Second)
@@ -1145,7 +1175,7 @@ func TestSmartQuotaPlanKeepsSupplierlessWarmHistoryIsolatedWithMultiplePlatforms
 	}
 }
 
-func TestSmartQuotaPlanAcceptsExtremeDownwardAfterFiveCompleteWindowRounds(t *testing.T) {
+func TestSmartQuotaPlanNeverAdoptsClassBelowPolicyFloor(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Second)
 	for index := 0; index < 3; index++ {
@@ -1160,19 +1190,23 @@ func TestSmartQuotaPlanAcceptsExtremeDownwardAfterFiveCompleteWindowRounds(t *te
 	results := []store.CodexInspectionResult{{FileName: "unseen.json", Provider: "codex", Status: "active", PlanType: "team"}}
 
 	var items []SmartQuotaPlanEstimate
+	var planning map[string]smartQuotaEstimate
 	for runID := int64(501); runID <= 505; runID++ {
-		items, _ = service.smartQuotaPlanEstimatesForInspection(
+		items, planning = service.smartQuotaPlanEstimatesForInspection(
 			store.ManagerSupplyConfig{},
 			results,
 			runID,
 			now.Add(time.Duration(runID-501)*time.Minute),
 		)
 	}
-	if len(items) != 1 || items[0].CompleteWindowAccounts != 3 || items[0].RequiredRounds != 5 ||
-		items[0].ConfirmationRounds != 5 || items[0].AdoptedM != 54 ||
-		items[0].ValidationState != smartQuotaValidationAccepted ||
-		!items[0].PendingConfirmation || items[0].OrderingBlocked {
-		t.Fatalf("confirmed complete-window estimate = %#v", items)
+	if len(items) != 1 || items[0].ObservedM != 0 || items[0].CompleteWindowAccounts != 0 ||
+		items[0].RejectedAccounts != 3 || items[0].RequiredRounds != 5 ||
+		items[0].ConfirmationRounds != 0 || items[0].AdoptedM != 60 ||
+		items[0].ValidationState != smartQuotaValidationQuarantined ||
+		!items[0].PendingConfirmation || !items[0].UsingFallback || items[0].OrderingBlocked ||
+		planning["team"].CapacityM != 60 || planning["team"].Source != smartQuotaEstimateSourceDefault ||
+		!planning["team"].FallbackOnly {
+		t.Fatalf("below-floor complete-window estimate = items %#v planning %#v", items, planning["team"])
 	}
 }
 

@@ -1629,12 +1629,12 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 				)
 			}
 			filteredTrusted = rejectedAccounts > 0 && smartQuotaEstimateHasTrustedPlanData(filteredObserved)
-			if filteredTrusted {
-				// When enough normal-range accounts remain, completely remove the
-				// abnormal low cluster before adoption as well as presentation. Old
-				// failures can no longer drag an otherwise healthy estimate down.
+			if rejectedAccounts > 0 {
+				// A class that is entirely below the policy floor is never an adoption
+				// candidate. Normal-range survivors may continue calibration once they
+				// have enough independent accounts; otherwise ordering stays on fallback.
 				candidateObserved = filteredObserved
-				hasData = true
+				hasData = filteredTrusted
 			}
 		}
 		planningObserved := candidateObserved
@@ -1726,7 +1726,9 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 		}
 		publishedObserved := rawObserved
 		publishedRejectedAccounts := 0
-		if filteredTrusted || (rejectedAccounts > 0 && state.validationState == smartQuotaValidationQuarantined) {
+		if rejectedAccounts > 0 {
+			// Rejected classes are never part of the published statistic. Adoption may
+			// still remain on the trusted fallback until enough corrected samples exist.
 			publishedObserved = filteredObserved
 			publishedRejectedAccounts = displayRejectedAccounts
 		}
