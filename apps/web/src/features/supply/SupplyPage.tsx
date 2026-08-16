@@ -117,6 +117,8 @@ const emptyConfig: SupplyConfig = {
   authFilesCacheTTLSeconds: 60,
   minHoldSeconds: 30,
   newAccountConfidence: 0.7,
+  teamQuotaQualityGateEnabled: false,
+  minimumTeamQuotaM: 50,
   minBalanceReserveFen: 0,
   dailyMaxHoldFen: 0,
   dailyMaxReplenishQuantity: 0,
@@ -1792,6 +1794,20 @@ export function SupplyPage() {
             </span>
           ) : null}
         </div>
+        {smart?.teamQuotaQualityGateEnabled ? (
+          <div className={styles.quotaEstimateMeta}>
+            <span>
+              {t('supply.team_quota_quality_summary', {
+                minimum: formatTokenM(smart.minimumTeamQuotaM ?? 50, 0),
+                qualified: formatInteger(smart.teamQuotaQualifiedAccounts ?? 0),
+                observed: formatInteger(smart.teamQuotaObservedAccounts ?? 0),
+                percent: formatNumber(smart.teamQuotaQualifiedPercent ?? 0, 1),
+                rejected: formatInteger(smart.teamQuotaRejectedAccounts ?? 0),
+                pending: formatInteger(smart.teamQuotaPendingAccounts ?? 0),
+              })}
+            </span>
+          </div>
+        ) : null}
         <div className={styles.quotaEstimateGrid}>
           {quotaEstimateItems.map((estimate) => {
             const planType = estimate.planType.trim().toLowerCase();
@@ -2866,6 +2882,34 @@ export function SupplyPage() {
                       />
                     </div>
                   </>
+                ) : null}
+                <div className={styles.reportSectionHeader}>
+                  <span>{t('supply.team_quota_quality_title')}</span>
+                  <small>{t('supply.team_quota_quality_hint')}</small>
+                </div>
+                <div className={styles.smartToggles}>
+                  <ToggleSwitch
+                    checked={draft.teamQuotaQualityGateEnabled === true}
+                    onChange={(teamQuotaQualityGateEnabled) =>
+                      updateDraft({ teamQuotaQualityGateEnabled })
+                    }
+                    label={t('supply.team_quota_quality_enable')}
+                  />
+                </div>
+                {draft.teamQuotaQualityGateEnabled ? (
+                  <div className={styles.formGrid}>
+                    <Input
+                      label={t('supply.minimum_team_quota_m')}
+                      type="number"
+                      min={1}
+                      max={500}
+                      step={1}
+                      value={draft.minimumTeamQuotaM ?? 50}
+                      onChange={(event) =>
+                        updateDraft({ minimumTeamQuotaM: Number(event.target.value) })
+                      }
+                    />
+                  </div>
                 ) : null}
                 <div className={styles.reportSectionHeader}>
                   <span>{t('supply.quota_plan_config_title')}</span>

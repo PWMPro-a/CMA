@@ -129,6 +129,46 @@ describe('accountListPresentation', () => {
     expect(item.recommendation.actionLabelKey).toBe('accounts.recommend_action_reauth');
   });
 
+  it('uses the shared normal pool bucket instead of stale reauth presentation', () => {
+    const row = makeRow({
+      statusMessage: 'expired',
+      inspection: {
+        source: 'server',
+        action: 'reauth',
+        actionReason: 'older 401',
+        actionStatus: 'pending',
+        statusCode: 401,
+        usedPercent: null,
+        runId: 1,
+        resultId: 2,
+        createdAtMs: 3,
+      },
+    });
+
+    const item = buildAccountListItem(row, {
+      codexStatus: makeCodexStatus({ needsReauth: true, isHttp401: true }),
+      poolStatus: 'normal',
+    });
+
+    expect(item.health.status).toBe('available');
+    expect(item.health.reasonKey).toBe('accounts.health_reason_available');
+  });
+
+  it('uses non-normal shared pool buckets as authoritative list states', () => {
+    expect(
+      buildAccountListItem(makeRow(), { poolStatus: 'needs_attention' }).health.status
+    ).toBe('exception');
+    expect(buildAccountListItem(makeRow(), { poolStatus: 'quota_risk' }).health.status).toBe(
+      'limited'
+    );
+    expect(buildAccountListItem(makeRow(), { poolStatus: 'unconfirmed' }).health.status).toBe(
+      'raw'
+    );
+    expect(buildAccountListItem(makeRow(), { poolStatus: 'disabled' }).health.status).toBe(
+      'disabled'
+    );
+  });
+
   it('summarizes quota refresh 401 as a quota refresh reauth reason', () => {
     const item = buildAccountListItem(
       makeRow({

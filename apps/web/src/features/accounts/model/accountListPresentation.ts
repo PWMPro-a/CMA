@@ -1,6 +1,6 @@
 import type { QuotaCooldownInfo } from '@/services/api';
 import type { AuthFileCodexStatusSummary } from '@/features/authFiles/model/authFilesPageModel';
-import type { AccountRow } from './accountRows';
+import type { AccountPoolCredentialBucket, AccountRow } from './accountRows';
 import {
   summarizeGroupedQuotaAvailability,
   type AccountGroupedQuotaAvailabilitySummary,
@@ -124,6 +124,7 @@ export interface AccountListPresentationOptions {
     source: UsageValueSource;
   } | null;
   codexStatus?: AuthFileCodexStatusSummary | null;
+  poolStatus?: AccountPoolCredentialBucket | null;
   quotaWindows?: AccountListQuotaWindowInput[];
 }
 
@@ -466,6 +467,7 @@ const resolveHealthStatus = (
   recommendation?: AccountRecommendation | null,
   quotaCooldown?: QuotaCooldownInfo | null,
   codexStatus?: AuthFileCodexStatusSummary | null,
+  poolStatus?: AccountPoolCredentialBucket | null,
   quotaWindows: AccountListQuotaWindowPresentation[] = []
 ): HealthStatusResolution => {
   const antigravityAvailability = resolveAntigravityAvailability(row, quotaWindows);
@@ -479,6 +481,26 @@ const resolveHealthStatus = (
           ? (antigravityAvailability.resetKind as AccountListSupportedLimitKind)
           : 'unknown'
       : resolveQuotaWindowLimitKind(quotaWindows);
+
+  if (poolStatus === 'normal' && !row.disabled && row.quota.status !== 'disabled') {
+    return {
+      status: 'available',
+      tooltipKey: 'accounts.health_tip_available',
+      tooltipParams: { detail: getFirstDetail(row.quota.source, row.quota.resetLabel) },
+      reasonKey: 'accounts.health_reason_available',
+      reasonTone: 'muted',
+    };
+  }
+
+  if (poolStatus === 'unconfirmed' && !row.disabled && row.quota.status !== 'disabled') {
+    return {
+      status: 'raw',
+      tooltipKey: 'accounts.health_tip_raw',
+      tooltipParams: { detail: getFirstDetail(row.quota.status, row.statusMessage) },
+      reasonKey: 'accounts.health_reason_raw',
+      reasonTone: 'muted',
+    };
+  }
 
   if (codexStatus?.needsReauth || isAuthProblem(row, recommendation)) {
     const quotaRefreshStatusCode = extractHttpStatusCode(row.quota.error);
@@ -607,12 +629,20 @@ const resolveHealthStatus = (
     };
   }
 
+  if (row.disabled || row.quota.status === 'disabled' || poolStatus === 'disabled') {
+    return {
+      status: 'disabled',
+      tooltipKey: 'accounts.health_tip_disabled',
+      tooltipParams: { detail: getFirstDetail(row.statusMessage, row.inspection?.actionReason) },
+      reasonKey: 'accounts.health_reason_disabled',
+      reasonTone: 'muted',
+    };
+  }
+
   const diagnosticText = getExceptionDetail(row);
   if (
-    !row.disabled &&
-    row.quota.status !== 'disabled' &&
-    (classifyAuthFileOperationalState(row.raw) === 'cooldown' ||
-      isAuthFileCoolingStatusText(diagnosticText, row.usage.success > 0))
+    classifyAuthFileOperationalState(row.raw) === 'cooldown' ||
+    isAuthFileCoolingStatusText(diagnosticText, row.usage.success > 0)
   ) {
     return {
       status: 'cooldown',
@@ -621,16 +651,6 @@ const resolveHealthStatus = (
       reasonKey: 'accounts.health_reason_cooldown_status',
       reasonParams: { detail: diagnosticText },
       reasonTone: 'warning',
-    };
-  }
-
-  if (row.disabled || row.quota.status === 'disabled') {
-    return {
-      status: 'disabled',
-      tooltipKey: 'accounts.health_tip_disabled',
-      tooltipParams: { detail: getFirstDetail(row.statusMessage, row.inspection?.actionReason) },
-      reasonKey: 'accounts.health_reason_disabled',
-      reasonTone: 'muted',
     };
   }
 
@@ -653,6 +673,27 @@ const resolveHealthStatus = (
       reasonKey: getExceptionReasonKey(row),
       reasonParams: { detail: getExceptionReasonDetail(row) },
       reasonTone: 'danger',
+    };
+  }
+
+  if (poolStatus === 'needs_attention') {
+    return {
+      status: 'exception',
+      tooltipKey: 'accounts.health_tip_exception',
+      tooltipParams: { detail: getExceptionDetail(row) },
+      reasonKey: getExceptionReasonKey(row),
+      reasonParams: { detail: getExceptionReasonDetail(row) },
+      reasonTone: 'danger',
+    };
+  }
+
+  if (poolStatus === 'quota_risk') {
+    return {
+      status: 'limited',
+      tooltipKey: 'accounts.health_tip_limited',
+      tooltipParams: { detail: getFirstDetail(row.quota.rateLimitReachedType, row.quota.error) },
+      reasonKey: getLimitedReasonKey(row),
+      reasonTone: 'warning',
     };
   }
 
@@ -784,6 +825,7 @@ export const buildAccountListItem = (
     recommendation,
     quotaCooldown,
     options.codexStatus ?? null,
+    options.poolStatus ?? null,
     quotaWindows
   );
 

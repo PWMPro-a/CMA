@@ -56,6 +56,8 @@ export interface SupplyConfig {
   authFilesCacheTTLSeconds: number;
   minHoldSeconds: number;
   newAccountConfidence: number;
+  teamQuotaQualityGateEnabled?: boolean;
+  minimumTeamQuotaM?: number;
   minBalanceReserveFen?: number;
   dailyMaxHoldFen?: number;
   dailyMaxReplenishQuantity?: number;
@@ -341,6 +343,13 @@ export interface SupplySmartResource {
   accountQuotaPlanEstimates?: SupplyQuotaPlanEstimate[];
   quotaEstimateOrderingBlocked?: boolean;
   quotaEstimatePendingPlans?: number;
+  teamQuotaQualityGateEnabled?: boolean;
+  minimumTeamQuotaM?: number;
+  teamQuotaObservedAccounts?: number;
+  teamQuotaQualifiedAccounts?: number;
+  teamQuotaRejectedAccounts?: number;
+  teamQuotaPendingAccounts?: number;
+  teamQuotaQualifiedPercent?: number;
   rawCapacityTokenM?: number;
   currentCapacityTokenM?: number;
   availableCapacityTokenM?: number;

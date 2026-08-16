@@ -129,13 +129,20 @@ type SmartResource struct {
 	// only its monthly quota window. The quota selector always prefers a shorter
 	// window; monthly data is used only as the fallback when no short window is
 	// present. The delivery lease still bounds its usable lifetime.
-	LeaseEstimatedAccounts    int     `json:"leaseEstimatedAccounts,omitempty"`
-	LeaseEstimatedCapacityRCU float64 `json:"leaseEstimatedCapacityRcu,omitempty"`
-	TargetAvailableAccounts   int     `json:"-"`
-	ConfiguredHealthyMinutes  int     `json:"configuredHealthyMinutesTarget,omitempty"`
-	EffectiveHealthyMinutes   int     `json:"effectiveHealthyMinutesTarget"`
-	AccountLifetimeMinutes    int     `json:"accountLifetimeMinutes"`
-	EstimatedSustainMinutes   float64 `json:"estimatedSustainMinutes"`
+	LeaseEstimatedAccounts      int     `json:"leaseEstimatedAccounts,omitempty"`
+	LeaseEstimatedCapacityRCU   float64 `json:"leaseEstimatedCapacityRcu,omitempty"`
+	TeamQuotaQualityGateEnabled bool    `json:"teamQuotaQualityGateEnabled,omitempty"`
+	MinimumTeamQuotaM           float64 `json:"minimumTeamQuotaM,omitempty"`
+	TeamQuotaObservedAccounts   int     `json:"teamQuotaObservedAccounts,omitempty"`
+	TeamQuotaQualifiedAccounts  int     `json:"teamQuotaQualifiedAccounts,omitempty"`
+	TeamQuotaRejectedAccounts   int     `json:"teamQuotaRejectedAccounts,omitempty"`
+	TeamQuotaPendingAccounts    int     `json:"teamQuotaPendingAccounts,omitempty"`
+	TeamQuotaQualifiedPercent   float64 `json:"teamQuotaQualifiedPercent,omitempty"`
+	TargetAvailableAccounts     int     `json:"-"`
+	ConfiguredHealthyMinutes    int     `json:"configuredHealthyMinutesTarget,omitempty"`
+	EffectiveHealthyMinutes     int     `json:"effectiveHealthyMinutesTarget"`
+	AccountLifetimeMinutes      int     `json:"accountLifetimeMinutes"`
+	EstimatedSustainMinutes     float64 `json:"estimatedSustainMinutes"`
 	// EmergencyShortage marks a runway shortfall that takes precedence over
 	// normal demand-trend observation.
 	EmergencyShortage           bool    `json:"emergencyShortage"`
@@ -526,6 +533,10 @@ func (s *Service) smartResource(ctx context.Context, cfg store.ManagerConfig, fo
 
 func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupplyConfig, snapshot inspectionQuotaSnapshot, now time.Time) (resource SmartResource) {
 	resource = defaultSmartResource(cfg)
+	resource.TeamQuotaQualityGateEnabled = cfg.TeamQuotaQualityGateEnabled != nil && *cfg.TeamQuotaQualityGateEnabled && cfg.MinimumTeamQuotaM > 0
+	if resource.TeamQuotaQualityGateEnabled {
+		resource.MinimumTeamQuotaM = cfg.MinimumTeamQuotaM
+	}
 	resource.quotaSupplierByFile = snapshot.supplierByFile
 	defer func() {
 		applySmartTokenMetrics(&resource)
@@ -642,6 +653,20 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			continue
 		}
 		withVerifiedUsability++
+		quality := s.smartTeamQuotaQualityForResult(cfg, result, now)
+		if quality.applies {
+			if !quality.observed {
+				resource.TeamQuotaPendingAccounts++
+			} else {
+				resource.TeamQuotaObservedAccounts++
+				if quality.qualified {
+					resource.TeamQuotaQualifiedAccounts++
+				} else {
+					resource.TeamQuotaRejectedAccounts++
+					continue
+				}
+			}
+		}
 		resource.SchedulableAccounts++
 		resource.AvailableAccounts++
 		remainingMinutes := float64(smartUsefulAccountLifetimeMinutes())
@@ -748,7 +773,15 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		resource.AvailableAccounts++
 		resource.PendingInspectionAccounts++
 		resource.PendingInspectionCapacityRCU += capacity
+		if resource.TeamQuotaQualityGateEnabled {
+			resource.TeamQuotaPendingAccounts++
+		}
 		resource.recordExpiringAccount(remainingMinutes, capacity)
+	}
+	if resource.TeamQuotaObservedAccounts > 0 {
+		resource.TeamQuotaQualifiedPercent = round2(
+			float64(resource.TeamQuotaQualifiedAccounts) / float64(resource.TeamQuotaObservedAccounts) * 100,
+		)
 	}
 	resource.DisabledAccounts = max(0, resource.TotalAccounts-resource.AvailableAccounts)
 	applySmartAccountCountBreakdown(&resource)

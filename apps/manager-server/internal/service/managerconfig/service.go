@@ -415,6 +415,12 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	}
 	next.MinHoldSeconds = BoundedPositiveOrDefault(submitted.MinHoldSeconds, next.MinHoldSeconds, 30, 3600)
 	next.NewAccountConfidence = BoundedFloatOrDefault(submitted.NewAccountConfidence, next.NewAccountConfidence, 0.7, 0.1, 1)
+	if submitted.TeamQuotaQualityGateEnabled != nil {
+		next.TeamQuotaQualityGateEnabled = BoolPtr(*submitted.TeamQuotaQualityGateEnabled)
+	} else if next.TeamQuotaQualityGateEnabled == nil {
+		next.TeamQuotaQualityGateEnabled = BoolPtr(false)
+	}
+	next.MinimumTeamQuotaM = BoundedFloatOrDefault(submitted.MinimumTeamQuotaM, next.MinimumTeamQuotaM, 50, 1, 500)
 	next.MinBalanceReserveFen = BoundedOptionalInt64(submitted.MinBalanceReserveFen, next.MinBalanceReserveFen, 100_000_000)
 	next.DailyMaxHoldFen = BoundedOptionalInt64(submitted.DailyMaxHoldFen, next.DailyMaxHoldFen, 100_000_000)
 	next.DailyMaxReplenishQuantity = BoundedOptionalInt(submitted.DailyMaxReplenishQuantity, next.DailyMaxReplenishQuantity, 10_000)

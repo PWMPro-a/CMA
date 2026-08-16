@@ -4327,10 +4327,12 @@ export function AccountsPage() {
               quotaDisplayWindowsByRowKey.get(row.selectionKey) ?? buildQuotaDisplayWindows(row);
             const quotaCooldown = quotaCooldownsByRowKey.get(row.selectionKey)?.[0] ?? null;
             const codexStatus = codexStatusBySelectionKey.get(row.selectionKey) ?? null;
+            const poolStatus = accountPoolStatusByRowKey.get(row.selectionKey) ?? null;
             const item = buildAccountListItem(row, {
               recommendation,
               quotaCooldown,
               codexStatus,
+              poolStatus,
               quotaWindows,
             });
             const antigravityQuotaMatrix = buildAntigravityQuotaMatrix(row, quotaWindows);

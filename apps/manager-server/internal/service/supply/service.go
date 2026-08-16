@@ -2253,6 +2253,11 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		if err != nil {
 			return err
 		}
+		if disabled, qualityErr := s.disableLowQualityTeamAccounts(ctx, cfg, time.Now()); qualityErr != nil {
+			log.Printf("[supply] team quota quality enforcement failed: %v", qualityErr)
+		} else if disabled > 0 {
+			log.Printf("[supply] disabled %d team credentials below %.2fM quota quality floor", disabled, supplyCfg.MinimumTeamQuotaM)
+		}
 		if len(openOrders) > 0 {
 			resource.PrelockedCapacityRCU = totalSupplyOrderCapacityRCU(supplyCfg, resource, openOrders)
 			resource.LockedOrderID = openOrders[0].OrderID
@@ -3394,7 +3399,7 @@ func (s *Service) refreshSupplyOverview(ctx context.Context, cfg store.ManagerSu
 }
 
 func (s *Service) hydrateOverviewIfNeeded(ctx context.Context, cfg store.ManagerSupplyConfig) {
-	if s == nil || !supplyCredentialsConfigured(cfg) {
+	if s == nil || !managerconfigsvc.SupplyEnabled(cfg) || !supplyCredentialsConfigured(cfg) {
 		return
 	}
 
@@ -5472,6 +5477,101 @@ func (s *Service) disableExpiredSupplyAccounts(ctx context.Context, cfg store.Ma
 	return disabled, firstErr
 }
 
+const maxLowQualityTeamDisablesPerRun = 12
+
+func (s *Service) disableLowQualityTeamAccounts(
+	ctx context.Context,
+	cfg store.ManagerConfig,
+	now time.Time,
+) (int, error) {
+	if s == nil || s.authFiles == nil || cfg.Supply.TeamQuotaQualityGateEnabled == nil ||
+		!*cfg.Supply.TeamQuotaQualityGateEnabled || cfg.Supply.MinimumTeamQuotaM <= 0 || !cpaManagementConfigured(cfg) {
+		return 0, nil
+	}
+	inspection, err := s.cachedInspectionQuotaSnapshot(ctx, cfg.Supply, false)
+	if err != nil {
+		return 0, err
+	}
+	if !smartInspectionSnapshotComplete(inspection) || !smartInspectionSnapshotFresh(inspection, now) {
+		return 0, nil
+	}
+	authSnapshot, err := s.cachedAuthFiles(ctx, cfg, false)
+	if err != nil {
+		return 0, err
+	}
+
+	resultsByFile := make(map[string][]store.CodexInspectionResult, len(inspection.results))
+	filesByName := make(map[string]int, len(authSnapshot.files))
+	for _, result := range inspection.results {
+		if isSmartCapacityInspectionResult(result) {
+			name := strings.TrimSpace(result.FileName)
+			resultsByFile[name] = append(resultsByFile[name], result)
+		}
+	}
+	for _, file := range authSnapshot.files {
+		if isCodexAuthFile(file) {
+			filesByName[strings.TrimSpace(file.Name)]++
+		}
+	}
+
+	disabled := 0
+	var firstErr error
+	for _, file := range authSnapshot.files {
+		if disabled >= maxLowQualityTeamDisablesPerRun || !isCodexAuthFile(file) || file.Disabled {
+			continue
+		}
+		fileName := strings.TrimSpace(file.Name)
+		result, matched := matchInspectionResultForAuthFile(file, resultsByFile[fileName], filesByName[fileName])
+		if !matched {
+			continue
+		}
+		quality := s.smartTeamQuotaQualityForResult(cfg.Supply, result, now)
+		if !quality.applies || !quality.observed || quality.qualified {
+			continue
+		}
+		identity := cpaauthfiles.Identity{
+			AuthFileName:      file.Name,
+			RuntimeID:         file.ID,
+			AuthIndex:         file.AuthIndex,
+			Provider:          file.Provider,
+			AccountSnapshot:   file.AccountSnapshot,
+			AccountIDSnapshot: file.AccountID,
+		}
+		mutationCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		target, targetErr := s.authFiles.ResolveVerifiedStatusMutationTarget(
+			mutationCtx,
+			cfg.CPAConnection.CPABaseURL,
+			cfg.CPAConnection.ManagementKey,
+			identity,
+		)
+		if targetErr == nil && target.File.Disabled {
+			cancel()
+			continue
+		}
+		if targetErr == nil {
+			targetErr = s.authFiles.PatchDisabledTarget(
+				mutationCtx,
+				cfg.CPAConnection.CPABaseURL,
+				cfg.CPAConnection.ManagementKey,
+				target,
+				true,
+			)
+		}
+		cancel()
+		if targetErr != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("disable low-quota team credential %q: %w", fileName, targetErr)
+			}
+			continue
+		}
+		disabled++
+	}
+	if disabled > 0 {
+		s.invalidateAuthAndCapacityCaches()
+	}
+	return disabled, firstErr
+}
+
 func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerConfig) (int, error) {
 	stats, err := s.countAccountPoolStats(ctx, cfg)
 	return stats.schedulable, err
@@ -5596,6 +5696,7 @@ func (s *Service) loadOperatorAccountPoolStats(
 		triggerType,
 		now,
 	)
+	stats = s.applyTeamQuotaQualityGate(cfg.Supply, stats, results, now)
 	return stats, liveErr
 }
 
@@ -5851,6 +5952,68 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 		stats.recordCredentialBucket(file, bucket, uniqueFileName)
 		if bucket == operatorAccountNormal {
 			stats.recordNormalCapacityEvidence(file, remainingFraction, uniqueFileName)
+		}
+	}
+	return stats
+}
+
+func (s *Service) applyTeamQuotaQualityGate(
+	cfg store.ManagerSupplyConfig,
+	stats accountPoolStats,
+	results []store.CodexInspectionResult,
+	now time.Time,
+) accountPoolStats {
+	if s == nil || cfg.TeamQuotaQualityGateEnabled == nil || !*cfg.TeamQuotaQualityGateEnabled || cfg.MinimumTeamQuotaM <= 0 {
+		return stats
+	}
+	resultsByFile := make(map[string][]store.CodexInspectionResult, len(results))
+	filesByName := make(map[string]int, len(stats.files))
+	for _, result := range results {
+		if isSmartCapacityInspectionResult(result) {
+			name := strings.TrimSpace(result.FileName)
+			resultsByFile[name] = append(resultsByFile[name], result)
+		}
+	}
+	for _, file := range stats.files {
+		if isCodexAuthFile(file) {
+			filesByName[strings.TrimSpace(file.Name)]++
+		}
+	}
+	for _, file := range stats.files {
+		if !isCodexAuthFile(file) || file.Disabled {
+			continue
+		}
+		fileName := strings.TrimSpace(file.Name)
+		result, matched := matchInspectionResultForAuthFile(file, resultsByFile[fileName], filesByName[fileName])
+		if !matched {
+			continue
+		}
+		quality := s.smartTeamQuotaQualityForResult(cfg, result, now)
+		if !quality.applies || !quality.observed || quality.qualified {
+			continue
+		}
+
+		credentialKey := operatorCredentialKey(file.Name, file.AuthIndex)
+		fileKey := operatorFileCredentialKey(file.Name)
+		bucket, found := stats.bucketByCredential[credentialKey]
+		if !found && filesByName[fileName] == 1 {
+			bucket, found = stats.bucketByCredential[fileKey]
+		}
+		if !found || bucket == operatorAccountNeedsAttention || bucket == operatorAccountQuotaRisk {
+			continue
+		}
+		switch bucket {
+		case operatorAccountNormal:
+			stats.normal = max(0, stats.normal-1)
+		case operatorAccountUnconfirmed:
+			stats.unconfirmed = max(0, stats.unconfirmed-1)
+		}
+		stats.quotaRisk++
+		stats.bucketByCredential[credentialKey] = operatorAccountQuotaRisk
+		delete(stats.normalRemainingByCredential, credentialKey)
+		if filesByName[fileName] == 1 {
+			stats.bucketByCredential[fileKey] = operatorAccountQuotaRisk
+			delete(stats.normalRemainingByCredential, fileKey)
 		}
 	}
 	return stats

@@ -102,6 +102,13 @@ type smartQuotaEstimate struct {
 	QuotaClasses           []SmartQuotaClassEstimate
 }
 
+type smartTeamQuotaQuality struct {
+	applies   bool
+	observed  bool
+	qualified bool
+	capacityM float64
+}
+
 type smartQuotaPlanAdoptionState struct {
 	mode                string
 	adoptedM            float64
@@ -998,6 +1005,32 @@ func (s *Service) smartQuotaCurrentEstimateForAt(now time.Time, identities ...st
 	}
 	s.smartMu.RUnlock()
 	return estimateSmartQuotaCurrentSamplesAt(samples, now)
+}
+
+func (s *Service) smartTeamQuotaQualityForResult(
+	cfg store.ManagerSupplyConfig,
+	result store.CodexInspectionResult,
+	now time.Time,
+) smartTeamQuotaQuality {
+	if cfg.TeamQuotaQualityGateEnabled == nil || !*cfg.TeamQuotaQualityGateEnabled || cfg.MinimumTeamQuotaM <= 0 ||
+		!strings.EqualFold(strings.TrimSpace(result.PlanType), "team") {
+		return smartTeamQuotaQuality{}
+	}
+	quality := smartTeamQuotaQuality{applies: true}
+	identities := smartQuotaCalibrationResultIdentities(
+		result.FileName,
+		result.AuthIndex,
+		result.AccountKey,
+		result.AccountID,
+	)
+	estimate, ok := s.smartQuotaCurrentEstimateForAt(now, identities...)
+	if !ok || estimate.Provisional || estimate.CapacityM <= 0 {
+		return quality
+	}
+	quality.observed = true
+	quality.capacityM = estimate.CapacityM
+	quality.qualified = estimate.CapacityM >= cfg.MinimumTeamQuotaM
+	return quality
 }
 
 func estimateSmartQuotaCurrentSamplesAt(samples []smartQuotaCalibrationSample, now time.Time) (smartQuotaEstimate, bool) {

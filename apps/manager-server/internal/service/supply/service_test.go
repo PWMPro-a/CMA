@@ -1822,6 +1822,121 @@ func TestDisableExpiredSupplyAccountsUsesCurrentRuntimeIdentityAndRefreshesPool(
 	}
 }
 
+func TestDisableLowQualityTeamAccountsVerifiesRuntimeIdentity(t *testing.T) {
+	var disabled atomic.Bool
+	var patchCalls atomic.Int32
+	now := time.Now().Truncate(time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer management-key" {
+			http.Error(w, "missing management key", http.StatusUnauthorized)
+			return
+		}
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"id": "runtime-low", "name": "low.json", "auth_index": "auth-low",
+				"provider": "codex", "account_id": "account-low", "status": "ready", "disabled": disabled.Load(),
+			}})
+		case "PATCH /v0/management/auth-files/status":
+			var payload struct {
+				Name      string `json:"name"`
+				AuthIndex string `json:"auth_index"`
+				Disabled  bool   `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if payload.Name != "runtime-low" || payload.AuthIndex != "auth-low" || !payload.Disabled {
+				t.Fatalf("unexpected quality patch: %#v", payload)
+			}
+			patchCalls.Add(1)
+			disabled.Store(true)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "team-quality.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	service := New(st, nil, server.Client())
+	service.smartMu.Lock()
+	service.appendSmartQuotaCalibrationSampleLocked(smartQuotaCalibrationSample{
+		identity: "file:low.json", planType: "team", capacityM: 36, weight: 1, usedFraction: 0.2,
+		observedMS: now.UnixMilli(), completeWindow: true,
+	})
+	service.smartMu.Unlock()
+	service.quotaSnapshotMu.Lock()
+	service.quotaSnapshot = inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{ProbeSetCount: 1, SampledCount: 1, FinishedAtMS: now.UnixMilli()},
+		results: []store.CodexInspectionResult{{
+			FileName: "low.json", AuthIndex: "auth-low", AccountID: "account-low", Provider: "codex",
+			Status: "active", Action: "keep", PlanType: "team", QuotaWindows: []model.CodexInspectionQuotaWindow{quotaWindow("weekly", 10, smartQuotaWeekSeconds)},
+		}},
+		generatedAt: now,
+		attemptedAt: now,
+	}
+	service.quotaSnapshotMu.Unlock()
+	service.authCacheMu.Lock()
+	service.authCache = authFileSnapshot{
+		files: []cpaauthfiles.File{{
+			ID: "runtime-low", Name: "low.json", AuthIndex: "auth-low", Provider: "codex", AccountID: "account-low",
+		}},
+		generatedAt: now,
+		attemptedAt: now,
+	}
+	service.authCacheMu.Unlock()
+
+	gateEnabled := true
+	disabledCount, err := service.disableLowQualityTeamAccounts(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			TeamQuotaQualityGateEnabled: &gateEnabled,
+			MinimumTeamQuotaM:           50,
+			AuthFilesCacheTTLSeconds:    60,
+		},
+	}, now)
+	if err != nil || disabledCount != 1 || patchCalls.Load() != 1 || !disabled.Load() {
+		t.Fatalf("quality disable result disabled=%d patch=%d state=%t err=%v", disabledCount, patchCalls.Load(), disabled.Load(), err)
+	}
+}
+
+func TestTeamQuotaQualityGateMarksLowQuotaCredentialAsQuotaRisk(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	service := New(nil, nil)
+	service.smartMu.Lock()
+	service.appendSmartQuotaCalibrationSampleLocked(smartQuotaCalibrationSample{
+		identity: "file:low.json", planType: "team", capacityM: 36, weight: 1, usedFraction: 0.2,
+		observedMS: now.UnixMilli(), completeWindow: true,
+	})
+	service.smartMu.Unlock()
+	files := []cpaauthfiles.File{{
+		ID: "runtime-low", Name: "low.json", AuthIndex: "auth-low", Provider: "codex",
+		Raw: map[string]any{"status": "ready"},
+	}}
+	results := []store.CodexInspectionResult{{
+		FileName: "low.json", AuthIndex: "auth-low", Provider: "codex", Status: "active", Action: "keep", PlanType: "team",
+		QuotaWindows: []model.CodexInspectionQuotaWindow{quotaWindow("weekly", 10, smartQuotaWeekSeconds)},
+	}}
+	stats := accountPoolStatsFromFilesAndCurrentEvidence(files, results, nil, model.CodexInspectionTriggerManual, now)
+	if stats.normal != 1 || stats.quotaRisk != 0 {
+		t.Fatalf("pre-gate pool stats = %#v", stats)
+	}
+	gateEnabled := true
+	stats = service.applyTeamQuotaQualityGate(store.ManagerSupplyConfig{
+		TeamQuotaQualityGateEnabled: &gateEnabled,
+		MinimumTeamQuotaM:           50,
+	}, stats, results, now)
+	if stats.normal != 0 || stats.quotaRisk != 1 || stats.unconfirmed != 0 {
+		t.Fatalf("post-gate pool stats = %#v", stats)
+	}
+}
+
 func TestDisableExpiredSupplyAccountsIgnoresSupersededLeaseForReauthorizedFile(t *testing.T) {
 	var patchCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -5052,6 +5167,7 @@ func TestSupplyOrderDatabaseAllowsOnlyOneOpenOrder(t *testing.T) {
 func TestHydrateOverviewIfNeededRestoresSupplierSnapshotAfterRestart(t *testing.T) {
 	var inventoryCalls atomic.Int32
 	var balanceCalls atomic.Int32
+	enabled := true
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/customer/login":
@@ -5070,6 +5186,7 @@ func TestHydrateOverviewIfNeededRestoresSupplierSnapshotAfterRestart(t *testing.
 
 	service := New(nil, nil, server.Client())
 	cfg := store.ManagerSupplyConfig{
+		Enabled:            &enabled,
 		BaseURL:            server.URL,
 		Username:           "customer",
 		Password:           "password",
@@ -5089,6 +5206,30 @@ func TestHydrateOverviewIfNeededRestoresSupplierSnapshotAfterRestart(t *testing.
 	service.hydrateOverviewIfNeeded(context.Background(), cfg)
 	if inventoryCalls.Load() != 1 || balanceCalls.Load() != 1 {
 		t.Fatalf("complete overview must not refetch on each UI poll: inventory=%d balance=%d", inventoryCalls.Load(), balanceCalls.Load())
+	}
+}
+
+func TestHydrateOverviewIfNeededSkipsDisabledSupply(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		t.Fatalf("disabled supply made an upstream request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	disabled := false
+	service := New(nil, nil, server.Client())
+	service.hydrateOverviewIfNeeded(context.Background(), store.ManagerSupplyConfig{
+		Enabled:            &disabled,
+		BaseURL:            server.URL,
+		Username:           "customer",
+		Password:           "password",
+		Product:            "oauth_7d",
+		ReplenishBatchSize: 5,
+	})
+
+	if calls.Load() != 0 {
+		t.Fatalf("disabled supply upstream calls = %d, want 0", calls.Load())
 	}
 }
 
