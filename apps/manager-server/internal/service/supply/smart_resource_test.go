@@ -561,6 +561,70 @@ func TestLoadLatestInspectionQuotaSnapshotKeepsExpiredLeaseEvidenceOutOfActiveOv
 	}
 }
 
+func TestLoadLatestInspectionQuotaSnapshotUsesSinglePlatformForUnattributedSamples(t *testing.T) {
+	tests := []struct {
+		name         string
+		platforms    []store.ManagerSupplyPlatformConfig
+		wantSupplier string
+	}{
+		{
+			name: "single platform",
+			platforms: []store.ManagerSupplyPlatformConfig{
+				{ID: "sogouedu", Type: "legacy"},
+			},
+			wantSupplier: "sogouedu",
+		},
+		{
+			name: "multiple platforms",
+			platforms: []store.ManagerSupplyPlatformConfig{
+				{ID: "supplier-a", Type: "legacy"},
+				{ID: "supplier-b", Type: "legacy"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, err := store.Open(filepath.Join(t.TempDir(), "supplier-snapshot.sqlite"))
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			now := time.Now().Truncate(time.Second)
+			usedPercent := 20.0
+			weeklySeconds := float64(smartQuotaWeekSeconds)
+			seedCompletedQuotaInspection(t, st, store.CodexInspectionResult{
+				AccountKey: "manual-account",
+				FileName:   "manual-account.json",
+				Provider:   "codex",
+				Status:     "active",
+				Action:     "keep",
+				PlanType:   "team",
+				QuotaWindows: []model.CodexInspectionQuotaWindow{{
+					ID:                 "weekly",
+					UsedPercent:        &usedPercent,
+					ResetAtMS:          now.Add(6 * 24 * time.Hour).UnixMilli(),
+					LimitWindowSeconds: &weeklySeconds,
+				}},
+			})
+
+			service := New(st, nil)
+			snapshot, err := service.loadLatestInspectionQuotaSnapshot(context.Background(), store.ManagerSupplyConfig{
+				Platforms: tt.platforms,
+			})
+			if err != nil {
+				t.Fatalf("load snapshot: %v", err)
+			}
+			if got := snapshot.supplierByFile["manual-account.json"]; got != tt.wantSupplier {
+				t.Fatalf("supplier fallback = %q, want %q", got, tt.wantSupplier)
+			}
+			if len(snapshot.quotaWindowUsage) != 1 || snapshot.quotaWindowUsage[0].supplierID != tt.wantSupplier {
+				t.Fatalf("quota sample supplier = %#v, want %q", snapshot.quotaWindowUsage, tt.wantSupplier)
+			}
+		})
+	}
+}
+
 func TestLoadLatestInspectionQuotaSnapshotAcceptsTrustedEmptySupplySnapshot(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "empty-supply-snapshot.sqlite"))
 	if err != nil {

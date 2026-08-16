@@ -1886,6 +1886,18 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context, configs
 				supplierByFile[fileName] = supplierID
 			}
 		}
+		platforms := supplyPlatforms(cfg)
+		if len(platforms) == 1 {
+			supplierID := normalizeSmartQuotaSupplierID(platforms[0].ID)
+			if supplierID != "" {
+				for _, result := range filtered {
+					fileName := strings.TrimSpace(result.FileName)
+					if fileName != "" && normalizeSmartQuotaSupplierID(supplierByFile[fileName]) == "" {
+						supplierByFile[fileName] = supplierID
+					}
+				}
+			}
+		}
 		quotaWindowUsage, quotaWindowTargets := smartQuotaWindowBaselinesForInspection(filtered, run, supplierByFile)
 		if len(quotaWindowTargets) > 0 {
 			usageRows, err := s.store.ListSupplyQuotaWindowUsage(ctx, quotaWindowTargets)
