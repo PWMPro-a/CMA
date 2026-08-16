@@ -19,7 +19,9 @@ export type VisualConfigFieldPath =
   | 'maxRetryCredentials'
   | 'maxRetryInterval'
   | 'authAutoRefreshWorkers'
-  | 'codexTailBurstTriggerUsedPercent'
+  | 'codexTailBurstTriggerRemainingPercent'
+  | 'codexTailBurstExpiryWindow'
+  | 'codexTailBurstMaxConcurrency'
   | 'codexTailBurstCollectorMaxConcurrency'
   | 'codexCacheAffinityMaxEntries'
   | 'codexCacheAffinityMaxRetryCredentials'
@@ -202,8 +204,10 @@ export type VisualConfigValues = {
   codexCacheAffinityQuotaPreemptPercent: string;
   codexCacheAffinityQuotaHardStopPercent: string;
   codexTailBurstEnabled: boolean;
-  codexTailBurstTriggerUsedPercent: string;
+  codexTailBurstTriggerRemainingPercent: string;
   codexTailBurstSnapshotTtl: string;
+  codexTailBurstExpiryWindow: string;
+  codexTailBurstMaxConcurrency: string;
   codexTailBurstCollectorInterval: string;
   codexTailBurstCollectorMaxConcurrency: string;
   codexTailBurstCollectorTimeout: string;
@@ -325,8 +329,10 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   codexCacheAffinityQuotaPreemptPercent: '97',
   codexCacheAffinityQuotaHardStopPercent: '99',
   codexTailBurstEnabled: false,
-  codexTailBurstTriggerUsedPercent: '98',
+  codexTailBurstTriggerRemainingPercent: '2',
   codexTailBurstSnapshotTtl: '90s',
+  codexTailBurstExpiryWindow: '10m',
+  codexTailBurstMaxConcurrency: '32',
   codexTailBurstCollectorInterval: '45s',
   codexTailBurstCollectorMaxConcurrency: '4',
   codexTailBurstCollectorTimeout: '8s',

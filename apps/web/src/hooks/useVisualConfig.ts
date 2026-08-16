@@ -635,10 +635,16 @@ function compareCodexVersions(left: string, right: string): number {
   return 0;
 }
 
-function readTailBurstTriggerPercent(value: unknown): string {
-  const ratio = Number(value);
-  if (!Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) return '98';
-  return String(Number((ratio * 100).toFixed(4)));
+function readTailBurstRemainingPercent(remainingValue: unknown, legacyUsedValue: unknown): string {
+  const remainingRatio = Number(remainingValue);
+  if (Number.isFinite(remainingRatio) && remainingRatio > 0 && remainingRatio < 1) {
+    return String(Number((remainingRatio * 100).toFixed(4)));
+  }
+  const usedRatio = Number(legacyUsedValue);
+  if (Number.isFinite(usedRatio) && usedRatio > 0 && usedRatio < 1) {
+    return String(Number(((1 - usedRatio) * 100).toFixed(4)));
+  }
+  return '2';
 }
 
 function readTailBurstDuration(value: unknown, fallback: string): string {
@@ -659,7 +665,7 @@ function setRatioPercentInDoc(doc: YamlDocument, path: YamlPath, value: string):
   }
 }
 
-function setTailBurstTriggerRatioInDoc(doc: YamlDocument, path: YamlPath, value: string): void {
+function setTailBurstRemainingRatioInDoc(doc: YamlDocument, path: YamlPath, value: string): void {
   const trimmed = value.trim();
   if (!trimmed) {
     if (docHas(doc, path)) doc.deleteIn(path);
@@ -723,8 +729,14 @@ export function getVisualConfigValidationErrors(
           values.codexCacheAffinityQuotaPreemptPercent
         )
       : undefined,
-    codexTailBurstTriggerUsedPercent: values.codexTailBurstEnabled
-      ? getTailBurstTriggerPercentError(values.codexTailBurstTriggerUsedPercent)
+    codexTailBurstTriggerRemainingPercent: values.codexTailBurstEnabled
+      ? getTailBurstTriggerPercentError(values.codexTailBurstTriggerRemainingPercent)
+      : undefined,
+    codexTailBurstExpiryWindow: values.codexTailBurstEnabled
+      ? getPositiveDurationError(values.codexTailBurstExpiryWindow)
+      : undefined,
+    codexTailBurstMaxConcurrency: values.codexTailBurstEnabled
+      ? getPositiveIntegerError(values.codexTailBurstMaxConcurrency)
       : undefined,
     codexTailBurstCollectorMaxConcurrency: values.codexTailBurstEnabled
       ? getTailBurstCollectorConcurrencyError(values.codexTailBurstCollectorMaxConcurrency)
@@ -860,8 +872,10 @@ function getNextDirtyFields(
       'codexCacheAffinityQuotaPreemptPercent',
       'codexCacheAffinityQuotaHardStopPercent',
       'codexTailBurstEnabled',
-      'codexTailBurstTriggerUsedPercent',
+      'codexTailBurstTriggerRemainingPercent',
       'codexTailBurstSnapshotTtl',
+      'codexTailBurstExpiryWindow',
+      'codexTailBurstMaxConcurrency',
       'codexTailBurstCollectorInterval',
       'codexTailBurstCollectorMaxConcurrency',
       'codexTailBurstCollectorTimeout',
@@ -1358,12 +1372,20 @@ export function useVisualConfig() {
           true
         ),
         codexTailBurstEnabled: Boolean(codexTailBurst?.enabled),
-        codexTailBurstTriggerUsedPercent: readTailBurstTriggerPercent(
+        codexTailBurstTriggerRemainingPercent: readTailBurstRemainingPercent(
+          codexTailBurst?.['trigger-remaining-ratio'] ?? codexTailBurst?.triggerRemainingRatio,
           codexTailBurst?.['trigger-used-ratio'] ?? codexTailBurst?.triggerUsedRatio
         ),
         codexTailBurstSnapshotTtl: readTailBurstDuration(
           codexTailBurst?.['snapshot-ttl'] ?? codexTailBurst?.snapshotTTL,
           '90s'
+        ),
+        codexTailBurstExpiryWindow: readTailBurstDuration(
+          codexTailBurst?.['expiry-window'] ?? codexTailBurst?.expiryWindow,
+          '10m'
+        ),
+        codexTailBurstMaxConcurrency: String(
+          codexTailBurst?.['max-concurrency'] ?? codexTailBurst?.maxConcurrency ?? 32
         ),
         codexTailBurstCollectorInterval: readTailBurstDuration(
           codexTailBurstCollector?.interval,
@@ -1878,8 +1900,10 @@ export function useVisualConfig() {
 
         const codexTailBurstDirty =
           isDirty('codexTailBurstEnabled') ||
-          isDirty('codexTailBurstTriggerUsedPercent') ||
+          isDirty('codexTailBurstTriggerRemainingPercent') ||
           isDirty('codexTailBurstSnapshotTtl') ||
+          isDirty('codexTailBurstExpiryWindow') ||
+          isDirty('codexTailBurstMaxConcurrency') ||
           isDirty('codexTailBurstCollectorInterval') ||
           isDirty('codexTailBurstCollectorMaxConcurrency') ||
           isDirty('codexTailBurstCollectorTimeout') ||
@@ -1890,18 +1914,35 @@ export function useVisualConfig() {
           if (isDirty('codexTailBurstEnabled')) {
             doc.setIn(['codex', 'tail-burst', 'enabled'], values.codexTailBurstEnabled);
           }
-          if (isDirty('codexTailBurstTriggerUsedPercent')) {
-            setTailBurstTriggerRatioInDoc(
+          if (isDirty('codexTailBurstTriggerRemainingPercent')) {
+            setTailBurstRemainingRatioInDoc(
               doc,
-              ['codex', 'tail-burst', 'trigger-used-ratio'],
-              values.codexTailBurstTriggerUsedPercent
+              ['codex', 'tail-burst', 'trigger-remaining-ratio'],
+              values.codexTailBurstTriggerRemainingPercent
             );
+            if (docHas(doc, ['codex', 'tail-burst', 'trigger-used-ratio'])) {
+              doc.deleteIn(['codex', 'tail-burst', 'trigger-used-ratio']);
+            }
           }
           if (isDirty('codexTailBurstSnapshotTtl')) {
             setStringInDoc(
               doc,
               ['codex', 'tail-burst', 'snapshot-ttl'],
               values.codexTailBurstSnapshotTtl
+            );
+          }
+          if (isDirty('codexTailBurstExpiryWindow')) {
+            setStringInDoc(
+              doc,
+              ['codex', 'tail-burst', 'expiry-window'],
+              values.codexTailBurstExpiryWindow
+            );
+          }
+          if (isDirty('codexTailBurstMaxConcurrency')) {
+            setIntFromStringInDoc(
+              doc,
+              ['codex', 'tail-burst', 'max-concurrency'],
+              values.codexTailBurstMaxConcurrency
             );
           }
           const collectorDirty =

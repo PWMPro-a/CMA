@@ -238,7 +238,15 @@ export function VisualConfigEditor({
   );
   const codexTailBurstTriggerPercentError = getValidationMessage(
     t,
-    validationErrors?.codexTailBurstTriggerUsedPercent
+    validationErrors?.codexTailBurstTriggerRemainingPercent
+  );
+  const codexTailBurstExpiryWindowError = getValidationMessage(
+    t,
+    validationErrors?.codexTailBurstExpiryWindow
+  );
+  const codexTailBurstMaxConcurrencyError = getValidationMessage(
+    t,
+    validationErrors?.codexTailBurstMaxConcurrency
   );
   const codexTailBurstCollectorConcurrencyError = getValidationMessage(
     t,
@@ -388,7 +396,9 @@ export function VisualConfigEditor({
           'codexCacheAffinityMaxSessionDuration',
           'codexCacheAffinityQuotaPreemptPercent',
           'codexCacheAffinityQuotaHardStopPercent',
-          'codexTailBurstTriggerUsedPercent',
+          'codexTailBurstTriggerRemainingPercent',
+          'codexTailBurstExpiryWindow',
+          'codexTailBurstMaxConcurrency',
           'codexTailBurstCollectorMaxConcurrency',
         ]),
       },
@@ -1637,9 +1647,9 @@ export function VisualConfigEditor({
                     min="1"
                     max="99.99"
                     step="0.01"
-                    value={values.codexTailBurstTriggerUsedPercent}
+                    value={values.codexTailBurstTriggerRemainingPercent}
                     onChange={(event) =>
-                      onChange({ codexTailBurstTriggerUsedPercent: event.target.value })
+                      onChange({ codexTailBurstTriggerRemainingPercent: event.target.value })
                     }
                     disabled={disabled || !values.codexTailBurstEnabled}
                     hint={t(
@@ -1655,6 +1665,33 @@ export function VisualConfigEditor({
                     }
                     disabled={disabled || !values.codexTailBurstEnabled}
                     hint={t('config_management.visual.sections.quota.tail_burst_duration_hint')}
+                  />
+                  <Input
+                    label={t('config_management.visual.sections.quota.tail_burst_expiry_window')}
+                    value={values.codexTailBurstExpiryWindow}
+                    onChange={(event) =>
+                      onChange({ codexTailBurstExpiryWindow: event.target.value })
+                    }
+                    disabled={disabled || !values.codexTailBurstEnabled}
+                    hint={t(
+                      'config_management.visual.sections.quota.tail_burst_expiry_window_hint'
+                    )}
+                    error={codexTailBurstExpiryWindowError}
+                  />
+                  <Input
+                    label={t('config_management.visual.sections.quota.tail_burst_max_concurrency')}
+                    type="number"
+                    min="1"
+                    max="512"
+                    value={values.codexTailBurstMaxConcurrency}
+                    onChange={(event) =>
+                      onChange({ codexTailBurstMaxConcurrency: event.target.value })
+                    }
+                    disabled={disabled || !values.codexTailBurstEnabled}
+                    hint={t(
+                      'config_management.visual.sections.quota.tail_burst_max_concurrency_hint'
+                    )}
+                    error={codexTailBurstMaxConcurrencyError}
                   />
                   <Input
                     label={t(
