@@ -158,6 +158,7 @@ export interface SupplyPlatformOverview {
 
 export interface SupplyAccountPoolSummary {
   checkedAtMs: number;
+  /** Enabled pool size. Disabled archive count is exposed separately as `disabled`. */
   total: number;
   normal: number;
   needsAttention: number;

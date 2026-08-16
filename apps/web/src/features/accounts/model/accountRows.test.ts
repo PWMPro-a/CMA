@@ -1505,6 +1505,7 @@ describe('accountRows', () => {
     const rows = buildAccountRows(
       [
         { name: 'codex.json', type: 'codex', authIndex: 'codex' },
+        { name: 'codex-disabled.json', type: 'codex', authIndex: 'codex-disabled', disabled: true },
         { name: 'claude.json', type: 'claude' },
       ],
       {
@@ -1524,16 +1525,16 @@ describe('accountRows', () => {
         normal: 0,
         needsAttention: 0,
         quotaRisk: 1,
-        disabled: 0,
+        disabled: 1,
         unconfirmed: 0,
         classificationObserved: true,
       })
     ).toMatchObject({
-      total: 2,
+      total: 3,
       available: 1,
       needsAttention: 0,
       quotaRisk: 1,
-      disabled: 0,
+      disabled: 1,
       unconfirmed: 0,
     });
   });

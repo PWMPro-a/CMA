@@ -621,6 +621,7 @@ export const buildAccountMetricsWithCodexPoolSummary = (
   const local = buildAccountMetrics(rows, context);
   if (!summary?.classificationObserved) return local;
   const codexRows = rows.filter((row) => row.provider === 'codex');
+  const summaryCodexTotal = summary.total + summary.disabled;
   const summaryValues = [
     summary.total,
     summary.normal,
@@ -630,12 +631,11 @@ export const buildAccountMetricsWithCodexPoolSummary = (
     summary.unconfirmed,
   ];
   if (
-    summary.total !== codexRows.length ||
+    summaryCodexTotal !== codexRows.length ||
     summaryValues.some((value) => !Number.isInteger(value) || value < 0) ||
     summary.normal +
       summary.needsAttention +
       summary.quotaRisk +
-      summary.disabled +
       summary.unconfirmed !==
       summary.total
   ) {
@@ -647,7 +647,7 @@ export const buildAccountMetricsWithCodexPoolSummary = (
     context
   );
   return {
-    total: summary.total + nonCodex.total,
+    total: summaryCodexTotal + nonCodex.total,
     available: summary.normal + nonCodex.available,
     needsAttention: summary.needsAttention + nonCodex.needsAttention,
     quotaRisk: summary.quotaRisk + nonCodex.quotaRisk,
