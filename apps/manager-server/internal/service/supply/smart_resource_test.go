@@ -3114,6 +3114,32 @@ func TestSmartPrelockKeepsFullBatchWhenCapacityCritical(t *testing.T) {
 	}
 }
 
+func TestSmartPrelockUsesProgressiveBatchWhilePoolIsHealthy(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		ReplenishBatchSize: 10,
+		PrelockMinQuantity: 1,
+		PrelockMaxQuantity: 10,
+	}
+	resource := SmartResource{HealthLevel: smartHealthHealthy}
+
+	for _, pressure := range []string{
+		smartSupplyPressurePlenty,
+		smartSupplyPressureNormal,
+		smartSupplyPressureTight,
+		smartSupplyPressureScarce,
+	} {
+		quantity, reason := smartPrelockQuantityForSupplyPressure(
+			cfg,
+			resource,
+			smartSupplyPressure{level: pressure},
+			10,
+		)
+		if quantity != 3 || reason != "pool_healthy_progressive_batch" {
+			t.Fatalf("pressure=%s quantity=%d reason=%q, want 3/progressive", pressure, quantity, reason)
+		}
+	}
+}
+
 func TestSmartPurchaseTimingWaitsUntilOneAccountIsUseful(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		ReplenishBatchSize:   10,

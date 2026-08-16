@@ -7154,6 +7154,17 @@ func smartPrelockQuantityForSupplyPressureWithTiming(cfg store.ManagerSupplyConf
 		}
 		return quantity, "low_water_staged_batch", timing
 	}
+	if resource.HealthLevel == smartHealthHealthy {
+		// Pool health takes precedence over momentary supplier pressure. While
+		// capacity is comfortably above the warning line, reserve only a small
+		// batch and let the normal create cooldown spread subsequent purchases.
+		// This staggers lease expiries without weakening warning/emergency refill.
+		progressiveBatch := smartPlentySmallBatchQuantity(cfg, quantity)
+		if quantity > progressiveBatch {
+			return progressiveBatch, "pool_healthy_progressive_batch", timing
+		}
+		return quantity, "pool_healthy_progressive_batch", timing
+	}
 	if !smartPrelockEnabled(cfg) {
 		return quantity, "", timing
 	}
