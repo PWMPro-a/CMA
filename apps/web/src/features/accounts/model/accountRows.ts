@@ -783,14 +783,21 @@ const matchesStatusFilter = (
   }
   const sharedPoolStatus =
     row.provider === 'codex' ? poolStatusBySelectionKey?.get(row.selectionKey) : undefined;
+  const liveDisabled = row.disabled || row.quota.status === 'disabled';
+  const liveFailed =
+    !liveDisabled &&
+    getAccountOperationalState(row) === 'failed' &&
+    !hasPartialGroupedQuota(row);
   if (status === 'available') {
-    return sharedPoolStatus ? sharedPoolStatus === 'normal' : isAccountRowAvailable(row);
+    return sharedPoolStatus
+      ? sharedPoolStatus === 'normal' && !liveDisabled && !liveFailed
+      : isAccountRowAvailable(row);
   }
   if (status === 'disabled') {
-    return sharedPoolStatus ? sharedPoolStatus === 'disabled' : row.disabled;
+    return sharedPoolStatus ? liveDisabled || sharedPoolStatus === 'disabled' : row.disabled;
   }
   if (status === 'problem') {
-    if (sharedPoolStatus) return sharedPoolStatus === 'needs_attention';
+    if (sharedPoolStatus) return liveFailed || sharedPoolStatus === 'needs_attention';
     return Boolean(
       (getAccountOperationalState(row) === 'failed' && !hasPartialGroupedQuota(row)) ||
       hasBlockingQuotaError(row)

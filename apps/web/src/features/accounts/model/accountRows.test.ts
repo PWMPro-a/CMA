@@ -15,6 +15,7 @@ import {
   sortAccountRows,
   type AccountInspectionResult,
   type AccountQuotaStores,
+  type AccountStatusFilter,
 } from './accountRows';
 import {
   buildQuotaCredentialIdentity,
@@ -1661,6 +1662,33 @@ describe('accountRows', () => {
         poolStatusBySelectionKey,
       }).map((row) => row.fileName)
     ).toEqual(['normal.json']);
+  });
+
+  it('keeps live disabled and failed credentials out of a briefly stale normal pool bucket', () => {
+    const rows = buildAccountRows(
+      [
+        { name: 'disabled.json', type: 'codex', authIndex: 'disabled', disabled: true },
+        { name: 'failed.json', type: 'codex', authIndex: 'failed', status: 'invalid' },
+        { name: 'healthy.json', type: 'codex', authIndex: 'healthy', status: 'active' },
+      ],
+      emptyStores()
+    );
+    const poolStatusBySelectionKey = new Map(
+      rows.map((row) => [row.selectionKey, 'normal' as const])
+    );
+    const filter = (status: AccountStatusFilter) =>
+      filterAccountRows(rows, {
+        provider: 'all',
+        status,
+        plan: 'all',
+        quotaBand: 'all',
+        search: '',
+        poolStatusBySelectionKey,
+      }).map((row) => row.fileName);
+
+    expect(filter('available')).toEqual(['healthy.json']);
+    expect(filter('disabled')).toEqual(['disabled.json']);
+    expect(filter('problem')).toEqual(['failed.json']);
   });
 
   it('filters rows by quota band and search text', () => {
