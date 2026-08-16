@@ -2,7 +2,7 @@
 
 本文定义下一版 CPAMP 的容器管理能力。目标不是替代 Portainer，而是把 CPA 相关服务做成可部署、可迁移、可备份、可恢复、可升级和可回滚的一套单机 Docker 运维栈。
 
-Core、Manager、Agent 的构建版本、镜像标签和发布校验统一遵循 [CPA 整套部署简版版本号标准](compact-deployment-versioning.zh-CN.md)。
+Core、Manager、Agent 的构建版本、镜像标签和发布校验统一遵循 [CPA 整套部署日期时间版本号标准](compact-deployment-versioning.zh-CN.md)。
 
 ## 产品定位
 

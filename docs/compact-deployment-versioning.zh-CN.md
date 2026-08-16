@@ -1,4 +1,4 @@
-# CPA 整套部署简版版本号标准
+# CPA 整套部署日期时间版本号标准
 
 本文约束 CPA 整套部署中的三个运行组件：
 
@@ -11,16 +11,16 @@
 内部构建与服务器部署统一采用：
 
 ```text
-MMDD-SHA4
+YYYYMMDD-HHMMSS
 ```
 
-- `MMDD`：源码提交日期的月日，例如 `0816`。
-- `SHA4`：构建所用 Git commit SHA 的前 4 位，例如 `cf8c`。
-- 完整示例：`0816-cf8c`。
-- 日期取源码 commit 日期，不取镜像构建时间，保证同一源码快照重复构建时版本号稳定。
-- 默认严格使用 4 位简码；若同一仓库、同一天出现相同 `MMDD-SHA4`，该批次统一扩展为 `MMDD-SHA6`。
+- `YYYYMMDD`：源码 commit 的完整日期，例如 `20260816`。
+- `HHMMSS`：源码 commit 的时分秒，例如 `143205`。
+- 完整示例：`20260816-143205`。
+- 默认时区固定为 `Asia/Shanghai`，也可通过 `CPA_VERSION_TIMEZONE` 显式覆盖。
+- 时间取源码 commit 时间，不取镜像构建时间，保证同一源码快照重复构建时版本号稳定。
 
-禁止使用仅包含功能名称、`latest`、`dev` 或只有构建时间而没有源码简码的生产镜像标签。
+禁止使用仅包含功能名称、`latest`、`dev`、不带日期的时间或旧的 `MMDD-SHA4` 格式作为生产镜像版本。
 
 ## 2. 生成命令
 
@@ -39,6 +39,14 @@ VERSION="$(./bin/compact-version.sh)"
 ```
 
 Manager 和 Agent 由同一仓库、同一 Dockerfile、同一源码快照构建，因此正常情况下使用同一个版本号；组件名称负责区分二者。
+
+如需核对 UTC 表示，可执行：
+
+```bash
+CPA_VERSION_TIMEZONE=UTC ./bin/compact-version.sh
+```
+
+生产发布仍统一使用默认的 `Asia/Shanghai`。
 
 ## 3. 构建注入
 
@@ -94,9 +102,9 @@ docker build \
 版本记录示例：
 
 ```text
-Core:    0816-cf8c  commit=cf8c0f06...
-Manager: 0816-b47a  commit=b47ab876...
-Agent:   0816-b47a  commit=b47ab876...
+Core:    20260816-143205  commit=COMMIT...
+Manager: 20260816-143412  commit=COMMIT...
+Agent:   20260816-143412  commit=COMMIT...
 ```
 
 本标准只定义版本生成、注入、展示和校验方式；生产切换仍按零停机发布手册逐个 Gateway/服务执行。
