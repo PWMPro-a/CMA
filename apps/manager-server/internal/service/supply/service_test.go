@@ -3650,6 +3650,47 @@ func TestNormalizeSupplyAccountKeepsExplicitCodexIdentityFingerprint(t *testing.
 	}
 }
 
+func TestNormalizeSupplyAccountClearsSupplierRuntimeState(t *testing.T) {
+	payload, _, _, err := normalizeAccountPayload([]byte(`{
+		"platform":"openai",
+		"type":"oauth",
+		"email":"fresh@example.com",
+		"disabled":true,
+		"status":"disabled",
+		"credentials":{
+			"type":"codex",
+			"email":"fresh@example.com",
+			"access_token":"access",
+			"refresh_token":"refresh",
+			"disabled":true,
+			"status":"unauthorized",
+			"status_message":"stale supplier runtime state",
+			"runtime_status":"quota_exhausted",
+			"last_error":"stale supplier error",
+			"initialization_state":"initialization_failed",
+			"recovery_state":"recovery_failed"
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("normalize supplied account: %v", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(payload, &result); err != nil {
+		t.Fatalf("decode normalized payload: %v", err)
+	}
+	if disabled, ok := result["disabled"].(bool); !ok || disabled {
+		t.Fatalf("disabled = %#v, want false", result["disabled"])
+	}
+	for _, key := range []string{
+		"status", "status_message", "runtime_status", "last_error",
+		"initialization_state", "recovery_state",
+	} {
+		if value, exists := result[key]; exists {
+			t.Fatalf("runtime field %q survived normalization: %#v", key, value)
+		}
+	}
+}
+
 func TestPreserveCodexIdentityFingerprintOnReplacement(t *testing.T) {
 	next := []byte(`{"type":"codex","email":"new@example.com","codex_identity_fingerprint":"new-device","access_token":"new"}`)
 	existing := []byte(`{"type":"codex","email":"old@example.com","codex_identity_fingerprint":"stable-device","access_token":"old"}`)

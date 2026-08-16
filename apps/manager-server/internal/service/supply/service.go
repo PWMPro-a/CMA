@@ -9443,6 +9443,7 @@ func normalizeSupplyAccountObject(object map[string]any, exportedAt any) (normal
 	} else {
 		return normalizedSupplyAccount{}, errors.New("account does not contain OAuth token data")
 	}
+	resetSupplyImportRuntimeState(metadata)
 	enrichCodexIdentityFromTokens(metadata)
 	pinSupplyCodexPlanType(metadata)
 	// Supplier-managed pool accounts must remain immediately selectable after
@@ -9725,13 +9726,29 @@ func convertSub2AccountToCPAPayload(account map[string]any, credentials map[stri
 	copyOptionalSupplyField(metadata, extra, "proxy_url", "proxyUrl")
 	copyOptionalSupplyField(metadata, extra, "websockets", "websockets")
 	copyOptionalSupplyField(metadata, extra, "openai_oauth_responses_websockets_v2_enabled", "openai_oauth_responses_websockets_v2_enabled")
-	if value, ok := account["disabled"].(bool); ok && value {
-		metadata["disabled"] = true
-	} else if status := strings.ToLower(stringFromMap(account, "status", "state")); status == "disabled" || status == "inactive" || status == "expired" || status == "revoked" || status == "deleted" {
-		metadata["disabled"] = true
-	}
 	enrichCodexIdentityFromTokens(metadata)
 	return stripEmptyValues(metadata)
+}
+
+func resetSupplyImportRuntimeState(metadata map[string]any) {
+	if metadata == nil {
+		return
+	}
+	for _, key := range []string{
+		"status", "state", "status_message", "statusMessage",
+		"runtime_status", "runtimeStatus",
+		"last_error", "lastError", "error",
+		"error_kind", "errorKind", "header_error_kind", "headerErrorKind",
+		"initialization_state", "initializationState",
+		"initialization_error", "initializationError",
+		"recovery_state", "recoveryState", "recovery_error", "recoveryError",
+		"unavailable", "revoked", "deleted",
+	} {
+		delete(metadata, key)
+	}
+	// Supplier runtime state belongs to the export source. Every delivered OAuth
+	// credential must enter CPA enabled so CPA can initialize and evaluate it.
+	metadata["disabled"] = false
 }
 
 func normalizeCodexPayloadAliases(metadata map[string]any) {
