@@ -3070,7 +3070,7 @@ describe('AccountsPage replacement flows', () => {
     expect(treeText(renderer)).not.toContain('accounts.empty_title');
   });
 
-  it('shows the bound source IP and enabled WebSocket state above the account identity', async () => {
+  it('groups import, source IP, and WebSocket tags inside the source column', async () => {
     if (typeof window === 'undefined') {
       vi.stubGlobal('window', {
         addEventListener: () => {},
@@ -3082,13 +3082,35 @@ describe('AccountsPage replacement flows', () => {
         ...makeCodexFile('networked.json', 'auth-networked', 'networked@example.com'),
         source_ip: '144.172.117.179',
         websockets: true,
+        cpamp_import: {
+          version: 1,
+          source: 'manual',
+          method: 'file_upload',
+          platform_id: 'chatgpt_session',
+          platform_name: 'ChatGPT Session',
+          imported_by: 'cpa-manager-plus',
+          imported_at: '2026-08-16T12:00:00.000Z',
+        },
       },
     ];
 
     const renderer = await renderAccountsPage();
     await flushPromises();
 
-    expect(treeText(renderer)).toContain('144.172.117.179');
+    const card = renderer.root.findByProps({
+      'data-account-card': getAuthFileSelectionKey(mocks.files[0]),
+    });
+    const source = card.findByProps({ 'data-account-source': 'true' });
+    const identity = card.findByProps({ 'data-account-identity': 'true' });
+
+    expect(readText(source)).toContain('ChatGPT Session');
+    expect(readText(source)).toContain('accounts.import_method_file_upload');
+    expect(readText(source)).toContain('cpa-manager-plus');
+    expect(readText(source)).toContain('144.172.117.179');
+    expect(readText(source)).toContain('WS');
+    expect(readText(source)).toContain('accounts.list_source_imported_at');
+    expect(readText(identity)).not.toContain('ChatGPT Session');
+    expect(readText(identity)).not.toContain('144.172.117.179');
     expect(renderer.root.findByProps({ 'aria-label': 'auth_files.websockets_label' })).toBeTruthy();
   });
 
@@ -3439,12 +3461,13 @@ describe('AccountsPage replacement flows', () => {
     expect(() => findHostButtonByText(renderer, 'accounts.view_mode_table')).toThrow();
   });
 
-  it('renders the six localized credential list headers', async () => {
+  it('renders the seven localized credential list headers', async () => {
     const renderer = await renderAccountsPage();
     const header = renderer.root.findByProps({ 'data-account-list-header': 'true' });
 
     expect(header.findAllByType('span').map((node) => readText(node))).toEqual([
       'accounts.list_header_credential',
+      'accounts.list_header_source',
       'accounts.list_header_availability',
       'accounts.list_header_recent_requests',
       'accounts.list_header_historical_usage',
@@ -3453,6 +3476,9 @@ describe('AccountsPage replacement flows', () => {
     ]);
 
     expect(renderer.root.findAllByProps({ 'data-account-quota-empty': 'true' })).toHaveLength(1);
+    expect(
+      readText(renderer.root.findAllByProps({ 'data-account-source': 'true' })[0])
+    ).toContain('accounts.list_source_unmarked');
     expect(treeText(renderer)).not.toContain('SUM');
   });
 

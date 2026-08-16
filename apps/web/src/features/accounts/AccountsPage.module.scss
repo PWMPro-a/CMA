@@ -313,12 +313,13 @@
 .accountCard {
   display: grid;
   grid-template-columns:
-    minmax(140px, 180px)
-    96px
-    144px
-    196px
-    minmax(190px, 1fr)
-    124px;
+    minmax(128px, 166px)
+    minmax(120px, 144px)
+    88px
+    132px
+    176px
+    minmax(168px, 1fr)
+    132px;
   column-gap: clamp(10px, 0.8vw, 14px);
   min-width: 0;
 }
@@ -339,16 +340,17 @@
     line-height: 1.25;
   }
 
-  > span:nth-child(2),
   > span:nth-child(3),
   > span:nth-child(4),
+  > span:nth-child(5),
   > span:last-child {
     justify-content: center;
     text-align: center;
   }
 
   > span:first-child,
-  > span:nth-child(5) {
+  > span:nth-child(2),
+  > span:nth-child(6) {
     justify-content: flex-start;
     text-align: left;
   }
@@ -379,14 +381,15 @@
   .accountCardHeader,
   .accountCard {
     grid-template-columns:
-      minmax(180px, 1.15fr)
-      104px
-      150px
-      196px
-      minmax(268px, 2fr)
+      minmax(160px, 1.05fr)
+      minmax(132px, 0.78fr)
+      92px
+      138px
+      176px
+      minmax(220px, 1.65fr)
       176px;
     justify-content: space-between;
-    column-gap: clamp(16px, 1.15vw, 22px);
+    column-gap: clamp(12px, 1vw, 16px);
   }
 
   .rowActions {
@@ -401,6 +404,11 @@
     display: none;
   }
 
+  .accountCardSourceLabel {
+    display: inline-flex;
+  }
+
+  .accountCardSource::before,
   .accountCardHealth::before,
   .accountCardLatestRequest::before,
   .accountCardEvidence::before,
@@ -431,6 +439,7 @@
 }
 
 .accountCardIdentity,
+.accountCardSource,
 .accountCardHealth,
 .accountCardLatestRequest,
 .accountCardEvidence,
@@ -442,6 +451,7 @@
 }
 
 .accountCardIdentity,
+.accountCardSource,
 .accountCardHealth,
 .accountCardLatestRequest,
 .accountCardEvidence,
@@ -449,6 +459,7 @@
   padding-right: 6px;
 }
 
+.accountCardSource,
 .accountCardHealth,
 .accountCardLatestRequest,
 .accountCardEvidence,
@@ -458,6 +469,7 @@
   padding-left: 10px;
 }
 
+.accountCardSource::before,
 .accountCardHealth::before,
 .accountCardLatestRequest::before,
 .accountCardEvidence::before,
@@ -486,6 +498,52 @@
   justify-content: center;
   flex-direction: column;
   gap: 6px;
+}
+
+.accountCardSource {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.accountCardSourceLabel {
+  display: none;
+  color: var(--accounts-muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+}
+
+.accountSourceBadgeRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+
+  > .accountMetaPill {
+    max-width: 100%;
+    min-width: 0;
+  }
+}
+
+.accountSourceTime,
+.accountSourceEmpty {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--accounts-muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.accountSourceEmpty {
+  color: var(--text-tertiary, var(--accounts-muted));
 }
 
 .accountIdentityBadgeRow,
@@ -727,6 +785,13 @@
   border: 1px solid color-mix(in srgb, var(--accounts-success) 28%, var(--accounts-border));
   background: color-mix(in srgb, var(--accounts-success) 7%, var(--accounts-surface));
   color: var(--accounts-success);
+}
+
+.accountImportToolPill {
+  max-width: 144px;
+  border: 1px solid color-mix(in srgb, var(--accounts-indigo) 28%, var(--accounts-border));
+  background: color-mix(in srgb, var(--accounts-indigo) 7%, var(--accounts-surface));
+  color: var(--accounts-indigo);
 }
 
 .accountSourceIpPill {
@@ -5420,6 +5485,7 @@
   }
 
   .accountCardIdentity,
+  .accountCardSource,
   .accountCardHealth,
   .accountCardLatestRequest,
   .accountCardEvidence,
@@ -5429,6 +5495,7 @@
     border-left: 0;
   }
 
+  .accountCardSource,
   .accountCardHealth,
   .accountCardLatestRequest,
   .accountCardEvidence,
@@ -5509,6 +5576,13 @@
     border-bottom: 1px solid color-mix(in srgb, var(--accounts-border) 76%, transparent);
   }
 
+  .accountCardSource {
+    grid-column: 1 / -1;
+    gap: 5px;
+    padding: 8px 2px 0 0;
+    border-top: 1px solid color-mix(in srgb, var(--accounts-border) 64%, transparent);
+  }
+
   .accountIdentityBadgeRow {
     flex-wrap: wrap;
     gap: 4px 6px;
@@ -5534,6 +5608,7 @@
     font-size: 11px;
   }
 
+  .accountCardSource,
   .accountCardHealth,
   .accountCardLatestRequest,
   .accountCardEvidence,
@@ -5542,6 +5617,7 @@
     grid-column: 1 / -1;
   }
 
+  .accountCardSource,
   .accountCardHealth,
   .accountCardLatestRequest,
   .accountCardEvidence,

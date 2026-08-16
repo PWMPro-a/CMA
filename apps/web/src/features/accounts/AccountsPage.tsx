@@ -4360,6 +4360,7 @@ export function AccountsPage() {
         <div className={styles.accountCardList}>
           <div className={styles.accountCardHeader} data-account-list-header="true">
             <span>{t('accounts.list_header_credential')}</span>
+            <span>{t('accounts.list_header_source')}</span>
             <span>{t('accounts.list_header_availability')}</span>
             <span>{t('accounts.list_header_recent_requests')}</span>
             <span>{t('accounts.list_header_historical_usage')}</span>
@@ -4436,15 +4437,20 @@ export function AccountsPage() {
             const importedAtMs = row.importMetadata?.imported_at
               ? Date.parse(row.importMetadata.imported_at)
               : Number.NaN;
+            const importedAtLabel = Number.isFinite(importedAtMs)
+              ? formatTimestampTitle(importedAtMs, i18n.language)
+              : '';
+            const importedBy = row.importMetadata?.imported_by?.trim() || '';
             const importBadgeTitle = row.importMetadata
               ? t('accounts.import_badge_title', {
                   platform: importPlatform,
                   method: importMethod,
-                  time: Number.isFinite(importedAtMs)
-                    ? formatTimestampTitle(importedAtMs, i18n.language)
-                    : '-',
+                  time: importedAtLabel || '-',
                 })
               : '';
+            const hasSourceDetails = Boolean(
+              row.importMetadata || sourceIp || websocketsEnabled
+            );
             const accountHistoryRequestValue = accountHistoryMatched
               ? formatCompactNumber(accountHistory.total_requests)
               : recentRequestCount > 0
@@ -4476,29 +4482,13 @@ export function AccountsPage() {
                   .join(' ')}
                 onClick={isSelectionMode ? () => handleAccountCardClick(row) : undefined}
               >
-                <div className={styles.accountCardIdentity}>
+                <div className={styles.accountCardIdentity} data-account-identity="true">
                   <div className={styles.accountIdentityBadgeRow}>
                     <span className={styles.providerPill}>
                       {getProviderLabel(item.identity.provider, t)}
                     </span>
                     {item.identity.planType ? (
                       <span className={styles.accountMetaPill}>{item.identity.planType}</span>
-                    ) : null}
-                    {row.importMetadata ? (
-                      <>
-                        <span
-                          className={`${styles.accountMetaPill} ${styles.accountImportPlatformPill}`}
-                          title={importBadgeTitle}
-                        >
-                          {importPlatform}
-                        </span>
-                        <span
-                          className={`${styles.accountMetaPill} ${styles.accountImportMethodPill}`}
-                          title={importBadgeTitle}
-                        >
-                          {importMethod}
-                        </span>
-                      </>
                     ) : null}
                     {accountGroupsAvailable ? (
                       <button
@@ -4518,25 +4508,6 @@ export function AccountsPage() {
                           showEmpty
                         />
                       </button>
-                    ) : null}
-                    {sourceIp ? (
-                      <span
-                        className={`${styles.accountMetaPill} ${styles.accountSourceIpPill}`}
-                        title={t('auth_files.source_ip_card_title', { ip: sourceIp })}
-                      >
-                        <span aria-hidden="true">IP</span>
-                        <strong>{sourceIp}</strong>
-                      </span>
-                    ) : null}
-                    {websocketsEnabled ? (
-                      <span
-                        className={`${styles.accountMetaPill} ${styles.accountWebsocketPill}`}
-                        title={t('auth_files.websockets_label')}
-                        aria-label={t('auth_files.websockets_label')}
-                      >
-                        <IconWifi size={13} aria-hidden="true" />
-                        <span>WS</span>
-                      </span>
                     ) : null}
                     {row.workspaceName || row.workspaceId ? (
                       <span
@@ -4598,6 +4569,74 @@ export function AccountsPage() {
                       </span>
                     ) : null}
                   </div>
+                </div>
+
+                <div className={styles.accountCardSource} data-account-source="true">
+                  <span className={styles.accountCardSourceLabel}>
+                    {t('accounts.list_header_source')}
+                  </span>
+                  {hasSourceDetails ? (
+                    <>
+                      <div className={styles.accountSourceBadgeRow}>
+                        {row.importMetadata ? (
+                          <>
+                            <span
+                              className={`${styles.accountMetaPill} ${styles.accountImportPlatformPill}`}
+                              title={importBadgeTitle}
+                            >
+                              {importPlatform}
+                            </span>
+                            <span
+                              className={`${styles.accountMetaPill} ${styles.accountImportMethodPill}`}
+                              title={importBadgeTitle}
+                            >
+                              {importMethod}
+                            </span>
+                          </>
+                        ) : null}
+                        {importedBy ? (
+                          <span
+                            className={`${styles.accountMetaPill} ${styles.accountImportToolPill}`}
+                            title={`${t('accounts.imported_by_label')}: ${importedBy}`}
+                          >
+                            {importedBy}
+                          </span>
+                        ) : null}
+                        {sourceIp ? (
+                          <span
+                            className={`${styles.accountMetaPill} ${styles.accountSourceIpPill}`}
+                            title={t('auth_files.source_ip_card_title', { ip: sourceIp })}
+                          >
+                            <span aria-hidden="true">IP</span>
+                            <strong>{sourceIp}</strong>
+                          </span>
+                        ) : null}
+                        {websocketsEnabled ? (
+                          <span
+                            className={`${styles.accountMetaPill} ${styles.accountWebsocketPill}`}
+                            title={t('auth_files.websockets_label')}
+                            aria-label={t('auth_files.websockets_label')}
+                          >
+                            <IconWifi size={13} aria-hidden="true" />
+                            <span>WS</span>
+                          </span>
+                        ) : null}
+                      </div>
+                      {importedAtLabel ? (
+                        <time
+                          className={styles.accountSourceTime}
+                          dateTime={row.importMetadata?.imported_at}
+                          title={importBadgeTitle}
+                        >
+                          {t('accounts.list_source_imported_at', { time: importedAtLabel })}
+                        </time>
+                      ) : null}
+                    </>
+                  ) : (
+                    <span className={styles.accountSourceEmpty}>
+                      {t('accounts.list_source_unmarked')}
+                    </span>
+                  )}
                 </div>
 
                 <div className={styles.accountCardHealth}>
