@@ -6941,16 +6941,22 @@ func smartSupplyPressureFromOrders(cfg store.ManagerSupplyConfig, inventory supp
 			float64(shortTotalFulfillMS) / float64(shortFulfillSamples) / 1000,
 		))
 	}
-	pressure.reliablyAvailable = inventory.Available > 0 && !inventory.NeedsProduction &&
-		pressure.shortWindowOrders >= smartSupplyReliabilityMinOrders &&
+	recentDeliveryProvesSupply := pressure.recentSuccessStreak >= smartSupplyReliabilityMinOrders &&
+		pressure.shortWindowAvgFulfillSecond > 0 && pressure.shortWindowAvgFulfillSecond <= 45
+	inventorySnapshotReady := inventory.Available > 0 && !inventory.NeedsProduction
+	pressure.reliablyAvailable = pressure.shortWindowOrders >= smartSupplyReliabilityMinOrders &&
 		pressure.recentSuccessStreak >= smartSupplyReliabilityMinOrders &&
 		pressure.shortWindowFulfillmentRate >= smartSupplyReliabilityMinFulfillment &&
 		pressure.shortWindowAvgFulfillSecond > 0 &&
-		pressure.shortWindowAvgFulfillSecond <= smartSupplyReliabilityMaxLeadSeconds
+		pressure.shortWindowAvgFulfillSecond <= smartSupplyReliabilityMaxLeadSeconds &&
+		(inventorySnapshotReady || recentDeliveryProvesSupply)
 	if pressure.reliablyAvailable {
-		// A short streak must recover quickly from stale failures in the 24-hour
-		// aggregate. Stable, fast fulfillment means there is no need to reserve a
-		// batch early; purchase one consumption-paced step near the lower line.
+		// A short streak must recover quickly from stale failures in both the
+		// 24-hour aggregate and a pessimistic momentary inventory snapshot. Three
+		// fast, complete deliveries are stronger evidence than needsProduction or
+		// missing counters captured before the supplier finished its latest batch.
+		// Stable fulfillment means there is no need to reserve a batch early;
+		// purchase one consumption-paced step near the lower line.
 		pressure.level = smartSupplyPressurePlenty
 		pressure.reason = "supply_history_reliably_available"
 		return pressure

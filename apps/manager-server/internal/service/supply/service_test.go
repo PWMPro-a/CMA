@@ -869,7 +869,7 @@ func TestSmartSupplyPressureRecentSuccessStreakOverridesOlderFailures(t *testing
 
 	pressure := smartSupplyPressureFromOrders(
 		store.ManagerSupplyConfig{Product: "oauth_7d"},
-		supplyclient.Inventory{Available: 20},
+		supplyclient.Inventory{Missing: 15, NeedsProduction: true},
 		4,
 		orders,
 	)
@@ -882,6 +882,30 @@ func TestSmartSupplyPressureRecentSuccessStreakOverridesOlderFailures(t *testing
 		// The reliability window closes at the first older failure once the latest
 		// three orders have already established a new successful regime.
 		t.Fatalf("short-window metrics = %#v", pressure)
+	}
+}
+
+func TestSmartSupplyPressureSlowSuccessDoesNotOverrideProductionShortage(t *testing.T) {
+	now := time.Now()
+	orders := make([]store.SupplyOrder, 0, 3)
+	for index := 0; index < 3; index++ {
+		createdAt := now.Add(-time.Duration(index+1) * time.Minute)
+		orders = append(orders, store.SupplyOrder{
+			OrderID: fmt.Sprintf("slow-completed-%d", index), Product: "oauth_7d",
+			RequestedQuantity: 1, ImportedCount: 1, Automatic: true, Status: "completed",
+			CreatedAtMS: createdAt.UnixMilli(), CompletedAtMS: createdAt.Add(2 * time.Minute).UnixMilli(),
+		})
+	}
+
+	pressure := smartSupplyPressureFromOrders(
+		store.ManagerSupplyConfig{Product: "oauth_7d"},
+		supplyclient.Inventory{Missing: 15, NeedsProduction: true},
+		4,
+		orders,
+	)
+	if pressure.reliablyAvailable || pressure.level != smartSupplyPressureScarce ||
+		pressure.reason != "supply_inventory_scarce" {
+		t.Fatalf("slow production-backed supply was treated as reliable: %#v", pressure)
 	}
 }
 
