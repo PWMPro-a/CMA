@@ -976,6 +976,41 @@ func TestSmartQuotaPlanRejectsWholeLowClassWithoutSplittingNormalClass(t *testin
 	}
 }
 
+func TestSmartQuotaPlanQuotaClassesUseCurrentInspectionCohort(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	results := make([]store.CodexInspectionResult, 0, 7)
+	for index, capacityM := range []float64{1.3, 1.6, 1.91, 2.4, 11.3, 21.5, 31.6} {
+		fileName := fmt.Sprintf("current-%d.json", index)
+		identity := "file:" + fileName
+		samples := quotaSamplesForEstimate(identity, "team", capacityM, now.Add(-time.Minute), 3)
+		service.smartQuotaState.samples = append(service.smartQuotaState.samples, samples...)
+		service.smartQuotaState.samplesByIdentity[identity] = append([]smartQuotaCalibrationSample(nil), samples...)
+		results = append(results, store.CodexInspectionResult{
+			FileName: fileName,
+			Provider: "codex",
+			Status:   "active",
+			PlanType: "team",
+		})
+	}
+	for index := 0; index < 20; index++ {
+		identity := fmt.Sprintf("file:historical-%d.json", index)
+		samples := quotaSamplesForEstimate(identity, "team", 150, now.Add(-2*time.Minute), 3)
+		service.smartQuotaState.samples = append(service.smartQuotaState.samples, samples...)
+		service.smartQuotaState.samplesByIdentity[identity] = append([]smartQuotaCalibrationSample(nil), samples...)
+	}
+
+	items, planning := service.smartQuotaPlanEstimatesForInspection(store.ManagerSupplyConfig{}, results, 457, now)
+	if len(items) != 1 || items[0].ObservedM <= 0 || items[0].UniqueAccounts != 2 ||
+		items[0].RejectedAccounts != 5 || len(items[0].QuotaClasses) != 1 ||
+		items[0].QuotaClasses[0].AccountCount != 2 || items[0].ObservedM != items[0].QuotaClasses[0].CenterM ||
+		items[0].QuotaClasses[0].MinimumM != 21.5 || items[0].QuotaClasses[0].MaximumM != 31.6 ||
+		items[0].QuotaClasses[0].SharePercent != 100 || items[0].AdoptedM != 60 ||
+		planning["team"].CapacityM != 60 || planning["team"].Source != smartQuotaEstimateSourceDefault {
+		t.Fatalf("current-cohort quota statistics = items %#v planning %#v", items, planning["team"])
+	}
+}
+
 func TestSmartQuotaPlanRebuildsObservedValueFromTrustedNormalRepresentatives(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Second)

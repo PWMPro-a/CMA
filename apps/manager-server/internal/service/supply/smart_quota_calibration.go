@@ -83,23 +83,25 @@ type smartQuotaCalibrationState struct {
 }
 
 type smartQuotaEstimate struct {
-	CapacityM              float64
-	Source                 string
-	SampleCount            int
-	EvidenceCount          int
-	ObservedPercent        float64
-	Confidence             string
-	UniqueAccounts         int
-	CompleteWindowAccounts int
-	CurrentEstimateM       float64
-	RecentEstimateM        float64
-	HistoricalEstimateM    float64
-	DivergencePercent      float64
-	IndependentAccount     bool
-	Provisional            bool
-	FallbackOnly           bool
-	QuotaClassID           string
-	QuotaClasses           []SmartQuotaClassEstimate
+	CapacityM               float64
+	Source                  string
+	SampleCount             int
+	EvidenceCount           int
+	ObservedPercent         float64
+	Confidence              string
+	UniqueAccounts          int
+	CompleteWindowAccounts  int
+	CurrentEstimateM        float64
+	RecentEstimateM         float64
+	HistoricalEstimateM     float64
+	DivergencePercent       float64
+	IndependentAccount      bool
+	Provisional             bool
+	FallbackOnly            bool
+	QuotaClassID            string
+	QuotaClasses            []SmartQuotaClassEstimate
+	CalibrationAccountCount int
+	CurrentCohortClasses    bool
 }
 
 type smartQuotaPlanAdoptionState struct {
@@ -936,11 +938,19 @@ func (s *Service) smartQuotaEstimateForSupplierAtWithMinimumOptions(
 
 	var currentEstimate smartQuotaEstimate
 	currentOK := false
+	currentQuotaClasses := quotaClasses
 	if len(normalizedIdentities) > 0 {
 		currentSamples := filterSmartQuotaSamples(recentSamples, func(sample smartQuotaCalibrationSample) bool {
 			_, ok := normalizedIdentities[sample.identity]
 			return ok
 		})
+		currentClassSamples := currentSamples
+		if planType != "" {
+			currentClassSamples = filterSmartQuotaSamples(currentSamples, func(sample smartQuotaCalibrationSample) bool {
+				return sample.planType == planType
+			})
+		}
+		currentQuotaClasses = estimateSmartQuotaClassesAt(currentClassSamples, now)
 		currentEstimate, currentOK = estimateSmartQuotaCurrentSamplesAt(currentSamples, now)
 	}
 
@@ -979,13 +989,13 @@ func (s *Service) smartQuotaEstimateForSupplierAtWithMinimumOptions(
 	)
 
 	if currentOK {
-		return attachSmartQuotaClasses(calibrateSmartQuotaCurrentEstimate(
+		return attachSmartQuotaCurrentClasses(calibrateSmartQuotaCurrentEstimate(
 			currentEstimate,
 			recentEstimate,
 			recentOK,
 			historicalEstimate,
 			historicalOK,
-		), quotaClasses)
+		), currentQuotaClasses, quotaClasses)
 	}
 	if recentOK {
 		recentEstimate.RecentEstimateM = recentEstimate.CapacityM
@@ -1413,11 +1423,41 @@ func smartQuotaRelativeDifference(left, right float64) float64 {
 }
 
 func smartQuotaEstimateAccountCount(estimate smartQuotaEstimate) int {
-	classAccounts := 0
-	for _, quotaClass := range estimate.QuotaClasses {
-		classAccounts += max(0, quotaClass.AccountCount)
+	return max(estimate.UniqueAccounts, estimate.CalibrationAccountCount, smartQuotaClassAccountCount(estimate.QuotaClasses))
+}
+
+func smartQuotaEstimateDisplayAccountCount(estimate smartQuotaEstimate) int {
+	return max(estimate.UniqueAccounts, smartQuotaClassAccountCount(estimate.QuotaClasses))
+}
+
+func smartQuotaClassAccountCount(classes []SmartQuotaClassEstimate) int {
+	accounts := 0
+	for _, quotaClass := range classes {
+		accounts += max(0, quotaClass.AccountCount)
 	}
-	return max(estimate.UniqueAccounts, classAccounts)
+	return accounts
+}
+
+func smartQuotaPublishedObservedM(estimate smartQuotaEstimate, rejectedAccounts int) float64 {
+	if estimate.CapacityM <= 0 || rejectedAccounts <= 0 || len(estimate.QuotaClasses) == 0 ||
+		(estimate.Source != smartQuotaEstimateSourceCurrent && estimate.Source != smartQuotaEstimateSourceRecalibrated) {
+		return estimate.CapacityM
+	}
+	for _, quotaClass := range estimate.QuotaClasses {
+		if quotaClass.ID == estimate.QuotaClassID && quotaClass.CenterM > 0 {
+			return quotaClass.CenterM
+		}
+	}
+	best := estimate.QuotaClasses[0]
+	bestDistance := math.Abs(estimate.CapacityM - best.CenterM)
+	for _, quotaClass := range estimate.QuotaClasses[1:] {
+		distance := math.Abs(estimate.CapacityM - quotaClass.CenterM)
+		if distance < bestDistance {
+			best = quotaClass
+			bestDistance = distance
+		}
+	}
+	return best.CenterM
 }
 
 func (s *Service) smartQuotaPlanEstimatesForInspection(
@@ -1568,6 +1608,7 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 		filteredObserved := rawObserved
 		filteredTrusted := false
 		rejectedAccounts := 0
+		displayRejectedAccounts := 0
 		if policy.Mode == smartQuotaPolicyModeAuto && context.accounts > 0 && state.adoptedM > 0 {
 			minimumAcceptedM := state.adoptedM * (1 - smartQuotaPolicyExtremeDivergence)
 			filteredObserved = s.smartQuotaEstimateForSupplierAtWithMinimumOptions(
@@ -1581,6 +1622,12 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 			rejectedAccounts = max(0,
 				smartQuotaEstimateAccountCount(rawObserved)-smartQuotaEstimateAccountCount(filteredObserved),
 			)
+			displayRejectedAccounts = rejectedAccounts
+			if rawObserved.CurrentCohortClasses && filteredObserved.CurrentCohortClasses {
+				displayRejectedAccounts = max(0,
+					smartQuotaEstimateDisplayAccountCount(rawObserved)-smartQuotaEstimateDisplayAccountCount(filteredObserved),
+				)
+			}
 			filteredTrusted = rejectedAccounts > 0 && smartQuotaEstimateHasTrustedPlanData(filteredObserved)
 			if filteredTrusted {
 				// When enough normal-range accounts remain, completely remove the
@@ -1681,12 +1728,12 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 		publishedRejectedAccounts := 0
 		if filteredTrusted || (rejectedAccounts > 0 && state.validationState == smartQuotaValidationQuarantined) {
 			publishedObserved = filteredObserved
-			publishedRejectedAccounts = rejectedAccounts
+			publishedRejectedAccounts = displayRejectedAccounts
 		}
 		hasPublishedObservedData := context.accounts > 0 && smartQuotaEstimateHasValidData(publishedObserved)
 		publishedObservedM := 0.0
 		if hasPublishedObservedData {
-			publishedObservedM = publishedObserved.CapacityM
+			publishedObservedM = smartQuotaPublishedObservedM(publishedObserved, publishedRejectedAccounts)
 		}
 
 		// A downward observation under confirmation is not reliable enough to size
@@ -2272,6 +2319,7 @@ func nearestSmartQuotaClassGroup(groups []smartQuotaClassGroup, capacityM float6
 
 func attachSmartQuotaClasses(estimate smartQuotaEstimate, classes []SmartQuotaClassEstimate) smartQuotaEstimate {
 	estimate.QuotaClasses = append([]SmartQuotaClassEstimate(nil), classes...)
+	estimate.CalibrationAccountCount = smartQuotaClassAccountCount(classes)
 	if estimate.CapacityM <= 0 || len(classes) == 0 {
 		return estimate
 	}
@@ -2288,6 +2336,17 @@ func attachSmartQuotaClasses(estimate smartQuotaEstimate, classes []SmartQuotaCl
 	if estimate.Provisional {
 		estimate.CapacityM = best.CenterM
 	}
+	return estimate
+}
+
+func attachSmartQuotaCurrentClasses(
+	estimate smartQuotaEstimate,
+	currentClasses []SmartQuotaClassEstimate,
+	calibrationClasses []SmartQuotaClassEstimate,
+) smartQuotaEstimate {
+	estimate = attachSmartQuotaClasses(estimate, currentClasses)
+	estimate.CalibrationAccountCount = smartQuotaClassAccountCount(calibrationClasses)
+	estimate.CurrentCohortClasses = true
 	return estimate
 }
 
