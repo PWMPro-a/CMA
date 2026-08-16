@@ -40,6 +40,11 @@ VERSION="$(./bin/compact-version.sh)"
 
 Manager 和 Agent 由同一仓库、同一 Dockerfile、同一源码快照构建，因此正常情况下使用同一个版本号；组件名称负责区分二者。
 
+管理面板必须使用同一个 Manager 日期时间版本号。前端构建必须显式传入
+`VERSION="$VERSION"`；Vite 的本地兜底只读取 commit 时间，禁止使用 `git describe`
+或任何上游标签。Manager Server 会校验外置/内嵌 `management.html` 是否包含自己的
+版本号；不匹配的外置面板会回退到内嵌面板，内嵌面板仍不匹配则健康发布失败。
+
 如需核对 UTC 表示，可执行：
 
 ```bash

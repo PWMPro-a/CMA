@@ -109,8 +109,24 @@ describe('accountRows', () => {
 
     expect(rows[0].statusMessage).toContain('Rate limit exceeded');
     expect(buildAccountMetrics(rows)).toMatchObject({ available: 1, needsAttention: 0 });
-    expect(filterAccountRows(rows, { provider: 'all', status: 'available', plan: 'all', quotaBand: 'all', search: '' })).toHaveLength(1);
-    expect(filterAccountRows(rows, { provider: 'all', status: 'problem', plan: 'all', quotaBand: 'all', search: '' })).toHaveLength(0);
+    expect(
+      filterAccountRows(rows, {
+        provider: 'all',
+        status: 'available',
+        plan: 'all',
+        quotaBand: 'all',
+        search: '',
+      })
+    ).toHaveLength(1);
+    expect(
+      filterAccountRows(rows, {
+        provider: 'all',
+        status: 'problem',
+        plan: 'all',
+        quotaBand: 'all',
+        search: '',
+      })
+    ).toHaveLength(0);
   });
 
   it('exposes supplier expiry and runtime current concurrency', () => {
@@ -129,6 +145,42 @@ describe('accountRows', () => {
     );
     expect(row.expiresAtMs).toBe(expiresAtMs);
     expect(row.currentConcurrency).toBe(3);
+  });
+
+  it('normalizes account import metadata for list and search presentation', () => {
+    const [row] = buildAccountRows(
+      [
+        {
+          name: 'imported.json',
+          type: 'codex',
+          cpamp_import: {
+            version: 1,
+            source: 'supply',
+            method: 'manual_supply',
+            platform_id: 'supplier-a',
+            platform_name: '平台 A',
+            imported_by: 'cpa-manager-plus',
+            imported_at: '2026-08-16T07:30:45Z',
+          },
+        },
+      ],
+      emptyStores()
+    );
+
+    expect(row.importMetadata).toMatchObject({
+      method: 'manual_supply',
+      platform_id: 'supplier-a',
+      platform_name: '平台 A',
+    });
+    expect(
+      filterAccountRows([row], {
+        provider: 'all',
+        status: 'all',
+        plan: 'all',
+        quotaBand: 'all',
+        search: '平台 A',
+      })
+    ).toHaveLength(1);
   });
 
   it('preserves zero runtime current concurrency as an idle value', () => {
@@ -905,9 +957,7 @@ describe('accountRows', () => {
       header_quota_used_percent: 25,
     };
     const rows = buildAccountRows([file], emptyStores(), [inspection], {
-      codexHeaderSnapshotBySelectionKey: new Map([
-        [getAuthFileSelectionKey(file), headerSnapshot],
-      ]),
+      codexHeaderSnapshotBySelectionKey: new Map([[getAuthFileSelectionKey(file), headerSnapshot]]),
     });
 
     expect(rows[0].inspection).toBeNull();
@@ -1520,15 +1570,19 @@ describe('accountRows', () => {
     );
 
     expect(
-      buildAccountMetricsWithCodexPoolSummary(rows, {}, {
-        total: 1,
-        normal: 0,
-        needsAttention: 0,
-        quotaRisk: 1,
-        disabled: 1,
-        unconfirmed: 0,
-        classificationObserved: true,
-      })
+      buildAccountMetricsWithCodexPoolSummary(
+        rows,
+        {},
+        {
+          total: 1,
+          normal: 0,
+          needsAttention: 0,
+          quotaRisk: 1,
+          disabled: 1,
+          unconfirmed: 0,
+          classificationObserved: true,
+        }
+      )
     ).toMatchObject({
       total: 3,
       available: 1,

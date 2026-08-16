@@ -715,6 +715,20 @@
   color: color-mix(in srgb, var(--accounts-warning) 78%, var(--accounts-text));
 }
 
+.accountImportPlatformPill {
+  max-width: 140px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 28%, var(--accounts-border));
+  background: color-mix(in srgb, var(--primary-color) 7%, var(--accounts-surface));
+  color: var(--primary-color);
+}
+
+.accountImportMethodPill {
+  max-width: 112px;
+  border: 1px solid color-mix(in srgb, var(--accounts-success) 28%, var(--accounts-border));
+  background: color-mix(in srgb, var(--accounts-success) 7%, var(--accounts-surface));
+  color: var(--accounts-success);
+}
+
 .accountSourceIpPill {
   gap: 5px;
   max-width: 190px;
@@ -1659,6 +1673,42 @@
   font-weight: 500;
   line-height: 1.4;
   @include text-ellipsis;
+}
+
+.drawerImportMeta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.drawerImportPlatformPill,
+.drawerImportMethodPill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  max-width: 180px;
+  padding: 0 7px;
+  overflow: hidden;
+  border: 1px solid var(--accounts-border);
+  border-radius: 7px;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawerImportPlatformPill {
+  border-color: color-mix(in srgb, var(--primary-color) 28%, var(--accounts-border));
+  color: var(--primary-color);
+}
+
+.drawerImportMethodPill {
+  border-color: color-mix(in srgb, var(--accounts-success) 28%, var(--accounts-border));
+  color: var(--accounts-success);
 }
 
 .drawerFileNameCopy {

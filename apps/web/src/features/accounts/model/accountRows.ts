@@ -1,4 +1,4 @@
-import type { AuthFileItem } from '@/types';
+import type { AuthFileImportMetadata, AuthFileItem } from '@/types';
 import type { CodexInspectionResult } from '@/services/api/usageService';
 import {
   normalizeRecentRequestBuckets,
@@ -33,6 +33,7 @@ import {
   type AccountQuotaStores,
   type AccountQuotaSummary,
 } from '@/features/accounts/model/accountQuotaSummary';
+import { readAuthFileImportMetadata } from '@/features/authFiles/model/authFileImportMetadata';
 
 export {
   compareQuotaResetLabels,
@@ -128,6 +129,7 @@ export interface AccountRow {
   projectId: string;
   workspaceId?: string;
   workspaceName?: string;
+  importMetadata?: AuthFileImportMetadata | null;
   note?: string;
   priority: number | null;
   createdAtMs: number | null;
@@ -481,6 +483,7 @@ export const buildAccountRows = (
       projectId: readProjectId(file),
       workspaceId: workspace.workspaceId,
       workspaceName: workspace.workspaceName,
+      importMetadata: readAuthFileImportMetadata(file),
       note: readString(file.note),
       priority: readNumber(file.priority),
       createdAtMs: readAuthFileCreatedAtMs(file),
@@ -533,8 +536,7 @@ const hasOperationalItems = (
 const hasPartialGroupedQuota = (row: AccountRow): boolean =>
   row.quota.groupedAvailabilityState === 'partial';
 
-const getAccountOperationalState = (row: AccountRow) =>
-  classifyAuthFileOperationalState(row.raw);
+const getAccountOperationalState = (row: AccountRow) => classifyAuthFileOperationalState(row.raw);
 
 const getAccountDiagnosticText = (row: AccountRow): string =>
   [
@@ -565,9 +567,7 @@ const needsAccountAttention = (
   );
 
 const hasAccountQuotaRisk = (row: AccountRow, _context: AccountMetricOperationalContext): boolean =>
-  row.quota.status === 'low' ||
-  row.quota.status === 'exhausted' ||
-  hasPartialGroupedQuota(row);
+  row.quota.status === 'low' || row.quota.status === 'exhausted' || hasPartialGroupedQuota(row);
 
 const hasConfirmedAvailableEvidence = (row: AccountRow): boolean =>
   row.quota.status === 'ok' ||
@@ -577,7 +577,7 @@ const hasConfirmedAvailableEvidence = (row: AccountRow): boolean =>
 const hasAccountDiagnosticException = (row: AccountRow): boolean =>
   Boolean(
     (row.quota.observedErrorKind || row.quota.observedErrorCode) &&
-      !hasCoolingAccountDiagnostic(row)
+    !hasCoolingAccountDiagnostic(row)
   );
 
 const classifyAccountMetricStatus = (
@@ -708,6 +708,10 @@ export const filterAccountRows = (rows: AccountRow[], filters: AccountRowFilters
       row.planType,
       row.authIndex,
       row.projectId,
+      row.importMetadata?.platform_id,
+      row.importMetadata?.platform_name,
+      row.importMetadata?.method,
+      row.importMetadata?.imported_by,
       row.note,
       row.statusMessage,
       row.raw.state,

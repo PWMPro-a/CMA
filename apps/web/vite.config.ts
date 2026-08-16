@@ -2,27 +2,36 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { viteSingleFile } from 'vite-plugin-singlefile';
 import path from 'path';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import fs from 'fs';
 
-// Get version from environment, git tag, or package.json
+const compactDateVersionPattern = /^\d{8}-\d{6}$/;
+
+// Keep the panel version aligned with Manager and Agent. Repository tags may
+// belong to an upstream release line and must never become deployment versions.
 function getVersion(): string {
-  // 1. Environment variable (set by GitHub Actions)
-  if (process.env.VERSION) {
-    return process.env.VERSION;
+  const explicitVersion = process.env.VERSION?.trim();
+  if (explicitVersion) {
+    return explicitVersion;
   }
 
-  // 2. Try git tag
   try {
-    const gitTag = execSync('git describe --tags --exact-match 2>/dev/null || git describe --tags 2>/dev/null || echo ""', { encoding: 'utf8' }).trim();
-    if (gitTag) {
-      return gitTag;
+    const commitVersion = execFileSync(
+      'git',
+      ['show', '-s', '--date=format-local:%Y%m%d-%H%M%S', '--format=%cd', 'HEAD'],
+      {
+        cwd: path.resolve(__dirname, '../..'),
+        encoding: 'utf8',
+        env: { ...process.env, TZ: process.env.CPA_VERSION_TIMEZONE || 'Asia/Shanghai' },
+      }
+    ).trim();
+    if (compactDateVersionPattern.test(commitVersion)) {
+      return commitVersion;
     }
   } catch {
-    // Git not available or no tags
+    // Git is optional in packaged source builds.
   }
 
-  // 3. Fall back to package.json version
   try {
     const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, 'package.json'), 'utf8'));
     if (pkg.version && pkg.version !== '0.0.0') {
@@ -47,12 +56,12 @@ export default defineConfig(({ mode }) => {
     plugins: [
       react(),
       viteSingleFile({
-        removeViteModuleLoader: true
-      })
+        removeViteModuleLoader: true,
+      }),
     ],
     define: {
       __APP_VERSION__: JSON.stringify(getVersion()),
-      __DEMO_SITE__: JSON.stringify(demoSite || mode === 'test')
+      __DEMO_SITE__: JSON.stringify(demoSite || mode === 'test'),
     },
     resolve: {
       alias: [
@@ -63,24 +72,24 @@ export default defineConfig(({ mode }) => {
             useRealDemoFixtures
               ? './src/features/demo/demoFixtures.ts'
               : './src/features/demo/demoFixtures.empty.ts'
-          )
+          ),
         },
         {
           find: '@',
-          replacement: path.resolve(__dirname, './src')
-        }
-      ]
+          replacement: path.resolve(__dirname, './src'),
+        },
+      ],
     },
     css: {
       modules: {
         localsConvention: 'camelCase',
-        generateScopedName: '[name]__[local]___[hash:base64:5]'
+        generateScopedName: '[name]__[local]___[hash:base64:5]',
       },
       preprocessorOptions: {
         scss: {
-          additionalData: `@use "@/styles/variables" as *;\n@use "@/styles/mixins" as *;\n`
-        }
-      }
+          additionalData: `@use "@/styles/variables" as *;\n@use "@/styles/mixins" as *;\n`,
+        },
+      },
     },
     build: {
       target: 'es2020',
@@ -90,9 +99,9 @@ export default defineConfig(({ mode }) => {
       cssCodeSplit: false,
       rolldownOptions: {
         output: {
-          codeSplitting: false
-        }
-      }
-    }
+          codeSplitting: false,
+        },
+      },
+    },
   };
 });

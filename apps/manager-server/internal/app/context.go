@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
@@ -194,7 +195,7 @@ func fromExisting(
 			authFileMutationCoordinator,
 			st,
 		),
-		PanelService:             panelsvc.New(cfg.PanelPath, embeddedPanel),
+		PanelService:             panelsvc.New(cfg.PanelPath, embeddedPanel, buildinfo.Version),
 		SupplyService:            supplyService,
 		AutomationRuntimeService: runtimeService,
 	}

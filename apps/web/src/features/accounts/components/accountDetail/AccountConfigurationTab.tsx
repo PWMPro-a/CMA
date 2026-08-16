@@ -480,6 +480,24 @@ export function AccountConfigurationTab({
               <dt>{t('accounts.detail_auth_index')}</dt>
               <dd>{row.authIndex || '-'}</dd>
             </div>
+            {row.importMetadata ? (
+              <>
+                <div>
+                  <dt>{t('accounts.import_platform_label')}</dt>
+                  <dd>
+                    {row.importMetadata.platform_name || row.importMetadata.platform_id || '-'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t('accounts.imported_by_label')}</dt>
+                  <dd>{row.importMetadata.imported_by || '-'}</dd>
+                </div>
+                <div>
+                  <dt>{t('accounts.imported_at_label')}</dt>
+                  <dd>{row.importMetadata.imported_at || '-'}</dd>
+                </div>
+              </>
+            ) : null}
           </dl>
           <div className={styles.configurationRawDataHeader}>
             <p>{t('accounts.config_raw_data_hint')}</p>

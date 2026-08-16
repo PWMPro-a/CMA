@@ -345,6 +345,15 @@ describe('prepareAuthFilesForUpload', () => {
     expect(result.files).toHaveLength(1);
     expect(result.files[0].name).toMatch(/^codex-[a-f0-9]{8}-user@example\.com\.json$/);
     expect(result.files[0].name).not.toBe(file.name);
+    expect(JSON.parse(await result.files[0].text())).toMatchObject({
+      cpamp_import: {
+        source: 'manual',
+        method: 'file_upload',
+        platform_id: 'cpa',
+        platform_name: 'CPA 文件',
+        imported_by: 'cpa-manager-plus',
+      },
+    });
   });
 
   it('keeps shared-workspace members separate even when source names are generic', async () => {
@@ -382,7 +391,7 @@ describe('prepareAuthFilesForUpload', () => {
     expect(result.files.map((item) => item.name)).not.toContain('item-0002.json');
   });
 
-  it('preserves valid CPA auth JSON with export-like metadata without rewriting it', async () => {
+  it('preserves valid CPA auth fields while adding file-import metadata', async () => {
     const file = new File(
       [
         JSON.stringify({
@@ -398,12 +407,20 @@ describe('prepareAuthFilesForUpload', () => {
 
     const result = await prepareAuthFilesForUpload([file]);
 
-    expect(result).toEqual({
-      files: [file],
-      failures: [],
-      convertedSourceCount: 0,
+    expect(result.failures).toEqual([]);
+    expect(result.convertedSourceCount).toBe(0);
+    expect(result.files).toHaveLength(1);
+    expect(result.files[0].name).toBe(file.name);
+    expect(JSON.parse(await result.files[0].text())).toMatchObject({
+      type: 'custom-provider',
+      token: 'provider-secret',
+      exported_at: '2026-06-01T12:00:00.000Z',
+      proxies: [],
+      cpamp_import: {
+        method: 'file_upload',
+        platform_id: 'cpa',
+      },
     });
-    expect(result.files[0]).toBe(file);
   });
 
   it('converts an uploaded sub2api export into separate CPA auth files', async () => {
@@ -451,6 +468,13 @@ describe('prepareAuthFilesForUpload', () => {
       const parsed = JSON.parse(await convertedFile.text()) as unknown;
       expect(parsed).toBeTypeOf('object');
       expect(Array.isArray(parsed)).toBe(false);
+      expect(parsed).toMatchObject({
+        cpamp_import: {
+          method: 'file_upload',
+          platform_id: 'sub2api',
+          platform_name: 'Sub2API',
+        },
+      });
     }
   });
 
@@ -770,6 +794,12 @@ describe('useAuthFilesData savePastedAuthJson', () => {
         email: 'Session.User+tag@example.com',
         account_id: 'session-account',
         access_token: 'plain-access-token',
+        cpamp_import: expect.objectContaining({
+          source: 'manual',
+          method: 'json_paste',
+          platform_id: 'chatgpt_session',
+          platform_name: 'ChatGPT Session',
+        }),
       })
     );
     expect(mocks.showNotification).toHaveBeenCalledWith(
@@ -780,7 +810,7 @@ describe('useAuthFilesData savePastedAuthJson', () => {
     hook.unmount();
   });
 
-  it('saves CPA JSON unchanged with explicit file name', async () => {
+  it('saves CPA JSON with explicit file name and paste metadata', async () => {
     const hook = mountUseAuthFilesData();
     const cpaInput = {
       type: 'codex',
@@ -793,7 +823,16 @@ describe('useAuthFilesData savePastedAuthJson', () => {
       .savePastedAuthJson('cpa', 'custom-auth.json', JSON.stringify(cpaInput));
 
     expect(savedName).toEqual(['custom-auth.json']);
-    expect(mocks.saveJsonObject).toHaveBeenCalledWith('custom-auth.json', cpaInput);
+    expect(mocks.saveJsonObject).toHaveBeenCalledWith(
+      'custom-auth.json',
+      expect.objectContaining({
+        ...cpaInput,
+        cpamp_import: expect.objectContaining({
+          method: 'json_paste',
+          platform_id: 'cpa',
+        }),
+      })
+    );
     expect(mocks.list).toHaveBeenCalledTimes(1);
     hook.unmount();
   });
@@ -851,11 +890,19 @@ describe('useAuthFilesData savePastedAuthJson', () => {
         type: 'codex',
         email: 'first@example.com',
         access_token: 'first-access-token',
+        cpamp_import: expect.objectContaining({
+          method: 'json_paste',
+          platform_id: 'sub2api',
+        }),
       }),
       expect.objectContaining({
         type: 'codex',
         email: 'second@example.com',
         access_token: 'second-access-token',
+        cpamp_import: expect.objectContaining({
+          method: 'json_paste',
+          platform_id: 'sub2api',
+        }),
       }),
     ]);
     expect(uploadedJson.every((item) => !Array.isArray(item))).toBe(true);

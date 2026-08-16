@@ -73,6 +73,7 @@ import {
   readAuthFileImportDefaults,
   writeAuthFileImportDefaults,
 } from '@/features/authFiles/importDefaults';
+import { getAuthFileImportMethodLabelKey } from '@/features/authFiles/model/authFileImportMetadata';
 import { useAuthFilesOauth } from '@/features/authFiles/hooks/useAuthFilesOauth';
 import { useAuthFilesModels } from '@/features/authFiles/hooks/useAuthFilesModels';
 import { useAuthFileConfigurationEditor } from '@/features/authFiles/hooks/useAuthFileConfigurationEditor';
@@ -4380,6 +4381,23 @@ export function AccountsPage() {
             const recentRequestCount = row.usage.success + row.usage.failure;
             const sourceIp = getAccountSourceIp(row.raw);
             const websocketsEnabled = readAuthFileWebsockets(row.raw);
+            const importPlatform =
+              row.importMetadata?.platform_name || row.importMetadata?.platform_id || '';
+            const importMethod = row.importMetadata
+              ? t(getAuthFileImportMethodLabelKey(row.importMetadata.method))
+              : '';
+            const importedAtMs = row.importMetadata?.imported_at
+              ? Date.parse(row.importMetadata.imported_at)
+              : Number.NaN;
+            const importBadgeTitle = row.importMetadata
+              ? t('accounts.import_badge_title', {
+                  platform: importPlatform,
+                  method: importMethod,
+                  time: Number.isFinite(importedAtMs)
+                    ? formatTimestampTitle(importedAtMs, i18n.language)
+                    : '-',
+                })
+              : '';
             const accountHistoryRequestValue = accountHistoryMatched
               ? formatCompactNumber(accountHistory.total_requests)
               : recentRequestCount > 0
@@ -4418,6 +4436,22 @@ export function AccountsPage() {
                     </span>
                     {item.identity.planType ? (
                       <span className={styles.accountMetaPill}>{item.identity.planType}</span>
+                    ) : null}
+                    {row.importMetadata ? (
+                      <>
+                        <span
+                          className={`${styles.accountMetaPill} ${styles.accountImportPlatformPill}`}
+                          title={importBadgeTitle}
+                        >
+                          {importPlatform}
+                        </span>
+                        <span
+                          className={`${styles.accountMetaPill} ${styles.accountImportMethodPill}`}
+                          title={importBadgeTitle}
+                        >
+                          {importMethod}
+                        </span>
+                      </>
                     ) : null}
                     {accountGroupsAvailable ? (
                       <button
@@ -4912,6 +4946,23 @@ export function AccountsPage() {
     };
     const selectedCredentialRefreshing =
       credentialRefreshing[getAuthFileSelectionKey(selectedRow.raw)] === true;
+    const selectedImportPlatform =
+      selectedRow.importMetadata?.platform_name || selectedRow.importMetadata?.platform_id || '';
+    const selectedImportMethod = selectedRow.importMetadata
+      ? t(getAuthFileImportMethodLabelKey(selectedRow.importMetadata.method))
+      : '';
+    const selectedImportedAtMs = selectedRow.importMetadata?.imported_at
+      ? Date.parse(selectedRow.importMetadata.imported_at)
+      : Number.NaN;
+    const selectedImportTitle = selectedRow.importMetadata
+      ? t('accounts.import_badge_title', {
+          platform: selectedImportPlatform,
+          method: selectedImportMethod,
+          time: Number.isFinite(selectedImportedAtMs)
+            ? formatTimestampTitle(selectedImportedAtMs, i18n.language)
+            : '-',
+        })
+      : '';
     const drawerMoreItems: DropdownMenuItem[] = [
       {
         key: 'models',
@@ -5003,6 +5054,12 @@ export function AccountsPage() {
                   <IconCopy size={12} />
                 </button>
               </span>
+              {selectedRow.importMetadata ? (
+                <span className={styles.drawerImportMeta} title={selectedImportTitle}>
+                  <span className={styles.drawerImportPlatformPill}>{selectedImportPlatform}</span>
+                  <span className={styles.drawerImportMethodPill}>{selectedImportMethod}</span>
+                </span>
+              ) : null}
             </div>
           </div>
         }

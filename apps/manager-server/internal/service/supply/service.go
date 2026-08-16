@@ -3132,6 +3132,7 @@ func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, orde
 		account, err := normalizeAccountForImport(item.PayloadJSON)
 		if err == nil {
 			account = withSupplyAccountLeaseMetadata(account, item.LeaseExpiresAtMS)
+			account = withSupplyAccountImportMetadata(account, cfg.Supply, *order, time.Now())
 		}
 		fileName := item.FileName
 		importAction := strings.ToLower(strings.TrimSpace(item.ImportAction))
@@ -3293,6 +3294,45 @@ func withSupplyAccountLeaseMetadata(account normalizedSupplyAccount, leaseExpire
 	}
 	metadata["supply_lease_expires_at_ms"] = leaseExpiresAtMS
 	metadata["supply_lease_expires_at"] = time.UnixMilli(leaseExpiresAtMS).UTC().Format(time.RFC3339)
+	if normalized, err := json.Marshal(metadata); err == nil {
+		account.payload = normalized
+	}
+	return account
+}
+
+func withSupplyAccountImportMetadata(account normalizedSupplyAccount, cfg store.ManagerSupplyConfig, order store.SupplyOrder, importedAt time.Time) normalizedSupplyAccount {
+	if len(account.payload) == 0 {
+		return account
+	}
+	var metadata map[string]any
+	if json.Unmarshal(account.payload, &metadata) != nil {
+		return account
+	}
+	platformID := strings.TrimSpace(order.SupplierID)
+	platformName := platformID
+	if platform, err := resolveSupplyPlatform(cfg, platformID, order.Product); err == nil {
+		platformID = firstNonEmptyString(platform.ID, platformID)
+		platformName = firstNonEmptyString(platform.Name, platform.ID, platformName)
+	}
+	if platformID == "" {
+		platformID = "supply"
+	}
+	if platformName == "" {
+		platformName = platformID
+	}
+	method := "manual_supply"
+	if order.Automatic {
+		method = "automatic_supply"
+	}
+	metadata["cpamp_import"] = map[string]any{
+		"version":       1,
+		"source":        "supply",
+		"method":        method,
+		"platform_id":   platformID,
+		"platform_name": platformName,
+		"imported_by":   "cpa-manager-plus",
+		"imported_at":   importedAt.UTC().Format(time.RFC3339Nano),
+	}
 	if normalized, err := json.Marshal(metadata); err == nil {
 		account.payload = normalized
 	}

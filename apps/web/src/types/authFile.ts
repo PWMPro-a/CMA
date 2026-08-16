@@ -95,6 +95,25 @@ export interface CodexQuotaSnapshot {
   generation?: number;
 }
 
+export type AuthFileImportSource = 'manual' | 'supply' | string;
+
+export type AuthFileImportMethod =
+  | 'file_upload'
+  | 'json_paste'
+  | 'automatic_supply'
+  | 'manual_supply'
+  | string;
+
+export interface AuthFileImportMetadata {
+  version: number;
+  source: AuthFileImportSource;
+  method: AuthFileImportMethod;
+  platform_id: string;
+  platform_name: string;
+  imported_by: string;
+  imported_at: string;
+}
+
 export interface AuthFileItem {
   id?: string;
   name: string;
@@ -132,6 +151,8 @@ export interface AuthFileItem {
   agentIdentityRegistration?: AgentIdentityRegistrationStatus;
   group_ids?: number[];
   groupIds?: number[];
+  cpamp_import?: AuthFileImportMetadata;
+  cpampImport?: AuthFileImportMetadata;
   [key: string]: unknown;
 }
 

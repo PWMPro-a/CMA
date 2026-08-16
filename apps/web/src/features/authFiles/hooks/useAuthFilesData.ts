@@ -23,11 +23,17 @@ import { MAX_AUTH_FILE_SIZE } from '@/utils/constants';
 import { downloadBlob } from '@/utils/download';
 import { parseTimestampMs } from '@/utils/timestamp';
 import {
+  AuthJsonConversionError,
   buildAuthJsonFilePayloads,
   isSub2ApiAuthJsonInput,
   type AuthJsonFilePayload,
   type AuthJsonInputType,
 } from '@/features/authFiles/sessionAuthConverter';
+import {
+  buildAuthFileImportMetadata,
+  getManualAuthFileImportPlatform,
+  withAuthFileImportMetadata,
+} from '@/features/authFiles/model/authFileImportMetadata';
 import {
   getTypeLabel,
   hasAuthFileStatusMessage,
@@ -600,6 +606,47 @@ const createUniqueConvertedAuthFiles = (
   });
 };
 
+const isAuthJsonRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const addManualImportMetadataToPayload = (
+  payload: AuthJsonFilePayload,
+  type: AuthJsonInputType,
+  method: 'file_upload' | 'json_paste',
+  importedAt: Date
+): AuthJsonFilePayload => {
+  const authJson = withAuthFileImportMetadata(
+    payload.authJson,
+    buildAuthFileImportMetadata({
+      method,
+      platform: getManualAuthFileImportPlatform(type),
+      importedAt,
+    })
+  );
+  const serialized = JSON.stringify(authJson);
+  if (new Blob([serialized]).size > MAX_AUTH_FILE_SIZE) {
+    throw new AuthJsonConversionError(
+      `Generated auth file ${payload.fileName} exceeds the maximum size`
+    );
+  }
+  return { ...payload, authJson };
+};
+
+const createManualImportAuthFile = (
+  fileName: string,
+  authJson: Record<string, unknown>,
+  type: AuthJsonInputType,
+  importedAt: Date
+): File => {
+  const payload = addManualImportMetadataToPayload(
+    { fileName, authJson },
+    type,
+    'file_upload',
+    importedAt
+  );
+  return new File([JSON.stringify(payload.authJson)], fileName, { type: 'application/json' });
+};
+
 const ensureUniqueUploadFileNames = (files: File[]) => {
   const usedNames = new Set<string>();
   return files.map((file) => {
@@ -616,7 +663,10 @@ const ensureUniqueUploadFileNames = (files: File[]) => {
   });
 };
 
-export const prepareAuthFilesForUpload = async (files: File[]): Promise<PreparedAuthFileUpload> => {
+export const prepareAuthFilesForUpload = async (
+  files: File[],
+  importedAt = new Date()
+): Promise<PreparedAuthFileUpload> => {
   const ordinaryFiles: File[] = [];
   const convertedPayloads: AuthJsonFilePayload[] = [];
   const failures: AuthFilePreparationFailure[] = [];
@@ -644,6 +694,8 @@ export const prepareAuthFilesForUpload = async (files: File[]): Promise<Prepared
             text,
             new Date(),
             MAX_AUTH_FILE_SIZE
+          ).map((payload) =>
+            addManualImportMetadataToPayload(payload, 'sub2api', 'file_upload', importedAt)
           )
         );
         convertedSourceCount += 1;
@@ -667,11 +719,17 @@ export const prepareAuthFilesForUpload = async (files: File[]): Promise<Prepared
         (provider === 'codex' || provider === 'openai-codex') &&
         cpaPayloads[0].fileName !== file.name;
       if (converted) {
-        convertedPayloads.push(...cpaPayloads);
+        convertedPayloads.push(
+          ...cpaPayloads.map((payload) =>
+            addManualImportMetadataToPayload(payload, 'cpa', 'file_upload', importedAt)
+          )
+        );
         convertedSourceCount += 1;
         continue;
       }
-      ordinaryFiles.push(file);
+      ordinaryFiles.push(
+        createManualImportAuthFile(file.name, cpaPayloads[0].authJson, 'cpa', importedAt)
+      );
     } catch (err) {
       if (isSub2ApiInput) {
         failures.push({
@@ -679,7 +737,21 @@ export const prepareAuthFilesForUpload = async (files: File[]): Promise<Prepared
           error: err instanceof Error ? err.message : 'Failed to convert sub2api auth JSON',
         });
       } else {
-        ordinaryFiles.push(file);
+        try {
+          const parsed = JSON.parse(text) as unknown;
+          if (!isAuthJsonRecord(parsed)) {
+            throw new AuthJsonConversionError('Auth file JSON must be an object');
+          }
+          ordinaryFiles.push(createManualImportAuthFile(file.name, parsed, 'cpa', importedAt));
+        } catch (fallbackError) {
+          failures.push({
+            name: file.name,
+            error:
+              fallbackError instanceof Error
+                ? fallbackError.message
+                : 'Failed to prepare auth JSON',
+          });
+        }
       }
     }
   }
@@ -1062,7 +1134,10 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
       authJsonPasteSavingRef.current = true;
       setAuthJsonPasteSaving(true);
       try {
-        const payloads = buildPastedAuthJsonPayloads(type, fileName, jsonText);
+        const importedAt = new Date();
+        const payloads = buildPastedAuthJsonPayloads(type, fileName, jsonText).map((payload) =>
+          addManualImportMetadataToPayload(payload, type, 'json_paste', importedAt)
+        );
         const savedFileNames = payloads.map((payload) => payload.fileName);
         if (payloads.length === 1) {
           try {

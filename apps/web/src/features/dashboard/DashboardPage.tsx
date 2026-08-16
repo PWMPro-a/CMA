@@ -32,6 +32,7 @@ import { TrafficOverviewCard } from './components/TrafficOverviewCard';
 import { useDashboardUsageSummary } from './hooks/useDashboardUsageSummary';
 import { getDashboardModelCountDisplay } from './modelCountDisplay';
 import { resolveProviderCount } from './providerStats';
+import { resolveManagerPanelVersion } from '@/features/system/versionChecks';
 import styles from './DashboardPage.module.scss';
 
 interface QuickStat {
@@ -511,7 +512,10 @@ export function DashboardPage() {
       {/* 2. Top Overview Row (Version & Health) */}
       <section className={styles.overviewRow}>
         <VersionCard
-          appVersion={__APP_VERSION__ || t('dashboard.version_unknown')}
+          appVersion={
+            resolveManagerPanelVersion(__APP_VERSION__, serverVersion) ||
+            t('dashboard.version_unknown')
+          }
           apiVersion={serverVersion || t('dashboard.version_unknown')}
           agentVersion={agentVersion || t('dashboard.version_unknown')}
           cpaBase={managerCpaBase || apiBase || ''}
