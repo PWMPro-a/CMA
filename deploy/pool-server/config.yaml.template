@@ -27,3 +27,21 @@ source-ip: ""
 request-retry: 3
 max-retry-credentials: 0
 max-retry-interval: 30
+
+codex:
+  identity-confuse: true
+  cache-affinity:
+    enabled: true
+    shadow: false
+    max-entries: 65536
+    max-retry-credentials: 2
+    websocket-pool-slots: 8
+    max-session-requests: 2000
+    max-session-duration: "30m"
+    quota-preempt-used-ratio: 0.97
+    quota-hard-stop-used-ratio: 0.99
+
+routing:
+  strategy: round-robin
+  session-affinity: false
+  high-cache-mode: true

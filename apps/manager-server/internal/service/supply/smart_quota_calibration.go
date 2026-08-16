@@ -50,15 +50,16 @@ const (
 // The UI presents the inverse value as remaining percentage, so this is also
 // windowTokens / (1 - remainingFraction).
 type smartQuotaCalibrationObservation struct {
-	lastEventMS        int64
-	lastFraction       float64
-	lastSampleFraction float64
-	lastSampleTokens   int64
-	hasFraction        bool
-	recoverAtMS        int64
-	supplierID         string
-	planType           string
-	windowTokens       int64
+	lastEventMS               int64
+	lastFraction              float64
+	lastSampleFraction        float64
+	lastSampleTokens          int64
+	hasFraction               bool
+	recoverAtMS               int64
+	credentialEffectiveFromMS int64
+	supplierID                string
+	planType                  string
+	windowTokens              int64
 }
 
 type smartQuotaCalibrationSample struct {
@@ -155,23 +156,24 @@ type smartQuotaWindowEvidence struct {
 }
 
 // smartQuotaWindowBaseline is an account-scoped Token aggregate for the quota
-// window observed by one inspection result. firstSeenMS proves whether the
-// local database covered the complete provider window; an account imported in
-// the middle of a 7-day window must not divide its partial local usage by the
-// provider's absolute used percentage.
+// window observed by one inspection result. firstSeenMS and the current
+// credential's effective time prove whether the local database covered one
+// unchanged provider window; an account imported or replaced mid-window must
+// not divide mixed local usage by the replacement's absolute used percentage.
 type smartQuotaWindowBaseline struct {
-	requestIndex int
-	identity     string
-	supplierID   string
-	planType     string
-	fraction     float64
-	fromMS       int64
-	toMS         int64
-	recoverAtMS  int64
-	observedMS   int64
-	windowTokens int64
-	firstSeenMS  int64
-	lastSeenMS   int64
+	requestIndex              int
+	identity                  string
+	supplierID                string
+	planType                  string
+	fraction                  float64
+	fromMS                    int64
+	toMS                      int64
+	recoverAtMS               int64
+	observedMS                int64
+	credentialEffectiveFromMS int64
+	windowTokens              int64
+	firstSeenMS               int64
+	lastSeenMS                int64
 }
 
 const smartQuotaCompleteWindowCoverageSlack = 5 * time.Minute
@@ -475,12 +477,9 @@ func smartQuotaWindowRecoverAtMS(window *usage.HeaderQuotaWindow, eventTimestamp
 func smartQuotaWindowBaselinesForInspection(
 	results []store.CodexInspectionResult,
 	run store.CodexInspectionRun,
-	supplierMaps ...map[string]string,
+	supplierByFile map[string]string,
+	credentialEffectiveFromByFile map[string]int64,
 ) ([]smartQuotaWindowBaseline, []store.SupplyQuotaWindowUsageQuery) {
-	var supplierByFile map[string]string
-	if len(supplierMaps) > 0 {
-		supplierByFile = supplierMaps[0]
-	}
 	baselines := make([]smartQuotaWindowBaseline, 0, len(results))
 	targets := make([]store.SupplyQuotaWindowUsageQuery, 0, len(results))
 	for _, result := range results {
@@ -514,22 +513,27 @@ func smartQuotaWindowBaselinesForInspection(
 		}
 		requestIndex := len(baselines)
 		baseline := smartQuotaWindowBaseline{
-			requestIndex: requestIndex,
-			identity:     "file:" + normalizeSmartQuotaIdentity(fileName),
-			supplierID:   normalizeSmartQuotaSupplierID(supplierByFile[fileName]),
-			planType:     strings.ToLower(strings.TrimSpace(result.PlanType)),
-			fraction:     fraction,
-			fromMS:       fromMS,
-			toMS:         observedMS + 1,
-			recoverAtMS:  recoverAtMS,
-			observedMS:   observedMS,
+			requestIndex:              requestIndex,
+			identity:                  "file:" + normalizeSmartQuotaIdentity(fileName),
+			supplierID:                normalizeSmartQuotaSupplierID(supplierByFile[fileName]),
+			planType:                  strings.ToLower(strings.TrimSpace(result.PlanType)),
+			fraction:                  fraction,
+			fromMS:                    fromMS,
+			toMS:                      observedMS + 1,
+			recoverAtMS:               recoverAtMS,
+			observedMS:                observedMS,
+			credentialEffectiveFromMS: credentialEffectiveFromByFile[fileName],
 		}
 		baselines = append(baselines, baseline)
+		usageFromMS := baseline.fromMS
+		if baseline.credentialEffectiveFromMS > usageFromMS {
+			usageFromMS = baseline.credentialEffectiveFromMS
+		}
 		targets = append(targets, store.SupplyQuotaWindowUsageQuery{
 			RequestIndex:     requestIndex,
 			AuthFileSnapshot: fileName,
 			AuthIndex:        result.AuthIndex,
-			FromMS:           baseline.fromMS,
+			FromMS:           usageFromMS,
 			ToMS:             baseline.toMS,
 		})
 	}
@@ -572,9 +576,18 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 		s.assignSmartQuotaSupplierToIdentityLocked(baseline.identity, baseline.supplierID)
 
 		observation := s.smartQuotaState.observations[baseline.identity]
+		credentialGenerationChanged := baseline.credentialEffectiveFromMS > 0 &&
+			observation.credentialEffectiveFromMS != baseline.credentialEffectiveFromMS
+		if credentialGenerationChanged {
+			// Warm replay can span two credentials that reused one filename. Drop
+			// the prior generation once, then retain deltas learned after this marker.
+			s.removeSmartQuotaSamplesThroughLocked(baseline.identity, baseline.observedMS)
+			delete(s.smartQuotaState.directSamples, baseline.identity)
+			delete(s.smartQuotaState.provisionalSamples, baseline.identity)
+		}
 		if (observation.recoverAtMS > 0 && baseline.recoverAtMS > 0 && observation.recoverAtMS != baseline.recoverAtMS) ||
 			(observation.supplierID != "" && baseline.supplierID != "" && observation.supplierID != baseline.supplierID) {
-			observation = smartQuotaCalibrationObservation{}
+			observation = resetSmartQuotaCalibrationObservation(observation)
 		}
 		observation.windowTokens = baseline.windowTokens
 		observation.lastEventMS = maxInt64(observation.lastEventMS, maxInt64(baseline.observedMS, baseline.lastSeenMS))
@@ -584,6 +597,9 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 		observation.hasFraction = true
 		if baseline.recoverAtMS > 0 {
 			observation.recoverAtMS = baseline.recoverAtMS
+		}
+		if baseline.credentialEffectiveFromMS > 0 {
+			observation.credentialEffectiveFromMS = baseline.credentialEffectiveFromMS
 		}
 		if baseline.planType != "" {
 			observation.planType = baseline.planType
@@ -642,7 +658,11 @@ func smartQuotaWindowBaselineHasCompleteCoverage(baseline smartQuotaWindowBaseli
 	if baseline.fromMS <= 0 || baseline.firstSeenMS <= 0 || baseline.observedMS <= baseline.fromMS {
 		return false
 	}
-	return baseline.firstSeenMS <= baseline.fromMS+smartQuotaCompleteWindowCoverageSlack.Milliseconds()
+	coverageBoundaryMS := baseline.fromMS + smartQuotaCompleteWindowCoverageSlack.Milliseconds()
+	if baseline.credentialEffectiveFromMS > coverageBoundaryMS {
+		return false
+	}
+	return baseline.firstSeenMS <= coverageBoundaryMS
 }
 
 func (s *Service) recordSmartQuotaCalibrationEventsLocked(events []usage.Event, now time.Time) {
@@ -694,7 +714,7 @@ func (s *Service) recordSmartQuotaCalibrationEventLocked(event usage.Event, now 
 		gapExpired := found && observation.recoverAtMS <= 0 &&
 			(ts-observation.lastEventMS) > smartQuotaCalibrationMaxObservationGap.Milliseconds()
 		if windowExpired || gapExpired {
-			observation = smartQuotaCalibrationObservation{}
+			observation = resetSmartQuotaCalibrationObservation(observation)
 		}
 		observation.windowTokens += tokens
 		observation.lastEventMS = ts
@@ -711,7 +731,7 @@ func (s *Service) recordSmartQuotaCalibrationEventLocked(event usage.Event, now 
 		(evidence.recoverAtMS > 0 && observation.recoverAtMS > 0 && evidence.recoverAtMS != observation.recoverAtMS) ||
 		(planType != "" && observation.planType != "" && planType != observation.planType)
 	if reset {
-		observation = smartQuotaCalibrationObservation{}
+		observation = resetSmartQuotaCalibrationObservation(observation)
 	}
 	observation.windowTokens += tokens
 	observation.lastEventMS = ts
@@ -765,6 +785,12 @@ func (s *Service) recordSmartQuotaCalibrationEventLocked(event usage.Event, now 
 		observation.lastSampleTokens = observation.windowTokens
 	}
 	s.smartQuotaState.observations[identity] = observation
+}
+
+func resetSmartQuotaCalibrationObservation(observation smartQuotaCalibrationObservation) smartQuotaCalibrationObservation {
+	return smartQuotaCalibrationObservation{
+		credentialEffectiveFromMS: observation.credentialEffectiveFromMS,
+	}
 }
 
 func (s *Service) pruneSmartQuotaCalibrationLocked(now time.Time) {

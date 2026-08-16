@@ -1870,11 +1870,16 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context, configs
 			orderByID[strings.TrimSpace(order.OrderID)] = order
 		}
 		supplierByFile := make(map[string]string, len(leaseItems))
+		credentialEffectiveFromByFile := make(map[string]int64, len(leaseItems))
 		for _, item := range leaseItems {
 			fileName := strings.TrimSpace(item.FileName)
 			if fileName == "" {
 				continue
 			}
+			credentialEffectiveFromByFile[fileName] = maxInt64(
+				credentialEffectiveFromByFile[fileName],
+				maxInt64(item.EffectiveFromMS, item.ImportedAtMS),
+			)
 			order := orderByID[strings.TrimSpace(item.OrderID)]
 			supplierID := normalizeSmartQuotaSupplierID(order.SupplierID)
 			if supplierID == "" && strings.TrimSpace(order.Product) != "" {
@@ -1898,7 +1903,12 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context, configs
 				}
 			}
 		}
-		quotaWindowUsage, quotaWindowTargets := smartQuotaWindowBaselinesForInspection(filtered, run, supplierByFile)
+		quotaWindowUsage, quotaWindowTargets := smartQuotaWindowBaselinesForInspection(
+			filtered,
+			run,
+			supplierByFile,
+			credentialEffectiveFromByFile,
+		)
 		if len(quotaWindowTargets) > 0 {
 			usageRows, err := s.store.ListSupplyQuotaWindowUsage(ctx, quotaWindowTargets)
 			if err != nil {

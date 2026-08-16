@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
@@ -270,6 +271,99 @@ func TestSmartQuotaCompleteWindowUsesIndependentAccountFormula(t *testing.T) {
 	if estimate.CapacityM != 40 || estimate.Source != smartQuotaEstimateSourceCurrent ||
 		!estimate.IndependentAccount || estimate.CurrentEstimateM != 40 {
 		t.Fatalf("independent account estimate = %#v", estimate)
+	}
+}
+
+func TestSmartQuotaWindowImportedAfterStartIsNotComplete(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	windowStart := now.Add(-7 * 24 * time.Hour)
+	identity := "file:replaced-mid-window.json"
+	service.appendSmartQuotaCalibrationSampleLocked(smartQuotaCalibrationSample{
+		identity: identity, planType: "team", capacityM: 31,
+		weight: 0.04, usedFraction: 0.9, observedMS: now.Add(-2 * time.Minute).UnixMilli(),
+	})
+	service.smartQuotaState.directSamples[identity] = smartQuotaCalibrationSample{
+		identity: identity, planType: "team", capacityM: 30,
+		weight: 1, usedFraction: 1, observedMS: now.Add(-time.Minute).UnixMilli(), completeWindow: true,
+	}
+
+	service.recordSmartQuotaWindowBaselines([]smartQuotaWindowBaseline{{
+		identity:                  identity,
+		planType:                  "team",
+		fraction:                  1,
+		fromMS:                    windowStart.UnixMilli(),
+		observedMS:                now.UnixMilli(),
+		credentialEffectiveFromMS: windowStart.Add(10 * time.Minute).UnixMilli(),
+		windowTokens:              30_000_000,
+		firstSeenMS:               windowStart.UnixMilli(),
+		lastSeenMS:                now.UnixMilli(),
+	}}, now)
+
+	if _, ok := service.smartQuotaState.directSamples[identity]; ok {
+		t.Fatal("mid-window replacement retained a false complete-window estimate")
+	}
+	if _, ok := service.smartQuotaState.provisionalSamples[identity]; ok {
+		t.Fatal("mid-window replacement created a provisional complete-window estimate")
+	}
+	if len(service.smartQuotaState.samplesByIdentity[identity]) != 0 {
+		t.Fatal("mid-window replacement retained runtime samples from the previous credential generation")
+	}
+	observation := service.smartQuotaState.observations[identity]
+	if observation.windowTokens != 30_000_000 || observation.lastFraction != 1 ||
+		observation.credentialEffectiveFromMS != windowStart.Add(10*time.Minute).UnixMilli() {
+		t.Fatalf("mid-window replacement did not seed delta observation: %#v", observation)
+	}
+
+	currentSample := smartQuotaCalibrationSample{
+		identity: identity, planType: "team", capacityM: 60,
+		weight: 0.04, usedFraction: 1, observedMS: now.Add(time.Second).UnixMilli(),
+	}
+	service.appendSmartQuotaCalibrationSampleLocked(currentSample)
+	service.recordSmartQuotaWindowBaselines([]smartQuotaWindowBaseline{{
+		identity:                  identity,
+		planType:                  "team",
+		fraction:                  1,
+		fromMS:                    windowStart.UnixMilli(),
+		observedMS:                now.Add(2 * time.Second).UnixMilli(),
+		credentialEffectiveFromMS: windowStart.Add(10 * time.Minute).UnixMilli(),
+		windowTokens:              30_100_000,
+		firstSeenMS:               windowStart.Add(10 * time.Minute).UnixMilli(),
+		lastSeenMS:                now.Add(2 * time.Second).UnixMilli(),
+	}}, now.Add(2*time.Second))
+	if samples := service.smartQuotaState.samplesByIdentity[identity]; len(samples) != 1 || samples[0].capacityM != 60 {
+		t.Fatalf("same credential generation did not retain warmed runtime sample: %#v", samples)
+	}
+}
+
+func TestSmartQuotaWindowUsageStartsAtCurrentCredentialGeneration(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	usedPercent := 50.0
+	weeklySeconds := float64(smartQuotaWeekSeconds)
+	fileName := "replaced.json"
+	effectiveFromMS := now.Add(-12 * time.Hour).UnixMilli()
+	baselines, targets := smartQuotaWindowBaselinesForInspection([]store.CodexInspectionResult{{
+		FileName:    fileName,
+		AuthIndex:   "auth-replaced",
+		Provider:    "codex",
+		PlanType:    "team",
+		CreatedAtMS: now.UnixMilli(),
+		QuotaWindows: []model.CodexInspectionQuotaWindow{{
+			ID:                 "weekly",
+			UsedPercent:        &usedPercent,
+			ResetAtMS:          now.Add(6 * 24 * time.Hour).UnixMilli(),
+			LimitWindowSeconds: &weeklySeconds,
+		}},
+	}}, store.CodexInspectionRun{}, map[string]string{fileName: "supplier"}, map[string]int64{
+		fileName: effectiveFromMS,
+	})
+
+	if len(baselines) != 1 || len(targets) != 1 {
+		t.Fatalf("baseline/target count = %d/%d, want 1/1", len(baselines), len(targets))
+	}
+	if baselines[0].credentialEffectiveFromMS != effectiveFromMS || targets[0].FromMS != effectiveFromMS {
+		t.Fatalf("credential generation bounds = baseline %d target %d, want %d",
+			baselines[0].credentialEffectiveFromMS, targets[0].FromMS, effectiveFromMS)
 	}
 }
 
