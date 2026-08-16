@@ -1622,7 +1622,7 @@ describe('accountRows', () => {
         {},
         {
           total: 1,
-          normal: 0,
+          normal: 1,
           needsAttention: 0,
           quotaRisk: 1,
           disabled: 1,
@@ -1632,11 +1632,34 @@ describe('accountRows', () => {
       )
     ).toMatchObject({
       total: 3,
-      available: 1,
+      available: 2,
       needsAttention: 0,
       quotaRisk: 1,
       disabled: 1,
       unconfirmed: 0,
+    });
+  });
+
+  it('accepts overlapping available and quota-risk counts from the live pool summary', () => {
+    const rows = buildAccountRows(
+      [{ name: 'risk.json', type: 'codex', authIndex: 'risk' }],
+      emptyStores()
+    );
+
+    expect(
+      buildAccountMetricsWithCodexPoolSummary(rows, {}, {
+        total: 1,
+        normal: 1,
+        needsAttention: 0,
+        quotaRisk: 1,
+        disabled: 0,
+        unconfirmed: 0,
+        classificationObserved: true,
+      })
+    ).toMatchObject({
+      total: 1,
+      available: 1,
+      quotaRisk: 1,
     });
   });
 

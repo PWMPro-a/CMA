@@ -186,6 +186,8 @@ export interface SupplyAccountPoolCredentialSummary {
   accountId?: string;
   accountSnapshot?: string;
   bucket: SupplyAccountPoolCredentialBucket;
+  /** Live Core scheduling eligibility; quota-risk credentials may still be schedulable. */
+  schedulable?: boolean;
 }
 
 export interface SupplySmartResource {

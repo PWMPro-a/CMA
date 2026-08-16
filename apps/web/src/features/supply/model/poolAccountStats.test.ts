@@ -191,7 +191,7 @@ describe('resolveSupplyPoolAccountStats', () => {
     });
   });
 
-  it('uses the shared live pool summary instead of stale embedded resource buckets', () => {
+  it('uses overlapping live availability and quota-risk counts from the shared summary', () => {
     expect(
       resolveSupplyPoolAccountStats(
         resource({
@@ -206,8 +206,8 @@ describe('resolveSupplyPoolAccountStats', () => {
         }),
         1,
         summary({
-          total: 46,
-          normal: 3,
+          total: 26,
+          normal: 26,
           needsAttention: 0,
           quotaRisk: 15,
           disabled: 20,
@@ -216,12 +216,12 @@ describe('resolveSupplyPoolAccountStats', () => {
       )
     ).toMatchObject({
       schedulable: 26,
-      normal: 3,
+      normal: 26,
       needsAttention: 0,
       quotaRisk: 15,
       unconfirmed: 8,
       atRisk: 23,
-      total: 46,
+      total: 26,
       disabled: 20,
     });
   });

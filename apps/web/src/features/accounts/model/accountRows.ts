@@ -676,16 +676,14 @@ export const buildAccountMetricsWithCodexPoolSummary = (
     summary.disabled,
     summary.unconfirmed,
   ];
-  const enabledSummaryTotal =
-    summary.normal + summary.needsAttention + summary.quotaRisk + summary.unconfirmed;
-  const populationSummaryTotal = enabledSummaryTotal + summary.disabled;
-  const summaryUsesEnabledTotal =
-    summary.total === enabledSummaryTotal && summary.total + summary.disabled === codexRows.length;
-  const summaryUsesPopulationTotal =
-    summary.total === populationSummaryTotal && summary.total === codexRows.length;
+  const populationSummaryTotal = summary.total + summary.disabled;
   if (
     summaryValues.some((value) => !Number.isInteger(value) || value < 0) ||
-    (!summaryUsesEnabledTotal && !summaryUsesPopulationTotal)
+    populationSummaryTotal !== codexRows.length ||
+    summary.normal > summary.total ||
+    summary.needsAttention > summary.total ||
+    summary.quotaRisk > summary.total ||
+    summary.unconfirmed > summary.total
   ) {
     return local;
   }

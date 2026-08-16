@@ -1501,7 +1501,15 @@ export function AccountsPage() {
       accountPoolSummary?.credentials ?? []
     );
     return new Map<string, AccountPoolCredentialBucket>(
-      Array.from(itemsByRowKey, ([rowKey, items]) => [rowKey, items[0]?.bucket]).filter(
+      Array.from(itemsByRowKey, ([rowKey, items]) => {
+        const item = items[0];
+        if (!item) return [rowKey, undefined] as const;
+        const bucket =
+          item.schedulable && item.bucket !== 'disabled' && item.bucket !== 'needs_attention'
+            ? 'normal'
+            : item.bucket;
+        return [rowKey, bucket] as const;
+      }).filter(
         (entry): entry is [string, AccountPoolCredentialBucket] => Boolean(entry[1])
       )
     );

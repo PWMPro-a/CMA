@@ -3045,7 +3045,7 @@ describe('AccountsPage replacement flows', () => {
       total: 1,
       normal: 1,
       needsAttention: 0,
-      quotaRisk: 0,
+      quotaRisk: 1,
       disabled: 0,
       unconfirmed: 0,
       classificationObserved: true,
@@ -3055,7 +3055,8 @@ describe('AccountsPage replacement flows', () => {
           provider: 'codex',
           authIndex: 'auth-normal',
           accountSnapshot: 'normal@example.com',
-          bucket: 'normal',
+          bucket: 'quota_risk',
+          schedulable: true,
         },
       ],
     });

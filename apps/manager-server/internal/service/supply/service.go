@@ -151,6 +151,7 @@ type AccountPoolCredentialSummary struct {
 	AccountID       string `json:"accountId,omitempty"`
 	AccountSnapshot string `json:"accountSnapshot,omitempty"`
 	Bucket          string `json:"bucket"`
+	Schedulable     bool   `json:"schedulable"`
 }
 
 // ActiveOrderStatus is deliberately smaller than Status. The management page
@@ -915,9 +916,12 @@ func (s *Service) GetAccountPoolSummary(ctx context.Context) (AccountPoolSummary
 
 func accountPoolSummaryFromStats(stats accountPoolStats, checkedAt time.Time) AccountPoolSummary {
 	return AccountPoolSummary{
-		CheckedAtMS:            checkedAt.UnixMilli(),
-		Total:                  max(0, stats.enabled),
-		Normal:                 max(0, stats.normal),
+		CheckedAtMS: checkedAt.UnixMilli(),
+		Total:       max(0, stats.enabled),
+		// Availability is a live scheduling property, while quota risk is an
+		// overlapping warning. A credential that is still carrying requests must
+		// remain visible as available even when its remaining quota is low.
+		Normal:                 max(0, stats.schedulable),
 		NeedsAttention:         max(0, stats.needsAttention),
 		QuotaRisk:              max(0, stats.quotaRisk),
 		Disabled:               max(0, stats.total-stats.enabled),
@@ -960,6 +964,7 @@ func accountPoolCredentialSummaries(stats accountPoolStats) []AccountPoolCredent
 			AccountID:       strings.TrimSpace(file.AccountID),
 			AccountSnapshot: strings.TrimSpace(file.AccountSnapshot),
 			Bucket:          bucket,
+			Schedulable:     isAvailableCodexFile(file),
 		})
 	}
 	sort.SliceStable(items, func(i, j int) bool {

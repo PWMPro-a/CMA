@@ -2,9 +2,8 @@ import type { SupplyAccountPoolSummary, SupplySmartResource } from '@/services/a
 
 export interface SupplyPoolAccountStats {
   schedulable: number | undefined;
-  // `normal` is the operator-facing credential bucket and must match the
-  // account-management page. It is intentionally separate from the
-  // inspection-backed capacity count below.
+  // `normal` is live scheduling availability. Quota risk is an overlapping
+  // warning, so a low-quota credential can be both normal and at risk.
   normal: number | undefined;
   capacityHealthy: number | undefined;
   needsAttention: number | undefined;
@@ -28,13 +27,10 @@ export const resolveSupplyPoolAccountStats = (
 ): SupplyPoolAccountStats => {
   const available = finiteNonNegative(resource?.availableAccounts ?? fallbackAvailable);
   const summaryObserved = summary?.classificationObserved === true;
-  const summaryEnabled = summaryObserved
-    ? finiteNonNegative(
-        summary.normal + summary.needsAttention + summary.quotaRisk + summary.unconfirmed
-      )
-    : undefined;
   const schedulable =
-    summaryEnabled ?? finiteNonNegative(resource?.schedulableAccounts) ?? available;
+    (summaryObserved ? finiteNonNegative(summary.normal) : undefined) ??
+    finiteNonNegative(resource?.schedulableAccounts) ??
+    available;
   const classificationObserved =
     summaryObserved || resource?.accountClassificationObserved === true;
   const legacyNormal = finiteNonNegative(resource?.normalAccounts);

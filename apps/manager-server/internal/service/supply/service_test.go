@@ -1043,37 +1043,35 @@ func TestAccountPoolStatsKeepsPopulationIdentityAcrossLiveAndInspectionBuckets(t
 	}
 }
 
-func TestAccountPoolSummaryFromStatsKeepsExclusivePoolIdentity(t *testing.T) {
+func TestAccountPoolSummaryCountsSchedulableQuotaRiskAsAvailable(t *testing.T) {
 	checkedAt := time.UnixMilli(1_786_745_988_395)
 	summary := accountPoolSummaryFromStats(accountPoolStats{
 		total:                  46,
 		enabled:                26,
+		schedulable:            18,
 		normal:                 3,
 		needsAttention:         0,
 		quotaRisk:              15,
 		unconfirmed:            8,
 		classificationObserved: true,
 	}, checkedAt)
-	if summary.CheckedAtMS != checkedAt.UnixMilli() || summary.Total != 26 || summary.Normal != 3 ||
+	if summary.CheckedAtMS != checkedAt.UnixMilli() || summary.Total != 26 || summary.Normal != 18 ||
 		summary.NeedsAttention != 0 || summary.QuotaRisk != 15 || summary.Disabled != 20 ||
 		summary.Unconfirmed != 8 || !summary.ClassificationObserved {
 		t.Fatalf("account pool summary = %#v", summary)
 	}
-	if summary.Normal+summary.NeedsAttention+summary.QuotaRisk+summary.Unconfirmed != summary.Total {
-		t.Fatalf("account pool summary identity does not hold: %#v", summary)
+	if summary.Normal+summary.NeedsAttention+summary.QuotaRisk+summary.Unconfirmed <= summary.Total {
+		t.Fatalf("schedulable availability did not include quota-risk credentials: %#v", summary)
 	}
 }
 
 func TestAccountPoolSummarySeparatesEnabledPoolFromDisabledArchive(t *testing.T) {
 	summary := accountPoolSummaryFromStats(accountPoolStats{
-		total: 24, enabled: 14, normal: 3, needsAttention: 11,
+		total: 24, enabled: 14, schedulable: 3, normal: 3, needsAttention: 11,
 		classificationObserved: true,
 	}, time.Now())
 	if summary.Total != 14 || summary.Normal != 3 || summary.NeedsAttention != 11 || summary.Disabled != 10 {
 		t.Fatalf("14-account enabled pool summary = %#v", summary)
-	}
-	if summary.Normal+summary.NeedsAttention+summary.QuotaRisk+summary.Unconfirmed != summary.Total {
-		t.Fatalf("enabled pool identity does not hold: %#v", summary)
 	}
 }
 
@@ -1098,7 +1096,9 @@ func TestAccountPoolCredentialSummariesPublishExactSharedBuckets(t *testing.T) {
 		byName[item.AuthFileName] = item
 	}
 	if byName["normal.json"].Bucket != "normal" || byName["normal.json"].AccountID != "account-normal" ||
-		byName["risk.json"].Bucket != "quota_risk" || byName["disabled.json"].Bucket != "disabled" {
+		!byName["normal.json"].Schedulable || byName["risk.json"].Bucket != "quota_risk" ||
+		!byName["risk.json"].Schedulable || byName["disabled.json"].Bucket != "disabled" ||
+		byName["disabled.json"].Schedulable {
 		t.Fatalf("credential summary buckets = %#v", items)
 	}
 }
