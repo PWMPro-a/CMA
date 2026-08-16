@@ -1316,6 +1316,11 @@
   border: 1px solid var(--data-badge-info-border);
 }
 
+.fingerprintBadge {
+  gap: 4px;
+  cursor: help;
+}
+
 .quotaCooldownBadge {
   cursor: help;
 }

@@ -147,6 +147,8 @@ export interface AuthFileItem {
   runtimeCurrentConcurrency?: number;
   codex_quota_snapshots?: Record<string, CodexQuotaSnapshot>;
   codexQuotaSnapshots?: Record<string, CodexQuotaSnapshot>;
+  codex_identity_fingerprint?: string;
+  codexIdentityFingerprint?: string;
   agent_identity_registration?: AgentIdentityRegistrationStatus;
   agentIdentityRegistration?: AgentIdentityRegistrationStatus;
   group_ids?: number[];

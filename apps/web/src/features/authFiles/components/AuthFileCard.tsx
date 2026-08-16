@@ -5,6 +5,7 @@ import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import {
   IconDownload,
+  IconFingerprint,
   IconInfo,
   IconModelCluster,
   IconRefreshCw,
@@ -264,6 +265,11 @@ export function AuthFileCard(props: AuthFileCardProps) {
   const agentRegistrationNextRetry = formatRegistrationTime(agentRegistration?.next_retry_at);
   const projectIdValue = getProjectIdValue(file);
   const sourceIpValue = readRuntimeText(file, 'source_ip', 'sourceIp');
+  const codexIdentityFingerprint = readRuntimeText(
+    file,
+    'codex_identity_fingerprint',
+    'codexIdentityFingerprint'
+  );
   const noteValue = typeof file.note === 'string' ? file.note.trim() : '';
   const subscription = isAntigravity && !isRuntimeOnly ? antigravitySubscription : undefined;
   const subscriptionData = subscription?.status === 'success' ? subscription.data : undefined;
@@ -366,6 +372,18 @@ export function AuthFileCard(props: AuthFileCardProps) {
                   {typeLabel}
                 </span>
                 <span className={`${styles.stateBadge} ${stateBadgeClass}`}>{stateLabel}</span>
+                {providerKey === 'codex' && codexIdentityFingerprint && (
+                  <span
+                    className={`${styles.codexStatusBadge} ${styles.codexStatusBadgeInfo} ${styles.fingerprintBadge}`}
+                    title={t('auth_files.codex_identity_fingerprint_title', {
+                      fingerprint: codexIdentityFingerprint,
+                    })}
+                    aria-label={t('auth_files.codex_identity_fingerprint_label')}
+                  >
+                    <IconFingerprint size={12} />
+                    {t('auth_files.codex_identity_fingerprint_label')}
+                  </span>
+                )}
                 {subscriptionBadgeLabel && (
                   <span
                     className={`${styles.subscriptionBadge} ${subscriptionBadgeClass}`}

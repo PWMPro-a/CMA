@@ -125,6 +125,18 @@ export function IconShieldCheck({ size = 20, ...props }: IconProps) {
   );
 }
 
+export function IconFingerprint({ size = 20, ...props }: IconProps) {
+  return (
+    <svg {...baseSvgProps} width={size} height={size} {...props}>
+      <path d="M12 10a2 2 0 0 0-2 2c0 1.5-.3 3-1 4.4" />
+      <path d="M14 13.1c0 2.5-.5 5-1.5 7.2" />
+      <path d="M17.5 16.5c.3-1.5.5-3 .5-4.5a6 6 0 0 0-12 0c0 1-.1 2-.4 3" />
+      <path d="M20.5 13.5c.1-.5.1-1 .1-1.5a8.6 8.6 0 0 0-17.2 0c0 .7 0 1.3-.2 2" />
+      <path d="M4.5 19.5c1.8-2.3 2.5-4.8 2.5-7.5a5 5 0 0 1 10 0c0 3.1-.5 6.1-1.6 8.9" />
+    </svg>
+  );
+}
+
 export function IconTriangleAlert({ size = 20, ...props }: IconProps) {
   return (
     <svg {...baseSvgProps} width={size} height={size} {...props}>

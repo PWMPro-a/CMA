@@ -1470,6 +1470,8 @@
     "search_empty_title": "没有匹配的配置文件",
     "search_empty_desc": "请调整筛选条件或清空搜索关键字再试一次。",
     "file_size": "大小",
+    "codex_identity_fingerprint_label": "指纹",
+    "codex_identity_fingerprint_title": "已绑定稳定 Codex 身份指纹：{{fingerprint}}",
     "file_modified": "修改时间",
     "health_status_label": "健康状态",
     "health_status_healthy": "健康",

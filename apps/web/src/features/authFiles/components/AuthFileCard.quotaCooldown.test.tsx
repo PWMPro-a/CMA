@@ -65,6 +65,42 @@ const textContent = (node: ReactTestInstance): string =>
     .join('');
 
 describe('AuthFileCard quota cooldown presentation', () => {
+  it('marks Codex credentials that carry a stable identity fingerprint', () => {
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(
+        <AuthFileCard
+          file={{
+            name: 'codex-team.json',
+            type: 'codex',
+            codex_identity_fingerprint: 'stable-device-a',
+          }}
+          compact
+          selected={false}
+          resolvedTheme="dark"
+          disableControls={false}
+          deleting={null}
+          statusUpdating={{}}
+          registrationRetrying={false}
+          statusBarCache={new Map()}
+          onShowModels={vi.fn()}
+          onDownload={vi.fn()}
+          onOpenPrefixProxyEditor={vi.fn()}
+          onDelete={vi.fn()}
+          onToggleStatus={vi.fn()}
+          onRetryAgentIdentityRegistration={vi.fn()}
+          onRebuildAgentIdentityRegistration={vi.fn()}
+          onToggleSelect={vi.fn()}
+        />
+      );
+    });
+
+    const badge = renderer.root.findByProps({
+      'aria-label': 'auth_files.codex_identity_fingerprint_label',
+    });
+    expect(badge.props.title).toContain('stable-device-a');
+  });
+
   it('renders xAI cooldown as event-driven xAI automation', () => {
     const badge = findCooldownBadge(
       renderCard({

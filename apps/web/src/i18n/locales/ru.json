@@ -1470,6 +1470,8 @@
     "search_empty_title": "Файлы не найдены",
     "search_empty_desc": "Попробуйте изменить фильтры или очистить строку поиска.",
     "file_size": "Размер",
+    "codex_identity_fingerprint_label": "Отпечаток",
+    "codex_identity_fingerprint_title": "Стабильный отпечаток идентичности Codex: {{fingerprint}}",
     "file_modified": "Изменён",
     "health_status_label": "Состояние",
     "health_status_healthy": "Нормально",

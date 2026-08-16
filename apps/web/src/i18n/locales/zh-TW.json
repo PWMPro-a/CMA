@@ -1470,6 +1470,8 @@
     "search_empty_title": "沒有符合的設定檔",
     "search_empty_desc": "請調整篩選條件或清空搜尋關鍵字再試一次。",
     "file_size": "大小",
+    "codex_identity_fingerprint_label": "指紋",
+    "codex_identity_fingerprint_title": "已綁定穩定 Codex 身份指紋：{{fingerprint}}",
     "file_modified": "修改時間",
     "health_status_label": "健康狀態",
     "health_status_healthy": "健康",

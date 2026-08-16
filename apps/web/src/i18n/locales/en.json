@@ -1470,6 +1470,8 @@
     "search_empty_title": "No matching files",
     "search_empty_desc": "Try changing the filters or clearing the search box.",
     "file_size": "Size",
+    "codex_identity_fingerprint_label": "Fingerprint",
+    "codex_identity_fingerprint_title": "Stable Codex identity fingerprint: {{fingerprint}}",
     "file_modified": "Modified",
     "health_status_label": "Health",
     "health_status_healthy": "Healthy",
