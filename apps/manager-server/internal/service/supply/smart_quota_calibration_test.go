@@ -985,6 +985,102 @@ func TestSmartQuotaPlanRebuildsObservedValueFromTrustedNormalRepresentatives(t *
 	}
 }
 
+func TestSmartQuotaPlanRestoresSupplierlessWarmHistoryForSolePlatform(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	activeIdentity := "file:active-low.json"
+	activeSamples := quotaSamplesForEstimate(activeIdentity, "team", 12.14, now.Add(-time.Minute), 3)
+	for index := range activeSamples {
+		activeSamples[index].supplierID = "legacy"
+	}
+	service.smartQuotaState.samples = append(service.smartQuotaState.samples, activeSamples...)
+	service.smartQuotaState.samplesByIdentity[activeIdentity] = append([]smartQuotaCalibrationSample(nil), activeSamples...)
+
+	// WarmSmartUsage can rebuild historical quota samples after restart, but
+	// raw usage rows do not carry the supply-platform ID. With exactly one
+	// configured platform these samples still belong to that platform and must
+	// remain available to correct a newly observed abnormal low current account.
+	for index, capacityM := range []float64{38, 40, 64, 150} {
+		identity := fmt.Sprintf("file:warm-normal-%d.json", index)
+		sample := smartQuotaCalibrationSample{
+			identity: identity, planType: "team", capacityM: capacityM,
+			weight: 0.12, usedFraction: 0.40, observedMS: now.Add(-2 * time.Minute).UnixMilli(),
+		}
+		service.smartQuotaState.samples = append(service.smartQuotaState.samples, sample)
+		service.smartQuotaState.samplesByIdentity[identity] = []smartQuotaCalibrationSample{sample}
+	}
+
+	cfg := store.ManagerSupplyConfig{
+		BaseURL: "https://supplier.test", Username: "user", Password: "secret", Product: "oauth_30d",
+	}
+	items, planning := service.smartQuotaPlanEstimatesForInspection(
+		cfg,
+		[]store.CodexInspectionResult{{FileName: "active-low.json", Provider: "codex", Status: "active", PlanType: "team"}},
+		471,
+		now,
+		map[string]string{"active-low.json": "legacy"},
+	)
+	var team SmartQuotaPlanEstimate
+	for _, item := range items {
+		if item.SupplierID == "legacy" && item.PlanType == "team" && item.AccountCount > 0 {
+			team = item
+			break
+		}
+	}
+	planningTeam := planning[smartQuotaContextKey("legacy", "team")]
+	if team.ObservedM != 52 || team.UniqueAccounts != 4 || team.RejectedAccounts != 1 ||
+		team.Source != smartQuotaEstimateSourceClassified || len(team.QuotaClasses) != 3 ||
+		team.ValidationState != smartQuotaValidationConfirming || !team.UsingFallback ||
+		planningTeam.CapacityM != 60 || planningTeam.Source != smartQuotaEstimateSourceDefault ||
+		!planningTeam.FallbackOnly {
+		t.Fatalf("sole-platform warm history = team %#v planning %#v all %#v", team, planningTeam, items)
+	}
+}
+
+func TestSmartQuotaPlanKeepsSupplierlessWarmHistoryIsolatedWithMultiplePlatforms(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	activeIdentity := "file:active-low.json"
+	activeSamples := quotaSamplesForEstimate(activeIdentity, "team", 12.14, now.Add(-time.Minute), 3)
+	for index := range activeSamples {
+		activeSamples[index].supplierID = "supplier-a"
+	}
+	service.smartQuotaState.samples = append(service.smartQuotaState.samples, activeSamples...)
+	service.smartQuotaState.samplesByIdentity[activeIdentity] = append([]smartQuotaCalibrationSample(nil), activeSamples...)
+
+	warmIdentity := "file:warm-unassigned.json"
+	warmSample := smartQuotaCalibrationSample{
+		identity: warmIdentity, planType: "team", capacityM: 64,
+		weight: 0.12, usedFraction: 0.40, observedMS: now.Add(-2 * time.Minute).UnixMilli(),
+	}
+	service.smartQuotaState.samples = append(service.smartQuotaState.samples, warmSample)
+	service.smartQuotaState.samplesByIdentity[warmIdentity] = []smartQuotaCalibrationSample{warmSample}
+
+	enabled := true
+	cfg := store.ManagerSupplyConfig{Platforms: []store.ManagerSupplyPlatformConfig{
+		{ID: "supplier-a", Type: "legacy", Enabled: &enabled, BaseURL: "https://a.test", Product: "oauth_30d"},
+		{ID: "supplier-b", Type: "legacy", Enabled: &enabled, BaseURL: "https://b.test", Product: "oauth_30d"},
+	}}
+	items, _ := service.smartQuotaPlanEstimatesForInspection(
+		cfg,
+		[]store.CodexInspectionResult{{FileName: "active-low.json", Provider: "codex", Status: "active", PlanType: "team"}},
+		472,
+		now,
+		map[string]string{"active-low.json": "supplier-a"},
+	)
+	var team SmartQuotaPlanEstimate
+	for _, item := range items {
+		if item.SupplierID == "supplier-a" && item.PlanType == "team" && item.AccountCount > 0 {
+			team = item
+			break
+		}
+	}
+	if team.ObservedM != 0 || team.UniqueAccounts != 0 || team.RejectedAccounts != 1 ||
+		len(team.QuotaClasses) != 0 || team.Source != smartQuotaEstimateSourceDefault {
+		t.Fatalf("multi-platform supplierless history leaked into supplier-a: team %#v all %#v", team, items)
+	}
+}
+
 func TestSmartQuotaPlanAcceptsExtremeDownwardAfterFiveCompleteWindowRounds(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Second)

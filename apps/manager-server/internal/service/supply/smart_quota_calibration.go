@@ -852,6 +852,24 @@ func (s *Service) smartQuotaEstimateForSupplierAtWithMinimum(
 	minimumCapacityM float64,
 	identities ...string,
 ) smartQuotaEstimate {
+	return s.smartQuotaEstimateForSupplierAtWithMinimumOptions(
+		now,
+		supplierID,
+		planType,
+		minimumCapacityM,
+		false,
+		identities...,
+	)
+}
+
+func (s *Service) smartQuotaEstimateForSupplierAtWithMinimumOptions(
+	now time.Time,
+	supplierID string,
+	planType string,
+	minimumCapacityM float64,
+	includeUnassignedSupplier bool,
+	identities ...string,
+) smartQuotaEstimate {
 	if s == nil {
 		return defaultSmartQuotaEstimate()
 	}
@@ -870,19 +888,19 @@ func (s *Service) smartQuotaEstimateForSupplierAtWithMinimum(
 	samples := make([]smartQuotaCalibrationSample, 0, len(s.smartQuotaState.samples)+len(s.smartQuotaState.directSamples)+len(s.smartQuotaState.provisionalSamples))
 	for _, sample := range s.smartQuotaState.samples {
 		if sample.observedMS >= cutoff && sample.capacityM >= minimumCapacityM &&
-			(supplierID == "" || sample.supplierID == supplierID) {
+			smartQuotaSampleMatchesSupplier(sample, supplierID, includeUnassignedSupplier) {
 			samples = append(samples, sample)
 		}
 	}
 	for _, sample := range s.smartQuotaState.directSamples {
 		if sample.observedMS >= cutoff && sample.capacityM >= minimumCapacityM &&
-			(supplierID == "" || sample.supplierID == supplierID) {
+			smartQuotaSampleMatchesSupplier(sample, supplierID, includeUnassignedSupplier) {
 			samples = append(samples, sample)
 		}
 	}
 	for _, sample := range s.smartQuotaState.provisionalSamples {
 		if sample.observedMS >= cutoff && sample.capacityM >= minimumCapacityM &&
-			(supplierID == "" || sample.supplierID == supplierID) {
+			smartQuotaSampleMatchesSupplier(sample, supplierID, includeUnassignedSupplier) {
 			samples = append(samples, sample)
 		}
 	}
@@ -977,6 +995,18 @@ func (s *Service) smartQuotaEstimateForSupplierAtWithMinimum(
 		return attachSmartQuotaClasses(classifiedEstimate, quotaClasses)
 	}
 	return attachSmartQuotaClasses(defaultSmartQuotaEstimateForPlan(planType), quotaClasses)
+}
+
+func smartQuotaSampleMatchesSupplier(
+	sample smartQuotaCalibrationSample,
+	supplierID string,
+	includeUnassignedSupplier bool,
+) bool {
+	if supplierID == "" {
+		return true
+	}
+	sampleSupplierID := normalizeSmartQuotaSupplierID(sample.supplierID)
+	return sampleSupplierID == supplierID || (includeUnassignedSupplier && sampleSupplierID == "")
 }
 
 func (s *Service) smartQuotaCurrentEstimateForAt(now time.Time, identities ...string) (smartQuotaEstimate, bool) {
@@ -1495,6 +1525,8 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 		context := contexts[key]
 		planType := context.planType
 		policy := smartQuotaPolicyForSupplier(cfg, context.supplierID, planType)
+		includeUnassignedSupplier := len(platforms) == 1 && context.supplierID != "" &&
+			normalizeSmartQuotaSupplierID(platforms[0].ID) == context.supplierID
 		state := s.quotaPolicyState[key]
 		if state.mode != policy.Mode || state.adoptedM <= 0 {
 			state = smartQuotaPlanAdoptionState{
@@ -1505,7 +1537,14 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 			}
 		}
 
-		rawObserved := s.smartQuotaEstimateForSupplierAt(now, context.supplierID, planType, context.identities...)
+		rawObserved := s.smartQuotaEstimateForSupplierAtWithMinimumOptions(
+			now,
+			context.supplierID,
+			planType,
+			0,
+			includeUnassignedSupplier,
+			context.identities...,
+		)
 		// Historical samples for a configured type remain useful once that type
 		// appears again, but a type with zero current accounts must not raise a
 		// calibration warning or influence this pool's ordering decision.
@@ -1517,11 +1556,12 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 		rejectedAccounts := 0
 		if policy.Mode == smartQuotaPolicyModeAuto && context.accounts > 0 && state.adoptedM > 0 {
 			minimumAcceptedM := state.adoptedM * (1 - smartQuotaPolicyExtremeDivergence)
-			filteredObserved = s.smartQuotaEstimateForSupplierAtWithMinimum(
+			filteredObserved = s.smartQuotaEstimateForSupplierAtWithMinimumOptions(
 				now,
 				context.supplierID,
 				planType,
 				minimumAcceptedM,
+				includeUnassignedSupplier,
 				context.identities...,
 			)
 			rejectedAccounts = max(0,
