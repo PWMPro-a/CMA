@@ -887,24 +887,38 @@ func (s *Service) smartQuotaEstimateForSupplierAtWithMinimumOptions(
 	s.smartMu.RLock()
 	samples := make([]smartQuotaCalibrationSample, 0, len(s.smartQuotaState.samples)+len(s.smartQuotaState.directSamples)+len(s.smartQuotaState.provisionalSamples))
 	for _, sample := range s.smartQuotaState.samples {
-		if sample.observedMS >= cutoff && sample.capacityM >= minimumCapacityM &&
+		if sample.observedMS >= cutoff &&
 			smartQuotaSampleMatchesSupplier(sample, supplierID, includeUnassignedSupplier) {
 			samples = append(samples, sample)
 		}
 	}
 	for _, sample := range s.smartQuotaState.directSamples {
-		if sample.observedMS >= cutoff && sample.capacityM >= minimumCapacityM &&
+		if sample.observedMS >= cutoff &&
 			smartQuotaSampleMatchesSupplier(sample, supplierID, includeUnassignedSupplier) {
 			samples = append(samples, sample)
 		}
 	}
 	for _, sample := range s.smartQuotaState.provisionalSamples {
-		if sample.observedMS >= cutoff && sample.capacityM >= minimumCapacityM &&
+		if sample.observedMS >= cutoff &&
 			smartQuotaSampleMatchesSupplier(sample, supplierID, includeUnassignedSupplier) {
 			samples = append(samples, sample)
 		}
 	}
 	s.smartMu.RUnlock()
+	if minimumCapacityM > 0 {
+		// The policy floor applies to an independently observed quota class, not
+		// to every account point in isolation. A legitimate class may straddle the
+		// floor because integer percentages and unequal evidence weights spread its
+		// members (for example 21.5M-31.6M around a 30M floor). Keep that whole
+		// class when any representative reaches the trusted floor, while removing a
+		// clearly separated class whose entire range stays below it.
+		if planType != "" {
+			samples = filterSmartQuotaSamples(samples, func(sample smartQuotaCalibrationSample) bool {
+				return sample.planType == planType
+			})
+		}
+		samples = filterSmartQuotaSamplesByClassFloor(samples, minimumCapacityM, now)
+	}
 	classSamples := samples
 	if planType != "" {
 		classSamples = filterSmartQuotaSamples(samples, func(sample smartQuotaCalibrationSample) bool {
@@ -1959,7 +1973,10 @@ func estimateSmartQuotaSamplesAtMode(
 	}, true
 }
 
-func estimateSmartQuotaClassesAt(samples []smartQuotaCalibrationSample, now time.Time) []SmartQuotaClassEstimate {
+func smartQuotaClassPointsAt(
+	samples []smartQuotaCalibrationSample,
+	now time.Time,
+) ([]smartQuotaClassPoint, []smartQuotaClassPoint) {
 	cutoff := now.Add(-smartQuotaCalibrationSampleTTL).UnixMilli()
 	grouped := make(map[string][]smartQuotaCalibrationSample)
 	for _, sample := range samples {
@@ -2022,7 +2039,11 @@ func estimateSmartQuotaClassesAt(samples []smartQuotaCalibrationSample, now time
 			provisionalPoints = append(provisionalPoints, point)
 		}
 	}
+	return trustedPoints, provisionalPoints
+}
 
+func smartQuotaClassGroupsAt(samples []smartQuotaCalibrationSample, now time.Time) []smartQuotaClassGroup {
+	trustedPoints, provisionalPoints := smartQuotaClassPointsAt(samples, now)
 	groups := clusterSmartQuotaClassPoints(trustedPoints)
 	unassigned := make([]smartQuotaClassPoint, 0, len(provisionalPoints))
 	for _, point := range provisionalPoints {
@@ -2039,6 +2060,39 @@ func estimateSmartQuotaClassesAt(samples []smartQuotaCalibrationSample, now time
 		groups[groupIndex].points = append(groups[groupIndex].points, point)
 	}
 	groups = append(groups, clusterSmartQuotaClassPoints(unassigned)...)
+	return groups
+}
+
+func filterSmartQuotaSamplesByClassFloor(
+	samples []smartQuotaCalibrationSample,
+	minimumCapacityM float64,
+	now time.Time,
+) []smartQuotaCalibrationSample {
+	if minimumCapacityM <= 0 || len(samples) == 0 {
+		return append([]smartQuotaCalibrationSample(nil), samples...)
+	}
+	groups := smartQuotaClassGroupsAt(samples, now)
+	acceptedIdentities := make(map[string]struct{})
+	for _, group := range groups {
+		maximumM := 0.0
+		for _, point := range group.points {
+			maximumM = math.Max(maximumM, point.capacityM)
+		}
+		if maximumM+1e-9 < minimumCapacityM {
+			continue
+		}
+		for _, point := range group.points {
+			acceptedIdentities[point.identity] = struct{}{}
+		}
+	}
+	return filterSmartQuotaSamples(samples, func(sample smartQuotaCalibrationSample) bool {
+		_, ok := acceptedIdentities[sample.identity]
+		return ok
+	})
+}
+
+func estimateSmartQuotaClassesAt(samples []smartQuotaCalibrationSample, now time.Time) []SmartQuotaClassEstimate {
+	groups := smartQuotaClassGroupsAt(samples, now)
 	if len(groups) == 0 {
 		return nil
 	}
