@@ -7524,12 +7524,19 @@ func (s *Service) automaticCreateCooldownActive(ctx context.Context, cfg store.M
 			// duplicate guard. It does not represent usable capacity, so do not
 			// let the normal "recent order covers the gap" branch hide it.
 			last = maxInt64(last, smartSupplyOrderTerminalAtMS(latest))
-		} else if !recentAutomaticOrderCoversCurrentShortage(cfg, resource, latest) {
-			// A completed order must not become a blanket cooldown. If demand has
-			// grown beyond the capacity just delivered, allow the next guarded
-			// order immediately; otherwise a recent purchase can make the pool
-			// fall behind while the worker appears healthy.
-			return false, nil
+		} else {
+			// Start successful-order observation after fulfillment/import, not
+			// order creation. Supplier or inspection latency must not consume the
+			// interval intended to measure the capacity actually delivered.
+			last = maxInt64(last, smartSupplyOrderTerminalAtMS(latest))
+			if !recentAutomaticOrderCoversCurrentShortage(cfg, resource, latest) &&
+				smartResourceEmergency(resource) {
+				// Only a real emergency may immediately continue after a partial
+				// delivery. Buffered healthy/warning pools must observe the small
+				// batch first so purchases and lease expiries remain staggered.
+				return false, nil
+			}
+			seconds = smartSuccessfulOrderCooldownForResource(cfg, resource)
 		}
 	}
 	if seconds <= 0 || last <= 0 {

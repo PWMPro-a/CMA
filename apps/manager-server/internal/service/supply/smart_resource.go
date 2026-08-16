@@ -2512,6 +2512,49 @@ func smartCreateCooldownSeconds(cfg store.ManagerSupplyConfig) int {
 	return clampInt(positiveOr(cfg.CreateCooldownSeconds, 120), 0, 3600)
 }
 
+const (
+	// Successful progressive purchases use a strategy-specific observation
+	// window. These windows apply only while the pool still has runway; a true
+	// emergency keeps the existing short recovery cadence.
+	smartStrongSupplyProgressiveCooldownSeconds = 5 * 60
+	smartStrongSupplyWarningCooldownSeconds     = 2 * 60
+	smartBalancedProgressiveCooldownSeconds     = 10 * 60
+	smartBalancedWarningCooldownSeconds         = 3 * 60
+	smartCostFirstProgressiveCooldownSeconds    = 15 * 60
+	smartCostFirstWarningCooldownSeconds        = 5 * 60
+)
+
+// smartSuccessfulOrderCooldownForResource keeps the procurement cadence aligned
+// with the selected strategy after an order has delivered usable accounts.
+// Healthy/buffered pools observe longer so lease expiries spread out. Warning
+// pools shorten the observation, while emergency pools retain the existing
+// fast cadence.
+func smartSuccessfulOrderCooldownForResource(cfg store.ManagerSupplyConfig, resource SmartResource) int {
+	if smartResourceEmergency(resource) {
+		return smartCreateCooldownForResource(cfg, resource)
+	}
+	base := smartCreateCooldownSeconds(cfg)
+	normalMinimum := 0
+	warningMinimum := 0
+	switch managerconfigsvc.NormalizeSupplyStrategy(cfg.Strategy) {
+	case managerconfigsvc.SupplyStrategyBalanced:
+		normalMinimum = smartBalancedProgressiveCooldownSeconds
+		warningMinimum = smartBalancedWarningCooldownSeconds
+	case managerconfigsvc.SupplyStrategyCostFirst:
+		normalMinimum = smartCostFirstProgressiveCooldownSeconds
+		warningMinimum = smartCostFirstWarningCooldownSeconds
+	case managerconfigsvc.SupplyStrategyCustom:
+		return smartCreateCooldownForResource(cfg, resource)
+	default:
+		normalMinimum = smartStrongSupplyProgressiveCooldownSeconds
+		warningMinimum = smartStrongSupplyWarningCooldownSeconds
+	}
+	if smartResourceAtOrBelowWarning(resource) {
+		return max(smartCreateCooldownForResource(cfg, resource), warningMinimum)
+	}
+	return max(base, normalMinimum)
+}
+
 // smartCreateCooldownForResource shortens recovery retries without ever
 // removing the safety delay. The delay is also checked against the latest
 // persisted automatic order, so a process restart cannot reset it.

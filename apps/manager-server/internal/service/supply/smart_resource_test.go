@@ -751,6 +751,55 @@ func TestSmartQuotaLowWaterRefillsToHealthyAndKeepsShortCooldown(t *testing.T) {
 	}
 }
 
+func TestSuccessfulOrderCooldownFollowsSupplyStrategyAndHealthLevel(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		CreateCooldownSeconds: 120,
+		Strategy:              managerconfigsvc.SupplyStrategyStrongSupply,
+	}
+	buffered := SmartResource{
+		HealthLevel:             smartHealthWarning,
+		WarningMinutes:          20,
+		CriticalMinutes:         15,
+		EffectiveHealthyMinutes: 30,
+		EstimatedSustainMinutes: 25,
+		ConsumeRCUPerMinute:     100,
+		CapacityGapRCU:          500,
+	}
+	if got := smartSuccessfulOrderCooldownForResource(cfg, buffered); got != 300 {
+		t.Fatalf("strong-supply buffered cooldown=%d, want 300", got)
+	}
+	cfg.Strategy = managerconfigsvc.SupplyStrategyBalanced
+	if got := smartSuccessfulOrderCooldownForResource(cfg, buffered); got != 600 {
+		t.Fatalf("balanced buffered cooldown=%d, want 600", got)
+	}
+	cfg.Strategy = managerconfigsvc.SupplyStrategyCostFirst
+	if got := smartSuccessfulOrderCooldownForResource(cfg, buffered); got != 900 {
+		t.Fatalf("cost-first buffered cooldown=%d, want 900", got)
+	}
+
+	warning := buffered
+	warning.EstimatedSustainMinutes = 20
+	cfg.Strategy = managerconfigsvc.SupplyStrategyStrongSupply
+	if got := smartSuccessfulOrderCooldownForResource(cfg, warning); got != 120 {
+		t.Fatalf("strong-supply warning cooldown=%d, want 120", got)
+	}
+	cfg.Strategy = managerconfigsvc.SupplyStrategyBalanced
+	if got := smartSuccessfulOrderCooldownForResource(cfg, warning); got != 180 {
+		t.Fatalf("balanced warning cooldown=%d, want 180", got)
+	}
+	cfg.Strategy = managerconfigsvc.SupplyStrategyCostFirst
+	if got := smartSuccessfulOrderCooldownForResource(cfg, warning); got != 300 {
+		t.Fatalf("cost-first warning cooldown=%d, want 300", got)
+	}
+
+	emergency := warning
+	emergency.EmergencyShortage = true
+	cfg.Strategy = managerconfigsvc.SupplyStrategyStrongSupply
+	if got := smartSuccessfulOrderCooldownForResource(cfg, emergency); got != 60 {
+		t.Fatalf("emergency cooldown=%d, want 60", got)
+	}
+}
+
 func TestCustomSupplyEnablesConfiguredVerifiedHealthyFloor(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		Strategy:                 managerconfigsvc.SupplyStrategyCustom,

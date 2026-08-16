@@ -327,6 +327,62 @@ func TestRecentAutomaticSettlementOnlyBlocksWhenDeliveryCoversCurrentShortage(t 
 	}
 }
 
+func TestSuccessfulPartialDeliveryKeepsProgressiveCooldownUnlessEmergency(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-progressive-cooldown.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	now := time.Now()
+	cfg := store.ManagerSupplyConfig{
+		Product:               "oauth_7d",
+		Strategy:              managerconfigsvc.SupplyStrategyStrongSupply,
+		CreateCooldownSeconds: 120,
+		NewAccountConfidence:  1,
+	}
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID:           "progressive-partial",
+		Product:           cfg.Product,
+		RequestedQuantity: 2,
+		ImportedCount:     2,
+		Automatic:         true,
+		Status:            "completed",
+		CreatedAtMS:       now.Add(-20 * time.Minute).UnixMilli(),
+		CompletedAtMS:     now.Add(-5 * time.Second).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("create automatic order: %v", err)
+	}
+	resource := SmartResource{
+		HealthLevel:             smartHealthWarning,
+		WarningMinutes:          20,
+		CriticalMinutes:         15,
+		EffectiveHealthyMinutes: 30,
+		EstimatedSustainMinutes: 25,
+		ConsumeRCUPerMinute:     100,
+		CapacityGapRCU:          5 * unit,
+		AccountQuantityDeficit:  5,
+		UnitCapacityRCU:         smartProductUnitCapacity(cfg.Product),
+	}
+	service := New(st, nil)
+	active, err := service.automaticCreateCooldownActive(context.Background(), cfg, resource)
+	if err != nil {
+		t.Fatalf("check progressive cooldown: %v", err)
+	}
+	if !active {
+		t.Fatal("a successful small batch must start buffered strategy observation even when a larger shortage remains")
+	}
+
+	resource.EmergencyShortage = true
+	active, err = service.automaticCreateCooldownActive(context.Background(), cfg, resource)
+	if err != nil {
+		t.Fatalf("check emergency cooldown bypass: %v", err)
+	}
+	if active {
+		t.Fatal("a real emergency must continue immediately when the successful partial batch does not cover the shortage")
+	}
+}
+
 func TestRecentSupplyOrdersCachesDefensiveCopiesAndInvalidates(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "supply-order-cache.sqlite"))
 	if err != nil {
