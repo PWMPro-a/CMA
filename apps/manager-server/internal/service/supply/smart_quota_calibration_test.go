@@ -361,6 +361,45 @@ func TestSmartQuotaIncompleteWindowKeepsTeamFallbackUntilDeltaEvidence(t *testin
 	}
 }
 
+func TestSmartQuotaIncompleteWindowKeepsWarmedRuntimeSamplesAndAssignsSupplier(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	identity := "file:warmed-runtime.json"
+	for index, capacityM := range []float64{58, 60, 62} {
+		service.appendSmartQuotaCalibrationSampleLocked(smartQuotaCalibrationSample{
+			identity:     identity,
+			planType:     "team",
+			capacityM:    capacityM,
+			weight:       0.04,
+			usedFraction: 0.20 + float64(index)*0.04,
+			observedMS:   now.Add(time.Duration(index-3) * time.Minute).UnixMilli(),
+		})
+	}
+
+	service.recordSmartQuotaWindowBaselines([]smartQuotaWindowBaseline{{
+		identity:     identity,
+		supplierID:   "legacy",
+		planType:     "team",
+		fraction:     0.35,
+		fromMS:       now.Add(-7 * 24 * time.Hour).UnixMilli(),
+		observedMS:   now.UnixMilli(),
+		windowTokens: 8_000_000,
+		firstSeenMS:  now.Add(-2 * time.Hour).UnixMilli(),
+		lastSeenMS:   now.UnixMilli(),
+	}}, now)
+
+	estimate := service.smartQuotaEstimateForSupplierAt(now, "legacy", "team", identity)
+	if estimate.Source != smartQuotaEstimateSourceCurrent || estimate.SampleCount != 1 ||
+		estimate.EvidenceCount != 3 || estimate.UniqueAccounts != 1 || estimate.CapacityM != 60 {
+		t.Fatalf("warmed supplier estimate = %#v", estimate)
+	}
+	for _, sample := range service.smartQuotaState.samples {
+		if sample.identity == identity && sample.supplierID != "legacy" {
+			t.Fatalf("runtime sample supplier = %q, want legacy", sample.supplierID)
+		}
+	}
+}
+
 func TestSmartQuotaCompleteWindowOverridesRuntimeDeltasForSameAccount(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	samples := []smartQuotaCalibrationSample{

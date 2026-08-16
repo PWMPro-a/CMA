@@ -213,6 +213,61 @@ func (s *Service) appendSmartQuotaCalibrationSampleLocked(sample smartQuotaCalib
 	)
 }
 
+func (s *Service) assignSmartQuotaSupplierToIdentityLocked(identity, supplierID string) {
+	identity = strings.TrimSpace(identity)
+	supplierID = normalizeSmartQuotaSupplierID(supplierID)
+	if identity == "" || supplierID == "" {
+		return
+	}
+	for index := range s.smartQuotaState.samples {
+		sample := &s.smartQuotaState.samples[index]
+		if sample.identity == identity && normalizeSmartQuotaSupplierID(sample.supplierID) == "" {
+			sample.supplierID = supplierID
+		}
+	}
+	if samples, ok := s.smartQuotaState.samplesByIdentity[identity]; ok {
+		for index := range samples {
+			if normalizeSmartQuotaSupplierID(samples[index].supplierID) == "" {
+				samples[index].supplierID = supplierID
+			}
+		}
+		s.smartQuotaState.samplesByIdentity[identity] = samples
+	}
+	if sample, ok := s.smartQuotaState.directSamples[identity]; ok && normalizeSmartQuotaSupplierID(sample.supplierID) == "" {
+		sample.supplierID = supplierID
+		s.smartQuotaState.directSamples[identity] = sample
+	}
+	if sample, ok := s.smartQuotaState.provisionalSamples[identity]; ok && normalizeSmartQuotaSupplierID(sample.supplierID) == "" {
+		sample.supplierID = supplierID
+		s.smartQuotaState.provisionalSamples[identity] = sample
+	}
+}
+
+func (s *Service) removeSmartQuotaSamplesThroughLocked(identity string, observedMS int64) {
+	kept := s.smartQuotaState.samples[:0]
+	for _, sample := range s.smartQuotaState.samples {
+		if sample.identity == identity && sample.observedMS <= observedMS {
+			continue
+		}
+		kept = append(kept, sample)
+	}
+	s.smartQuotaState.samples = kept
+	if samples, ok := s.smartQuotaState.samplesByIdentity[identity]; ok {
+		keptByIdentity := samples[:0]
+		for _, sample := range samples {
+			if sample.observedMS <= observedMS {
+				continue
+			}
+			keptByIdentity = append(keptByIdentity, sample)
+		}
+		if len(keptByIdentity) == 0 {
+			delete(s.smartQuotaState.samplesByIdentity, identity)
+		} else {
+			s.smartQuotaState.samplesByIdentity[identity] = keptByIdentity
+		}
+	}
+}
+
 func normalizeSmartQuotaFraction(value float64) (float64, bool) {
 	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 100 {
 		return 0, false
@@ -514,18 +569,7 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 			!smartQuotaClassificationFractionEligible(baseline.fraction) {
 			continue
 		}
-
-		// The targeted aggregate is authoritative through observedMS for the
-		// local observation baseline. Discard older runtime deltas for this exact
-		// credential while retaining samples produced after the inspection.
-		kept := s.smartQuotaState.samples[:0]
-		for _, sample := range s.smartQuotaState.samples {
-			if sample.identity == baseline.identity && sample.observedMS <= baseline.observedMS {
-				continue
-			}
-			kept = append(kept, sample)
-		}
-		s.smartQuotaState.samples = kept
+		s.assignSmartQuotaSupplierToIdentityLocked(baseline.identity, baseline.supplierID)
 
 		observation := s.smartQuotaState.observations[baseline.identity]
 		if (observation.recoverAtMS > 0 && baseline.recoverAtMS > 0 && observation.recoverAtMS != baseline.recoverAtMS) ||
@@ -554,13 +598,18 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 		// database then contains only post-import traffic. Treating that partial
 		// tail as a complete-window numerator produced false 10-30M account
 		// estimates and collapsed a 16 x 60M pool to roughly 250M. Keep the
-		// observation as the baseline for future percentage deltas, but retain the
-		// configured per-plan fallback until complete coverage is proven.
+		// observation as the baseline for future percentage deltas. The configured
+		// fallback remains in use unless separately validated runtime deltas exist.
 		if !smartQuotaWindowBaselineHasCompleteCoverage(baseline) {
 			delete(s.smartQuotaState.directSamples, baseline.identity)
 			delete(s.smartQuotaState.provisionalSamples, baseline.identity)
 			continue
 		}
+
+		// A complete-window aggregate supersedes older runtime deltas for this
+		// credential. Partial-window baselines only seed future deltas, so their
+		// already validated runtime samples remain useful after refresh/restart.
+		s.removeSmartQuotaSamplesThroughLocked(baseline.identity, baseline.observedMS)
 
 		capacityM := float64(baseline.windowTokens) / baseline.fraction / 1_000_000
 		if capacityM < smartQuotaCalibrationMinCapacityM || capacityM > smartQuotaCalibrationMaxCapacityM {
