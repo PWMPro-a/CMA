@@ -661,10 +661,10 @@ func (r *repository) ListActiveImportedItems(ctx context.Context, nowMS int64) (
 	return items, rows.Err()
 }
 
-// ListCurrentImportedLeaseItems returns the current supplier lease attached to
-// every imported file, including leases that have already expired. Capacity
-// planning needs the expired rows as negative evidence; filtering them here
-// makes an expired supplied credential look like an unrelated legacy account.
+// ListCurrentImportedLeaseItems returns the current supplier lease metadata
+// attached to every imported file, including timestamps that have passed.
+// The timestamp remains useful for provenance and routing priority, but is not
+// itself a credential-validity boundary.
 func (r *repository) ListCurrentImportedLeaseItems(ctx context.Context) ([]model.SupplyImportItem, error) {
 	rows, err := r.db.QueryContext(ctx, `select id, file_name, imported_at_ms, effective_from_ms, lease_expires_at_ms
 		from supply_import_items

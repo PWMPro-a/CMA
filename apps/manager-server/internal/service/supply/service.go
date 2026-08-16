@@ -51,8 +51,6 @@ const (
 	remoteStatusAutomaticReleasePending = "auto_release_pending"
 	automaticReleasePendingMessage      = "automatically released locally; supplier reservation will expire automatically"
 	defaultSupplyRevenueMultiplier      = 0.06
-	expiredSupplyLeaseSweepInterval     = 15 * time.Second
-	expiredSupplyLeaseSweepTimeout      = 2 * time.Minute
 	recoverySyncBackgroundTimeout       = 10 * time.Minute
 	automaticRunSlowLogThreshold        = 500 * time.Millisecond
 )
@@ -570,35 +568,31 @@ type Service struct {
 	// request must not independently log in to the supplier after a restart.
 	overviewRefreshMu sync.Mutex
 
-	smartMu                  sync.RWMutex
-	smartBuckets             map[int64]*smartUsageBucket
-	smartQuotaState          smartQuotaCalibrationState
-	quotaPolicyMu            sync.Mutex
-	quotaPolicyState         map[string]smartQuotaPlanAdoptionState
-	authCacheMu              sync.Mutex
-	authRefreshMu            sync.Mutex
-	authCache                authFileSnapshot
-	quotaSnapshotMu          sync.Mutex
-	quotaRefreshMu           sync.Mutex
-	quotaSnapshot            inspectionQuotaSnapshot
-	operatorHeadersMu        sync.Mutex
-	operatorHeaders          operatorHeaderSnapshotCache
-	operatorPoolMu           sync.Mutex
-	operatorPool             operatorAccountPoolCache
-	smartResourceState       SmartResource
-	automation               AutomationExecution
-	recoveryMu               sync.Mutex
-	recoveryState            RecoverySummary
-	recoveryAsyncMu          sync.Mutex
-	recoveryAsyncRunning     bool
-	recoverySyncIfDue        func(context.Context) (RecoverySummary, error)
-	importMu                 sync.Mutex
-	expiredLeaseSweepMu      sync.Mutex
-	expiredLeaseSweepAt      time.Time
-	expiredLeaseSweepRunning bool
-	expiredLeaseSweep        func(context.Context, store.ManagerConfig, time.Time) (int, error)
-	poolVacuumMu             sync.Mutex
-	poolVacuumStarted        int64
+	smartMu              sync.RWMutex
+	smartBuckets         map[int64]*smartUsageBucket
+	smartQuotaState      smartQuotaCalibrationState
+	quotaPolicyMu        sync.Mutex
+	quotaPolicyState     map[string]smartQuotaPlanAdoptionState
+	authCacheMu          sync.Mutex
+	authRefreshMu        sync.Mutex
+	authCache            authFileSnapshot
+	quotaSnapshotMu      sync.Mutex
+	quotaRefreshMu       sync.Mutex
+	quotaSnapshot        inspectionQuotaSnapshot
+	operatorHeadersMu    sync.Mutex
+	operatorHeaders      operatorHeaderSnapshotCache
+	operatorPoolMu       sync.Mutex
+	operatorPool         operatorAccountPoolCache
+	smartResourceState   SmartResource
+	automation           AutomationExecution
+	recoveryMu           sync.Mutex
+	recoveryState        RecoverySummary
+	recoveryAsyncMu      sync.Mutex
+	recoveryAsyncRunning bool
+	recoverySyncIfDue    func(context.Context) (RecoverySummary, error)
+	importMu             sync.Mutex
+	poolVacuumMu         sync.Mutex
+	poolVacuumStarted    int64
 
 	inspectionSnapshotRefreshMu sync.Mutex
 	inspectionSnapshotRefresh   inspectionSnapshotRefreshState
@@ -2212,16 +2206,11 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	if err != nil {
 		return err
 	}
-	timing.next("lease-sweep-schedule")
 	supplyCfg := cfg.Supply
 	_, baselineStarted := s.observeAutomaticEnabled(managerconfigsvc.SupplyEnabled(supplyCfg))
 	if baselineStarted && smartSupplyEnabled(supplyCfg) {
 		s.invalidateInspectionQuotaSnapshot()
 		s.requestStaleInspectionSnapshotRefresh()
-	}
-	if _, sweepErr := s.disableExpiredSupplyAccountsIfDue(ctx, cfg, time.Now()); sweepErr != nil {
-		// Scheduling errors must never hold up order reconciliation or replenishment.
-		log.Printf("[supply] expired supplier lease cleanup failed: %v", sweepErr)
 	}
 	timing.next("order-reconcile")
 	if restored, restoredFound, err := s.store.ActivateNextUnsupportedSupplyRelease(ctx); err != nil {
@@ -5386,161 +5375,6 @@ func (s *Service) disableRecoveredOriginal(ctx context.Context, cfg store.Manage
 		recovery.OriginalFileName, true, recovery.OriginalAuthIndex)
 }
 
-func (s *Service) disableExpiredSupplyAccountsIfDue(ctx context.Context, cfg store.ManagerConfig, now time.Time) (int, error) {
-	if s == nil || s.store == nil || s.authFiles == nil || !cpaManagementConfigured(cfg) {
-		return 0, nil
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-	s.expiredLeaseSweepMu.Lock()
-	if s.expiredLeaseSweepRunning ||
-		(!s.expiredLeaseSweepAt.IsZero() && now.Sub(s.expiredLeaseSweepAt) < expiredSupplyLeaseSweepInterval) {
-		s.expiredLeaseSweepMu.Unlock()
-		return 0, nil
-	}
-	s.expiredLeaseSweepAt = now
-	s.expiredLeaseSweepRunning = true
-	run := s.expiredLeaseSweep
-	s.expiredLeaseSweepMu.Unlock()
-
-	go func() {
-		startedAt := time.Now()
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		sweepCtx, cancel := context.WithTimeout(ctx, expiredSupplyLeaseSweepTimeout)
-		defer cancel()
-		if run == nil {
-			run = s.disableExpiredSupplyAccounts
-		}
-		disabled, err := run(sweepCtx, cfg, now)
-		duration := time.Since(startedAt)
-
-		s.expiredLeaseSweepMu.Lock()
-		s.expiredLeaseSweepRunning = false
-		if err != nil {
-			// Failed/cancelled sweeps are retried on the next automatic pass
-			// instead of being hidden behind the normal interval.
-			s.expiredLeaseSweepAt = time.Time{}
-		}
-		s.expiredLeaseSweepMu.Unlock()
-
-		if err != nil {
-			log.Printf("[supply] expired supplier lease cleanup failed duration=%s: %v", duration.Round(time.Millisecond), err)
-		} else if disabled > 0 || duration >= automaticRunSlowLogThreshold {
-			log.Printf("[supply] expired supplier lease cleanup completed duration=%s disabled=%d", duration.Round(time.Millisecond), disabled)
-		}
-	}()
-	return 0, nil
-}
-
-// disableExpiredSupplyAccounts reconciles the supplier's paid lease boundary
-// with CPA's live credential state. It runs under importMu so a reauthorization
-// replacement cannot be disabled using the identity of the file it superseded.
-func (s *Service) disableExpiredSupplyAccounts(ctx context.Context, cfg store.ManagerConfig, now time.Time) (int, error) {
-	if s == nil || s.store == nil || s.authFiles == nil || !cpaManagementConfigured(cfg) {
-		return 0, nil
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-	s.importMu.Lock()
-	defer s.importMu.Unlock()
-
-	leaseItems, err := s.store.ListCurrentImportedSupplyLeaseItems(ctx)
-	if err != nil {
-		return 0, err
-	}
-	latestLeaseByFile := make(map[string]int64, len(leaseItems))
-	for _, item := range leaseItems {
-		fileName := strings.TrimSpace(item.FileName)
-		if fileName == "" || item.LeaseExpiresAtMS <= 0 {
-			continue
-		}
-		latestLeaseByFile[fileName] = maxInt64(latestLeaseByFile[fileName], item.LeaseExpiresAtMS)
-	}
-	expiredFiles := make(map[string]int64)
-	for fileName, expiresAtMS := range latestLeaseByFile {
-		if expiresAtMS <= now.UnixMilli() {
-			expiredFiles[fileName] = expiresAtMS
-		}
-	}
-	if len(expiredFiles) == 0 {
-		return 0, nil
-	}
-
-	authCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	authSnapshot, authErr := s.cachedAuthFiles(authCtx, cfg, true)
-	if authErr != nil && len(authSnapshot.files) == 0 {
-		return 0, authErr
-	}
-	liveByName := make(map[string][]cpaauthfiles.File, len(expiredFiles))
-	for _, file := range authSnapshot.files {
-		fileName := strings.TrimSpace(file.Name)
-		if _, tracked := expiredFiles[fileName]; tracked {
-			liveByName[fileName] = append(liveByName[fileName], file)
-		}
-	}
-
-	disabled := 0
-	var firstErr error
-	for fileName, storedExpiryMS := range expiredFiles {
-		matches := liveByName[fileName]
-		if len(matches) == 0 {
-			continue
-		}
-		if len(matches) != 1 {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("expired supply file %q has %d live identities", fileName, len(matches))
-			}
-			continue
-		}
-		file := matches[0]
-		if file.Disabled {
-			continue
-		}
-		// The credential file is the last identity check before mutation. A
-		// freshly replaced credential carries the new lease in its metadata and
-		// must win over an older local database observation.
-		if liveExpiry, ok := smartSupplyLeaseExpiry(file.Raw, now); ok && liveExpiry.UnixMilli() > storedExpiryMS && liveExpiry.After(now) {
-			continue
-		}
-		if strings.TrimSpace(file.ID) == "" {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("expired supply file %q has no stable runtime identity", fileName)
-			}
-			continue
-		}
-		patchCtx, patchCancel := context.WithTimeout(ctx, 10*time.Second)
-		patchErr := s.authFiles.PatchDisabledTarget(
-			patchCtx,
-			cfg.CPAConnection.CPABaseURL,
-			cfg.CPAConnection.ManagementKey,
-			cpaauthfiles.StatusMutationTarget{
-				Selector:      strings.TrimSpace(file.ID),
-				File:          file,
-				Scope:         cpaauthfiles.StatusMutationScopeCredential,
-				AffectedFiles: []cpaauthfiles.File{file},
-			},
-			true,
-		)
-		patchCancel()
-		if patchErr != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("disable expired supply file %q: %w", fileName, patchErr)
-			}
-			continue
-		}
-		disabled++
-	}
-	if disabled > 0 {
-		s.invalidateAuthAndCapacityCaches()
-	}
-	return disabled, firstErr
-}
-
 func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerConfig) (int, error) {
 	stats, err := s.countAccountPoolStats(ctx, cfg)
 	return stats.schedulable, err
@@ -6421,8 +6255,10 @@ func (s *Service) reconcileSmartNormalCapacityFloor(
 			capacityRCU:      capacity,
 			remainingMinutes: remainingMinutes,
 		}
+		expiryHintMinutes := remainingMinutes
 		if expiry, supplied := smartSupplyLeaseExpiry(file.Raw, now); supplied {
 			item.expiresAtMS = expiry.UnixMilli()
+			expiryHintMinutes = expiry.Sub(now).Minutes()
 		}
 		resource.capacityItems = append(resource.capacityItems, item)
 		existing[credentialKey] = struct{}{}
@@ -6432,7 +6268,7 @@ func (s *Service) reconcileSmartNormalCapacityFloor(
 		addedCapacity += capacity
 		addedAccounts++
 		addedByPlan[smartQuotaContextKey(supplierID, planType)]++
-		resource.recordExpiringAccount(remainingMinutes, capacity)
+		resource.recordExpiringAccount(expiryHintMinutes, capacity)
 	}
 	if addedAccounts == 0 || addedCapacity <= 0 {
 		return false

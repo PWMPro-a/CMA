@@ -512,7 +512,7 @@ func TestSmartResourceIncludesRecentImportedCapacityUntilNextInspection(t *testi
 	}
 }
 
-func TestLoadLatestInspectionQuotaSnapshotKeepsExpiredLeaseEvidenceOutOfActiveOverlay(t *testing.T) {
+func TestLoadLatestInspectionQuotaSnapshotKeepsExpiredLeaseAsRoutingMetadata(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "lease-snapshot.sqlite"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -552,12 +552,12 @@ func TestLoadLatestInspectionQuotaSnapshotKeepsExpiredLeaseEvidenceOutOfActiveOv
 	if snapshot.leaseExpiresByFile["expired.json"] <= 0 || snapshot.leaseExpiresByFile["active.json"] <= now.UnixMilli() {
 		t.Fatalf("snapshot did not retain current lease evidence: %#v", snapshot.leaseExpiresByFile)
 	}
-	if len(snapshot.activeImportItems) != 1 || snapshot.activeImportItems[0].FileName != "active.json" {
-		t.Fatalf("active overlay must contain only the unexpired import: %#v", snapshot.activeImportItems)
+	if len(snapshot.activeImportItems) != 2 {
+		t.Fatalf("current overlay must retain both imports: %#v", snapshot.activeImportItems)
 	}
 	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{Product: "oauth_30d"}, snapshot, now)
-	if resource.AvailableAccounts != 1 || resource.PendingInspectionAccounts != 1 || resource.RawCapacityRCU <= 0 {
-		t.Fatalf("expired inspection result must be excluded while the active overlay remains: %#v", resource)
+	if resource.AvailableAccounts != 2 || resource.HealthyAccounts != 1 || resource.PendingInspectionAccounts != 1 || resource.RawCapacityRCU <= 0 {
+		t.Fatalf("expired timestamp must not remove a healthy inspected account: %#v", resource)
 	}
 }
 
@@ -1108,7 +1108,7 @@ func TestSmartResourceKeepsSixteenMidWindowTeamAccountsAboveSevenHundredMillion(
 	}
 }
 
-func TestSmartResourceUsesPersistedSupplyLeaseForCapacity(t *testing.T) {
+func TestSmartResourceUsesPersistedSupplyLeaseOnlyAsRoutingHint(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Second)
 	events := make([]usage.Event, 0, 30)
@@ -1139,13 +1139,13 @@ func TestSmartResourceUsesPersistedSupplyLeaseForCapacity(t *testing.T) {
 	if !resource.SnapshotFresh || resource.CapacityLifetimeCoverage != 100 {
 		t.Fatalf("active supply lease should be a usable snapshot: %#v", resource)
 	}
-	if resource.RawCapacityRCU != 125 || resource.CurrentCapacityRCU != 5 ||
-		resource.RawCapacityTokenM != 10 || resource.CurrentCapacityTokenM != 0.4 {
-		t.Fatalf("capacity must use the remaining five-minute lease rather than an account count: %#v", resource)
+	if resource.RawCapacityRCU != 125 || resource.CurrentCapacityRCU != 55 ||
+		resource.RawCapacityTokenM != 10 || resource.CurrentCapacityTokenM != 4.4 {
+		t.Fatalf("supplier timestamp must not cap verified healthy capacity: %#v", resource)
 	}
 }
 
-func TestSmartResourceExcludesExpiredSupplyLeaseEvenWhenQuotaProbeSucceeds(t *testing.T) {
+func TestSmartResourceKeepsExpiredSupplyLeaseWhenQuotaProbeSucceeds(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	usedPercent := 0.0
 	statusCode := http.StatusOK
@@ -1163,11 +1163,11 @@ func TestSmartResourceExcludesExpiredSupplyLeaseEvenWhenQuotaProbeSucceeds(t *te
 		generatedAt:        now,
 	}, now)
 
-	if !resource.SnapshotFresh || resource.CapacityLifetimeCoverage != 0 || resource.RawCapacityRCU != 0 ||
-		resource.CurrentCapacityRCU != 0 || resource.RawCapacityTokenM != 0 || resource.CurrentCapacityTokenM != 0 ||
-		resource.AvailableAccounts != 0 || resource.HealthyAccounts != 0 || resource.SchedulableAccounts != 0 ||
-		resource.EnabledAccounts != 0 || resource.DisabledAccounts != 1 {
-		t.Fatalf("an expired supplier lease must contribute no capacity: %#v", resource)
+	if !resource.SnapshotFresh || resource.CapacityLifetimeCoverage != 100 || resource.RawCapacityRCU <= 0 ||
+		resource.CurrentCapacityRCU <= 0 || resource.RawCapacityTokenM <= 0 || resource.CurrentCapacityTokenM <= 0 ||
+		resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 || resource.SchedulableAccounts != 1 ||
+		resource.EnabledAccounts != 1 || resource.DisabledAccounts != 0 {
+		t.Fatalf("a healthy account must retain capacity after its supplier timestamp: %#v", resource)
 	}
 }
 
@@ -1189,7 +1189,7 @@ func TestSmartResourceKeepsUnrelatedLegacyCredentialAfterUsefulLeaseWindow(t *te
 	}
 }
 
-func TestSmartResourceFallbackExcludesExpiredLeaseMetadata(t *testing.T) {
+func TestSmartResourceFallbackKeepsHealthyExpiredLeaseMetadata(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	resource := New(nil, nil).buildSmartResourceFromSnapshots(store.ManagerSupplyConfig{
 		Product: "oauth_30d",
@@ -1206,10 +1206,10 @@ func TestSmartResourceFallbackExcludesExpiredLeaseMetadata(t *testing.T) {
 		}},
 	}, now)
 
-	if resource.AvailableAccounts != 0 || resource.HealthyAccounts != 0 || resource.SchedulableAccounts != 0 ||
-		resource.EnabledAccounts != 0 || resource.DisabledAccounts != 1 ||
-		resource.RawCapacityRCU != 0 || resource.CurrentCapacityRCU != 0 {
-		t.Fatalf("fallback capacity must exclude an explicitly expired supplier lease: %#v", resource)
+	if resource.AvailableAccounts != 1 || resource.HealthyAccounts != 1 || resource.SchedulableAccounts != 1 ||
+		resource.EnabledAccounts != 1 || resource.DisabledAccounts != 0 ||
+		resource.RawCapacityRCU <= 0 || resource.CurrentCapacityRCU <= 0 {
+		t.Fatalf("fallback capacity must follow live health rather than the supplier timestamp: %#v", resource)
 	}
 }
 

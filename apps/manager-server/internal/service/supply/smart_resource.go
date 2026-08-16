@@ -174,9 +174,9 @@ type SmartResource struct {
 	NearestExpiryAtMS           int64   `json:"nearestExpiryAtMs,omitempty"`
 	NearestExpiryMinutes        float64 `json:"nearestExpiryMinutes,omitempty"`
 	NextCapacityDeficitAtMS     int64   `json:"nextCapacityDeficitAtMs,omitempty"`
-	// ExpiringAccounts counts currently schedulable credentials whose remaining
-	// supplier/OAuth validity is inside the warning window. They remain usable,
-	// but their usable capacity is already bounded by expiry.
+	// ExpiringAccounts counts currently schedulable credentials whose routing
+	// timestamp or runtime validity is inside the warning window. Supplier
+	// timestamps are informational and do not cap a healthy account's capacity.
 	ExpiringAccounts                int     `json:"expiringAccounts"`
 	ExpiringWithinMinutes           int     `json:"expiringWithinMinutes"`
 	ExpiringCapacityRCU             float64 `json:"expiringCapacityRcu,omitempty"`
@@ -598,17 +598,14 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	withQuotaEvidence := 0
 	usabilityRequired := 0
 	withVerifiedUsability := 0
-	leaseRequired := 0
-	withActiveLease := 0
 	for _, result := range snapshot.results {
 		if !isSmartCapacityInspectionResult(result) {
 			continue
 		}
 		fileName := strings.TrimSpace(result.FileName)
 		leaseExpiresAtMS, suppliedAccount := snapshot.leaseExpiresByFile[fileName]
-		expiredSupplyLease := suppliedAccount && leaseExpiresAtMS <= now.UnixMilli()
 		resource.TotalAccounts++
-		if !result.Disabled && !expiredSupplyLease {
+		if !result.Disabled {
 			resource.EnabledAccounts++
 		}
 		if fileName != "" {
@@ -616,17 +613,6 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		}
 		if inspectionResultCapacityExcluded(result) {
 			continue
-		}
-		if suppliedAccount {
-			leaseRequired++
-			// Supplier delivery leases are a hard ownership boundary. A quota
-			// endpoint may continue to answer briefly after the purchased lease
-			// ends, but that response must not extend paid capacity or suppress
-			// replenishment.
-			if leaseExpiresAtMS <= now.UnixMilli() {
-				continue
-			}
-			withActiveLease++
 		}
 		eligible++
 		usabilityRequired++
@@ -645,12 +631,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		resource.SchedulableAccounts++
 		resource.AvailableAccounts++
 		remainingMinutes := float64(smartUsefulAccountLifetimeMinutes())
-		hasActiveLease := false
-		if suppliedAccount {
-			hasActiveLease = true
-			remainingMinutes = clampFloat(time.UnixMilli(leaseExpiresAtMS).Sub(now).Minutes(), 0, float64(smartUsefulAccountLifetimeMinutes()))
-		}
-		if !hasCapacityQuota && hasActiveLease {
+		if !hasCapacityQuota && suppliedAccount {
 			withQuotaEvidence++
 		}
 		capacity := 0.0
@@ -667,11 +648,9 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		switch {
 		case hasCapacityQuota:
 			capacity = smartAccountQuotaCapacityRCU(resource.UnitCapacityRCU, accountQuotaEstimate.CapacityM, remaining)
-		case hasActiveLease:
-			// The completed probe proved that the credential works, while the
-			// supplier's delivery record bounds how long it can remain usable.
-			// This is intentionally a conservative lease estimate, not a
-			// conversion of the excluded monthly allowance.
+		case suppliedAccount:
+			// The completed probe proves current usability. Supplier timestamps
+			// remain routing-priority hints and do not cap usable capacity.
 			capacity = smartEstimatedNewAccountTokenCapacityRCU(cfg, accountQuotaEstimate.CapacityM)
 			resource.LeaseEstimatedAccounts++
 			resource.LeaseEstimatedCapacityRCU += capacity
@@ -681,7 +660,11 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		if capacity <= 0 {
 			continue
 		}
-		resource.recordExpiringAccount(remainingMinutes, capacity)
+		expiryHintMinutes := remainingMinutes
+		if suppliedAccount {
+			expiryHintMinutes = time.UnixMilli(leaseExpiresAtMS).Sub(now).Minutes()
+		}
+		resource.recordExpiringAccount(expiryHintMinutes, capacity)
 		// A successful current quota inspection is direct evidence that the
 		// credential is alive. 401 thresholds do not reduce its actual quota.
 		resource.HealthyAccounts++
@@ -694,7 +677,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			capacityRCU:      capacity,
 			remainingMinutes: remainingMinutes,
 		}
-		if hasActiveLease {
+		if suppliedAccount {
 			capacityItem.expiresAtMS = leaseExpiresAtMS
 		}
 		capacityItems = append(capacityItems, capacityItem)
@@ -702,7 +685,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	// A completed inspection is intentionally snapshot based, so an account
 	// delivered just after that run used to contribute zero capacity until the
 	// next full scan completed. That made a manual purchase appear to have no
-	// effect for several minutes. Overlay only active imports that were added
+	// effect for several minutes. Overlay current imports that were added
 	// after this snapshot, use the configured new-account confidence discount,
 	// and keep them visibly separate from verified healthy credentials.
 	overlaidFiles := make(map[string]struct{}, len(inspectedFiles)+len(snapshot.activeImportItems))
@@ -718,14 +701,14 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		// The inspection's file set is captured at its start, not when its
 		// results finish writing. Accounts imported while a long inspection is
 		// running are absent from that completed result and need this overlay.
-		if fileName == "" || item.ImportedAtMS <= inspectionStartedAtMS || item.LeaseExpiresAtMS <= now.UnixMilli() {
+		if fileName == "" || item.ImportedAtMS <= inspectionStartedAtMS {
 			continue
 		}
 		if _, alreadyCounted := overlaidFiles[fileName]; alreadyCounted {
 			continue
 		}
 		overlaidFiles[fileName] = struct{}{}
-		remainingMinutes := clampFloat(time.UnixMilli(item.LeaseExpiresAtMS).Sub(now).Minutes(), 0, float64(smartUsefulAccountLifetimeMinutes()))
+		remainingMinutes := float64(smartUsefulAccountLifetimeMinutes())
 		supplierID := normalizeSmartQuotaSupplierID(snapshot.supplierByFile[fileName])
 		if supplierID == "" && len(platforms) == 1 {
 			supplierID = normalizeSmartQuotaSupplierID(platforms[0].ID)
@@ -748,7 +731,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		resource.AvailableAccounts++
 		resource.PendingInspectionAccounts++
 		resource.PendingInspectionCapacityRCU += capacity
-		resource.recordExpiringAccount(remainingMinutes, capacity)
+		resource.recordExpiringAccount(time.UnixMilli(item.LeaseExpiresAtMS).Sub(now).Minutes(), capacity)
 	}
 	resource.DisabledAccounts = max(0, resource.TotalAccounts-resource.AvailableAccounts)
 	applySmartAccountCountBreakdown(&resource)
@@ -761,16 +744,13 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		// capacity state, not a missing data state.
 		resource.CapacityCoverage = 100
 	}
-	if leaseRequired > 0 {
-		resource.CapacityLifetimeCoverage = round2(float64(withActiveLease) / float64(leaseRequired) * 100)
-	} else {
-		resource.CapacityLifetimeCoverage = 100
-	}
+	// Supplier timestamps are provenance and routing-priority signals. Current
+	// health/quota evidence, rather than the timestamp, determines capacity.
+	resource.CapacityLifetimeCoverage = 100
 	quotaEvidenceIncomplete := eligible > 0 && withQuotaEvidence != eligible
 	usabilityEvidenceIncomplete := usabilityRequired > 0 && withVerifiedUsability != usabilityRequired
-	// Delivery-lease coverage is retained as an observability signal. It does
-	// not override a current successful quota probe: live usability and quota
-	// evidence decide whether a credential contributes capacity.
+	// Live usability and quota evidence decide whether a credential contributes
+	// capacity; supplier timestamps remain informational.
 	for _, item := range capacityItems {
 		resource.RawCapacityRCU += item.capacityRCU
 	}
@@ -873,8 +853,7 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		}
 		resource.TotalAccounts++
 		leaseExpiresAt, suppliedAccount := smartSupplyLeaseExpiry(file.Raw, now)
-		expiredSupplyLease := suppliedAccount && !leaseExpiresAt.After(now)
-		if !file.Disabled && !expiredSupplyLease {
+		if !file.Disabled {
 			resource.EnabledAccounts++
 			if smartAccountNeedsAttention(file.Raw) {
 				resource.NeedsAttentionAccounts++
@@ -883,10 +862,6 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 			}
 		}
 		if !isSmartCapacityCodexFile(file) {
-			resource.DisabledAccounts++
-			continue
-		}
-		if expiredSupplyLease {
 			resource.DisabledAccounts++
 			continue
 		}
@@ -956,7 +931,11 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 			}
 			capacityItems = append(capacityItems, capacityItem)
 		}
-		resource.recordExpiringAccount(remainingMinutes, rawCapacity)
+		expiryHintMinutes := remainingMinutes
+		if suppliedAccount {
+			expiryHintMinutes = leaseExpiresAt.Sub(now).Minutes()
+		}
+		resource.recordExpiringAccount(expiryHintMinutes, rawCapacity)
 		effectiveAvailable++
 	}
 	resource.AvailableAccounts = int(effectiveAvailable)
@@ -1839,12 +1818,11 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context, configs
 		if len(filtered) == 0 && !smartInspectionRunIsTrustedEmptySupplySnapshot(run) {
 			continue
 		}
-		nowMS := time.Now().UnixMilli()
 		leaseItems, err := s.store.ListCurrentImportedSupplyLeaseItems(ctx)
 		if err != nil {
 			return inspectionQuotaSnapshot{}, err
 		}
-		activeLeaseItems := make([]store.SupplyImportItem, 0, len(leaseItems))
+		currentImportItems := make([]store.SupplyImportItem, 0, len(leaseItems))
 		orderIDs := make([]string, 0, len(leaseItems))
 		orderSeen := make(map[string]struct{}, len(leaseItems))
 		for _, item := range leaseItems {
@@ -1929,9 +1907,7 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context, configs
 				continue
 			}
 			leaseExpiresByFile[fileName] = maxInt64(leaseExpiresByFile[fileName], item.LeaseExpiresAtMS)
-			if item.LeaseExpiresAtMS > nowMS {
-				activeLeaseItems = append(activeLeaseItems, item)
-			}
+			currentImportItems = append(currentImportItems, item)
 		}
 		generatedAt := time.UnixMilli(run.FinishedAtMS)
 		if run.FinishedAtMS <= 0 {
@@ -1943,7 +1919,7 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context, configs
 			quotaWindowUsage:   quotaWindowUsage,
 			leaseExpiresByFile: leaseExpiresByFile,
 			supplierByFile:     supplierByFile,
-			activeImportItems:  activeLeaseItems,
+			activeImportItems:  currentImportItems,
 			generatedAt:        generatedAt,
 		}, nil
 	}
@@ -2262,9 +2238,8 @@ func smartAccountLifetimeMinutes() int {
 }
 
 func smartUsefulAccountLifetimeMinutes() int {
-	// Supplier accounts are short-lived. Keep a small tail as safety because
-	// taking, importing, scheduling and in-flight requests all consume part of
-	// the one-hour lifetime.
+	// Keep a conservative rolling planning horizon for accounts without stronger
+	// runtime lifetime evidence. This is a forecast window, not a disable time.
 	return 55
 }
 
@@ -2882,12 +2857,10 @@ func smartExpiryLimitedCapacity(items []smartCapacityItem, consumeRCUPerMinute f
 	return usable, wasteRisk
 }
 
-// applySmartExpiryCapacity turns per-account quota and supplier deadlines into
-// one capacity timeline. Raw capacity answers how much quota exists, while the
-// time-limited capacity answers how much can still be consumed if the oldest
-// lease is drained first. Keeping the absolute nearest deadline lets the UI
-// explain why a runway value can remain flat after a recovery or a staggered
-// purchase instead of presenting only the opaque capacity/rate quotient.
+// applySmartExpiryCapacity turns per-account quota and actual runtime lifetime
+// evidence into one capacity timeline. Supplier lease timestamps are retained
+// only for nearest-expiry observability and routing priority; they do not set
+// remainingMinutes or cap a still-healthy credential's usable capacity.
 func applySmartExpiryCapacity(resource *SmartResource, items []smartCapacityItem, consumeRCUPerMinute float64, now time.Time) {
 	if resource == nil {
 		return
@@ -2984,9 +2957,6 @@ func smartAccountRemainingMinutes(values map[string]any, now time.Time, fallback
 	}
 	if seconds, ok := numberFieldOK(values, "expires_in", "expiresIn", "expire_in", "expireIn"); ok {
 		return clampFloat(seconds/60, 0, float64(smartAccountLifetimeMinutes()))
-	}
-	if expiry, ok := smartSupplyLeaseExpiry(values, now); ok {
-		return clampFloat(expiry.Sub(now).Minutes(), 0, float64(smartAccountLifetimeMinutes()))
 	}
 	for _, key := range []string{"expired", "expires_at", "expiresAt", "expire_at", "expireAt", "valid_until", "validUntil"} {
 		raw, ok := values[key]
