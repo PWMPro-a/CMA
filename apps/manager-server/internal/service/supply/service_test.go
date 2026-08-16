@@ -969,6 +969,18 @@ func TestCPAAuthLifecyclePendingIsNotSchedulableCapacity(t *testing.T) {
 	}
 }
 
+func TestCPAAuthLifecyclePendingReadsPersistedLifecycleFields(t *testing.T) {
+	for _, raw := range []map[string]any{
+		{"status": "error", "initialization_state": "refreshing_quota"},
+		{"status": "error", "recovery_state": "recovering_token"},
+	} {
+		file := cpaauthfiles.File{Name: "account.json", Provider: "codex", Raw: raw}
+		if !isCPAAuthLifecyclePending(file) {
+			t.Fatalf("lifecycle fields were not recognized as pending: %#v", raw)
+		}
+	}
+}
+
 func TestAccountPoolStatsKeepsPopulationIdentityAcrossLiveAndInspectionBuckets(t *testing.T) {
 	remainingNormal := 10.0
 	remainingRisk := 90.0
@@ -3654,6 +3666,24 @@ func TestPreserveCodexIdentityFingerprintOnReplacement(t *testing.T) {
 	}
 }
 
+func TestPreserveCodexIdentityFingerprintBackfillsLegacyExistingAccount(t *testing.T) {
+	next := []byte(`{"type":"codex","email":"new@example.com","codex_identity_fingerprint":"new-device","access_token":"new"}`)
+	existing := []byte(`{"type":"codex","email":"old@example.com","workspace_id":"workspace-one","chatgpt_user_id":"member-one","access_token":"old"}`)
+	preserved := preserveCodexSupplyMetadata(next, existing)
+	var result map[string]any
+	if err := json.Unmarshal(preserved, &result); err != nil {
+		t.Fatalf("decode preserved payload: %v", err)
+	}
+	var existingMetadata map[string]any
+	if err := json.Unmarshal(existing, &existingMetadata); err != nil {
+		t.Fatalf("decode existing payload: %v", err)
+	}
+	want := stableCodexIdentityFingerprint(supplyAccountIdentity(existingMetadata))
+	if got := stringFromMap(result, "codex_identity_fingerprint"); got == "" || got != want {
+		t.Fatalf("codex_identity_fingerprint = %q, want %q", got, want)
+	}
+}
+
 func TestPreservePinnedSupplyTeamPlanOnTransientFreeReplacement(t *testing.T) {
 	next := []byte(`{"type":"codex","email":"team@example.com","plan_type":"free","chatgpt_plan_type":"free","access_token":"new"}`)
 	existing := []byte(`{"type":"codex","email":"team@example.com","import_format":"sub2api","plan_type":"team","chatgpt_plan_type":"team","access_token":"old"}`)
@@ -4487,6 +4517,77 @@ func TestTerminalCPAAuthLifecycleErrorOnlyMatchesPermanentCredentialFailure(t *t
 	}}
 	if err := terminalCPAAuthLifecycleError(quotaExhausted); err == nil || !strings.Contains(err.Error(), "returned 402") {
 		t.Fatalf("quota-exhausted lifecycle error = %v", err)
+	}
+
+	deactivated := cpaauthfiles.File{Name: "account.json", Raw: map[string]any{
+		"status":         "disabled",
+		"status_message": "workspace_deactivated",
+	}}
+	if err := terminalCPAAuthLifecycleError(deactivated); err == nil || !strings.Contains(err.Error(), "workspace_deactivated") {
+		t.Fatalf("deactivated lifecycle error = %v", err)
+	}
+}
+
+func TestEnsureCPAAccountImportedReplacesAvailableDifferentAccountAndKeepsFingerprint(t *testing.T) {
+	const fileName = "codex-pool.json"
+	existingPayload := []byte(`{"type":"codex","email":"old@example.com","workspace_id":"workspace-old","chatgpt_user_id":"member-old","codex_identity_fingerprint":"stable-cache-prefix","access_token":"old"}`)
+	account, err := normalizeAccountForImport(`{"type":"codex","email":"new@example.com","workspace_id":"workspace-new","chatgpt_user_id":"member-new","access_token":"new"}`)
+	if err != nil {
+		t.Fatalf("normalize replacement account: %v", err)
+	}
+
+	var uploaded atomic.Bool
+	var uploadedPayload []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files/download":
+			_, _ = w.Write(existingPayload)
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/auth-files":
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			file, _, errFile := r.FormFile("file")
+			if errFile != nil {
+				http.Error(w, errFile.Error(), http.StatusBadRequest)
+				return
+			}
+			defer file.Close()
+			uploadedPayload, _ = io.ReadAll(file)
+			uploaded.Store(true)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			if uploaded.Load() {
+				_, _ = w.Write([]byte(`{"files":[{"name":"codex-pool.json","provider":"codex","status":"active","account_id":"workspace-new","workspace_id":"workspace-new","chatgpt_user_id":"member-new","email":"new@example.com"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"files":[{"name":"codex-pool.json","provider":"codex","status":"active","account_id":"workspace-old","workspace_id":"workspace-old","chatgpt_user_id":"member-old","email":"old@example.com"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	service := New(nil, nil, server.Client())
+	cfg := store.ManagerConfig{CPAConnection: store.ManagerCPAConnectionConfig{
+		CPABaseURL:    server.URL,
+		ManagementKey: "management-key",
+	}}
+	if err := service.ensureCPAAccountImported(context.Background(), cfg, fileName, account.payload, "replace", account); err != nil {
+		t.Fatalf("replace imported account: %v", err)
+	}
+	if !uploaded.Load() {
+		t.Fatal("replacement upload was skipped")
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(uploadedPayload, &metadata); err != nil {
+		t.Fatalf("decode uploaded replacement: %v", err)
+	}
+	if got := stringFromMap(metadata, "codex_identity_fingerprint"); got != "stable-cache-prefix" {
+		t.Fatalf("replacement fingerprint = %q, want stable-cache-prefix", got)
+	}
+	if got := stringFromMap(metadata, "access_token"); got != "new" {
+		t.Fatalf("replacement access token = %q, want new", got)
 	}
 }
 

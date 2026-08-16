@@ -8453,25 +8453,33 @@ func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.Manage
 			return file, fmt.Errorf("CPA registered imported auth file with unsupported provider %q", provider)
 		}
 		if !isAvailableCodexFile(file) {
+			message := textField(file.Raw, "status_message", "statusMessage", "last_error", "lastError", "error")
+			if message != "" {
+				return file, fmt.Errorf("CPA registered imported auth file but it is not available: %s", message)
+			}
 			return file, errors.New("CPA registered imported auth file but it is not available")
 		}
 		return file, nil
 	}
+	existingFound := false
 	if existing, found, err := s.authFiles.Find(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName, ""); err != nil {
 		return err
 	} else if found {
+		existingFound = true
 		matchesAccount := supplyCPAFileMatchesAccount(existing, account)
 		if strings.EqualFold(strings.TrimSpace(importAction), "add") && !matchesAccount {
 			return fmt.Errorf("CPA auth file %q already belongs to another account", fileName)
 		}
-		if _, err := find(ctx); err == nil {
-			return nil
-		}
-		if matchesAccount && isCPAAuthLifecyclePending(existing) {
-			return s.waitForCPAAuthLifecycle(ctx, find)
+		if matchesAccount {
+			if _, err := find(ctx); err == nil {
+				return nil
+			}
+			if isCPAAuthLifecyclePending(existing) {
+				return s.waitForCPAAuthLifecycle(ctx, find)
+			}
 		}
 	}
-	if strings.EqualFold(strings.TrimSpace(importAction), "replace") {
+	if existingFound || strings.EqualFold(strings.TrimSpace(importAction), "replace") {
 		existingPayload, errDownload := s.authFiles.Download(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName)
 		if errDownload == nil {
 			payload = preserveCodexSupplyMetadata(payload, existingPayload)
@@ -8486,7 +8494,7 @@ func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.Manage
 	return s.waitForCPAAuthLifecycle(ctx, find)
 }
 
-const cpaAuthLifecycleWaitTimeout = 45 * time.Second
+const cpaAuthLifecycleWaitTimeout = 90 * time.Second
 
 func (s *Service) waitForCPAAuthLifecycle(ctx context.Context, find func(context.Context) (cpaauthfiles.File, error)) error {
 	if find == nil {
@@ -8494,7 +8502,7 @@ func (s *Service) waitForCPAAuthLifecycle(ctx context.Context, find func(context
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, cpaAuthLifecycleWaitTimeout)
 	defer cancel()
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	var lastErr error
 	for {
@@ -8523,11 +8531,12 @@ func (s *Service) waitForCPAAuthLifecycle(ctx context.Context, find func(context
 }
 
 func terminalCPAAuthLifecycleError(file cpaauthfiles.File) error {
-	status := strings.ToLower(textField(file.Raw, "status", "state"))
-	if status != "initialization_failed" && status != "recovery_failed" {
-		return nil
-	}
-	message := textField(file.Raw, "status_message", "statusMessage", "last_error", "lastError", "error")
+	message := textField(file.Raw,
+		"status_message", "statusMessage",
+		"initialization_error", "initializationError",
+		"recovery_error", "recoveryError",
+		"last_error", "lastError", "error",
+	)
 	if !permanentCPAAuthLifecycleFailure(message) {
 		return nil
 	}
@@ -8544,8 +8553,17 @@ func permanentCPAAuthLifecycleFailure(value string) bool {
 		"oauth token was revoked",
 		"token was revoked or invalidated",
 		"workspace is deactivated",
+		"workspace_deactivated",
+		"deactivated_workspace",
 		"usage endpoint returned 402",
 		"quota endpoint returned 402",
+		"usage_limit_reached",
+		"quota_exhausted",
+		"insufficient_quota",
+		"billing_hard_limit",
+		"hard_limit_reached",
+		"credit_grant_exhausted",
+		"exceeded your current quota",
 	} {
 		if strings.Contains(value, marker) {
 			return true
@@ -8555,14 +8573,26 @@ func permanentCPAAuthLifecycleFailure(value string) bool {
 }
 
 func isCPAAuthLifecyclePending(file cpaauthfiles.File) bool {
-	status := strings.ToLower(textField(file.Raw, "status", "state"))
-	switch status {
-	case "initializing", "refreshing_token", "refreshing_quota", "initialization_failed",
-		"recovering_token", "recovering_quota", "recovery_failed":
-		return true
-	default:
+	for _, status := range []string{
+		strings.ToLower(textField(file.Raw, "status", "state")),
+		strings.ToLower(textField(file.Raw, "initialization_state", "initializationState")),
+		strings.ToLower(textField(file.Raw, "recovery_state", "recoveryState")),
+	} {
+		switch status {
+		case "initializing", "refreshing_token", "refreshing_quota", "initialization_failed",
+			"recovering_token", "recovering_quota", "recovery_failed":
+			return true
+		}
+	}
+	if file.Name == "" || file.Disabled || !isCodexAuthFile(file) || terminalCPAAuthLifecycleError(file) != nil {
 		return false
 	}
+	status := strings.ToLower(textField(file.Raw, "status", "state"))
+	switch status {
+	case "disabled", "inactive", "invalid", "expired", "revoked", "deleted":
+		return false
+	}
+	return !isAvailableCodexFile(file)
 }
 
 type supplyImportPlan struct {
@@ -9978,6 +10008,9 @@ func preserveCodexSupplyMetadata(payload []byte, existingPayload []byte) []byte 
 		"codex-identity-fingerprint",
 		"codexIdentityFingerprint",
 	))
+	if fingerprint == "" {
+		fingerprint = stableCodexIdentityFingerprint(supplyAccountIdentity(existing))
+	}
 	if fingerprint != "" {
 		next["codex_identity_fingerprint"] = fingerprint
 		changed = true
