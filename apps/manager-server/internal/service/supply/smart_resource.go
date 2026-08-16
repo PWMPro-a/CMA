@@ -60,6 +60,11 @@ const (
 	// verified 7-day baseline until an account has at least 10% valid usage data.
 	smartDefaultAccountQuotaMillionTokens     = 10.0
 	smartDefaultTeamAccountQuotaMillionTokens = 60.0
+	// Only a short, recent gap between the last successful request and an empty
+	// pool is treated as outage demand for emergency order sizing. Older demand
+	// memory still protects the low-water state, but must not create a fresh
+	// short-lived batch after traffic has genuinely gone idle.
+	smartEmergencyDemandMemoryMaxAge = 5 * time.Minute
 )
 
 type SmartResource struct {
@@ -1617,8 +1622,15 @@ func applySmartEmergencyAvailability(cfg store.ManagerSupplyConfig, resource *Sm
 	// unused. A positive but sub-critical pool is handled below by topping up
 	// only to the critical floor; an empty pool still receives the configured
 	// minimum emergency batch so the next request is not stranded.
-	noCurrentTraffic := resource.ConsumeRCUPerMinute <= 0
-	if noCurrentTraffic && resource.AvailableAccounts > 0 {
+	//
+	// A pool outage is different from genuine idleness: once the last account
+	// disappears, the current success rate immediately becomes zero even while
+	// recent real demand remains in DemandPlanningRCUPerMinute. Treat that
+	// remembered rate as sizing evidence. Falling back to the fixed emergency
+	// batch in this state creates several credentials at the same timestamp and
+	// recreates the expiry-waste pattern that progressive replenishment avoids.
+	sizingResource, demandObserved := smartEmergencySizingResource(*resource)
+	if !demandObserved && resource.AvailableAccounts > 0 {
 		if resource.AvailableAccounts >= critical {
 			if resource.EmergencyReason == "available_capacity_critical" || resource.EmergencyReason == "critical_available_accounts" || resource.EmergencyReason == "emergency_pool_vacuum" {
 				resource.EmergencyShortage = false
@@ -1644,8 +1656,8 @@ func applySmartEmergencyAvailability(cfg store.ManagerSupplyConfig, resource *Sm
 	resource.HealthLevel = smartHealthCritical
 	resource.SuggestedAction = smartActionEmergencyReplenish
 	resource.DecisionReason = reason
-	refillQuantity := smartMinimumAvailableRefillQuantity(cfg, *resource)
-	if noCurrentTraffic {
+	refillQuantity := smartMinimumAvailableRefillQuantity(cfg, sizingResource)
+	if !demandObserved {
 		refillQuantity = smartIdleEmergencyRefillQuantity(cfg, resource.AvailableAccounts)
 	}
 	resource.SuggestedQuantity = refillQuantity
@@ -1653,6 +1665,27 @@ func applySmartEmergencyAvailability(cfg store.ManagerSupplyConfig, resource *Sm
 		resource.CapacityGapRCU = round2(math.Max(0, resource.TargetCapacityRCU-resource.CurrentCapacityRCU-resource.PrelockedCapacityRCU))
 	}
 	applySmartRefillProjection(cfg, resource)
+}
+
+// smartEmergencySizingResource keeps the displayed current burn rate honest
+// while still allowing recent real demand to size an emergency refill after a
+// pool outage. DemandPlanningRCUPerMinute is populated from the last completed
+// non-zero window and bounded by the strategy TTL, so it is materially better
+// evidence than the fixed emergency account minimum without pretending that
+// requests are currently succeeding.
+func smartEmergencySizingResource(resource SmartResource) (SmartResource, bool) {
+	if resource.ConsumeRCUPerMinute > 0 {
+		return resource, true
+	}
+	if resource.DemandMemoryAgeSeconds > int(smartEmergencyDemandMemoryMaxAge/time.Second) {
+		return resource, false
+	}
+	planningRate := math.Max(resource.DemandPlanningRCUPerMinute, resource.VirtualDemandRCUPerMinute)
+	if planningRate <= 0 {
+		return resource, false
+	}
+	resource.ConsumeRCUPerMinute = planningRate
+	return resource, true
 }
 
 func smartAvailableCapacity(resource SmartResource) float64 {

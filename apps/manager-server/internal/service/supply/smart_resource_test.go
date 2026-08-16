@@ -1450,6 +1450,66 @@ func TestNoTrafficKeepsOnlyMinimumPoolAndCreatesNoCapacityOrder(t *testing.T) {
 	}
 }
 
+func TestVirtualDemandSizesEmptyPoolEmergencyWithoutFixedBatchWaste(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Strategy:                    managerconfigsvc.SupplyStrategyStrongSupply,
+		CriticalAvailableAccounts:   2,
+		HealthyAvailableAccounts:    10,
+		DefaultEmergencyMinAccounts: 5,
+		ReplenishBatchSize:          15,
+		PrelockMaxQuantity:          9,
+	}
+	resource := SmartResource{
+		AvailableAccounts:              0,
+		HealthyAccounts:                0,
+		ConsumeRCUPerMinute:            0,
+		DemandPlanningRCUPerMinute:     3.29,
+		VirtualDemandRCUPerMinute:      3.29,
+		DemandMemoryAgeSeconds:         120,
+		EstimatedNewAccountCapacityRCU: 40.51,
+		CriticalMinutes:                15,
+		EffectiveHealthyMinutes:        30,
+	}
+
+	applySmartEmergencyAvailability(cfg, &resource, time.Now())
+
+	if !resource.EmergencyShortage || resource.EmergencyReason != "emergency_pool_vacuum" ||
+		resource.SuggestedQuantity != 3 {
+		t.Fatalf("virtual-demand empty-pool refill = %#v, want demand-sized quantity 3", resource)
+	}
+	if resource.ConsumeRCUPerMinute != 0 {
+		t.Fatalf("virtual demand leaked into displayed current burn rate: %#v", resource)
+	}
+}
+
+func TestVirtualDemandSizesSubcriticalPoolProgressively(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Strategy:                    managerconfigsvc.SupplyStrategyStrongSupply,
+		CriticalAvailableAccounts:   2,
+		HealthyAvailableAccounts:    10,
+		DefaultEmergencyMinAccounts: 5,
+		ReplenishBatchSize:          15,
+		PrelockMaxQuantity:          9,
+	}
+	resource := SmartResource{
+		AvailableAccounts:              1,
+		HealthyAccounts:                1,
+		ConsumeRCUPerMinute:            0,
+		DemandPlanningRCUPerMinute:     3.29,
+		DemandMemoryAgeSeconds:         120,
+		EstimatedNewAccountCapacityRCU: 40.51,
+		CriticalMinutes:                15,
+		EffectiveHealthyMinutes:        30,
+	}
+
+	applySmartEmergencyAvailability(cfg, &resource, time.Now())
+
+	if !resource.EmergencyShortage || resource.EmergencyReason != "available_capacity_critical" ||
+		resource.SuggestedQuantity != 2 {
+		t.Fatalf("virtual-demand subcritical refill = %#v, want progressive quantity 2", resource)
+	}
+}
+
 func TestSmartResourceKeepsTransientErrorsInCapacity(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now()
