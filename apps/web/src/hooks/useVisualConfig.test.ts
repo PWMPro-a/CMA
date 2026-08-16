@@ -43,6 +43,42 @@ const mountUseVisualConfig = (): UseVisualConfigHarness => {
 };
 
 describe('useVisualConfig', () => {
+  it('disables management panel auto updates by default', () => {
+    expect(DEFAULT_VISUAL_VALUES.rmDisableAutoUpdatePanel).toBe(true);
+  });
+
+  it('keeps panel auto updates disabled when legacy YAML omits the setting', () => {
+    const harness = mountUseVisualConfig();
+
+    act(() => {
+      const result = harness
+        .getCurrent()
+        .loadVisualValuesFromYaml(
+          ['remote-management:', '  disable-control-panel: false', ''].join('\n')
+        );
+      expect(result.ok).toBe(true);
+    });
+
+    expect(harness.getCurrent().visualValues.rmDisableAutoUpdatePanel).toBe(true);
+    harness.unmount();
+  });
+
+  it('preserves an explicit panel auto-update opt-in', () => {
+    const harness = mountUseVisualConfig();
+
+    act(() => {
+      const result = harness
+        .getCurrent()
+        .loadVisualValuesFromYaml(
+          ['remote-management:', '  disable-auto-update-panel: false', ''].join('\n')
+        );
+      expect(result.ok).toBe(true);
+    });
+
+    expect(harness.getCurrent().visualValues.rmDisableAutoUpdatePanel).toBe(false);
+    harness.unmount();
+  });
+
   it('uses the strict Codex quota-protection fingerprint defaults', () => {
     expect(DEFAULT_VISUAL_VALUES.codexClientFingerprintSignals).toHaveLength(4);
     expect(

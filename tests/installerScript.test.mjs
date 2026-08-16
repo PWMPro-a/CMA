@@ -309,6 +309,7 @@ describe('installer script', () => {
       expect(cpaManagementKey).toMatch(/^cpa_[A-Za-z0-9]{32}$/);
       expect(demoClientKey).toMatch(/^sk-[A-Za-z0-9]{64}$/);
       expect(cpaConfig).toContain('auth-dir: "/root/.cli-proxy-api"');
+      expect(cpaConfig).toContain('disable-auto-update-panel: true');
       expect(cpaConfig).toContain(`secret-key: "${cpaManagementKey}"`);
       expect(cpaConfig).toContain(`api-keys:\n  - "${demoClientKey}"`);
     } finally {

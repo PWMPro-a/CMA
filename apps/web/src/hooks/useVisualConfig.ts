@@ -1208,7 +1208,7 @@ export function useVisualConfig() {
           typeof remoteManagement?.['secret-key'] === 'string' &&
           remoteManagement['secret-key'].length > 0,
         rmDisableControlPanel: Boolean(remoteManagement?.['disable-control-panel']),
-        rmDisableAutoUpdatePanel: Boolean(remoteManagement?.['disable-auto-update-panel']),
+        rmDisableAutoUpdatePanel: remoteManagement?.['disable-auto-update-panel'] !== false,
         rmPanelRepo:
           typeof remoteManagement?.['panel-github-repository'] === 'string'
             ? remoteManagement['panel-github-repository']

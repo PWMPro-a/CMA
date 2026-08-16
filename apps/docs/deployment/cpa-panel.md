@@ -54,8 +54,8 @@ remote-management:
   # 必须允许 CPA 托管管理面板。
   disable-control-panel: false
 
-  # false 表示允许 CPA 定期检查并更新面板。
-  disable-auto-update-panel: false
+  # CPAMP 本地版本默认关闭后台自动更新，避免已部署面板被新 Release 覆盖。
+  disable-auto-update-panel: true
 
   # 让 CPA 从 CPAMP Release 下载 management.html。
   panel-github-repository: 'https://github.com/seakee/CPA-Manager-Plus'
@@ -79,7 +79,9 @@ CPA 首次访问时会从指定 GitHub 仓库的最新 Release 查找名为 `man
 
 ## 更新与缓存
 
-当 `disable-auto-update-panel: false` 时，CPA 会定期检查最新面板。升级后仍显示旧界面时：
+CPAMP 本地版本默认使用 `disable-auto-update-panel: true`。CPA 只会在缓存文件不存在时下载面板，不会定期自动替换当前版本。
+
+需要手动更新面板时：
 
 1. 确认 `panel-github-repository` 仍指向 CPA Manager Plus。
 2. 停止 CPA。
@@ -91,7 +93,7 @@ rm static/management.html
 
 4. 重新启动 CPA 并访问 `/management.html`。
 
-如果启用了 `disable-auto-update-panel: true`，CPA 只会在缓存文件不存在时下载面板，不会定期自动更新。
+只有明确设置 `disable-auto-update-panel: false` 时，CPA 才会恢复定期检查并更新面板。
 
 ## 轻量面板支持什么
 

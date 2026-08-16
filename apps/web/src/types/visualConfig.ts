@@ -232,7 +232,7 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   rmSecretKeyAction: 'unchanged',
   rmSecretKeyConfigured: false,
   rmDisableControlPanel: false,
-  rmDisableAutoUpdatePanel: false,
+  rmDisableAutoUpdatePanel: true,
   rmPanelRepo: '',
   authDir: '',
   apiKeysText: '',

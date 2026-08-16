@@ -54,8 +54,8 @@ remote-management:
   # CPA must be allowed to serve the management panel.
   disable-control-panel: false
 
-  # false lets CPA periodically check for panel updates.
-  disable-auto-update-panel: false
+  # Local CPAMP builds disable background panel updates by default so a release cannot replace the deployed UI.
+  disable-auto-update-panel: true
 
   # Download management.html from CPAMP Releases.
   panel-github-repository: 'https://github.com/seakee/CPA-Manager-Plus'
@@ -79,7 +79,9 @@ On first access, CPA checks the latest Release in the configured GitHub reposito
 
 ## Updates And Cache
 
-With `disable-auto-update-panel: false`, CPA periodically checks for a newer panel. If an upgrade still shows the old interface:
+Local CPAMP builds default to `disable-auto-update-panel: true`. CPA downloads the panel only when the cached file is missing and does not periodically replace the deployed version.
+
+To update the panel manually:
 
 1. Confirm that `panel-github-repository` still points to CPA Manager Plus.
 2. Stop CPA.
@@ -91,7 +93,7 @@ rm static/management.html
 
 4. Restart CPA and open `/management.html` again.
 
-With `disable-auto-update-panel: true`, CPA downloads the panel only when the cached file is missing and does not perform periodic updates.
+CPA resumes periodic panel checks only when `disable-auto-update-panel: false` is explicitly configured.
 
 ## Lightweight Panel Capabilities
 
