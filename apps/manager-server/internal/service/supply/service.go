@@ -2253,11 +2253,6 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		if err != nil {
 			return err
 		}
-		if disabled, qualityErr := s.disableLowQualityTeamAccounts(ctx, cfg, time.Now()); qualityErr != nil {
-			log.Printf("[supply] team quota quality enforcement failed: %v", qualityErr)
-		} else if disabled > 0 {
-			log.Printf("[supply] disabled %d team credentials below %.2fM quota quality floor", disabled, supplyCfg.MinimumTeamQuotaM)
-		}
 		if len(openOrders) > 0 {
 			resource.PrelockedCapacityRCU = totalSupplyOrderCapacityRCU(supplyCfg, resource, openOrders)
 			resource.LockedOrderID = openOrders[0].OrderID
@@ -2409,22 +2404,6 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		}
 		return ErrInvalidQuantity
 	}
-	if useSmart && supplyCfg.DailyMaxReplenishQuantity > 0 {
-		remaining, err := s.remainingAutomaticDailyQuantity(ctx, supplyCfg)
-		if err != nil {
-			return err
-		}
-		if remaining <= 0 {
-			resource.SuggestedAction = smartActionManualReview
-			resource.DecisionReason = "daily_quantity_limit"
-			s.setSmartResource(resource)
-			s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
-			return nil
-		}
-		if quantity > remaining {
-			quantity = remaining
-		}
-	}
 	if manualQuantity == 0 && immediateRetryOrder != nil {
 		retryQuantity, retryErr := s.automaticImmediateRetryQuantity(ctx, supplyCfg, *immediateRetryOrder, quantity)
 		if retryErr != nil {
@@ -2550,12 +2529,6 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			resource.DecisionReason = "balance_reserve_protected"
 			s.setSmartResource(resource)
 			return ErrInsufficientBalance
-		}
-		if supplyCfg.DailyMaxHoldFen > 0 && inventory.EstimatedTotalFen > 0 && balance.HeldFen+inventory.EstimatedTotalFen > supplyCfg.DailyMaxHoldFen {
-			resource.SuggestedAction = smartActionManualReview
-			resource.DecisionReason = "daily_hold_limit"
-			s.setSmartResource(resource)
-			return nil
 		}
 		if inventory.Available <= 0 && !inventory.NeedsProduction && resource.HealthLevel != smartHealthCritical {
 			resource.SuggestedAction = smartActionInventoryBlocked
@@ -5496,101 +5469,6 @@ func (s *Service) disableExpiredSupplyAccounts(ctx context.Context, cfg store.Ma
 	return disabled, firstErr
 }
 
-const maxLowQualityTeamDisablesPerRun = 12
-
-func (s *Service) disableLowQualityTeamAccounts(
-	ctx context.Context,
-	cfg store.ManagerConfig,
-	now time.Time,
-) (int, error) {
-	if s == nil || s.authFiles == nil || cfg.Supply.TeamQuotaQualityGateEnabled == nil ||
-		!*cfg.Supply.TeamQuotaQualityGateEnabled || cfg.Supply.MinimumTeamQuotaM <= 0 || !cpaManagementConfigured(cfg) {
-		return 0, nil
-	}
-	inspection, err := s.cachedInspectionQuotaSnapshot(ctx, cfg.Supply, false)
-	if err != nil {
-		return 0, err
-	}
-	if !smartInspectionSnapshotComplete(inspection) || !smartInspectionSnapshotFresh(inspection, now) {
-		return 0, nil
-	}
-	authSnapshot, err := s.cachedAuthFiles(ctx, cfg, false)
-	if err != nil {
-		return 0, err
-	}
-
-	resultsByFile := make(map[string][]store.CodexInspectionResult, len(inspection.results))
-	filesByName := make(map[string]int, len(authSnapshot.files))
-	for _, result := range inspection.results {
-		if isSmartCapacityInspectionResult(result) {
-			name := strings.TrimSpace(result.FileName)
-			resultsByFile[name] = append(resultsByFile[name], result)
-		}
-	}
-	for _, file := range authSnapshot.files {
-		if isCodexAuthFile(file) {
-			filesByName[strings.TrimSpace(file.Name)]++
-		}
-	}
-
-	disabled := 0
-	var firstErr error
-	for _, file := range authSnapshot.files {
-		if disabled >= maxLowQualityTeamDisablesPerRun || !isCodexAuthFile(file) || file.Disabled {
-			continue
-		}
-		fileName := strings.TrimSpace(file.Name)
-		result, matched := matchInspectionResultForAuthFile(file, resultsByFile[fileName], filesByName[fileName])
-		if !matched {
-			continue
-		}
-		quality := s.smartTeamQuotaQualityForResult(cfg.Supply, result, now)
-		if !quality.applies || !quality.observed || quality.qualified {
-			continue
-		}
-		identity := cpaauthfiles.Identity{
-			AuthFileName:      file.Name,
-			RuntimeID:         file.ID,
-			AuthIndex:         file.AuthIndex,
-			Provider:          file.Provider,
-			AccountSnapshot:   file.AccountSnapshot,
-			AccountIDSnapshot: file.AccountID,
-		}
-		mutationCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		target, targetErr := s.authFiles.ResolveVerifiedStatusMutationTarget(
-			mutationCtx,
-			cfg.CPAConnection.CPABaseURL,
-			cfg.CPAConnection.ManagementKey,
-			identity,
-		)
-		if targetErr == nil && target.File.Disabled {
-			cancel()
-			continue
-		}
-		if targetErr == nil {
-			targetErr = s.authFiles.PatchDisabledTarget(
-				mutationCtx,
-				cfg.CPAConnection.CPABaseURL,
-				cfg.CPAConnection.ManagementKey,
-				target,
-				true,
-			)
-		}
-		cancel()
-		if targetErr != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("disable low-quota team credential %q: %w", fileName, targetErr)
-			}
-			continue
-		}
-		disabled++
-	}
-	if disabled > 0 {
-		s.invalidateAuthAndCapacityCaches()
-	}
-	return disabled, firstErr
-}
-
 func (s *Service) countAvailableAccounts(ctx context.Context, cfg store.ManagerConfig) (int, error) {
 	stats, err := s.countAccountPoolStats(ctx, cfg)
 	return stats.schedulable, err
@@ -5715,7 +5593,6 @@ func (s *Service) loadOperatorAccountPoolStats(
 		triggerType,
 		now,
 	)
-	stats = s.applyTeamQuotaQualityGate(cfg.Supply, stats, results, now)
 	return stats, liveErr
 }
 
@@ -5971,68 +5848,6 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 		stats.recordCredentialBucket(file, bucket, uniqueFileName)
 		if bucket == operatorAccountNormal {
 			stats.recordNormalCapacityEvidence(file, remainingFraction, uniqueFileName)
-		}
-	}
-	return stats
-}
-
-func (s *Service) applyTeamQuotaQualityGate(
-	cfg store.ManagerSupplyConfig,
-	stats accountPoolStats,
-	results []store.CodexInspectionResult,
-	now time.Time,
-) accountPoolStats {
-	if s == nil || cfg.TeamQuotaQualityGateEnabled == nil || !*cfg.TeamQuotaQualityGateEnabled || cfg.MinimumTeamQuotaM <= 0 {
-		return stats
-	}
-	resultsByFile := make(map[string][]store.CodexInspectionResult, len(results))
-	filesByName := make(map[string]int, len(stats.files))
-	for _, result := range results {
-		if isSmartCapacityInspectionResult(result) {
-			name := strings.TrimSpace(result.FileName)
-			resultsByFile[name] = append(resultsByFile[name], result)
-		}
-	}
-	for _, file := range stats.files {
-		if isCodexAuthFile(file) {
-			filesByName[strings.TrimSpace(file.Name)]++
-		}
-	}
-	for _, file := range stats.files {
-		if !isCodexAuthFile(file) || file.Disabled {
-			continue
-		}
-		fileName := strings.TrimSpace(file.Name)
-		result, matched := matchInspectionResultForAuthFile(file, resultsByFile[fileName], filesByName[fileName])
-		if !matched {
-			continue
-		}
-		quality := s.smartTeamQuotaQualityForResult(cfg, result, now)
-		if !quality.applies || !quality.observed || quality.qualified {
-			continue
-		}
-
-		credentialKey := operatorCredentialKey(file.Name, file.AuthIndex)
-		fileKey := operatorFileCredentialKey(file.Name)
-		bucket, found := stats.bucketByCredential[credentialKey]
-		if !found && filesByName[fileName] == 1 {
-			bucket, found = stats.bucketByCredential[fileKey]
-		}
-		if !found || bucket == operatorAccountNeedsAttention || bucket == operatorAccountQuotaRisk {
-			continue
-		}
-		switch bucket {
-		case operatorAccountNormal:
-			stats.normal = max(0, stats.normal-1)
-		case operatorAccountUnconfirmed:
-			stats.unconfirmed = max(0, stats.unconfirmed-1)
-		}
-		stats.quotaRisk++
-		stats.bucketByCredential[credentialKey] = operatorAccountQuotaRisk
-		delete(stats.normalRemainingByCredential, credentialKey)
-		if filesByName[fileName] == 1 {
-			stats.bucketByCredential[fileKey] = operatorAccountQuotaRisk
-			delete(stats.normalRemainingByCredential, fileKey)
 		}
 	}
 	return stats
@@ -7409,9 +7224,6 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 		if quantity <= 0 {
 			return 0
 		}
-		if cfg.DailyMaxReplenishQuantity > 0 {
-			quantity = min(quantity, cfg.DailyMaxReplenishQuantity)
-		}
 		return clampInt(quantity, 1, 100)
 	}
 	quantity := resource.SuggestedQuantity
@@ -7462,9 +7274,6 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 			minimumQuantity = min(minimumQuantity, accountQuantityLimit)
 		}
 		quantity = max(quantity, minimumQuantity)
-	}
-	if cfg.DailyMaxReplenishQuantity > 0 {
-		quantity = min(quantity, cfg.DailyMaxReplenishQuantity)
 	}
 	if resource.DemandTrend == smartDemandTrendRising && !smartResourceEmergency(resource) {
 		quantity = min(quantity, smartRisingObservationQuantity(cfg, resource))
@@ -7737,43 +7546,6 @@ func supplyOrderTriggerReason(resource SmartResource, automatic bool) string {
 		return "virtual_demand_memory"
 	}
 	return firstNonEmptyString(resource.DecisionReason, "automatic")
-}
-
-func (s *Service) remainingAutomaticDailyQuantity(ctx context.Context, cfg store.ManagerSupplyConfig) (int, error) {
-	limit := cfg.DailyMaxReplenishQuantity
-	if limit <= 0 {
-		return 100, nil
-	}
-	orders, err := s.recentSupplyOrders(ctx)
-	if err != nil {
-		return 0, err
-	}
-	now := time.Now()
-	dayStartMS := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).UnixMilli()
-	used := 0
-	for _, order := range orders {
-		if order.CreatedAtMS > 0 && order.CreatedAtMS < dayStartMS {
-			break
-		}
-		if !isSupplierPurchaseHistoryOrder(order) || !order.Automatic {
-			continue
-		}
-		// Waiting-inventory orders are competing reservations, not acquired
-		// accounts. Counting every rung of a 10/5/2 ladder as daily replenishment
-		// would prevent the smaller orders from competing once the first order used
-		// the apparent budget. Charge the daily cap only when capacity is actually
-		// ready, being imported, or completed; the ready-order admission path still
-		// enforces the aggregate deficit before taking surplus reservations.
-		delivered := automaticOrderDeliveredQuantity(order)
-		if delivered <= 0 {
-			continue
-		}
-		used += delivered
-	}
-	if used >= limit {
-		return 0, nil
-	}
-	return limit - used, nil
 }
 
 func isSupplierPurchaseHistoryOrder(order store.SupplyOrder) bool {

@@ -365,35 +365,6 @@ func TestRecentSupplyOrdersCachesDefensiveCopiesAndInvalidates(t *testing.T) {
 	}
 }
 
-func TestRemainingAutomaticDailyQuantityIgnoresRecoveryImports(t *testing.T) {
-	st, err := store.Open(filepath.Join(t.TempDir(), "supply-daily-limit.sqlite"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-	ctx := context.Background()
-	nowMS := time.Now().UnixMilli()
-	orders := []store.SupplyOrder{
-		{OrderID: "purchase", Product: "oauth_7d", RequestedQuantity: 2, Automatic: true, Status: "completed", CreatedAtMS: nowMS},
-		{OrderID: "competing-reservation", Product: "oauth_7d", RequestedQuantity: 5, Automatic: true, TriggerReason: "parallel_emergency_refill_to_healthy", Status: "waiting_inventory", CreatedAtMS: nowMS},
-		{OrderID: "recovery-import", Product: "oauth_7d", RequestedQuantity: 50, Automatic: true, Strategy: "recovery", RemoteStatus: "recovery_claimed", Status: "completed", CreatedAtMS: nowMS},
-	}
-	for _, order := range orders {
-		if _, err := st.CreateSupplyOrder(ctx, order); err != nil {
-			t.Fatalf("create order %s: %v", order.OrderID, err)
-		}
-	}
-	remaining, err := New(st, nil).remainingAutomaticDailyQuantity(ctx, store.ManagerSupplyConfig{
-		DailyMaxReplenishQuantity: 5,
-	})
-	if err != nil {
-		t.Fatalf("remaining daily quantity: %v", err)
-	}
-	if remaining != 3 {
-		t.Fatalf("remaining daily quantity = %d, want 3", remaining)
-	}
-}
-
 func TestEmergencyRetryNextIntervalHonorsShortCooldown(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
@@ -1822,121 +1793,6 @@ func TestDisableExpiredSupplyAccountsUsesCurrentRuntimeIdentityAndRefreshesPool(
 	}
 }
 
-func TestDisableLowQualityTeamAccountsVerifiesRuntimeIdentity(t *testing.T) {
-	var disabled atomic.Bool
-	var patchCalls atomic.Int32
-	now := time.Now().Truncate(time.Second)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer management-key" {
-			http.Error(w, "missing management key", http.StatusUnauthorized)
-			return
-		}
-		switch r.Method + " " + r.URL.Path {
-		case "GET /v0/management/auth-files":
-			_ = json.NewEncoder(w).Encode([]map[string]any{{
-				"id": "runtime-low", "name": "low.json", "auth_index": "auth-low",
-				"provider": "codex", "account_id": "account-low", "status": "ready", "disabled": disabled.Load(),
-			}})
-		case "PATCH /v0/management/auth-files/status":
-			var payload struct {
-				Name      string `json:"name"`
-				AuthIndex string `json:"auth_index"`
-				Disabled  bool   `json:"disabled"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			if payload.Name != "runtime-low" || payload.AuthIndex != "auth-low" || !payload.Disabled {
-				t.Fatalf("unexpected quality patch: %#v", payload)
-			}
-			patchCalls.Add(1)
-			disabled.Store(true)
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	st, err := store.Open(filepath.Join(t.TempDir(), "team-quality.sqlite"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-	service := New(st, nil, server.Client())
-	service.smartMu.Lock()
-	service.appendSmartQuotaCalibrationSampleLocked(smartQuotaCalibrationSample{
-		identity: "file:low.json", planType: "team", capacityM: 36, weight: 1, usedFraction: 0.2,
-		observedMS: now.UnixMilli(), completeWindow: true,
-	})
-	service.smartMu.Unlock()
-	service.quotaSnapshotMu.Lock()
-	service.quotaSnapshot = inspectionQuotaSnapshot{
-		run: store.CodexInspectionRun{ProbeSetCount: 1, SampledCount: 1, FinishedAtMS: now.UnixMilli()},
-		results: []store.CodexInspectionResult{{
-			FileName: "low.json", AuthIndex: "auth-low", AccountID: "account-low", Provider: "codex",
-			Status: "active", Action: "keep", PlanType: "team", QuotaWindows: []model.CodexInspectionQuotaWindow{quotaWindow("weekly", 10, smartQuotaWeekSeconds)},
-		}},
-		generatedAt: now,
-		attemptedAt: now,
-	}
-	service.quotaSnapshotMu.Unlock()
-	service.authCacheMu.Lock()
-	service.authCache = authFileSnapshot{
-		files: []cpaauthfiles.File{{
-			ID: "runtime-low", Name: "low.json", AuthIndex: "auth-low", Provider: "codex", AccountID: "account-low",
-		}},
-		generatedAt: now,
-		attemptedAt: now,
-	}
-	service.authCacheMu.Unlock()
-
-	gateEnabled := true
-	disabledCount, err := service.disableLowQualityTeamAccounts(context.Background(), store.ManagerConfig{
-		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
-		Supply: store.ManagerSupplyConfig{
-			TeamQuotaQualityGateEnabled: &gateEnabled,
-			MinimumTeamQuotaM:           50,
-			AuthFilesCacheTTLSeconds:    60,
-		},
-	}, now)
-	if err != nil || disabledCount != 1 || patchCalls.Load() != 1 || !disabled.Load() {
-		t.Fatalf("quality disable result disabled=%d patch=%d state=%t err=%v", disabledCount, patchCalls.Load(), disabled.Load(), err)
-	}
-}
-
-func TestTeamQuotaQualityGateMarksLowQuotaCredentialAsQuotaRisk(t *testing.T) {
-	now := time.Now().Truncate(time.Second)
-	service := New(nil, nil)
-	service.smartMu.Lock()
-	service.appendSmartQuotaCalibrationSampleLocked(smartQuotaCalibrationSample{
-		identity: "file:low.json", planType: "team", capacityM: 36, weight: 1, usedFraction: 0.2,
-		observedMS: now.UnixMilli(), completeWindow: true,
-	})
-	service.smartMu.Unlock()
-	files := []cpaauthfiles.File{{
-		ID: "runtime-low", Name: "low.json", AuthIndex: "auth-low", Provider: "codex",
-		Raw: map[string]any{"status": "ready"},
-	}}
-	results := []store.CodexInspectionResult{{
-		FileName: "low.json", AuthIndex: "auth-low", Provider: "codex", Status: "active", Action: "keep", PlanType: "team",
-		QuotaWindows: []model.CodexInspectionQuotaWindow{quotaWindow("weekly", 10, smartQuotaWeekSeconds)},
-	}}
-	stats := accountPoolStatsFromFilesAndCurrentEvidence(files, results, nil, model.CodexInspectionTriggerManual, now)
-	if stats.normal != 1 || stats.quotaRisk != 0 {
-		t.Fatalf("pre-gate pool stats = %#v", stats)
-	}
-	gateEnabled := true
-	stats = service.applyTeamQuotaQualityGate(store.ManagerSupplyConfig{
-		TeamQuotaQualityGateEnabled: &gateEnabled,
-		MinimumTeamQuotaM:           50,
-	}, stats, results, now)
-	if stats.normal != 0 || stats.quotaRisk != 1 || stats.unconfirmed != 0 {
-		t.Fatalf("post-gate pool stats = %#v", stats)
-	}
-}
-
 func TestDisableExpiredSupplyAccountsIgnoresSupersededLeaseForReauthorizedFile(t *testing.T) {
 	var patchCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3361,7 +3217,7 @@ func TestAutomaticEmergencyReplenishmentCreatesTenFiveTwoLadderAndStops(t *testi
 			Strategy:                  managerconfigsvc.SupplyStrategyCustom,
 			CriticalAvailableAccounts: 2, HealthyAvailableAccounts: 20, DefaultEmergencyMinAccounts: 5,
 			ReplenishBatchSize: 10, PrelockMinQuantity: 1, PrelockMaxQuantity: 10,
-			MaxConcurrentOrders: 3, DailyMaxReplenishQuantity: 10,
+			MaxConcurrentOrders: 3,
 		},
 	}); err != nil {
 		t.Fatalf("save config: %v", err)

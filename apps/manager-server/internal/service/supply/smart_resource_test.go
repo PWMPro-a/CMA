@@ -130,46 +130,6 @@ func TestSmartResourceSeparatesNormallyAvailableFromQuotaRisk(t *testing.T) {
 	}
 }
 
-func TestTeamQuotaQualityGateExcludesOnlyTrustedLowQuotaAccounts(t *testing.T) {
-	service := New(nil, nil)
-	now := time.Now().Truncate(time.Second)
-	service.smartMu.Lock()
-	service.appendSmartQuotaCalibrationSampleLocked(smartQuotaCalibrationSample{
-		identity: "file:low.json", planType: "team", capacityM: 36, weight: 1, usedFraction: 0.2,
-		observedMS: now.UnixMilli(), completeWindow: true,
-	})
-	service.appendSmartQuotaCalibrationSampleLocked(smartQuotaCalibrationSample{
-		identity: "file:high.json", planType: "team", capacityM: 64, weight: 1, usedFraction: 0.2,
-		observedMS: now.UnixMilli(), completeWindow: true,
-	})
-	service.smartMu.Unlock()
-
-	enabled := true
-	result := func(fileName string) store.CodexInspectionResult {
-		item := quotaInspectionResult(10)
-		item.FileName = fileName
-		item.Provider = "codex"
-		item.Status = "active"
-		item.PlanType = "team"
-		return item
-	}
-	resource := service.buildSmartResourceFromInspectionSnapshot(store.ManagerSupplyConfig{
-		Product:                     "oauth_7d",
-		TeamQuotaQualityGateEnabled: &enabled,
-		MinimumTeamQuotaM:           50,
-	}, inspectionQuotaSnapshot{
-		run:         store.CodexInspectionRun{ProbeSetCount: 2, SampledCount: 2, FinishedAtMS: now.UnixMilli()},
-		results:     []store.CodexInspectionResult{result("low.json"), result("high.json")},
-		generatedAt: now,
-	}, now)
-
-	if resource.AvailableAccounts != 1 || resource.SchedulableAccounts != 1 || resource.HealthyAccounts != 1 ||
-		resource.TeamQuotaObservedAccounts != 2 || resource.TeamQuotaQualifiedAccounts != 1 ||
-		resource.TeamQuotaRejectedAccounts != 1 || resource.TeamQuotaQualifiedPercent != 50 {
-		t.Fatalf("team quota quality split = %#v", resource)
-	}
-}
-
 func TestInspectionResultQuotaFractionUsesWeeklyWhenNoShorterWindowExists(t *testing.T) {
 	result := store.CodexInspectionResult{
 		QuotaWindows: []model.CodexInspectionQuotaWindow{
@@ -727,11 +687,10 @@ func TestEmptyNonSupplyInspectionDoesNotBecomeCapacityBaseline(t *testing.T) {
 
 func TestSmartQuotaLowWaterRefillsToHealthyAndKeepsShortCooldown(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
-		ReplenishBatchSize:        15,
-		PrelockMinQuantity:        1,
-		PrelockMaxQuantity:        7,
-		CreateCooldownSeconds:     120,
-		DailyMaxReplenishQuantity: 100,
+		ReplenishBatchSize:    15,
+		PrelockMinQuantity:    1,
+		PrelockMaxQuantity:    7,
+		CreateCooldownSeconds: 120,
 	}
 	critical := SmartResource{
 		HealthLevel:             smartHealthCritical,

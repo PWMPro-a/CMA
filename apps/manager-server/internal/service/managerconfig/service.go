@@ -415,15 +415,7 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	}
 	next.MinHoldSeconds = BoundedPositiveOrDefault(submitted.MinHoldSeconds, next.MinHoldSeconds, 30, 3600)
 	next.NewAccountConfidence = BoundedFloatOrDefault(submitted.NewAccountConfidence, next.NewAccountConfidence, 0.7, 0.1, 1)
-	if submitted.TeamQuotaQualityGateEnabled != nil {
-		next.TeamQuotaQualityGateEnabled = BoolPtr(*submitted.TeamQuotaQualityGateEnabled)
-	} else if next.TeamQuotaQualityGateEnabled == nil {
-		next.TeamQuotaQualityGateEnabled = BoolPtr(false)
-	}
-	next.MinimumTeamQuotaM = BoundedFloatOrDefault(submitted.MinimumTeamQuotaM, next.MinimumTeamQuotaM, 50, 1, 500)
 	next.MinBalanceReserveFen = BoundedOptionalInt64(submitted.MinBalanceReserveFen, next.MinBalanceReserveFen, 100_000_000)
-	next.DailyMaxHoldFen = BoundedOptionalInt64(submitted.DailyMaxHoldFen, next.DailyMaxHoldFen, 100_000_000)
-	next.DailyMaxReplenishQuantity = BoundedOptionalInt(submitted.DailyMaxReplenishQuantity, next.DailyMaxReplenishQuantity, 10_000)
 	next.RevenueMultiplier = BoundedFloatOrDefault(submitted.RevenueMultiplier, next.RevenueMultiplier, 0.06, 0.000001, 100)
 	next = NormalizeSupplyStrategyConfig(next, submitted)
 	if submitted.RecoverySyncEnabled != nil {
@@ -946,20 +938,6 @@ func BoundedFloatOrDefault(value float64, fallback float64, hardDefault float64,
 	}
 	if result < minimum {
 		return minimum
-	}
-	if result > maximum {
-		return maximum
-	}
-	return result
-}
-
-func BoundedOptionalInt(value int, fallback int, maximum int) int {
-	result := fallback
-	if value > 0 || fallback <= 0 {
-		result = value
-	}
-	if result < 0 {
-		return 0
 	}
 	if result > maximum {
 		return maximum

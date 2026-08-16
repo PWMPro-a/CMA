@@ -144,9 +144,6 @@ func TestNormalizeSupplyConfigDefaultsRecoveryControls(t *testing.T) {
 	if next.RevenueMultiplier != 0.06 {
 		t.Fatalf("revenue multiplier = %f, want 0.06", next.RevenueMultiplier)
 	}
-	if next.TeamQuotaQualityGateEnabled == nil || *next.TeamQuotaQualityGateEnabled || next.MinimumTeamQuotaM != 50 {
-		t.Fatalf("team quota quality defaults = enabled %#v minimum %.2f", next.TeamQuotaQualityGateEnabled, next.MinimumTeamQuotaM)
-	}
 	if next.QuotaEstimationPolicies["team"].Mode != SupplyQuotaEstimationAuto ||
 		next.QuotaEstimationPolicies["team"].FallbackM != 60 ||
 		next.QuotaEstimationPolicies["free"].FallbackM != 10 {
@@ -156,14 +153,6 @@ func TestNormalizeSupplyConfigDefaultsRecoveryControls(t *testing.T) {
 	next = NormalizeSupplyConfig(store.ManagerSupplyConfig{RecoveryDisableOriginal: &off}, next)
 	if next.RecoveryDisableOriginal == nil || *next.RecoveryDisableOriginal {
 		t.Fatalf("submitted recovery original disable=false should be preserved: %#v", next.RecoveryDisableOriginal)
-	}
-	on := true
-	next = NormalizeSupplyConfig(store.ManagerSupplyConfig{
-		TeamQuotaQualityGateEnabled: &on,
-		MinimumTeamQuotaM:           700,
-	}, next)
-	if next.TeamQuotaQualityGateEnabled == nil || !*next.TeamQuotaQualityGateEnabled || next.MinimumTeamQuotaM != 500 {
-		t.Fatalf("team quota quality submitted values = enabled %#v minimum %.2f", next.TeamQuotaQualityGateEnabled, next.MinimumTeamQuotaM)
 	}
 }
 

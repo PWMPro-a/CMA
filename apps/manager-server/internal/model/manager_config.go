@@ -60,11 +60,7 @@ type ManagerSupplyConfig struct {
 	AuthFilesCacheTTLSeconds    int                                           `json:"authFilesCacheTTLSeconds"`
 	MinHoldSeconds              int                                           `json:"minHoldSeconds"`
 	NewAccountConfidence        float64                                       `json:"newAccountConfidence"`
-	TeamQuotaQualityGateEnabled *bool                                         `json:"teamQuotaQualityGateEnabled,omitempty"`
-	MinimumTeamQuotaM           float64                                       `json:"minimumTeamQuotaM,omitempty"`
 	MinBalanceReserveFen        int64                                         `json:"minBalanceReserveFen,omitempty"`
-	DailyMaxHoldFen             int64                                         `json:"dailyMaxHoldFen,omitempty"`
-	DailyMaxReplenishQuantity   int                                           `json:"dailyMaxReplenishQuantity,omitempty"`
 	RevenueMultiplier           float64                                       `json:"revenueMultiplier,omitempty"`
 	CriticalAvailableAccounts   int                                           `json:"criticalAvailableAccounts,omitempty"`
 	HealthyAvailableAccounts    int                                           `json:"healthyAvailableAccounts,omitempty"`
