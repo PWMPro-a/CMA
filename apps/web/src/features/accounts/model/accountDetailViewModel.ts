@@ -10,6 +10,7 @@ import type {
   QuotaCooldownInfo,
 } from '@/services/api';
 import type { AuthFileCodexStatusSummary } from '@/features/authFiles/model/authFilesPageModel';
+import { getAuthFileImportMethodLabelKey } from '@/features/authFiles/model/authFileImportMetadata';
 import { normalizePlanType, parseIdTokenPayload } from '@/utils/quota/parsers';
 import { isValidQuotaResetAtMs } from '@/utils/quota/formatters';
 import { resolveCodexPlanType, resolveEffectiveCodexPlanType } from '@/utils/quota/resolvers';
@@ -1080,6 +1081,10 @@ const buildOverviewCredential = (
     liveSubscriptionUntilMs !== null
       ? 'accounts.detail_subscription_until'
       : 'accounts.detail_subscription_until_token';
+  const importedAtMs = parseTimestampMs(row.importMetadata?.imported_at);
+  const replacementRecorded =
+    row.supplyMetadata?.importAction === 'replace' ||
+    row.importMetadata?.method === 'reauth_replacement';
 
   return {
     statusLabelKey: row.disabled
@@ -1095,6 +1100,36 @@ const buildOverviewCredential = (
       field('subscriptionUntilMs', subscriptionUntilLabelKey, subscriptionUntilMs, 'quota_reset'),
       field('authIndex', 'accounts.detail_auth_index', presentOverviewText(row.authIndex)),
       field('priority', 'accounts.col_priority', row.priority ?? 0, 'number'),
+      field(
+        'importPlatform',
+        'accounts.import_platform_label',
+        row.importMetadata?.platform_name || row.importMetadata?.platform_id
+      ),
+      field(
+        'importMethod',
+        'accounts.import_method_label',
+        row.importMetadata ? getAuthFileImportMethodLabelKey(row.importMetadata.method) : null,
+        'i18n'
+      ),
+      field('importedAtMs', 'accounts.imported_at_label', importedAtMs, 'timestamp'),
+      field('leaseExpiresAtMs', 'accounts.account_expires_at', row.expiresAtMs, 'timestamp'),
+      field(
+        'replacementRecord',
+        'accounts.replacement_record_label',
+        replacementRecorded ? 'accounts.replacement_record_401' : null,
+        'i18n'
+      ),
+      field(
+        'replacedFileName',
+        'accounts.replacement_original_file_label',
+        row.supplyMetadata?.replacedFileName
+      ),
+      field('recoveryId', 'accounts.replacement_recovery_id_label', row.supplyMetadata?.recoveryId),
+      field(
+        'recoveryStatus',
+        'accounts.replacement_recovery_status_label',
+        row.supplyMetadata?.recoveryStatus
+      ),
     ]),
     targetTab: 'config',
   };

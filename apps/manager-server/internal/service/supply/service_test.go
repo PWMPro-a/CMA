@@ -1631,6 +1631,51 @@ func TestSupplyAccountLeaseMetadataUsesSupplierDeadline(t *testing.T) {
 	}
 }
 
+func TestListAccountLeasesIncludesRecoveryReplacementProvenance(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "account-provenance.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	now := time.Now().Truncate(time.Second)
+	orderID := "recovery-account-provenance"
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: orderID, SupplierID: "supplier-a", Product: "oauth_30d", Strategy: "recovery", Status: "completed",
+	}); err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	if _, err := st.InsertSupplyImportItems(ctx, orderID, []store.SupplyImportItem{{
+		ItemKey: "replacement", FileName: "replacement.json", ImportAction: "replace",
+		ReplacedFileName: "expired.json", Status: "pending", LeaseExpiresAtMS: now.Add(time.Hour).UnixMilli(),
+	}}); err != nil {
+		t.Fatalf("insert import item: %v", err)
+	}
+	items, err := st.ListSupplyImportItemsByOrderIDs(ctx, []string{orderID})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("list import items: items=%#v err=%v", items, err)
+	}
+	if err := st.MarkSupplyImportItemImported(ctx, items[0].ID, now.UnixMilli()); err != nil {
+		t.Fatalf("mark imported: %v", err)
+	}
+	if _, err := st.UpsertSupplyRecoveries(ctx, []store.SupplyRecovery{{
+		RecoveryID: "recovery-1", ClaimOrderID: orderID, Status: "imported", UpdatedAtMS: now.UnixMilli(),
+	}}); err != nil {
+		t.Fatalf("upsert recovery: %v", err)
+	}
+
+	leases, err := New(st, nil).ListAccountLeases(ctx)
+	if err != nil || len(leases) != 1 {
+		t.Fatalf("list account provenance: leases=%#v err=%v", leases, err)
+	}
+	lease := leases[0]
+	if lease.FileName != "replacement.json" || lease.Source != "recovery" || lease.ImportMethod != "reauth_replacement" ||
+		lease.ImportAction != "replace" || lease.ReplacedFileName != "expired.json" || lease.RecoveryID != "recovery-1" ||
+		lease.RecoveryStatus != "imported" || lease.ImportedAtMS != now.UnixMilli() || lease.LeaseExpiresAtMS <= now.UnixMilli() {
+		t.Fatalf("replacement provenance = %#v", lease)
+	}
+}
+
 func TestDisableExpiredSupplyAccountsIfDueSchedulesNonBlockingSingleFlight(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "expired-sweep-background.sqlite"))
 	if err != nil {

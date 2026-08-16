@@ -1,5 +1,6 @@
 import type { AuthFileImportMetadata, AuthFileItem } from '@/types';
 import type { CodexInspectionResult } from '@/services/api/usageService';
+import type { SupplyAccountLeaseItem } from '@/services/api/supply';
 import {
   normalizeRecentRequestBuckets,
   sumRecentRequests,
@@ -130,6 +131,7 @@ export interface AccountRow {
   workspaceId?: string;
   workspaceName?: string;
   importMetadata?: AuthFileImportMetadata | null;
+  supplyMetadata?: SupplyAccountLeaseItem | null;
   note?: string;
   priority: number | null;
   createdAtMs: number | null;
@@ -430,7 +432,7 @@ export const buildAccountRows = (
   stores: AccountQuotaStores,
   inspectionResults?: AccountInspectionResult[],
   overrides?: AccountQuotaOverrides,
-  expiryByFileName?: ReadonlyMap<string, number>
+  supplyMetadataByFileName?: ReadonlyMap<string, number | SupplyAccountLeaseItem>
 ): AccountRow[] => {
   const inspectionByFile = buildInspectionMap(inspectionResults);
   const fileNameCounts = files.reduce((counts, file) => {
@@ -468,6 +470,42 @@ export const buildAccountRows = (
         ? resolveEffectiveCodexPlanType(file, quota.planType)
         : (quota.planType ?? readPlanType(file));
     const workspace = resolveWorkspaceIdentity(file, effectivePlanType);
+    const supplyValue = supplyMetadataByFileName?.get(file.name);
+    const supplyMetadata = supplyValue && typeof supplyValue === 'object' ? supplyValue : null;
+    const persistedImportMetadata = readAuthFileImportMetadata(file);
+    const fallbackImportMetadata: AuthFileImportMetadata | null = supplyMetadata
+      ? {
+          version: 1,
+          source: 'supply',
+          method:
+            supplyMetadata.importMethod ||
+            (supplyMetadata.source === 'automatic'
+              ? 'automatic_supply'
+              : supplyMetadata.source === 'recovery'
+                ? 'reauth_replacement'
+                : supplyMetadata.source === 'manual'
+                  ? 'manual_supply'
+                  : 'unknown'),
+          platform_id: supplyMetadata.supplierId || supplyMetadata.source || 'supply',
+          platform_name:
+            supplyMetadata.platformName ||
+            supplyMetadata.supplierId ||
+            supplyMetadata.source ||
+            'Supply',
+          imported_by: 'cpa-manager-plus',
+          imported_at:
+            typeof supplyMetadata.importedAtMs === 'number' && supplyMetadata.importedAtMs > 0
+              ? new Date(supplyMetadata.importedAtMs).toISOString()
+              : '',
+        }
+      : null;
+    const expiryOverride =
+      typeof supplyValue === 'number'
+        ? supplyValue
+        : typeof supplyMetadata?.leaseExpiresAtMs === 'number' &&
+            supplyMetadata.leaseExpiresAtMs > 0
+          ? supplyMetadata.leaseExpiresAtMs
+          : undefined;
     return {
       key: file.name,
       selectionKey,
@@ -483,12 +521,13 @@ export const buildAccountRows = (
       projectId: readProjectId(file),
       workspaceId: workspace.workspaceId,
       workspaceName: workspace.workspaceName,
-      importMetadata: readAuthFileImportMetadata(file),
+      importMetadata: persistedImportMetadata ?? fallbackImportMetadata,
+      supplyMetadata,
       note: readString(file.note),
       priority: readNumber(file.priority),
       createdAtMs: readAuthFileCreatedAtMs(file),
       updatedAtMs: readAuthFileUpdatedAtMs(file),
-      expiresAtMs: expiryByFileName?.get(file.name) ?? readAccountExpiryAtMs(file),
+      expiresAtMs: expiryOverride ?? readAccountExpiryAtMs(file),
       currentConcurrency: readAccountCurrentConcurrency(file),
       quota,
       usage: buildUsageSummary(file),
@@ -785,9 +824,7 @@ const matchesStatusFilter = (
     row.provider === 'codex' ? poolStatusBySelectionKey?.get(row.selectionKey) : undefined;
   const liveDisabled = row.disabled || row.quota.status === 'disabled';
   const liveFailed =
-    !liveDisabled &&
-    getAccountOperationalState(row) === 'failed' &&
-    !hasPartialGroupedQuota(row);
+    !liveDisabled && getAccountOperationalState(row) === 'failed' && !hasPartialGroupedQuota(row);
   if (status === 'available') {
     return sharedPoolStatus
       ? sharedPoolStatus === 'normal' && !liveDisabled && !liveFailed

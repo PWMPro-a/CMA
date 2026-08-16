@@ -324,7 +324,18 @@ type SupplyAccountList struct {
 
 type SupplyAccountLeaseItem struct {
 	FileName         string `json:"fileName"`
-	LeaseExpiresAtMS int64  `json:"leaseExpiresAtMs"`
+	OrderID          string `json:"orderId,omitempty"`
+	SupplierID       string `json:"supplierId,omitempty"`
+	PlatformName     string `json:"platformName,omitempty"`
+	Product          string `json:"product,omitempty"`
+	Source           string `json:"source,omitempty"`
+	ImportMethod     string `json:"importMethod,omitempty"`
+	ImportAction     string `json:"importAction,omitempty"`
+	ReplacedFileName string `json:"replacedFileName,omitempty"`
+	RecoveryID       string `json:"recoveryId,omitempty"`
+	RecoveryStatus   string `json:"recoveryStatus,omitempty"`
+	ImportedAtMS     int64  `json:"importedAtMs,omitempty"`
+	LeaseExpiresAtMS int64  `json:"leaseExpiresAtMs,omitempty"`
 }
 
 type ReportExecutive struct {
@@ -1728,8 +1739,8 @@ func cloneSupplyAccountList(result SupplyAccountList) SupplyAccountList {
 }
 
 // ListAccountLeases is intentionally lightweight for the credential list. It
-// avoids the analytics, pricing, recovery and CPA status joins performed by
-// ListAccounts while still giving operators the supplier validity deadline.
+// avoids analytics, pricing and CPA status joins while exposing the durable
+// import provenance needed to recover metadata after a credential replacement.
 func (s *Service) ListAccountLeases(ctx context.Context) ([]SupplyAccountLeaseItem, error) {
 	if s == nil || s.store == nil {
 		return nil, ErrNotConfigured
@@ -1738,10 +1749,35 @@ func (s *Service) ListAccountLeases(ctx context.Context) ([]SupplyAccountLeaseIt
 	if err != nil {
 		return nil, err
 	}
+	orders, err := s.supplyOrdersForItems(ctx, nil, items)
+	if err != nil {
+		return nil, err
+	}
+	recoveries, err := s.store.ListSupplyRecoveries(ctx, 1000, "")
+	if err != nil {
+		return nil, err
+	}
+	recoveryByClaimOrder := make(map[string]store.SupplyRecovery, len(recoveries))
+	for _, recovery := range recoveries {
+		orderID := strings.TrimSpace(recovery.ClaimOrderID)
+		if orderID == "" {
+			continue
+		}
+		current, found := recoveryByClaimOrder[orderID]
+		if !found || recovery.UpdatedAtMS >= current.UpdatedAtMS {
+			recoveryByClaimOrder[orderID] = recovery
+		}
+	}
+	var supplyCfg store.ManagerSupplyConfig
+	if s.managerConfig != nil {
+		if managerCfg, _, _, resolveErr := s.managerConfig.ResolveManagerConfigWithSource(ctx); resolveErr == nil {
+			supplyCfg = managerCfg.Supply
+		}
+	}
 	latestByFile := make(map[string]store.SupplyImportItem, len(items))
 	for _, item := range items {
 		fileName := strings.TrimSpace(item.FileName)
-		if fileName == "" || item.SupersededAtMS > 0 || item.LeaseExpiresAtMS <= 0 {
+		if fileName == "" || item.SupersededAtMS > 0 {
 			continue
 		}
 		current, found := latestByFile[fileName]
@@ -1751,7 +1787,43 @@ func (s *Service) ListAccountLeases(ctx context.Context) ([]SupplyAccountLeaseIt
 	}
 	result := make([]SupplyAccountLeaseItem, 0, len(latestByFile))
 	for fileName, item := range latestByFile {
-		result = append(result, SupplyAccountLeaseItem{FileName: fileName, LeaseExpiresAtMS: item.LeaseExpiresAtMS})
+		order := orders[item.OrderID]
+		source := "unknown"
+		if strings.TrimSpace(order.OrderID) != "" {
+			source = reportOrderSource(order)
+		} else if strings.HasPrefix(strings.TrimSpace(item.OrderID), "recovery-") {
+			source = "recovery"
+		}
+		method := "unknown"
+		if source == "manual" {
+			method = "manual_supply"
+		} else if source == "automatic" {
+			method = "automatic_supply"
+		} else if source == "recovery" {
+			method = "reauth_replacement"
+		}
+		platformID := strings.TrimSpace(order.SupplierID)
+		platformName := platformID
+		if platform, resolveErr := resolveSupplyPlatform(supplyCfg, platformID, order.Product); resolveErr == nil {
+			platformID = firstNonEmptyString(platform.ID, platformID)
+			platformName = firstNonEmptyString(platform.Name, platform.ID, platformName)
+		}
+		recovery := recoveryByClaimOrder[item.OrderID]
+		result = append(result, SupplyAccountLeaseItem{
+			FileName:         fileName,
+			OrderID:          item.OrderID,
+			SupplierID:       platformID,
+			PlatformName:     platformName,
+			Product:          order.Product,
+			Source:           source,
+			ImportMethod:     method,
+			ImportAction:     item.ImportAction,
+			ReplacedFileName: item.ReplacedFileName,
+			RecoveryID:       recovery.RecoveryID,
+			RecoveryStatus:   recovery.Status,
+			ImportedAtMS:     item.ImportedAtMS,
+			LeaseExpiresAtMS: item.LeaseExpiresAtMS,
+		})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].FileName < result[j].FileName })
 	return result, nil

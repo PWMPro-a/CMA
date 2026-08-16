@@ -586,7 +586,18 @@ export interface SupplyAccountList {
 
 export interface SupplyAccountLeaseItem {
   fileName: string;
-  leaseExpiresAtMs: number;
+  orderId?: string;
+  supplierId?: string;
+  platformName?: string;
+  product?: string;
+  source?: string;
+  importMethod?: string;
+  importAction?: string;
+  replacedFileName?: string;
+  recoveryId?: string;
+  recoveryStatus?: string;
+  importedAtMs?: number;
+  leaseExpiresAtMs?: number;
 }
 
 export interface SupplyReportExecutive {

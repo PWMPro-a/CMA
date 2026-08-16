@@ -195,6 +195,43 @@ describe('accountDetailViewModel', () => {
     expect(sparse.auth.fields.map((field) => field.key)).toEqual(['runtime']);
   });
 
+  it('shows import provenance and 401 replacement records in credential details', () => {
+    const importedAtMs = Date.parse('2026-08-16T07:30:45Z');
+    const expiresAtMs = importedAtMs + 60 * 60_000;
+    const viewModel = buildAccountDetailViewModel(
+      makeRow({
+        importMetadata: {
+          version: 1,
+          source: 'supply',
+          method: 'reauth_replacement',
+          platform_id: 'supplier-a',
+          platform_name: '平台 A',
+          imported_by: 'cpa-manager-plus',
+          imported_at: '2026-08-16T07:30:45Z',
+        },
+        supplyMetadata: {
+          fileName: 'replacement.json',
+          importAction: 'replace',
+          replacedFileName: 'expired.json',
+          recoveryId: 'recovery-1',
+          recoveryStatus: 'imported',
+        },
+        expiresAtMs,
+      })
+    );
+    const fields = new Map(
+      viewModel.overview.credential.fields.map((field) => [field.key, field.value])
+    );
+
+    expect(fields.get('importPlatform')).toBe('平台 A');
+    expect(fields.get('importMethod')).toBe('accounts.import_method_reauth_replacement');
+    expect(fields.get('importedAtMs')).toBe(importedAtMs);
+    expect(fields.get('leaseExpiresAtMs')).toBe(expiresAtMs);
+    expect(fields.get('replacementRecord')).toBe('accounts.replacement_record_401');
+    expect(fields.get('replacedFileName')).toBe('expired.json');
+    expect(fields.get('recoveryId')).toBe('recovery-1');
+  });
+
   it('matches window usage and action candidates by file name plus auth index', () => {
     const row = makeRow({
       selectionKey: 'shared.codex.json\u00001',

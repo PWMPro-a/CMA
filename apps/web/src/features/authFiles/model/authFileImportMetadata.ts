@@ -88,6 +88,8 @@ export const getAuthFileImportMethodLabelKey = (method: string): string => {
       return 'accounts.import_method_automatic_supply';
     case 'manual_supply':
       return 'accounts.import_method_manual_supply';
+    case 'reauth_replacement':
+      return 'accounts.import_method_reauth_replacement';
     default:
       return 'accounts.import_method_unknown';
   }

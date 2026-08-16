@@ -249,6 +249,7 @@ import {
   type MonitoringAccountHistoryItem,
   type MonitoringAccountWindowUsageItem,
   type QuotaCooldownInfo,
+  type SupplyAccountLeaseItem,
   type SupplyAccountPoolSummary,
   type UsageHeaderSnapshot,
 } from '@/services/api';
@@ -594,7 +595,7 @@ export function AccountsPage() {
 
   const [oauthViewMode, setOauthViewMode] = useState<'diagram' | 'list'>('list');
   const [supplyLeaseExpiryByFile, setSupplyLeaseExpiryByFile] = useState<
-    ReadonlyMap<string, number>
+    ReadonlyMap<string, SupplyAccountLeaseItem>
   >(() => new Map());
   const [accountPoolSummary, setAccountPoolSummary] = useState<SupplyAccountPoolSummary | null>(
     null
@@ -1153,9 +1154,7 @@ export function AccountsPage() {
       const leases = await supplyApi.listAccountLeases();
       setSupplyLeaseExpiryByFile(
         new Map(
-          leases
-            .filter((item) => item.fileName && Number.isFinite(item.leaseExpiresAtMs))
-            .map((item) => [item.fileName, item.leaseExpiresAtMs] as const)
+          leases.filter((item) => item.fileName).map((item) => [item.fileName, item] as const)
         )
       );
     } catch {
@@ -4448,9 +4447,7 @@ export function AccountsPage() {
                   time: importedAtLabel || '-',
                 })
               : '';
-            const hasSourceDetails = Boolean(
-              row.importMetadata || sourceIp || websocketsEnabled
-            );
+            const hasSourceDetails = Boolean(row.importMetadata || sourceIp || websocketsEnabled);
             const accountHistoryRequestValue = accountHistoryMatched
               ? formatCompactNumber(accountHistory.total_requests)
               : recentRequestCount > 0
@@ -5496,9 +5493,7 @@ export function AccountsPage() {
           <span className={styles.uploadDropZoneCopy}>
             <strong>
               {t(
-                uploadDragActive
-                  ? 'auth_files.drop_upload_active'
-                  : 'auth_files.drop_upload_title'
+                uploadDragActive ? 'auth_files.drop_upload_active' : 'auth_files.drop_upload_title'
               )}
             </strong>
             <span>{t('auth_files.drop_upload_hint')}</span>

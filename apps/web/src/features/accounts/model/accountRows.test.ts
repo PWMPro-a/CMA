@@ -59,8 +59,16 @@ const buildAccountRows = (
   files: AuthFileItem[],
   stores: AccountQuotaStores,
   inspectionResults?: Parameters<typeof buildAccountRowsBase>[2],
-  overrides?: Parameters<typeof buildAccountRowsBase>[3]
-) => buildAccountRowsBase(files, scopeTestQuotaStores(files, stores), inspectionResults, overrides);
+  overrides?: Parameters<typeof buildAccountRowsBase>[3],
+  supplyMetadataByFileName?: Parameters<typeof buildAccountRowsBase>[4]
+) =>
+  buildAccountRowsBase(
+    files,
+    scopeTestQuotaStores(files, stores),
+    inspectionResults,
+    overrides,
+    supplyMetadataByFileName
+  );
 
 describe('accountRows', () => {
   it('keeps same-email workspaces distinct in row identity', () => {
@@ -182,6 +190,44 @@ describe('accountRows', () => {
         search: '平台 A',
       })
     ).toHaveLength(1);
+  });
+
+  it('restores replacement source and expiry from Manager supply metadata', () => {
+    const importedAtMs = Date.parse('2026-08-16T07:30:45Z');
+    const leaseExpiresAtMs = importedAtMs + 60 * 60_000;
+    const [row] = buildAccountRows(
+      [{ name: 'replacement.json', type: 'codex' }],
+      emptyStores(),
+      undefined,
+      undefined,
+      new Map([
+        [
+          'replacement.json',
+          {
+            fileName: 'replacement.json',
+            supplierId: 'supplier-a',
+            platformName: '平台 A',
+            source: 'recovery',
+            importMethod: 'reauth_replacement',
+            importAction: 'replace',
+            replacedFileName: 'expired.json',
+            recoveryId: 'recovery-1',
+            recoveryStatus: 'imported',
+            importedAtMs,
+            leaseExpiresAtMs,
+          },
+        ],
+      ])
+    );
+
+    expect(row.importMetadata).toMatchObject({
+      method: 'reauth_replacement',
+      platform_id: 'supplier-a',
+      platform_name: '平台 A',
+      imported_at: '2026-08-16T07:30:45.000Z',
+    });
+    expect(row.expiresAtMs).toBe(leaseExpiresAtMs);
+    expect(row.supplyMetadata?.replacedFileName).toBe('expired.json');
   });
 
   it('preserves zero runtime current concurrency as an idle value', () => {
