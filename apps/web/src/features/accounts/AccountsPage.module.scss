@@ -4570,6 +4570,64 @@
   justify-content: flex-end;
 }
 
+.uploadDropZone {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  margin: 0 16px 14px;
+  padding: 10px 13px;
+  border: 1px dashed color-mix(in srgb, var(--accounts-brand-active) 38%, var(--accounts-border));
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--accounts-brand-active) 5%, var(--accounts-surface));
+  color: var(--accounts-text);
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    box-shadow 150ms ease,
+    transform 150ms ease;
+}
+
+.uploadDropZoneActive {
+  border-color: color-mix(in srgb, var(--accounts-brand-active) 76%, var(--accounts-border));
+  background: color-mix(in srgb, var(--accounts-brand-active) 12%, var(--accounts-surface));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accounts-brand-active) 12%, transparent);
+  transform: translateY(-1px);
+}
+
+.uploadDropZoneDisabled {
+  opacity: 0.58;
+}
+
+.uploadDropZoneIcon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accounts-brand-active) 13%, var(--accounts-surface));
+  color: var(--accounts-brand-active);
+}
+
+.uploadDropZoneCopy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+
+  strong {
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  span {
+    color: var(--accounts-muted);
+    font-size: 12px;
+    line-height: 1.35;
+  }
+}
+
 .tabLabel {
   display: inline-flex;
   align-items: center;
@@ -5118,6 +5176,10 @@
   .controlsTabsRow,
   .controlsFilterPanel {
     padding-inline: 12px;
+  }
+
+  .uploadDropZone {
+    margin: 0 12px 12px;
   }
 
   .controlsTabsRow {

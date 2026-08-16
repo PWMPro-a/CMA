@@ -110,6 +110,7 @@ export type UseAuthFilesDataResult = {
   loadFiles: (options?: { throwOnError?: boolean; silent?: boolean }) => Promise<void>;
   handleUploadClick: () => void;
   handleFileChange: (event: ChangeEvent<HTMLInputElement>) => Promise<void>;
+  handleDroppedFiles: (files: File[]) => Promise<void>;
   savePastedAuthJson: (
     type: AuthJsonInputType,
     fileName: string,
@@ -1031,26 +1032,16 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
     if (!input || input.disabled) return;
 
     // Clear the previous selection before opening the picker so choosing the
-    // same file twice still emits a change event. Prefer the native picker and
-    // fall back to click() for browsers/WebViews that do not expose it.
+    // same file twice still emits a change event. click() remains the broadest
+    // browser-compatible path; the drop zone is the fallback when the browser
+    // or an extension suppresses the operating-system picker.
     input.value = '';
-    if (typeof input.showPicker === 'function') {
-      try {
-        input.showPicker();
-        return;
-      } catch {
-        // Some embedded browsers expose showPicker() but reject the call.
-      }
-    }
     input.click();
   }, []);
 
-  const handleFileChange = useCallback(
-    async (event: ChangeEvent<HTMLInputElement>) => {
-      const fileList = event.target.files;
-      if (!fileList || fileList.length === 0) return;
-
-      const filesToUpload = Array.from(fileList);
+  const uploadSelectedFiles = useCallback(
+    async (filesToUpload: File[]) => {
+      if (filesToUpload.length === 0) return;
       const validFiles: File[] = [];
       const invalidFiles: string[] = [];
       const oversizedFiles: string[] = [];
@@ -1078,7 +1069,6 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
       }
 
       if (validFiles.length === 0) {
-        event.target.value = '';
         return;
       }
 
@@ -1120,10 +1110,29 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
         showNotification(`${t('notification.upload_failed')}: ${errorMessage}`, 'error');
       } finally {
         setUploading(false);
-        event.target.value = '';
       }
     },
     [clearInspectionOwnershipForFile, loadFiles, options.importDefaults, showNotification, t]
+  );
+
+  const handleFileChange = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const fileList = event.target.files;
+      if (!fileList || fileList.length === 0) return;
+      try {
+        await uploadSelectedFiles(Array.from(fileList));
+      } finally {
+        event.target.value = '';
+      }
+    },
+    [uploadSelectedFiles]
+  );
+
+  const handleDroppedFiles = useCallback(
+    async (files: File[]) => {
+      await uploadSelectedFiles(files);
+    },
+    [uploadSelectedFiles]
   );
 
   const savePastedAuthJson = useCallback(
@@ -2423,6 +2432,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
     loadFiles,
     handleUploadClick,
     handleFileChange,
+    handleDroppedFiles,
     savePastedAuthJson,
     handleDelete,
     handleDeleteAll,

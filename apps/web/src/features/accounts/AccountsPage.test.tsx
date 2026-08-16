@@ -308,8 +308,11 @@ const { mocks } = vi.hoisted(() => {
       showNotification: vi.fn(),
       showConfirmation: vi.fn(),
       loadFiles: vi.fn(async () => undefined),
+      uploading: false,
+      authJsonPasteSaving: false,
       handleUploadClick: vi.fn(),
       handleFileChange: vi.fn(async () => undefined),
+      handleDroppedFiles: vi.fn(async () => undefined),
       lastAuthFilesDataOptions: null as null | {
         importDefaults?: { websockets?: boolean };
         connectionFingerprint?: string | null;
@@ -486,14 +489,15 @@ vi.mock('@/features/authFiles/hooks/useAuthFilesData', () => ({
       selectionCount: mocks.selectionCount,
       loading: false,
       error: '',
-      uploading: false,
-      authJsonPasteSaving: false,
+      uploading: mocks.uploading,
+      authJsonPasteSaving: mocks.authJsonPasteSaving,
       deleting: null,
       batchFieldsUpdating: mocks.batchFieldsUpdating,
       fileInputRef: { current: null },
       loadFiles: mocks.loadFiles,
       handleUploadClick: mocks.handleUploadClick,
       handleFileChange: mocks.handleFileChange,
+      handleDroppedFiles: mocks.handleDroppedFiles,
       savePastedAuthJson: vi.fn(async () => 'saved.json'),
       handleDelete: mocks.handleDelete,
       handleDownload: mocks.handleDownload,
@@ -1005,8 +1009,11 @@ describe('AccountsPage replacement flows', () => {
     mocks.navigate.mockClear();
     mocks.showNotification.mockClear();
     mocks.showConfirmation.mockClear();
+    mocks.uploading = false;
+    mocks.authJsonPasteSaving = false;
     mocks.handleUploadClick.mockClear();
     mocks.handleFileChange.mockClear();
+    mocks.handleDroppedFiles.mockClear();
     mocks.lastAuthFilesDataOptions = null;
     mocks.toggleSelect.mockClear();
     mocks.selectAllVisible.mockClear();
@@ -1323,6 +1330,62 @@ describe('AccountsPage replacement flows', () => {
       findButtonByText(renderer, 'auth_files.upload_button').props.onClick();
     });
     expect(mocks.handleUploadClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a persistent drop zone and automatically uploads all dropped files', async () => {
+    const renderer = await renderAccountsPage();
+    const findDropZone = () =>
+      renderer.root.findByProps({ 'aria-label': 'auth_files.drop_upload_aria' });
+    const dropZone = findDropZone();
+    const fileA = new File(['{}'], 'first.json', { type: 'application/json' });
+    const fileB = new File(['{}'], 'second.json', { type: 'application/json' });
+    const eventBase = {
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    };
+
+    act(() => {
+      dropZone.props.onDragEnter({
+        ...eventBase,
+        dataTransfer: { types: ['Files'] },
+      });
+    });
+    expect(findDropZone().props['data-upload-drop-active']).toBe('true');
+    expect(treeText(renderer)).toContain('auth_files.drop_upload_active');
+
+    act(() => {
+      findDropZone().props.onDragLeave(eventBase);
+    });
+    expect(findDropZone().props['data-upload-drop-active']).toBe('false');
+
+    act(() => {
+      findDropZone().props.onDrop({
+        ...eventBase,
+        dataTransfer: { files: [fileA, fileB] },
+      });
+    });
+    expect(mocks.handleDroppedFiles).toHaveBeenCalledWith([fileA, fileB]);
+  });
+
+  it('does not upload dropped files while an upload is already running', async () => {
+    mocks.uploading = true;
+    const renderer = await renderAccountsPage();
+    const dropZone = renderer.root.findByProps({
+      'aria-label': 'auth_files.drop_upload_aria',
+    });
+
+    act(() => {
+      dropZone.props.onDrop({
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+        dataTransfer: {
+          files: [new File(['{}'], 'busy.json', { type: 'application/json' })],
+        },
+      });
+    });
+
+    expect(dropZone.props['aria-disabled']).toBe(true);
+    expect(mocks.handleDroppedFiles).not.toHaveBeenCalled();
   });
 
   it('initializes the active view from the accounts view query', async () => {

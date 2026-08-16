@@ -585,7 +585,7 @@ describe('prepareAuthFilesForUpload', () => {
 });
 
 describe('useAuthFilesData handleUploadClick', () => {
-  it('opens the native file picker and clears a stale selection first', () => {
+  it('uses input.click and clears a stale selection even when showPicker exists', () => {
     const hook = mountUseAuthFilesData();
     const showPicker = vi.fn();
     const click = vi.fn();
@@ -602,20 +602,21 @@ describe('useAuthFilesData handleUploadClick', () => {
     });
 
     expect(input.value).toBe('');
-    expect(showPicker).toHaveBeenCalledTimes(1);
-    expect(click).not.toHaveBeenCalled();
+    expect(showPicker).not.toHaveBeenCalled();
+    expect(click).toHaveBeenCalledTimes(1);
     hook.unmount();
   });
 
-  it('falls back to click when an embedded browser rejects showPicker', () => {
+  it('does not invoke an embedded browser showPicker implementation', () => {
     const hook = mountUseAuthFilesData();
     const click = vi.fn();
+    const showPicker = vi.fn(() => {
+      throw new Error('picker unavailable');
+    });
     const input = {
       disabled: false,
       value: '',
-      showPicker: vi.fn(() => {
-        throw new Error('picker unavailable');
-      }),
+      showPicker,
       click,
     } as unknown as HTMLInputElement;
     hook.getCurrent().fileInputRef.current = input;
@@ -625,6 +626,7 @@ describe('useAuthFilesData handleUploadClick', () => {
     });
 
     expect(click).toHaveBeenCalledTimes(1);
+    expect(showPicker).not.toHaveBeenCalled();
     hook.unmount();
   });
 });
@@ -769,6 +771,32 @@ describe('useAuthFilesData handleFileChange', () => {
     expect(mocks.list).toHaveBeenCalledTimes(1);
     expect(mocks.showNotification).not.toHaveBeenCalledWith('auth_files.upload_success', 'success');
     expect(mocks.showNotification).toHaveBeenCalledWith('notification.upload_failed', 'error');
+    hook.unmount();
+  });
+});
+
+describe('useAuthFilesData handleDroppedFiles', () => {
+  it('uses the same upload pipeline and configured WS default for dropped files', async () => {
+    const hook = mountUseAuthFilesData(undefined, undefined, { websockets: true });
+    const files = [
+      new File([JSON.stringify({ type: 'qwen', refresh_token: 'first-token' })], 'first.json', {
+        type: 'application/json',
+      }),
+    ];
+    mocks.uploadFiles.mockResolvedValueOnce({
+      status: 'ok',
+      uploaded: files.length,
+      files: files.map((file) => file.name),
+      failed: [],
+    });
+
+    await act(async () => {
+      await hook.getCurrent().handleDroppedFiles(files);
+    });
+
+    expect(mocks.uploadFiles).toHaveBeenCalledWith(expect.any(Array), { websockets: true });
+    expect(mocks.showNotification).toHaveBeenCalledWith('auth_files.upload_success', 'success');
+    expect(mocks.list).toHaveBeenCalledTimes(1);
     hook.unmount();
   });
 });

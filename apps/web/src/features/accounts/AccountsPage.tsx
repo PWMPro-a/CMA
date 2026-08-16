@@ -7,7 +7,11 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react';
-import type { KeyboardEvent, MouseEvent as ReactMouseEvent } from 'react';
+import type {
+  DragEvent as ReactDragEvent,
+  KeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+} from 'react';
 import { createPortal } from 'react-dom';
 import type { TFunction } from 'i18next';
 import { useLocation, useNavigate, type BlockerFunction } from 'react-router-dom';
@@ -570,6 +574,7 @@ export function AccountsPage() {
     loadFiles,
     handleUploadClick,
     handleFileChange,
+    handleDroppedFiles,
     savePastedAuthJson,
     handleDelete,
     handleDownload,
@@ -583,6 +588,9 @@ export function AccountsPage() {
     batchPatchFields,
     batchDelete,
   } = useAuthFilesData({ importDefaults, connectionFingerprint });
+
+  const [uploadDragActive, setUploadDragActive] = useState(false);
+  const uploadDragDepthRef = useRef(0);
 
   const [oauthViewMode, setOauthViewMode] = useState<'diagram' | 'list'>('list');
   const [supplyLeaseExpiryByFile, setSupplyLeaseExpiryByFile] = useState<
@@ -1693,6 +1701,7 @@ export function AccountsPage() {
     return files.filter((file) => String(file.name ?? '').trim() === fileName).length;
   }, [files, selectedRow?.fileName]);
   const disableControls = connectionStatus !== 'connected';
+  const uploadDropDisabled = disableControls || uploading || authJsonPasteSaving;
   const handleDefaultWebsocketsChange = useCallback((websockets: boolean) => {
     setImportDefaults((current) => {
       const next = { ...current, websockets };
@@ -1700,6 +1709,42 @@ export function AccountsPage() {
       return next;
     });
   }, []);
+  const handleUploadDragEnter = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (uploadDropDisabled || !event.dataTransfer.types.includes('Files')) return;
+      uploadDragDepthRef.current += 1;
+      setUploadDragActive(true);
+    },
+    [uploadDropDisabled]
+  );
+  const handleUploadDragOver = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = uploadDropDisabled ? 'none' : 'copy';
+    },
+    [uploadDropDisabled]
+  );
+  const handleUploadDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    uploadDragDepthRef.current = Math.max(0, uploadDragDepthRef.current - 1);
+    if (uploadDragDepthRef.current === 0) setUploadDragActive(false);
+  }, []);
+  const handleUploadDrop = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      uploadDragDepthRef.current = 0;
+      setUploadDragActive(false);
+      if (uploadDropDisabled) return;
+      const droppedFiles = Array.from(event.dataTransfer.files);
+      if (droppedFiles.length > 0) void handleDroppedFiles(droppedFiles);
+    },
+    [handleDroppedFiles, uploadDropDisabled]
+  );
   const handleConfigurationSaved = useCallback(() => {
     if (!selectedRow) return;
     invalidateModels(selectedRow.raw);
@@ -5393,6 +5438,33 @@ export function AccountsPage() {
           {renderViewTabs()}
           {renderPageActions()}
         </div>
+        <div
+          className={`${styles.uploadDropZone} ${
+            uploadDragActive ? styles.uploadDropZoneActive : ''
+          } ${uploadDropDisabled ? styles.uploadDropZoneDisabled : ''}`}
+          role="region"
+          aria-label={t('auth_files.drop_upload_aria')}
+          aria-disabled={uploadDropDisabled}
+          data-upload-drop-active={uploadDragActive ? 'true' : 'false'}
+          onDragEnter={handleUploadDragEnter}
+          onDragOver={handleUploadDragOver}
+          onDragLeave={handleUploadDragLeave}
+          onDrop={handleUploadDrop}
+        >
+          <span className={styles.uploadDropZoneIcon} aria-hidden="true">
+            <IconFileText size={18} />
+          </span>
+          <span className={styles.uploadDropZoneCopy}>
+            <strong>
+              {t(
+                uploadDragActive
+                  ? 'auth_files.drop_upload_active'
+                  : 'auth_files.drop_upload_title'
+              )}
+            </strong>
+            <span>{t('auth_files.drop_upload_hint')}</span>
+          </span>
+        </div>
       </section>
       <input
         id="accounts-auth-file-upload-input"
@@ -5401,6 +5473,7 @@ export function AccountsPage() {
         type="file"
         accept=".json,application/json"
         multiple
+        disabled={uploadDropDisabled}
         tabIndex={-1}
         aria-hidden="true"
         onChange={(event) => void handleFileChange(event)}
