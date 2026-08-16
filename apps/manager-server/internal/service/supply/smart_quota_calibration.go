@@ -966,6 +966,16 @@ func (s *Service) smartQuotaEstimateForSupplierAtWithMinimum(
 		allEstimate.HistoricalEstimateM = allEstimate.CapacityM
 		return attachSmartQuotaClasses(allEstimate, quotaClasses)
 	}
+	if classifiedEstimate, classifiedOK := estimateSmartQuotaTrustedRepresentativesAt(classSamples, now); classifiedOK {
+		// The plan/global estimators intentionally require several delta rows per
+		// account. A completed inspection can still leave one trustworthy (>10%
+		// observed) representative for several independent accounts. Once abnormal
+		// low rows have been removed, rebuild the displayed plan statistic from
+		// those account representatives instead of publishing either the rejected
+		// low current account or a contradictory "no data" value next to populated
+		// quota classes.
+		return attachSmartQuotaClasses(classifiedEstimate, quotaClasses)
+	}
 	return attachSmartQuotaClasses(defaultSmartQuotaEstimateForPlan(planType), quotaClasses)
 }
 
@@ -2041,6 +2051,80 @@ func estimateSmartQuotaClassesAt(samples []smartQuotaCalibrationSample, now time
 		})
 	}
 	return items
+}
+
+func estimateSmartQuotaTrustedRepresentativesAt(samples []smartQuotaCalibrationSample, now time.Time) (smartQuotaEstimate, bool) {
+	cutoff := now.Add(-smartQuotaCalibrationSampleTTL).UnixMilli()
+	grouped := make(map[string][]smartQuotaCalibrationSample)
+	for _, sample := range samples {
+		if sample.identity == "" || sample.observedMS < cutoff || sample.weight <= 0 ||
+			sample.capacityM < smartQuotaCalibrationMinCapacityM || sample.capacityM > smartQuotaCalibrationMaxCapacityM ||
+			sample.classificationOnly || !smartQuotaCalibrationUsedFractionEligible(sample.usedFraction) {
+			continue
+		}
+		grouped[sample.identity] = append(grouped[sample.identity], sample)
+	}
+
+	representatives := make([]float64, 0, len(grouped))
+	totalObservedWeight := 0.0
+	evidenceCount := 0
+	completeWindowAccounts := 0
+	for _, identitySamples := range grouped {
+		complete := filterSmartQuotaSamples(identitySamples, func(sample smartQuotaCalibrationSample) bool {
+			return sample.completeWindow
+		})
+		if len(complete) > 0 {
+			identitySamples = complete
+			completeWindowAccounts++
+		}
+		identitySamples = trimSmartQuotaSampleExtremes(identitySamples)
+		weighted := make([]smartQuotaWeightedPoint, 0, len(identitySamples))
+		for _, sample := range identitySamples {
+			recencyWeight := smartQuotaSampleRecencyWeight(now, sample.observedMS)
+			weight := sample.weight * recencyWeight * clampFloat(sample.usedFraction, 0.05, 1)
+			if weight <= 0 {
+				continue
+			}
+			weighted = append(weighted, smartQuotaWeightedPoint{capacityM: sample.capacityM, weight: weight})
+			totalObservedWeight += sample.weight * recencyWeight
+			evidenceCount++
+		}
+		if len(weighted) == 0 {
+			continue
+		}
+		representatives = append(representatives, weightedSmartQuotaMedian(weighted))
+	}
+	if len(representatives) == 0 {
+		return smartQuotaEstimate{}, false
+	}
+
+	sort.Float64s(representatives)
+	if len(representatives) >= 5 {
+		representatives = representatives[1 : len(representatives)-1]
+	}
+	middle := len(representatives) / 2
+	median := representatives[middle]
+	if len(representatives)%2 == 0 {
+		median = (representatives[middle-1] + representatives[middle]) / 2
+	}
+	confidence := smartConfidenceLow
+	if len(representatives) >= smartQuotaPolicyMinUniqueAccounts {
+		confidence = smartConfidenceMedium
+	}
+	if len(representatives) >= 12 && totalObservedWeight >= 0.5 {
+		confidence = smartConfidenceHigh
+	}
+	return smartQuotaEstimate{
+		CapacityM:              round2(clampFloat(median, smartQuotaCalibrationMinCapacityM, smartQuotaCalibrationMaxCapacityM)),
+		Source:                 smartQuotaEstimateSourceClassified,
+		SampleCount:            len(representatives),
+		EvidenceCount:          evidenceCount,
+		ObservedPercent:        round2(totalObservedWeight * 100),
+		Confidence:             confidence,
+		UniqueAccounts:         len(representatives),
+		CompleteWindowAccounts: completeWindowAccounts,
+		IndependentAccount:     completeWindowAccounts > 0,
+	}, true
 }
 
 func clusterSmartQuotaClassPoints(points []smartQuotaClassPoint) []smartQuotaClassGroup {

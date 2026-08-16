@@ -947,6 +947,44 @@ func TestSmartQuotaPlanRecalculatesStatisticsAfterRejectingExtremeLowCluster(t *
 	}
 }
 
+func TestSmartQuotaPlanRebuildsObservedValueFromTrustedNormalRepresentatives(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	activeIdentity := "file:active-low.json"
+	activeSamples := quotaSamplesForEstimate(activeIdentity, "team", 12.14, now.Add(-time.Minute), 3)
+	service.smartQuotaState.samples = append(service.smartQuotaState.samples, activeSamples...)
+	service.smartQuotaState.samplesByIdentity[activeIdentity] = append([]smartQuotaCalibrationSample(nil), activeSamples...)
+
+	// These are independent normal-range accounts retained from recent
+	// inspections. Each has one trusted representative, so the stricter
+	// multi-delta estimator has no aggregate yet even though the classification
+	// statistic has enough independent accounts to be meaningful.
+	for index, capacityM := range []float64{38, 40, 64, 150} {
+		identity := fmt.Sprintf("file:normal-%d.json", index)
+		sample := smartQuotaCalibrationSample{
+			identity: identity, planType: "team", capacityM: capacityM,
+			weight: 0.12, usedFraction: 0.40, observedMS: now.Add(-2 * time.Minute).UnixMilli(),
+		}
+		service.smartQuotaState.samples = append(service.smartQuotaState.samples, sample)
+		service.smartQuotaState.samplesByIdentity[identity] = []smartQuotaCalibrationSample{sample}
+	}
+
+	items, planning := service.smartQuotaPlanEstimatesForInspection(
+		store.ManagerSupplyConfig{},
+		[]store.CodexInspectionResult{{FileName: "active-low.json", Provider: "codex", Status: "active", PlanType: "team"}},
+		461,
+		now,
+	)
+	if len(items) != 1 || items[0].ObservedM != 52 || items[0].UniqueAccounts != 4 ||
+		items[0].RejectedAccounts != 1 || len(items[0].QuotaClasses) != 3 ||
+		items[0].Source != smartQuotaEstimateSourceClassified ||
+		items[0].ValidationState != smartQuotaValidationConfirming || !items[0].UsingFallback ||
+		items[0].AdoptedM != 60 || planning["team"].CapacityM != 60 ||
+		planning["team"].Source != smartQuotaEstimateSourceDefault || !planning["team"].FallbackOnly {
+		t.Fatalf("trusted representative recalculation = items %#v planning %#v", items, planning["team"])
+	}
+}
+
 func TestSmartQuotaPlanAcceptsExtremeDownwardAfterFiveCompleteWindowRounds(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now().Truncate(time.Second)

@@ -2631,6 +2631,89 @@ func TestSmartAutomaticDoesNotCreateWhenCapacityHealthy(t *testing.T) {
 	}
 }
 
+func TestSmartAutomaticPurchaseTimingWaitDoesNotCreateOrder(t *testing.T) {
+	var createCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":100,"missing":0,"needs_production":false,"estimated_total_fen":100}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
+		case r.URL.Path == "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"files":[{"name":"quota-0.json","provider":"codex"},{"name":"quota-1.json","provider":"codex"},{"name":"quota-2.json","provider":"codex"},{"name":"quota-3.json","provider":"codex"},{"name":"quota-4.json","provider":"codex"},{"name":"quota-5.json","provider":"codex"},{"name":"quota-6.json","provider":"codex"},{"name":"quota-7.json","provider":"codex"},{"name":"quota-8.json","provider":"codex"},{"name":"quota-9.json","provider":"codex"}]}`))
+		case r.URL.Path == "/api/customer/pickup/orders" && r.Method == http.MethodPost:
+			createCalls.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"order":{"id":"unexpected-early-order","status":"waiting_inventory","quantity":1}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "smart-purchase-timing-wait.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password",
+			Product: "oauth_30d", TargetAvailableAccounts: 1, ReplenishBatchSize: 10,
+			PrelockMinQuantity: 1, PrelockMaxQuantity: 10,
+			HealthyMinutesTarget: 55, WarningMinutes: 40, CriticalMinutes: 25,
+			CriticalAvailableAccounts: 1, HealthyAvailableAccounts: 3,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	results := make([]store.CodexInspectionResult, 0, 10)
+	for index := 0; index < 10; index++ {
+		result := quotaInspectionResult(0)
+		result.AccountKey = fmt.Sprintf("quota-%d", index)
+		result.FileName = result.AccountKey + ".json"
+		result.PlanType = "team"
+		results = append(results, result)
+	}
+	seedCompletedQuotaInspection(t, st, results...)
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	now := time.Now()
+	events := make([]usage.Event, 0, 30)
+	for minute := 0; minute < 30; minute++ {
+		events = append(events, usage.Event{
+			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+			Provider:    "codex",
+			AuthIndex:   "load-source",
+			TotalTokens: 11_000_000,
+		})
+	}
+	service.recordSmartUsageEvents(events, now)
+
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("run automatic: %v", err)
+	}
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	if createCalls.Load() != 0 {
+		t.Fatalf("create calls = %d, want 0; resource=%#v orders=%#v", createCalls.Load(), status.SmartResource, status.Orders)
+	}
+	if status.ActiveOrder != nil || len(status.Orders) != 0 {
+		t.Fatalf("purchase timing wait persisted an order: active=%#v orders=%#v", status.ActiveOrder, status.Orders)
+	}
+	if status.SmartResource.DecisionReason != "purchase_timing_wait" ||
+		status.SmartResource.SuggestedQuantity != 0 ||
+		status.SmartResource.PurchaseTimingEligibleQuantity != 0 ||
+		status.SmartResource.PurchaseTimingWaitMinutes <= 0 {
+		t.Fatalf("purchase timing wait resource = %#v", status.SmartResource)
+	}
+}
+
 func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *testing.T) {
 	var createQuantity atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

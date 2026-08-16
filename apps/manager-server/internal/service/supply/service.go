@@ -870,7 +870,18 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	if overview.Inventory != nil {
 		pressure := smartSupplyPressureFromOrders(cfg.Supply, *overview.Inventory, max(1, resource.SuggestedQuantity), orders)
 		applySmartSupplyPressure(&resource, pressure)
-		applySmartPurchaseTiming(&resource, smartJustInTimePurchase(cfg.Supply, resource, pressure, resource.SuggestedQuantity))
+		purchaseTiming := smartJustInTimePurchase(cfg.Supply, resource, pressure, resource.SuggestedQuantity)
+		applySmartPurchaseTiming(&resource, purchaseTiming)
+		if len(activeOrders) == 0 && !smartResourceEmergency(resource) &&
+			purchaseTiming.eligibleQuantity <= 0 && purchaseTiming.waitMinutes > 0 {
+			// Keep the read model aligned with automatic execution. Operators should
+			// see that this cycle is intentionally waiting rather than a stale
+			// positive suggestion that the worker has already rejected.
+			resource.SuggestedAction = smartActionObserveDemand
+			resource.SuggestedQuantity = 0
+			resource.DecisionReason = "purchase_timing_wait"
+			applySmartRefillProjection(cfg.Supply, &resource)
+		}
 		s.setSmartResource(resource)
 	}
 	if overviewAvailable >= 0 {
@@ -2514,7 +2525,15 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 				adjustedQuantity = retryQuantity
 			}
 		}
-		if adjustedQuantity > 0 && adjustedQuantity != quantity {
+		if adjustedQuantity <= 0 {
+			// A zero adjusted quantity is an explicit just-in-time admission
+			// decision, not a missing override. Preserve it through the execution
+			// layer so purchase_timing_wait never falls back to the original smart
+			// suggestion and creates a real supplier order early.
+			quantity = 0
+			resource.SuggestedQuantity = 0
+			resource.SuggestedAction = smartActionObserveDemand
+		} else if adjustedQuantity != quantity {
 			quantity = adjustedQuantity
 			selection, err = s.selectSupplyPlatform(ctx, supplyCfg, quantity, openOrders)
 			if err != nil {
