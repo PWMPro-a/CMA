@@ -657,7 +657,9 @@ export const prepareAuthFilesForUpload = async (files: File[]): Promise<Prepared
         new Date(),
         MAX_AUTH_FILE_SIZE
       );
-      const provider = String(cpaPayloads[0]?.authJson.type ?? cpaPayloads[0]?.authJson.provider ?? '')
+      const provider = String(
+        cpaPayloads[0]?.authJson.type ?? cpaPayloads[0]?.authJson.provider ?? ''
+      )
         .trim()
         .toLowerCase();
       const converted =
@@ -684,7 +686,10 @@ export const prepareAuthFilesForUpload = async (files: File[]): Promise<Prepared
 
   const uniqueConvertedPayloads = Array.from(
     convertedPayloads
-      .reduce((items, payload) => items.set(payload.fileName.toLowerCase(), payload), new Map<string, AuthJsonFilePayload>())
+      .reduce(
+        (items, payload) => items.set(payload.fileName.toLowerCase(), payload),
+        new Map<string, AuthJsonFilePayload>()
+      )
       .values()
   );
   const convertedFiles = createUniqueConvertedAuthFiles(
@@ -950,7 +955,22 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
   }, [hasActiveRegistration, refreshAgentIdentityRegistrations]);
 
   const handleUploadClick = useCallback(() => {
-    fileInputRef.current?.click();
+    const input = fileInputRef.current;
+    if (!input || input.disabled) return;
+
+    // Clear the previous selection before opening the picker so choosing the
+    // same file twice still emits a change event. Prefer the native picker and
+    // fall back to click() for browsers/WebViews that do not expose it.
+    input.value = '';
+    if (typeof input.showPicker === 'function') {
+      try {
+        input.showPicker();
+        return;
+      } catch {
+        // Some embedded browsers expose showPicker() but reject the call.
+      }
+    }
+    input.click();
   }, []);
 
   const handleFileChange = useCallback(

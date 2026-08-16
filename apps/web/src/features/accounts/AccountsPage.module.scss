@@ -42,6 +42,35 @@
   }
 }
 
+.importDefaultsControl {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 24%, var(--accounts-border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--primary-color) 7%, var(--accounts-surface));
+  color: var(--accounts-brand-active);
+  white-space: nowrap;
+
+  :global(label) {
+    gap: 7px;
+  }
+}
+
+.fileInput {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .accountDisplayButton:global(.btn.btn-sm) {
   gap: 6px;
 }

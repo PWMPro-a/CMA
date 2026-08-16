@@ -138,7 +138,8 @@ const mountUseAuthFilesData = (
   onConnectionLayout?: (
     value: ReturnType<typeof useAuthFilesData>,
     connectionFingerprint?: string
-  ) => void
+  ) => void,
+  importDefaults?: { websockets?: boolean }
 ): UseAuthFilesDataHarness => {
   let currentConnectionFingerprint = connectionFingerprint;
   let lastLayoutConnectionFingerprint: string | undefined | symbol = Symbol('uninitialized');
@@ -156,7 +157,10 @@ const mountUseAuthFilesData = (
   };
 
   function HookHarness() {
-    const value = useAuthFilesData({ connectionFingerprint: currentConnectionFingerprint });
+    const value = useAuthFilesData({
+      connectionFingerprint: currentConnectionFingerprint,
+      importDefaults,
+    });
     captureHook(value);
     useLayoutEffect(() => {
       if (lastLayoutConnectionFingerprint === currentConnectionFingerprint) return;
@@ -556,7 +560,82 @@ describe('prepareAuthFilesForUpload', () => {
   );
 });
 
+describe('useAuthFilesData handleUploadClick', () => {
+  it('opens the native file picker and clears a stale selection first', () => {
+    const hook = mountUseAuthFilesData();
+    const showPicker = vi.fn();
+    const click = vi.fn();
+    const input = {
+      disabled: false,
+      value: 'previous.json',
+      showPicker,
+      click,
+    } as unknown as HTMLInputElement;
+    hook.getCurrent().fileInputRef.current = input;
+
+    act(() => {
+      hook.getCurrent().handleUploadClick();
+    });
+
+    expect(input.value).toBe('');
+    expect(showPicker).toHaveBeenCalledTimes(1);
+    expect(click).not.toHaveBeenCalled();
+    hook.unmount();
+  });
+
+  it('falls back to click when an embedded browser rejects showPicker', () => {
+    const hook = mountUseAuthFilesData();
+    const click = vi.fn();
+    const input = {
+      disabled: false,
+      value: '',
+      showPicker: vi.fn(() => {
+        throw new Error('picker unavailable');
+      }),
+      click,
+    } as unknown as HTMLInputElement;
+    hook.getCurrent().fileInputRef.current = input;
+
+    act(() => {
+      hook.getCurrent().handleUploadClick();
+    });
+
+    expect(click).toHaveBeenCalledTimes(1);
+    hook.unmount();
+  });
+});
+
 describe('useAuthFilesData handleFileChange', () => {
+  it('passes the configured WS default to the upload API', async () => {
+    const hook = mountUseAuthFilesData(undefined, undefined, { websockets: false });
+    const file = new File(
+      [JSON.stringify({ type: 'codex', access_token: 'token' })],
+      'codex-account.json',
+      { type: 'application/json' }
+    );
+    mocks.uploadFiles.mockResolvedValueOnce({
+      status: 'ok',
+      uploaded: 1,
+      files: [file.name],
+      failed: [],
+    });
+    const target = {
+      files: [file] as unknown as FileList,
+      value: file.name,
+    };
+
+    await act(async () => {
+      await hook
+        .getCurrent()
+        .handleFileChange({ target } as unknown as Parameters<
+          ReturnType<typeof useAuthFilesData>['handleFileChange']
+        >[0]);
+    });
+
+    expect(mocks.uploadFiles).toHaveBeenCalledWith(expect.any(Array), { websockets: false });
+    hook.unmount();
+  });
+
   it('auto-converts an uploaded sub2api export before calling the backend upload API', async () => {
     const hook = mountUseAuthFilesData();
     const file = new File(

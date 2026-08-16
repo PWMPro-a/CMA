@@ -308,6 +308,12 @@ const { mocks } = vi.hoisted(() => {
       showNotification: vi.fn(),
       showConfirmation: vi.fn(),
       loadFiles: vi.fn(async () => undefined),
+      handleUploadClick: vi.fn(),
+      handleFileChange: vi.fn(async () => undefined),
+      lastAuthFilesDataOptions: null as null | {
+        importDefaults?: { websockets?: boolean };
+        connectionFingerprint?: string | null;
+      },
       toggleSelect: vi.fn(),
       selectAllVisible: vi.fn(),
       invertVisibleSelection: vi.fn(),
@@ -469,34 +475,40 @@ vi.mock('@/hooks/useUnsavedChangesGuard', () => ({
 }));
 
 vi.mock('@/features/authFiles/hooks/useAuthFilesData', () => ({
-  useAuthFilesData: () => ({
-    files: mocks.files,
-    selectedFiles: mocks.selectedFiles,
-    selectionCount: mocks.selectionCount,
-    loading: false,
-    error: '',
-    uploading: false,
-    authJsonPasteSaving: false,
-    deleting: null,
-    batchFieldsUpdating: mocks.batchFieldsUpdating,
-    fileInputRef: { current: null },
-    loadFiles: mocks.loadFiles,
-    handleUploadClick: vi.fn(),
-    handleFileChange: vi.fn(),
-    savePastedAuthJson: vi.fn(async () => 'saved.json'),
-    handleDelete: mocks.handleDelete,
-    handleDownload: mocks.handleDownload,
-    handleCredentialRefresh: mocks.handleCredentialRefresh,
-    credentialRefreshing: {},
-    toggleSelect: mocks.toggleSelect,
-    selectAllVisible: mocks.selectAllVisible,
-    invertVisibleSelection: mocks.invertVisibleSelection,
-    deselectAll: mocks.deselectAll,
-    batchDownload: mocks.batchDownload,
-    batchSetStatus: mocks.batchSetStatus,
-    batchPatchFields: mocks.batchPatchFields,
-    batchDelete: mocks.batchDelete,
-  }),
+  useAuthFilesData: (options: {
+    importDefaults?: { websockets?: boolean };
+    connectionFingerprint?: string | null;
+  }) => {
+    mocks.lastAuthFilesDataOptions = options;
+    return {
+      files: mocks.files,
+      selectedFiles: mocks.selectedFiles,
+      selectionCount: mocks.selectionCount,
+      loading: false,
+      error: '',
+      uploading: false,
+      authJsonPasteSaving: false,
+      deleting: null,
+      batchFieldsUpdating: mocks.batchFieldsUpdating,
+      fileInputRef: { current: null },
+      loadFiles: mocks.loadFiles,
+      handleUploadClick: mocks.handleUploadClick,
+      handleFileChange: mocks.handleFileChange,
+      savePastedAuthJson: vi.fn(async () => 'saved.json'),
+      handleDelete: mocks.handleDelete,
+      handleDownload: mocks.handleDownload,
+      handleCredentialRefresh: mocks.handleCredentialRefresh,
+      credentialRefreshing: {},
+      toggleSelect: mocks.toggleSelect,
+      selectAllVisible: mocks.selectAllVisible,
+      invertVisibleSelection: mocks.invertVisibleSelection,
+      deselectAll: mocks.deselectAll,
+      batchDownload: mocks.batchDownload,
+      batchSetStatus: mocks.batchSetStatus,
+      batchPatchFields: mocks.batchPatchFields,
+      batchDelete: mocks.batchDelete,
+    };
+  },
 }));
 
 vi.mock('@/features/authFiles/hooks/useAuthFilesOauth', () => ({
@@ -993,6 +1005,9 @@ describe('AccountsPage replacement flows', () => {
     mocks.navigate.mockClear();
     mocks.showNotification.mockClear();
     mocks.showConfirmation.mockClear();
+    mocks.handleUploadClick.mockClear();
+    mocks.handleFileChange.mockClear();
+    mocks.lastAuthFilesDataOptions = null;
     mocks.toggleSelect.mockClear();
     mocks.selectAllVisible.mockClear();
     mocks.invertVisibleSelection.mockClear();
@@ -1262,6 +1277,52 @@ describe('AccountsPage replacement flows', () => {
     mountedAccountsRenderers.add(renderer!);
 
     expect(mocks.loadFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the upload input mounted and persists the default WS import switch', async () => {
+    const windowEvents = new EventTarget();
+    const storage = new Map<string, string>();
+    storage.set('authFilesPage.importDefaults', JSON.stringify({ websockets: false }));
+    vi.stubGlobal('window', {
+      location: { hash: '' },
+      history: { state: null },
+      localStorage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value),
+        removeItem: (key: string) => storage.delete(key),
+        clear: () => storage.clear(),
+      },
+      addEventListener: windowEvents.addEventListener.bind(windowEvents),
+      removeEventListener: windowEvents.removeEventListener.bind(windowEvents),
+    });
+
+    const renderer = await renderAccountsPage();
+    const wsSwitch = findInputByAriaLabel(renderer, 'auth_files.import_default_websockets_label');
+
+    expect(wsSwitch.props.checked).toBe(false);
+    expect(mocks.lastAuthFilesDataOptions).toMatchObject({
+      importDefaults: { websockets: false },
+    });
+    expect(renderer.root.findByProps({ id: 'accounts-auth-file-upload-input' })).toBeTruthy();
+
+    act(() => {
+      wsSwitch.props.onChange({ target: { checked: true } });
+    });
+
+    expect(JSON.parse(storage.get('authFilesPage.importDefaults') ?? '{}')).toEqual({
+      websockets: true,
+    });
+    expect(
+      findInputByAriaLabel(renderer, 'auth_files.import_default_websockets_label').props.checked
+    ).toBe(true);
+    expect(mocks.lastAuthFilesDataOptions).toMatchObject({
+      importDefaults: { websockets: true },
+    });
+
+    act(() => {
+      findButtonByText(renderer, 'auth_files.upload_button').props.onClick();
+    });
+    expect(mocks.handleUploadClick).toHaveBeenCalledTimes(1);
   });
 
   it('initializes the active view from the accounts view query', async () => {

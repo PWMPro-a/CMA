@@ -69,6 +69,10 @@ import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
 import { getAuthFileIcon, readAuthFileWebsockets } from '@/features/authFiles/constants';
 import { useAuthFilesData } from '@/features/authFiles/hooks/useAuthFilesData';
+import {
+  readAuthFileImportDefaults,
+  writeAuthFileImportDefaults,
+} from '@/features/authFiles/importDefaults';
 import { useAuthFilesOauth } from '@/features/authFiles/hooks/useAuthFilesOauth';
 import { useAuthFilesModels } from '@/features/authFiles/hooks/useAuthFilesModels';
 import { useAuthFileConfigurationEditor } from '@/features/authFiles/hooks/useAuthFileConfigurationEditor';
@@ -537,6 +541,7 @@ export function AccountsPage() {
     () => createCodexInspectionConnectionFingerprint(apiBase, managementKey),
     [apiBase, managementKey]
   );
+  const [importDefaults, setImportDefaults] = useState(readAuthFileImportDefaults);
   const managerStorageAvailable =
     !featureAvailability.checking &&
     Boolean(featureAvailability.managerServiceBase) &&
@@ -576,7 +581,7 @@ export function AccountsPage() {
     batchSetStatus,
     batchPatchFields,
     batchDelete,
-  } = useAuthFilesData({ connectionFingerprint });
+  } = useAuthFilesData({ importDefaults, connectionFingerprint });
 
   const [oauthViewMode, setOauthViewMode] = useState<'diagram' | 'list'>('list');
   const [supplyLeaseExpiryByFile, setSupplyLeaseExpiryByFile] = useState<
@@ -1687,6 +1692,13 @@ export function AccountsPage() {
     return files.filter((file) => String(file.name ?? '').trim() === fileName).length;
   }, [files, selectedRow?.fileName]);
   const disableControls = connectionStatus !== 'connected';
+  const handleDefaultWebsocketsChange = useCallback((websockets: boolean) => {
+    setImportDefaults((current) => {
+      const next = { ...current, websockets };
+      writeAuthFileImportDefaults(next);
+      return next;
+    });
+  }, []);
   const handleConfigurationSaved = useCallback(() => {
     if (!selectedRow) return;
     invalidateModels(selectedRow.raw);
@@ -5266,6 +5278,17 @@ export function AccountsPage() {
 
   const renderPageActions = () => (
     <div className={styles.headerActions}>
+      <div className={styles.importDefaultsControl} title={t('auth_files.import_defaults_hint')}>
+        <IconSlidersHorizontal size={15} aria-hidden="true" />
+        <ToggleSwitch
+          checked={importDefaults.websockets}
+          onChange={handleDefaultWebsocketsChange}
+          disabled={disableControls || uploading || authJsonPasteSaving}
+          ariaLabel={t('auth_files.import_default_websockets_label')}
+          label={t('auth_files.import_default_websockets_label')}
+          labelPosition="left"
+        />
+      </div>
       <Button
         variant="secondary"
         size="sm"
@@ -5295,14 +5318,6 @@ export function AccountsPage() {
         {!uploading ? <IconPlus size={15} /> : null}
         {t('auth_files.upload_button')}
       </Button>
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".json,application/json"
-        multiple
-        hidden
-        onChange={(event) => void handleFileChange(event)}
-      />
     </div>
   );
 
@@ -5320,6 +5335,17 @@ export function AccountsPage() {
           {renderPageActions()}
         </div>
       </section>
+      <input
+        id="accounts-auth-file-upload-input"
+        ref={fileInputRef}
+        className={styles.fileInput}
+        type="file"
+        accept=".json,application/json"
+        multiple
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={(event) => void handleFileChange(event)}
+      />
       {activeView === 'accounts' ? (
         <section className={styles.controlsFilterPanel}>{renderToolbar()}</section>
       ) : null}
