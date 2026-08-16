@@ -11,19 +11,33 @@ RUN VERSION=$VERSION npm run build
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS service-build
 ARG TARGETOS
 ARG TARGETARCH
+ARG VERSION=dev
+ARG COMMIT=none
+ARG BUILD_DATE=unknown
 WORKDIR /src
 COPY apps/manager-server ./apps/manager-server
 COPY --from=web-build /app/apps/web/dist/index.html ./apps/manager-server/internal/httpapi/web/management.html
 WORKDIR /src/apps/manager-server
 RUN go mod download
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/cpa-manager-plus ./cmd/cpa-manager-plus
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/cpamp-agent ./cmd/cpamp-agent
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
+    -ldflags="-s -w -X 'github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=${VERSION}' -X 'github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Commit=${COMMIT}' -X 'github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.BuildDate=${BUILD_DATE}'" \
+    -o /out/cpa-manager-plus ./cmd/cpa-manager-plus
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
+    -ldflags="-s -w -X 'github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=${VERSION}' -X 'github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Commit=${COMMIT}' -X 'github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.BuildDate=${BUILD_DATE}'" \
+    -o /out/cpamp-agent ./cmd/cpamp-agent
 
 FROM alpine:3.21
+ARG VERSION=dev
+ARG COMMIT=none
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.version=$VERSION \
+      org.opencontainers.image.revision=$COMMIT \
+      org.opencontainers.image.created=$BUILD_DATE
 RUN apk add --no-cache ca-certificates iproute2 wget tzdata
 WORKDIR /app
 COPY --from=service-build /out/cpa-manager-plus /usr/local/bin/cpa-manager-plus
 COPY --from=service-build /out/cpamp-agent /usr/local/bin/cpamp-agent
+ENV VERSION=$VERSION
 ENV HTTP_ADDR=0.0.0.0:18317
 ENV USAGE_DATA_DIR=/data
 ENV USAGE_DB_PATH=/data/usage.sqlite

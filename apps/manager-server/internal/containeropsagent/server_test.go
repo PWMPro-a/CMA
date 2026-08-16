@@ -54,6 +54,15 @@ func TestServerRequiresBearerTokenForAgentInfo(t *testing.T) {
 	if health.Code != http.StatusOK {
 		t.Fatalf("health status = %d", health.Code)
 	}
+	var healthInfo struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(health.Body.Bytes(), &healthInfo); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	if healthInfo.Version != "test" {
+		t.Fatalf("health version = %q", healthInfo.Version)
+	}
 }
 
 func TestUpgradeJobRoutesRecreateCPAOnlyAndPersistJob(t *testing.T) {

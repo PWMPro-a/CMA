@@ -275,6 +275,7 @@
     "system_overview": "System Overview",
     "app_version": "Manager Version",
     "api_version": "Server Version",
+    "agent_version": "Agent Version",
     "build_time": "Build Time",
     "connection": "Connection",
     "version_update_available": "Update available {{version}}",

@@ -9,14 +9,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/containeropsagent"
 )
 
 func main() {
 	addr := env("CPAMP_AGENT_ADDR", "0.0.0.0:18417")
+	version := env("VERSION", buildinfo.Version)
+	log.Printf("cpamp-agent version=%s commit=%s builtAt=%s", version, buildinfo.Commit, buildinfo.BuildDate)
 	serverApp, err := containeropsagent.NewServer(containeropsagent.ServerOptions{
 		ServiceID:  "cpamp-agent",
-		Version:    env("VERSION", "dev"),
+		Version:    version,
 		DockerHost: env("DOCKER_HOST", "unix:///var/run/docker.sock"),
 		Token:      env("CPAMP_AGENT_TOKEN", ""),
 		StackRoot:  env("CPAMP_STACK_ROOT", "/opt/cpamp/stacks/cpa"),

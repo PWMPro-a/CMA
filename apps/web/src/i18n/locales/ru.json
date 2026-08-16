@@ -275,6 +275,7 @@
     "system_overview": "Обзор системы",
     "app_version": "Версия панели",
     "api_version": "Версия сервера",
+    "agent_version": "Версия Agent",
     "build_time": "Время сборки",
     "connection": "Подключение",
     "version_update_available": "Доступно обновление {{version}}",

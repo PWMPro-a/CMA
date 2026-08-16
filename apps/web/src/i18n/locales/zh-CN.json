@@ -275,6 +275,7 @@
     "system_overview": "系统概览",
     "app_version": "管理面板版本",
     "api_version": "服务端版本",
+    "agent_version": "Agent 版本",
     "build_time": "构建时间",
     "connection": "连接",
     "version_update_available": "有新版本 {{version}}",

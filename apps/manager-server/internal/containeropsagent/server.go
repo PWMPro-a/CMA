@@ -94,7 +94,11 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		response.MethodNotAllowed(w)
 		return
 	}
-	response.JSON(w, http.StatusOK, map[string]any{"ok": true, "service": s.serviceID})
+	response.JSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"service": s.serviceID,
+		"version": s.version,
+	})
 }
 
 func (s *Server) agentInfo(w http.ResponseWriter, r *http.Request) {

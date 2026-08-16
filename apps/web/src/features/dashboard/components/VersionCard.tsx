@@ -8,6 +8,7 @@ import { Modal } from '@/components/ui/Modal';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import {
   IconCheck,
+  IconBot,
   IconExternalLink,
   IconInfo,
   IconRefreshCw,
@@ -26,6 +27,7 @@ import styles from './VersionCard.module.scss';
 interface VersionCardProps {
   appVersion: string;
   apiVersion: string;
+  agentVersion: string;
   cpaBase: string;
   serverBuildDate?: string;
   connectionStatus: ConnectionStatus;
@@ -77,6 +79,7 @@ const renderBadge = (
 export function VersionCard({
   appVersion,
   apiVersion,
+  agentVersion,
   cpaBase,
   serverBuildDate,
   connectionStatus,
@@ -153,7 +156,8 @@ export function VersionCard({
 
     if (!config && connectionStatus === 'connected') {
       fetchConfig().catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+        const message =
+          error instanceof Error ? error.message : typeof error === 'string' ? error : '';
         showNotification(
           `${t('notification.update_failed')}${message ? `: ${message}` : ''}`,
           'error'
@@ -203,7 +207,8 @@ export function VersionCard({
       showNotification(t('notification.request_log_updated'), 'success');
       setRequestLogModalOpen(false);
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+      const message =
+        error instanceof Error ? error.message : typeof error === 'string' ? error : '';
       updateConfigValue('request-log', previous);
       showNotification(
         `${t('notification.update_failed')}${message ? `: ${message}` : ''}`,
@@ -241,7 +246,8 @@ export function VersionCard({
         showNotification(t('system_info.manager_version_is_latest'), 'success');
       }
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+      const message =
+        error instanceof Error ? error.message : typeof error === 'string' ? error : '';
       const suffix = message ? `: ${message}` : '';
       showNotification(`${t('system_info.manager_version_check_error')}${suffix}`, 'error');
     } finally {
@@ -268,12 +274,16 @@ export function VersionCard({
       }
 
       if (comparison > 0) {
-        showNotification(t('system_info.version_update_available', { version: latestApi }), 'warning');
+        showNotification(
+          t('system_info.version_update_available', { version: latestApi }),
+          'warning'
+        );
       } else {
         showNotification(t('system_info.version_is_latest'), 'success');
       }
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+      const message =
+        error instanceof Error ? error.message : typeof error === 'string' ? error : '';
       const suffix = message ? `: ${message}` : '';
       showNotification(`${t('system_info.version_check_error')}${suffix}`, 'error');
     } finally {
@@ -354,7 +364,8 @@ export function VersionCard({
           }
         : {
             label: t('dashboard.collector_status_title'),
-            value: collectorLoading && !collectorStatus ? '...' : t('dashboard.health_status_normal'),
+            value:
+              collectorLoading && !collectorStatus ? '...' : t('dashboard.health_status_normal'),
             tone: collectorLoading && !collectorStatus ? 'muted' : 'ok',
             icon: <IconCheck size={16} />,
           };
@@ -375,7 +386,9 @@ export function VersionCard({
         }
       : {
           label: t('dashboard.health_queue_status'),
-          value: collector?.queue || (collectorLoading && !collectorStatus ? '...' : t('dashboard.health_status_normal')),
+          value:
+            collector?.queue ||
+            (collectorLoading && !collectorStatus ? '...' : t('dashboard.health_status_normal')),
           tone: collectorLoading && !collectorStatus ? 'muted' : 'ok',
           icon: <IconCheck size={16} />,
         };
@@ -411,7 +424,9 @@ export function VersionCard({
               }
             }}
           >
-            <div className={styles.icon}><IconSettings size={18} /></div>
+            <div className={styles.icon}>
+              <IconSettings size={18} />
+            </div>
             <div className={styles.content}>
               <div className={styles.versionHeader}>
                 <div className={styles.label}>{t('dashboard.app_version')}</div>
@@ -435,13 +450,17 @@ export function VersionCard({
               </div>
               <div className={styles.valueWrap}>
                 <span className={styles.value}>{appVersion || t('dashboard.version_unknown')}</span>
-                {appBadge && <span className={`${styles.badge} ${appBadge.className}`}>{appBadge.label}</span>}
+                {appBadge && (
+                  <span className={`${styles.badge} ${appBadge.className}`}>{appBadge.label}</span>
+                )}
               </div>
             </div>
           </div>
 
           <div className={styles.item}>
-            <div className={styles.icon}><IconSatellite size={18} /></div>
+            <div className={styles.icon}>
+              <IconSatellite size={18} />
+            </div>
             <div className={styles.content}>
               <div className={styles.versionHeader}>
                 <div className={styles.label}>{t('dashboard.api_version')}</div>
@@ -461,13 +480,27 @@ export function VersionCard({
               </div>
               <div className={styles.valueWrap}>
                 <span className={styles.value}>{apiVersion || t('dashboard.version_unknown')}</span>
-                {apiBadge && <span className={`${styles.badge} ${apiBadge.className}`}>{apiBadge.label}</span>}
+                {apiBadge && (
+                  <span className={`${styles.badge} ${apiBadge.className}`}>{apiBadge.label}</span>
+                )}
               </div>
             </div>
           </div>
 
           <div className={styles.item}>
-            <div className={styles.icon}><IconTimer size={18} /></div>
+            <div className={styles.icon}>
+              <IconBot size={18} />
+            </div>
+            <div className={styles.content}>
+              <div className={styles.label}>{t('dashboard.agent_version')}</div>
+              <div className={styles.value}>{agentVersion || t('dashboard.version_unknown')}</div>
+            </div>
+          </div>
+
+          <div className={styles.item}>
+            <div className={styles.icon}>
+              <IconTimer size={18} />
+            </div>
             <div className={styles.content}>
               <div className={styles.label}>{t('dashboard.build_time')}</div>
               <div className={styles.value}>{buildTimeDisplay}</div>
@@ -475,7 +508,9 @@ export function VersionCard({
           </div>
 
           <div className={styles.item}>
-            <div className={styles.icon}><IconExternalLink size={18} /></div>
+            <div className={styles.icon}>
+              <IconExternalLink size={18} />
+            </div>
             <div className={styles.content}>
               <div className={styles.label}>{t('dashboard.cpa_base')}</div>
               <div className={styles.value}>{cpaBase || '-'}</div>
@@ -493,13 +528,19 @@ export function VersionCard({
                 <div className={`${styles.healthIcon} ${styles[item.tone]}`}>{item.icon}</div>
                 <div className={styles.content}>
                   <div className={styles.label}>{item.label}</div>
-                  <div className={`${styles.value} ${styles[`${item.tone}Text`]}`}>{item.value}</div>
+                  <div className={`${styles.value} ${styles[`${item.tone}Text`]}`}>
+                    {item.value}
+                  </div>
                 </div>
               </>
             );
 
             return item.to ? (
-              <Link key={item.label} to={item.to} className={`${styles.healthItem} ${styles.healthLink}`}>
+              <Link
+                key={item.label}
+                to={item.to}
+                className={`${styles.healthItem} ${styles.healthLink}`}
+              >
                 {content}
               </Link>
             ) : (

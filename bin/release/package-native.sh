@@ -3,6 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 version="${VERSION:-dev}"
+commit="${COMMIT:-$(git -C "${repo_root}" rev-parse --short HEAD 2>/dev/null || printf 'none')}"
+build_date="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 out_dir="${OUT_DIR:-"${repo_root}/dist/native"}"
 web_html="${WEB_HTML:-"${repo_root}/apps/web/dist/index.html"}"
 binary_name="cpa-manager-plus"
@@ -46,7 +48,9 @@ for target in "${targets[@]}"; do
   mkdir -p "${package_dir}"
   (
     cd "${work_dir}/manager-server"
-    CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath -ldflags "-s -w" -o "${package_dir}/${exe_name}" ./cmd/cpa-manager-plus
+    CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath \
+      -ldflags "-s -w -X 'github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=${version}' -X 'github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Commit=${commit}' -X 'github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.BuildDate=${build_date}'" \
+      -o "${package_dir}/${exe_name}" ./cmd/cpa-manager-plus
   )
 
   cp "${repo_root}/README.md" "${package_dir}/README.md"

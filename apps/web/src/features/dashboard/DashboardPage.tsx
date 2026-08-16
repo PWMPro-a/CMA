@@ -10,7 +10,7 @@ import {
   IconSettings,
 } from '@/components/ui/icons';
 import { useAuthStore, useConfigStore, useModelsStore } from '@/stores';
-import { apiKeysApi, providersApi, authFilesApi } from '@/services/api';
+import { apiKeysApi, providersApi, authFilesApi, containerOpsApi } from '@/services/api';
 import { logsApi, type ErrorLogFile } from '@/services/api/logs';
 import {
   usageServiceApi,
@@ -101,6 +101,7 @@ export function DashboardPage() {
   const [errorLogs, setErrorLogs] = useState<ErrorLogFile[]>([]);
   const [errorLogsLoading, setErrorLogsLoading] = useState(false);
   const [managerCpaBase, setManagerCpaBase] = useState('');
+  const [agentVersion, setAgentVersion] = useState('');
   const [displayMeta, setDisplayMeta] = useState<DashboardDisplayMeta>({
     authFiles: [],
     channels: [],
@@ -218,6 +219,19 @@ export function DashboardPage() {
     }
   }, [connectionStatus]);
 
+  const refreshAgentVersion = useCallback(async () => {
+    if (connectionStatus !== 'connected') {
+      setAgentVersion('');
+      return;
+    }
+    try {
+      const agent = await containerOpsApi.agent();
+      setAgentVersion(agent.version?.trim() || '');
+    } catch {
+      setAgentVersion('');
+    }
+  }, [connectionStatus]);
+
   const usageEnabled = usageSummary.enabled;
   const usageServiceBase = usageSummary.serviceBase;
   const authMetaMap = useMemo(
@@ -318,12 +332,18 @@ export function DashboardPage() {
   const refreshDashboard = useCallback(async () => {
     setCurrentTime(new Date());
     setCardRefreshSignal((value) => value + 1);
-    await Promise.all([refreshStats(), fetchModels(), refreshUsageSummary(), refreshHealth()]);
-  }, [fetchModels, refreshHealth, refreshStats, refreshUsageSummary]);
+    await Promise.all([
+      refreshStats(),
+      fetchModels(),
+      refreshUsageSummary(),
+      refreshHealth(),
+      refreshAgentVersion(),
+    ]);
+  }, [fetchModels, refreshAgentVersion, refreshHealth, refreshStats, refreshUsageSummary]);
 
   useEffect(() => {
-    void Promise.all([refreshStats(), fetchModels()]);
-  }, [fetchModels, refreshStats]);
+    void Promise.all([refreshStats(), fetchModels(), refreshAgentVersion()]);
+  }, [fetchModels, refreshAgentVersion, refreshStats]);
 
   useEffect(() => {
     void refreshHealth();
@@ -493,6 +513,7 @@ export function DashboardPage() {
         <VersionCard
           appVersion={__APP_VERSION__ || t('dashboard.version_unknown')}
           apiVersion={serverVersion || t('dashboard.version_unknown')}
+          agentVersion={agentVersion || t('dashboard.version_unknown')}
           cpaBase={managerCpaBase || apiBase || ''}
           serverBuildDate={serverBuildDate || undefined}
           connectionStatus={connectionStatus}

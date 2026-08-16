@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/app"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
 )
@@ -59,6 +60,9 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 	}
 	payload := map[string]any{
 		"service":     h.App.ServiceID,
+		"version":     buildinfo.Version,
+		"commit":      buildinfo.Commit,
+		"buildDate":   buildinfo.BuildDate,
 		"dbPath":      h.App.Config.DBPath,
 		"events":      events,
 		"deadLetters": deadLetters,

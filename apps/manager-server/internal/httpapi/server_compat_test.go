@@ -72,11 +72,14 @@ func TestServerCompatHealthInfoAndPanel(t *testing.T) {
 	healthRR := testutil.Request(t, handler, http.MethodGet, "/health", "", "")
 	testutil.RequireStatus(t, healthRR, http.StatusOK)
 	var health struct {
-		OK      bool   `json:"ok"`
-		Service string `json:"service"`
+		OK        bool   `json:"ok"`
+		Service   string `json:"service"`
+		Version   string `json:"version"`
+		Commit    string `json:"commit"`
+		BuildDate string `json:"buildDate"`
 	}
 	testutil.DecodeJSON(t, healthRR, &health)
-	if !health.OK || health.Service == "" {
+	if !health.OK || health.Service == "" || health.Version == "" || health.Commit == "" || health.BuildDate == "" {
 		t.Fatalf("health response = %#v", health)
 	}
 

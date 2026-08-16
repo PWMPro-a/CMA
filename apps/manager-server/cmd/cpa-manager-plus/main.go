@@ -16,6 +16,7 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/adminreset"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
@@ -29,6 +30,7 @@ import (
 )
 
 func main() {
+	log.Printf("CPA Manager Plus version=%s commit=%s builtAt=%s", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "reset-admin-key", "reset-admin-password":

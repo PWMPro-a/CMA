@@ -3,6 +3,7 @@ package health
 import (
 	"net/http"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
 )
 
@@ -15,5 +16,11 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 		response.MethodNotAllowed(w)
 		return
 	}
-	response.JSON(w, http.StatusOK, map[string]any{"ok": true, "service": h.ServiceID})
+	response.JSON(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"service":   h.ServiceID,
+		"version":   buildinfo.Version,
+		"commit":    buildinfo.Commit,
+		"buildDate": buildinfo.BuildDate,
+	})
 }
