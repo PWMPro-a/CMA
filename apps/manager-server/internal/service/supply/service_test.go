@@ -4480,6 +4480,65 @@ func TestTerminalCPAAuthLifecycleErrorOnlyMatchesPermanentCredentialFailure(t *t
 	if err := terminalCPAAuthLifecycleError(recoverable); err != nil {
 		t.Fatalf("recoverable lifecycle error = %v", err)
 	}
+
+	quotaExhausted := cpaauthfiles.File{Name: "account.json", Raw: map[string]any{
+		"status":         "initialization_failed",
+		"status_message": "initialization failed; retrying: usage endpoint returned 402",
+	}}
+	if err := terminalCPAAuthLifecycleError(quotaExhausted); err == nil || !strings.Contains(err.Error(), "returned 402") {
+		t.Fatalf("quota-exhausted lifecycle error = %v", err)
+	}
+}
+
+func TestRecoveryImportSettlesTerminalQuotaFailure(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "recovery-terminal.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	now := time.Now()
+	const orderID = "recovery-terminal-quota"
+	order := store.SupplyOrder{
+		OrderID: orderID, Product: "oauth_30d", RequestedQuantity: 1, Automatic: true,
+		Strategy: "recovery", Status: "recovery_partial", RemoteStatus: "recovery_claimed", ItemCount: 1,
+	}
+	if _, err := st.CreateSupplyOrder(ctx, order); err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	if _, err := st.InsertSupplyImportItems(ctx, orderID, []store.SupplyImportItem{{
+		OrderID: orderID, ItemKey: "terminal-quota", AccountName: "quota@example.com",
+		FileName: "codex-quota@example.com-space-test.json", PayloadJSON: `{"type":"codex"}`,
+	}}); err != nil {
+		t.Fatalf("insert item: %v", err)
+	}
+	items, err := st.ListSupplyImportItemsByOrderIDs(ctx, []string{orderID})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("list items=%#v err=%v", items, err)
+	}
+	if err := st.MarkSupplyImportItemFailed(ctx, items[0].ID, "initialization failed; retrying: usage endpoint returned 402", now.Add(time.Hour).UnixMilli()); err != nil {
+		t.Fatalf("mark item failed: %v", err)
+	}
+	recovery := store.SupplyRecovery{
+		RecoveryID: "terminal-quota", DeliveryStatus: "claimed", Status: "partial",
+		ClaimOrderID: orderID, ItemCount: 1, LastSeenAtMS: now.UnixMilli(),
+	}
+	if _, err := st.UpsertSupplyRecoveries(ctx, []store.SupplyRecovery{recovery}); err != nil {
+		t.Fatalf("upsert recovery: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), nil)
+	imported, failed, err := service.processRecoveryImport(ctx, store.ManagerConfig{}, recovery)
+	if err != nil || imported || !failed {
+		t.Fatalf("process recovery imported=%v failed=%v err=%v", imported, failed, err)
+	}
+	settledRecovery, found, err := st.GetSupplyRecovery(ctx, recovery.RecoveryID)
+	if err != nil || !found || settledRecovery.Status != "failed" || !strings.Contains(settledRecovery.LastError, "returned 402") {
+		t.Fatalf("settled recovery=%#v found=%v err=%v", settledRecovery, found, err)
+	}
+	settledOrder, found, err := st.GetSupplyOrder(ctx, orderID)
+	if err != nil || !found || settledOrder.Status != "failed" || settledOrder.CompletedAtMS <= 0 {
+		t.Fatalf("settled order=%#v found=%v err=%v", settledOrder, found, err)
+	}
 }
 
 func TestAutomaticWaitingOrderRemainsTrackedWhenCPATargetIsAlreadySatisfied(t *testing.T) {
@@ -5015,6 +5074,34 @@ func TestImportPendingFindsLegacyClaimWithPersistedLocalTask(t *testing.T) {
 	pending, err := st.ListImportPendingSupplyRecoveries(context.Background(), 10)
 	if err != nil || len(pending) != 1 || pending[0].RecoveryID != "legacy-link" {
 		t.Fatalf("legacy pending=%#v err=%v", pending, err)
+	}
+}
+
+func TestRecoverySyncPreservesLocallySettledFailure(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "recovery-failed-sync.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	now := time.Now().UnixMilli()
+	if _, err := st.UpsertSupplyRecoveries(ctx, []store.SupplyRecovery{{
+		RecoveryID: "failed-sync", DeliveryStatus: "claimed", Status: "partial",
+		ClaimOrderID: "recovery-failed-sync", ItemCount: 1, LastSeenAtMS: now,
+	}}); err != nil {
+		t.Fatalf("insert recovery: %v", err)
+	}
+	if err := st.MarkSupplyRecoveryFailed(ctx, "failed-sync", "usage endpoint returned 402"); err != nil {
+		t.Fatalf("mark recovery failed: %v", err)
+	}
+	if _, err := st.UpsertSupplyRecoveries(ctx, []store.SupplyRecovery{{
+		RecoveryID: "failed-sync", DeliveryStatus: "claimed", Status: "claimed", LastSeenAtMS: now + 1,
+	}}); err != nil {
+		t.Fatalf("sync remote recovery: %v", err)
+	}
+	recovery, found, err := st.GetSupplyRecovery(ctx, "failed-sync")
+	if err != nil || !found || recovery.Status != "failed" {
+		t.Fatalf("recovery=%#v found=%v err=%v", recovery, found, err)
 	}
 }
 

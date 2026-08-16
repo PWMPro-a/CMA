@@ -202,7 +202,7 @@ func TestNormalizeSupplyConfigAppliesSupplyStrategyPresets(t *testing.T) {
 	}{
 		{SupplyStrategyStrongSupply, 2, 10, 5, 60, 30, 120},
 		{SupplyStrategyBalanced, 1, 5, 3, 30, 40, 150},
-		{SupplyStrategyCostFirst, 0, 2, 1, 15, 50, 180},
+		{SupplyStrategyCostFirst, 2, 3, 1, 15, 50, 180},
 	}
 	for _, test := range tests {
 		t.Run(test.strategy, func(t *testing.T) {

@@ -805,6 +805,7 @@ func TestSmartQuantityEstimateCapsAutomaticOrderByAccountDeficit(t *testing.T) {
 		AccountMaxUsefulSeconds401:  150,
 	}
 	resource := SmartResource{
+		TotalAccounts:       80,
 		AvailableAccounts:   3,
 		TargetCapacityRCU:   280,
 		CapacityGapRCU:      280,
@@ -1587,7 +1588,7 @@ func TestGetStatusRecomputesDemandWhenTrafficStops(t *testing.T) {
 		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
 		Supply: store.ManagerSupplyConfig{
 			Enabled: &automaticEnabled, SmartEnabled: &smartEnabled, Product: "oauth_7d",
-			Strategy: managerconfigsvc.SupplyStrategyCostFirst, HealthyAvailableAccounts: 2,
+			Strategy: managerconfigsvc.SupplyStrategyCustom, HealthyAvailableAccounts: 2,
 		},
 	}); err != nil {
 		t.Fatalf("save config: %v", err)

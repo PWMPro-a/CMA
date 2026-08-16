@@ -5188,6 +5188,21 @@ func (s *Service) processRecoveryImport(ctx context.Context, cfg store.ManagerCo
 		}
 		return true, false, nil
 	}
+	if settled, settlementError, settleErr := s.recoveryImportFailuresSettled(ctx, cfg, order, time.Now()); settleErr != nil {
+		return false, true, settleErr
+	} else if settled {
+		order.Status = "failed"
+		order.CompletedAtMS = time.Now().UnixMilli()
+		order.NextPollAtMS = 0
+		order.LastError = settlementError
+		if updateErr := s.store.UpdateSupplyOrder(ctx, order); updateErr != nil {
+			return false, true, updateErr
+		}
+		if markErr := s.store.MarkSupplyRecoveryFailed(ctx, recovery.RecoveryID, settlementError); markErr != nil {
+			return false, true, markErr
+		}
+		return false, true, nil
+	}
 	message := ""
 	if err != nil {
 		message = safeError(err)
@@ -5199,6 +5214,48 @@ func (s *Service) processRecoveryImport(ctx context.Context, cfg store.ManagerCo
 		return false, true, err
 	}
 	return false, false, nil
+}
+
+// recoveryImportFailuresSettled closes a consumed recovery ticket once every
+// remaining replacement credential has reached a terminal lifecycle failure.
+// Without this gate, quota-exhausted replacement accounts are uploaded and
+// initialized forever, keeping the recovery worker busy and repeatedly
+// disturbing the live account snapshot.
+func (s *Service) recoveryImportFailuresSettled(ctx context.Context, cfg store.ManagerConfig, order store.SupplyOrder, now time.Time) (bool, string, error) {
+	if s == nil || s.store == nil || !strings.HasPrefix(order.OrderID, "recovery-") {
+		return false, "", nil
+	}
+	items, err := s.store.ListSupplyImportItemsByOrderIDs(ctx, []string{order.OrderID})
+	if err != nil {
+		return false, "", err
+	}
+	terminalFailures := 0
+	lastError := ""
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item.Status), "imported") {
+			continue
+		}
+		if !terminalSupplyImportItem(item, now) {
+			return false, "", nil
+		}
+		terminalFailures++
+		if strings.TrimSpace(item.LastError) != "" {
+			lastError = strings.TrimSpace(item.LastError)
+		}
+		if strings.TrimSpace(cfg.CPAConnection.CPABaseURL) != "" && strings.TrimSpace(cfg.CPAConnection.ManagementKey) != "" && safeSupplyAuthFileName(item.FileName) {
+			if disableErr := s.authFiles.PatchDisabled(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, item.FileName, true, ""); disableErr != nil && !errors.Is(disableErr, cpaauthfiles.ErrAuthFileNotFound) {
+				return false, "", fmt.Errorf("disable terminal recovery auth file %q: %w", item.FileName, disableErr)
+			}
+		}
+	}
+	if terminalFailures == 0 {
+		return false, "", nil
+	}
+	message := fmt.Sprintf("recovery delivery settled with %d unusable account(s)", terminalFailures)
+	if lastError != "" {
+		message += ": " + lastError
+	}
+	return true, message, nil
 }
 
 func (s *Service) disableRecoveredOriginal(ctx context.Context, cfg store.ManagerConfig, recovery store.SupplyRecovery) error {
@@ -8447,6 +8504,8 @@ func permanentCPAAuthLifecycleFailure(value string) bool {
 		"oauth token was revoked",
 		"token was revoked or invalidated",
 		"workspace is deactivated",
+		"usage endpoint returned 402",
+		"quota endpoint returned 402",
 	} {
 		if strings.Contains(value, marker) {
 			return true

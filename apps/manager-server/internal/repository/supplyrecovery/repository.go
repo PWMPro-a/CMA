@@ -96,7 +96,7 @@ func (r *repository) UpsertMany(ctx context.Context, recoveries []model.SupplyRe
 			end,
 			status = case
 				when excluded.status = 'refunded' then 'refunded'
-				when supply_recoveries.status in ('imported','importing','partial') then supply_recoveries.status
+				when supply_recoveries.status in ('imported','importing','partial','failed') then supply_recoveries.status
 				when excluded.status = 'claimable' then 'claimable'
 				else excluded.status
 			end,
