@@ -3300,6 +3300,91 @@ func TestSmartPurchaseTimingUsesDemandAndLeadToStageQuantity(t *testing.T) {
 	}
 }
 
+func TestSmartPurchaseTimingReliableSupplyLowersEntryLineAndFollowsConsumption(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		ReplenishBatchSize:   10,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   10,
+		PollIntervalSeconds:  3,
+		HealthyMinutesTarget: 55,
+		WarningMinutes:       40,
+		CriticalMinutes:      25,
+	}
+	pressure := smartSupplyPressure{
+		level:                       smartSupplyPressurePlenty,
+		reliablyAvailable:           true,
+		shortWindowOrders:           3,
+		recentSuccessStreak:         3,
+		shortWindowFulfillmentRate:  100,
+		shortWindowAvgFulfillSecond: 5,
+	}
+	resource := SmartResource{
+		HealthLevel:                    smartHealthWarning,
+		DemandTrend:                    smartDemandTrendStable,
+		EffectiveHealthyMinutes:        55,
+		WarningMinutes:                 40,
+		CriticalMinutes:                25,
+		EstimatedSustainMinutes:        40,
+		CurrentCapacityRCU:             4_000,
+		CapacityGapRCU:                 1_500,
+		ConsumeRCUPerMinute:            100,
+		DemandPlanningRCUPerMinute:     100,
+		TokenCapacityMode:              smartTokenCapacityMode,
+		EstimatedNewAccountCapacityRCU: 1_000,
+	}
+	quantity, reason, timing := smartPrelockQuantityForSupplyPressureWithTiming(cfg, resource, pressure, 4)
+	if quantity != 0 || reason != "purchase_timing_wait" || timing.triggerMinutes != 32 ||
+		timing.waitMinutes != 8 || timing.eligibleQuantity != 0 {
+		t.Fatalf("reliable supply entered too early: quantity=%d reason=%q timing=%#v", quantity, reason, timing)
+	}
+
+	resource.EstimatedSustainMinutes = 32
+	resource.CurrentCapacityRCU = 3_200
+	quantity, reason, timing = smartPrelockQuantityForSupplyPressureWithTiming(cfg, resource, pressure, 4)
+	if quantity != 1 || reason != "low_water_staged_batch" || timing.eligibleQuantity != 1 {
+		t.Fatalf("reliable supply one-step purchase = %d/%q %#v, want 1", quantity, reason, timing)
+	}
+
+	resource.ConsumeRCUPerMinute = 200
+	resource.DemandPlanningRCUPerMinute = 200
+	resource.CurrentCapacityRCU = 6_400
+	quantity, reason, timing = smartPrelockQuantityForSupplyPressureWithTiming(cfg, resource, pressure, 4)
+	if quantity != 2 || reason != "low_water_staged_batch" || timing.eligibleQuantity != 2 {
+		t.Fatalf("doubled consumption purchase = %d/%q %#v, want 2", quantity, reason, timing)
+	}
+}
+
+func TestSmartPurchaseTimingPlentySupplyStagesOneAtWarning(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		ReplenishBatchSize: 10,
+		PrelockMinQuantity: 1,
+		PrelockMaxQuantity: 10,
+		WarningMinutes:     40,
+		CriticalMinutes:    25,
+	}
+	resource := SmartResource{
+		HealthLevel:                    smartHealthWarning,
+		EffectiveHealthyMinutes:        55,
+		WarningMinutes:                 40,
+		CriticalMinutes:                25,
+		EstimatedSustainMinutes:        40,
+		CurrentCapacityRCU:             4_000,
+		CapacityGapRCU:                 1_500,
+		ConsumeRCUPerMinute:            100,
+		DemandPlanningRCUPerMinute:     100,
+		EstimatedNewAccountCapacityRCU: 1_000,
+	}
+	quantity, reason, timing := smartPrelockQuantityForSupplyPressureWithTiming(
+		cfg,
+		resource,
+		smartSupplyPressure{level: smartSupplyPressurePlenty},
+		4,
+	)
+	if quantity != 1 || reason != "low_water_staged_batch" || timing.eligibleQuantity != 1 {
+		t.Fatalf("plenty warning purchase = %d/%q %#v, want one staged account", quantity, reason, timing)
+	}
+}
+
 func TestSmartPurchaseTimingDoesNotDelayLowWaterRefill(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{ReplenishBatchSize: 10, PrelockMinQuantity: 1, PrelockMaxQuantity: 10}
 	resource := SmartResource{

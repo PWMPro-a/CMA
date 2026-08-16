@@ -389,6 +389,7 @@ export interface SupplyQuotaPlanEstimate {
   requiredRounds?: number;
   validationState?: 'fixed' | 'insufficient' | 'confirming' | 'quarantined' | 'accepted' | string;
   usingFallback?: boolean;
+  rejectedAccounts?: number;
   orderingBlocked?: boolean;
   lastInspectionRunId?: number;
   quotaClasses?: SupplyQuotaClassEstimate[];

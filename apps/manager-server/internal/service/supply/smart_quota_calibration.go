@@ -842,6 +842,16 @@ func (s *Service) smartQuotaEstimateForAt(now time.Time, planType string, identi
 }
 
 func (s *Service) smartQuotaEstimateForSupplierAt(now time.Time, supplierID string, planType string, identities ...string) smartQuotaEstimate {
+	return s.smartQuotaEstimateForSupplierAtWithMinimum(now, supplierID, planType, 0, identities...)
+}
+
+func (s *Service) smartQuotaEstimateForSupplierAtWithMinimum(
+	now time.Time,
+	supplierID string,
+	planType string,
+	minimumCapacityM float64,
+	identities ...string,
+) smartQuotaEstimate {
 	if s == nil {
 		return defaultSmartQuotaEstimate()
 	}
@@ -859,17 +869,20 @@ func (s *Service) smartQuotaEstimateForSupplierAt(now time.Time, supplierID stri
 	s.smartMu.RLock()
 	samples := make([]smartQuotaCalibrationSample, 0, len(s.smartQuotaState.samples)+len(s.smartQuotaState.directSamples)+len(s.smartQuotaState.provisionalSamples))
 	for _, sample := range s.smartQuotaState.samples {
-		if sample.observedMS >= cutoff && (supplierID == "" || sample.supplierID == supplierID) {
+		if sample.observedMS >= cutoff && sample.capacityM >= minimumCapacityM &&
+			(supplierID == "" || sample.supplierID == supplierID) {
 			samples = append(samples, sample)
 		}
 	}
 	for _, sample := range s.smartQuotaState.directSamples {
-		if sample.observedMS >= cutoff && (supplierID == "" || sample.supplierID == supplierID) {
+		if sample.observedMS >= cutoff && sample.capacityM >= minimumCapacityM &&
+			(supplierID == "" || sample.supplierID == supplierID) {
 			samples = append(samples, sample)
 		}
 	}
 	for _, sample := range s.smartQuotaState.provisionalSamples {
-		if sample.observedMS >= cutoff && (supplierID == "" || sample.supplierID == supplierID) {
+		if sample.observedMS >= cutoff && sample.capacityM >= minimumCapacityM &&
+			(supplierID == "" || sample.supplierID == supplierID) {
 			samples = append(samples, sample)
 		}
 	}
@@ -1345,6 +1358,14 @@ func smartQuotaRelativeDifference(left, right float64) float64 {
 	return math.Abs(left-right) / right
 }
 
+func smartQuotaEstimateAccountCount(estimate smartQuotaEstimate) int {
+	classAccounts := 0
+	for _, quotaClass := range estimate.QuotaClasses {
+		classAccounts += max(0, quotaClass.AccountCount)
+	}
+	return max(estimate.UniqueAccounts, classAccounts)
+}
+
 func (s *Service) smartQuotaPlanEstimatesForInspection(
 	cfg store.ManagerSupplyConfig,
 	results []store.CodexInspectionResult,
@@ -1464,25 +1485,6 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 		context := contexts[key]
 		planType := context.planType
 		policy := smartQuotaPolicyForSupplier(cfg, context.supplierID, planType)
-		observed := s.smartQuotaEstimateForSupplierAt(now, context.supplierID, planType, context.identities...)
-		// Historical samples for a configured type remain useful once that type
-		// appears again, but a type with zero current accounts must not raise a
-		// calibration warning or influence this pool's ordering decision.
-		hasObservedData := context.accounts > 0 && smartQuotaEstimateHasValidData(observed)
-		hasData := context.accounts > 0 && smartQuotaEstimateHasTrustedPlanData(observed)
-		observedM := 0.0
-		if hasObservedData {
-			observedM = observed.CapacityM
-		}
-		planningObserved := observed
-		if !hasData {
-			planningObserved = smartQuotaEstimate{
-				CapacityM:  policy.FallbackM,
-				Source:     smartQuotaEstimateSourceDefault,
-				Confidence: smartConfidenceLow,
-			}
-		}
-
 		state := s.quotaPolicyState[key]
 		if state.mode != policy.Mode || state.adoptedM <= 0 {
 			state = smartQuotaPlanAdoptionState{
@@ -1490,6 +1492,46 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 				adoptedM:        policy.FallbackM,
 				requiredRounds:  smartQuotaPolicyRequiredRounds,
 				validationState: smartQuotaValidationInsufficient,
+			}
+		}
+
+		rawObserved := s.smartQuotaEstimateForSupplierAt(now, context.supplierID, planType, context.identities...)
+		// Historical samples for a configured type remain useful once that type
+		// appears again, but a type with zero current accounts must not raise a
+		// calibration warning or influence this pool's ordering decision.
+		rawHasObservedData := context.accounts > 0 && smartQuotaEstimateHasValidData(rawObserved)
+		candidateObserved := rawObserved
+		hasData := context.accounts > 0 && smartQuotaEstimateHasTrustedPlanData(candidateObserved)
+		filteredObserved := rawObserved
+		filteredTrusted := false
+		rejectedAccounts := 0
+		if policy.Mode == smartQuotaPolicyModeAuto && context.accounts > 0 && state.adoptedM > 0 {
+			minimumAcceptedM := state.adoptedM * (1 - smartQuotaPolicyExtremeDivergence)
+			filteredObserved = s.smartQuotaEstimateForSupplierAtWithMinimum(
+				now,
+				context.supplierID,
+				planType,
+				minimumAcceptedM,
+				context.identities...,
+			)
+			rejectedAccounts = max(0,
+				smartQuotaEstimateAccountCount(rawObserved)-smartQuotaEstimateAccountCount(filteredObserved),
+			)
+			filteredTrusted = rejectedAccounts > 0 && smartQuotaEstimateHasTrustedPlanData(filteredObserved)
+			if filteredTrusted {
+				// When enough normal-range accounts remain, completely remove the
+				// abnormal low cluster before adoption as well as presentation. Old
+				// failures can no longer drag an otherwise healthy estimate down.
+				candidateObserved = filteredObserved
+				hasData = true
+			}
+		}
+		planningObserved := candidateObserved
+		if !hasData {
+			planningObserved = smartQuotaEstimate{
+				CapacityM:  policy.FallbackM,
+				Source:     smartQuotaEstimateSourceDefault,
+				Confidence: smartConfidenceLow,
 			}
 		}
 		if policy.Mode == smartQuotaPolicyModeFixed {
@@ -1511,12 +1553,23 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 			state.validationState = smartQuotaValidationInsufficient
 			state.lastInspectionRunID = runID
 		} else if !hasData {
-			state.candidateM = observedM
-			state.lastObservedM = observedM
+			validationObservedM := 0.0
+			if rawHasObservedData {
+				validationObservedM = rawObserved.CapacityM
+			}
+			difference := smartQuotaRelativeDifference(validationObservedM, state.adoptedM)
+			extremeDownward := validationObservedM > 0 && validationObservedM < state.adoptedM &&
+				difference > smartQuotaPolicyExtremeDivergence
+			state.candidateM = validationObservedM
+			state.lastObservedM = validationObservedM
 			state.confirmationRounds = 0
-			state.requiredRounds = smartQuotaPolicyRequiredRounds
-			state.pending = false
-			state.validationState = smartQuotaValidationInsufficient
+			state.requiredRounds = smartQuotaPolicyRoundsForDifference(difference)
+			state.pending = extremeDownward
+			if extremeDownward {
+				state.validationState = smartQuotaValidationQuarantined
+			} else {
+				state.validationState = smartQuotaValidationInsufficient
+			}
 			state.lastInspectionRunID = runID
 		} else {
 			newInspection := (runID > 0 && runID != state.lastInspectionRunID) ||
@@ -1556,14 +1609,30 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 			}
 		}
 		s.quotaPolicyState[key] = state
+		validationObserved := candidateObserved
+		if !hasData {
+			validationObserved = rawObserved
+		}
+		publishedObserved := rawObserved
+		publishedRejectedAccounts := 0
+		if filteredTrusted || (rejectedAccounts > 0 && state.validationState == smartQuotaValidationQuarantined) {
+			publishedObserved = filteredObserved
+			publishedRejectedAccounts = rejectedAccounts
+		}
+		hasPublishedObservedData := context.accounts > 0 && smartQuotaEstimateHasValidData(publishedObserved)
+		publishedObservedM := 0.0
+		if hasPublishedObservedData {
+			publishedObservedM = publishedObserved.CapacityM
+		}
 
 		// A downward observation under confirmation is not reliable enough to size
 		// purchases. Keep collecting evidence, but plan every account in this
 		// supplier/plan context from the configured no-data fallback until the
 		// candidate is accepted. This keeps the warning visible without stranding
 		// the pool behind a calibration-only ordering gate.
-		usingFallback := policy.Mode == smartQuotaPolicyModeAuto && hasData && state.pending &&
-			context.accounts > 0 && planningObserved.CapacityM < state.adoptedM &&
+		usingFallback := policy.Mode == smartQuotaPolicyModeAuto && state.pending &&
+			context.accounts > 0 && smartQuotaEstimateHasValidData(validationObserved) &&
+			validationObserved.CapacityM < state.adoptedM &&
 			(state.validationState == smartQuotaValidationConfirming ||
 				state.validationState == smartQuotaValidationQuarantined)
 		effectiveAdoptedM := state.adoptedM
@@ -1571,13 +1640,13 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 			effectiveAdoptedM = policy.FallbackM
 		}
 		divergence := 0.0
-		if hasObservedData {
-			divergence = smartQuotaRelativeDifference(observedM, state.adoptedM) * 100
+		if context.accounts > 0 && smartQuotaEstimateHasValidData(validationObserved) {
+			divergence = smartQuotaRelativeDifference(validationObserved.CapacityM, state.adoptedM) * 100
 		}
-		source := observed.Source
-		sampleCount := observed.SampleCount
-		uniqueAccounts := observed.UniqueAccounts
-		completeWindowAccounts := observed.CompleteWindowAccounts
+		source := publishedObserved.Source
+		sampleCount := publishedObserved.SampleCount
+		uniqueAccounts := publishedObserved.UniqueAccounts
+		completeWindowAccounts := publishedObserved.CompleteWindowAccounts
 		if context.accounts == 0 {
 			source = smartQuotaEstimateSourceDefault
 			sampleCount = 0
@@ -1596,7 +1665,7 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 			AccountCount:           context.accounts,
 			FallbackM:              round2(policy.FallbackM),
 			FixedM:                 round2(policy.FixedM),
-			ObservedM:              round2(observedM),
+			ObservedM:              round2(publishedObservedM),
 			AdoptedM:               round2(effectiveAdoptedM),
 			Source:                 source,
 			SampleCount:            sampleCount,
@@ -1609,9 +1678,10 @@ func (s *Service) smartQuotaPlanEstimatesForInspection(
 			RequiredRounds:         state.requiredRounds,
 			ValidationState:        state.validationState,
 			UsingFallback:          usingFallback,
+			RejectedAccounts:       publishedRejectedAccounts,
 			OrderingBlocked:        false,
 			LastInspectionRunID:    state.lastInspectionRunID,
-			QuotaClasses:           observed.QuotaClasses,
+			QuotaClasses:           publishedObserved.QuotaClasses,
 		})
 		planningSource := source
 		if policy.Mode == smartQuotaPolicyModeAuto && !hasData {

@@ -200,6 +200,10 @@ type SmartResource struct {
 	SupplyRecentRequestedQuantity   int     `json:"supplyRecentRequestedQuantity,omitempty"`
 	SupplyRecentDeliveredQuantity   int     `json:"supplyRecentDeliveredQuantity,omitempty"`
 	SupplyFulfillmentRate           float64 `json:"supplyFulfillmentRate,omitempty"`
+	SupplyReliable                  bool    `json:"supplyReliable,omitempty"`
+	SupplyRecentSuccessStreak       int     `json:"supplyRecentSuccessStreak,omitempty"`
+	SupplyShortWindowOrders         int     `json:"supplyShortWindowOrders,omitempty"`
+	SupplyShortWindowFulfillment    float64 `json:"supplyShortWindowFulfillmentRate,omitempty"`
 	PurchaseLeadMinutes             float64 `json:"purchaseLeadMinutes,omitempty"`
 	PurchaseTimingTriggerMinutes    float64 `json:"purchaseTimingTriggerMinutes,omitempty"`
 	PurchaseTimingWaitMinutes       float64 `json:"purchaseTimingWaitMinutes,omitempty"`
@@ -296,6 +300,7 @@ type SmartQuotaPlanEstimate struct {
 	RequiredRounds         int                       `json:"requiredRounds,omitempty"`
 	ValidationState        string                    `json:"validationState,omitempty"`
 	UsingFallback          bool                      `json:"usingFallback,omitempty"`
+	RejectedAccounts       int                       `json:"rejectedAccounts,omitempty"`
 	OrderingBlocked        bool                      `json:"orderingBlocked,omitempty"`
 	LastInspectionRunID    int64                     `json:"lastInspectionRunId,omitempty"`
 	QuotaClasses           []SmartQuotaClassEstimate `json:"quotaClasses,omitempty"`

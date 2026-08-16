@@ -6455,6 +6455,10 @@ func preserveSmartResourceRuntimeState(resource *SmartResource, previous SmartRe
 		resource.SupplyRecentRequestedQuantity = previous.SupplyRecentRequestedQuantity
 		resource.SupplyRecentDeliveredQuantity = previous.SupplyRecentDeliveredQuantity
 		resource.SupplyFulfillmentRate = previous.SupplyFulfillmentRate
+		resource.SupplyReliable = previous.SupplyReliable
+		resource.SupplyRecentSuccessStreak = previous.SupplyRecentSuccessStreak
+		resource.SupplyShortWindowOrders = previous.SupplyShortWindowOrders
+		resource.SupplyShortWindowFulfillment = previous.SupplyShortWindowFulfillment
 	}
 }
 
@@ -6730,20 +6734,34 @@ func (s *Service) invalidateAuthAndCapacityCaches() {
 }
 
 type smartSupplyPressure struct {
-	level              string
-	reason             string
-	inventoryAvailable int
-	inventoryMissing   int
-	needsProduction    bool
-	avgFulfillSeconds  int
-	recentWaiting      int
-	recentOrders       int
-	recentCancelled    int
-	recentZeroDelivery int
-	requestedQuantity  int
-	deliveredQuantity  int
-	fulfillmentRate    float64
+	level                       string
+	reason                      string
+	inventoryAvailable          int
+	inventoryMissing            int
+	needsProduction             bool
+	avgFulfillSeconds           int
+	recentWaiting               int
+	recentOrders                int
+	recentCancelled             int
+	recentZeroDelivery          int
+	requestedQuantity           int
+	deliveredQuantity           int
+	fulfillmentRate             float64
+	shortWindowOrders           int
+	shortWindowRequested        int
+	shortWindowDelivered        int
+	shortWindowFulfillmentRate  float64
+	shortWindowAvgFulfillSecond int
+	recentSuccessStreak         int
+	reliablyAvailable           bool
 }
+
+const (
+	smartSupplyReliabilityWindowOrders   = 8
+	smartSupplyReliabilityMinOrders      = 3
+	smartSupplyReliabilityMinFulfillment = 85.0
+	smartSupplyReliabilityMaxLeadSeconds = 90
+)
 
 // recentSupplyOrders amortizes the two operator calculations that inspect the
 // same recent order history (supplier pressure and daily quantity usage). The
@@ -6821,9 +6839,20 @@ func smartSupplyPressureFromOrders(cfg store.ManagerSupplyConfig, inventory supp
 
 	nowMS := time.Now().UnixMilli()
 	cutoffMS := nowMS - int64((24*time.Hour)/time.Millisecond)
+	orderedOrders := append([]store.SupplyOrder(nil), orders...)
+	sort.SliceStable(orderedOrders, func(i, j int) bool {
+		if orderedOrders[i].CreatedAtMS != orderedOrders[j].CreatedAtMS {
+			return orderedOrders[i].CreatedAtMS > orderedOrders[j].CreatedAtMS
+		}
+		return orderedOrders[i].ID > orderedOrders[j].ID
+	})
 	fulfillSamples := 0
 	totalFulfillMS := int64(0)
-	for _, order := range orders {
+	shortFulfillSamples := 0
+	shortTotalFulfillMS := int64(0)
+	streakOpen := true
+	shortWindowClosed := false
+	for _, order := range orderedOrders {
 		if order.CreatedAtMS > 0 && order.CreatedAtMS < cutoffMS {
 			break
 		}
@@ -6831,8 +6860,11 @@ func smartSupplyPressureFromOrders(cfg store.ManagerSupplyConfig, inventory supp
 			continue
 		}
 		delivered := automaticOrderDeliveredQuantity(order)
-		switch order.Status {
+		status := strings.ToLower(strings.TrimSpace(order.Status))
+		shortTerminal := false
+		switch status {
 		case "completed":
+			shortTerminal = true
 			pressure.recentOrders++
 			pressure.requestedQuantity += max(0, order.RequestedQuantity)
 			pressure.deliveredQuantity += delivered
@@ -6841,6 +6873,7 @@ func smartSupplyPressureFromOrders(cfg store.ManagerSupplyConfig, inventory supp
 				fulfillSamples++
 			}
 		case "cancelled", "failed", "dismissed":
+			shortTerminal = true
 			pressure.recentOrders++
 			pressure.requestedQuantity += max(0, order.RequestedQuantity)
 			pressure.deliveredQuantity += delivered
@@ -6860,6 +6893,31 @@ func smartSupplyPressureFromOrders(cfg store.ManagerSupplyConfig, inventory supp
 				pressure.recentWaiting++
 			}
 		}
+		if shortTerminal && !shortWindowClosed && pressure.shortWindowOrders < smartSupplyReliabilityWindowOrders {
+			requested := max(0, order.RequestedQuantity)
+			successful := status == "completed" && requested > 0 &&
+				float64(delivered)/float64(requested)*100 >= smartSupplyReliabilityMinFulfillment
+			if !successful && pressure.recentSuccessStreak >= smartSupplyReliabilityMinOrders {
+				// Once the latest three orders all succeeded, older failures belong to
+				// the stale regime and must not suppress the newly proven supply state.
+				shortWindowClosed = true
+				continue
+			}
+			pressure.shortWindowOrders++
+			pressure.shortWindowRequested += requested
+			pressure.shortWindowDelivered += delivered
+			if streakOpen {
+				if successful {
+					pressure.recentSuccessStreak++
+				} else {
+					streakOpen = false
+				}
+			}
+			if successful && order.CompletedAtMS > order.CreatedAtMS {
+				shortTotalFulfillMS += order.CompletedAtMS - order.CreatedAtMS
+				shortFulfillSamples++
+			}
+		}
 	}
 	if fulfillSamples > 0 {
 		pressure.avgFulfillSeconds = int(math.Round(float64(totalFulfillMS) / float64(fulfillSamples) / 1000))
@@ -6870,6 +6928,32 @@ func smartSupplyPressureFromOrders(cfg store.ManagerSupplyConfig, inventory supp
 			0,
 			100,
 		))
+	}
+	if pressure.shortWindowRequested > 0 {
+		pressure.shortWindowFulfillmentRate = round1(clampFloat(
+			float64(pressure.shortWindowDelivered)/float64(pressure.shortWindowRequested)*100,
+			0,
+			100,
+		))
+	}
+	if shortFulfillSamples > 0 {
+		pressure.shortWindowAvgFulfillSecond = int(math.Round(
+			float64(shortTotalFulfillMS) / float64(shortFulfillSamples) / 1000,
+		))
+	}
+	pressure.reliablyAvailable = inventory.Available > 0 && !inventory.NeedsProduction &&
+		pressure.shortWindowOrders >= smartSupplyReliabilityMinOrders &&
+		pressure.recentSuccessStreak >= smartSupplyReliabilityMinOrders &&
+		pressure.shortWindowFulfillmentRate >= smartSupplyReliabilityMinFulfillment &&
+		pressure.shortWindowAvgFulfillSecond > 0 &&
+		pressure.shortWindowAvgFulfillSecond <= smartSupplyReliabilityMaxLeadSeconds
+	if pressure.reliablyAvailable {
+		// A short streak must recover quickly from stale failures in the 24-hour
+		// aggregate. Stable, fast fulfillment means there is no need to reserve a
+		// batch early; purchase one consumption-paced step near the lower line.
+		pressure.level = smartSupplyPressurePlenty
+		pressure.reason = "supply_history_reliably_available"
+		return pressure
 	}
 	// Supplier inventory snapshots are momentary and can report available while
 	// competing orders are repeatedly cancelled. Treat the recent realized
@@ -6920,6 +7004,10 @@ func applySmartSupplyPressure(resource *SmartResource, pressure smartSupplyPress
 	resource.SupplyRecentRequestedQuantity = pressure.requestedQuantity
 	resource.SupplyRecentDeliveredQuantity = pressure.deliveredQuantity
 	resource.SupplyFulfillmentRate = pressure.fulfillmentRate
+	resource.SupplyReliable = pressure.reliablyAvailable
+	resource.SupplyRecentSuccessStreak = pressure.recentSuccessStreak
+	resource.SupplyShortWindowOrders = pressure.shortWindowOrders
+	resource.SupplyShortWindowFulfillment = pressure.shortWindowFulfillmentRate
 }
 
 func smartPrelockQuantityForSupplyPressure(cfg store.ManagerSupplyConfig, resource SmartResource, pressure smartSupplyPressure, quantity int) (int, string) {
@@ -7058,6 +7146,14 @@ func smartJustInTimePurchase(cfg store.ManagerSupplyConfig, resource SmartResour
 	unitMinutes := unit / demand
 	targetMinutes := float64(max(1, resource.EffectiveHealthyMinutes))
 	triggerMinutes := math.Max(float64(max(1, resource.WarningMinutes)), targetMinutes+leadMinutes-unitMinutes)
+	if pressure.reliablyAvailable {
+		// Stable stock and a fast recent success streak allow the pool to enter
+		// later. Target the warning runway rather than refilling to the healthy
+		// line, so each order replaces roughly the consumption until the next
+		// useful account instead of creating another same-expiry batch.
+		targetMinutes = float64(max(1, resource.WarningMinutes))
+		triggerMinutes = math.Max(float64(max(1, resource.CriticalMinutes)), targetMinutes+leadMinutes-unitMinutes)
+	}
 	currentMinutes := resource.EstimatedSustainMinutes
 	if currentMinutes <= 0 && resource.CurrentCapacityRCU > 0 {
 		currentMinutes = resource.CurrentCapacityRCU / demand
@@ -7070,12 +7166,28 @@ func smartJustInTimePurchase(cfg store.ManagerSupplyConfig, resource SmartResour
 		}
 		return result
 	}
-	if smartResourceEmergency(resource) || smartResourceAtOrBelowWarning(resource) || resource.CapacityGapRCU <= 0 {
+	if smartResourceEmergency(resource) || resource.CapacityGapRCU <= 0 {
 		return result
 	}
-	arrivalGap := math.Max(0, resource.CapacityGapRCU+demand*leadMinutes)
+	atOrBelowWarning := smartResourceAtOrBelowWarning(resource)
+	if atOrBelowWarning && !pressure.reliablyAvailable &&
+		(pressure.level == smartSupplyPressureTight || pressure.level == smartSupplyPressureScarce) {
+		return result
+	}
+	currentCapacity := resource.CurrentCapacityRCU
+	if currentCapacity <= 0 && currentMinutes > 0 {
+		currentCapacity = currentMinutes * demand
+	}
+	targetCapacity := demand * targetMinutes
+	arrivalGap := math.Max(0, targetCapacity-currentCapacity-resource.PrelockedCapacityRCU) + demand*leadMinutes
 	eligible := int(math.Floor((arrivalGap + 1e-9) / unit))
 	eligible = min(requested, max(0, eligible))
+	if eligible <= 0 && atOrBelowWarning && !pressure.reliablyAvailable &&
+		(pressure.level == smartSupplyPressurePlenty || pressure.level == smartSupplyPressureNormal) {
+		// With no proven reliability streak, crossing warning water must still
+		// reserve one account. Keep it to one instead of filling the healthy gap.
+		eligible = min(requested, 1)
+	}
 	result.eligibleQuantity = eligible
 	if eligible <= 0 && currentMinutes > triggerMinutes {
 		result.waitMinutes = round1(currentMinutes - triggerMinutes)
@@ -7095,13 +7207,21 @@ func smartSupplyDeliveryLeadMinutes(cfg store.ManagerSupplyConfig, pressure smar
 	case smartSupplyPressureScarce:
 		lead = 12
 	}
-	if pressure.avgFulfillSeconds > 0 {
-		lead = math.Max(lead, float64(pressure.avgFulfillSeconds)/60)
+	avgFulfillSeconds := pressure.avgFulfillSeconds
+	fulfillmentRate := pressure.fulfillmentRate
+	recentCancelled := pressure.recentCancelled
+	if pressure.reliablyAvailable {
+		avgFulfillSeconds = pressure.shortWindowAvgFulfillSecond
+		fulfillmentRate = pressure.shortWindowFulfillmentRate
+		recentCancelled = 0
 	}
-	if pressure.fulfillmentRate > 0 && pressure.fulfillmentRate < 100 {
-		lead *= math.Min(3, 100/pressure.fulfillmentRate)
+	if avgFulfillSeconds > 0 {
+		lead = math.Max(lead, float64(avgFulfillSeconds)/60)
 	}
-	lead += math.Min(5, float64(max(0, pressure.recentCancelled)))
+	if fulfillmentRate > 0 && fulfillmentRate < 100 {
+		lead *= math.Min(3, 100/fulfillmentRate)
+	}
+	lead += math.Min(5, float64(max(0, recentCancelled)))
 	// Polling, download, import, token refresh and the first quota probe happen
 	// after remote fulfillment. Reserve at least one minute for that local path.
 	localReadyMinutes := math.Max(1, float64(max(1, cfg.PollIntervalSeconds))/60)

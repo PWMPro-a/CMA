@@ -847,6 +847,44 @@ func TestSmartSupplyPressureUsesRealizedFulfillmentInsteadOfInventorySnapshot(t 
 	}
 }
 
+func TestSmartSupplyPressureRecentSuccessStreakOverridesOlderFailures(t *testing.T) {
+	now := time.Now()
+	orders := make([]store.SupplyOrder, 0, 7)
+	for index := 0; index < 4; index++ {
+		createdAt := now.Add(-time.Duration(index+10) * time.Minute)
+		orders = append(orders, store.SupplyOrder{
+			OrderID: fmt.Sprintf("old-cancelled-%d", index), Product: "oauth_7d",
+			RequestedQuantity: 5, Automatic: true, Status: "cancelled",
+			CreatedAtMS: createdAt.UnixMilli(), CompletedAtMS: createdAt.Add(time.Second).UnixMilli(),
+		})
+	}
+	for index := 0; index < 3; index++ {
+		createdAt := now.Add(-time.Duration(index+1) * time.Minute)
+		orders = append(orders, store.SupplyOrder{
+			OrderID: fmt.Sprintf("recent-completed-%d", index), Product: "oauth_7d",
+			RequestedQuantity: 1, ImportedCount: 1, Automatic: true, Status: "completed",
+			CreatedAtMS: createdAt.UnixMilli(), CompletedAtMS: createdAt.Add(10 * time.Second).UnixMilli(),
+		})
+	}
+
+	pressure := smartSupplyPressureFromOrders(
+		store.ManagerSupplyConfig{Product: "oauth_7d"},
+		supplyclient.Inventory{Available: 20},
+		4,
+		orders,
+	)
+	if !pressure.reliablyAvailable || pressure.level != smartSupplyPressurePlenty ||
+		pressure.reason != "supply_history_reliably_available" {
+		t.Fatalf("recent reliable supply was not recognized: %#v", pressure)
+	}
+	if pressure.recentSuccessStreak != 3 || pressure.shortWindowOrders != 3 ||
+		pressure.shortWindowFulfillmentRate != 100 {
+		// The reliability window closes at the first older failure once the latest
+		// three orders have already established a new successful regime.
+		t.Fatalf("short-window metrics = %#v", pressure)
+	}
+}
+
 func TestAutomaticSupplyGuardRequiresFreshBaselineAndSettledImports(t *testing.T) {
 	service := New(nil, nil)
 	nowMS := time.Now().UnixMilli()

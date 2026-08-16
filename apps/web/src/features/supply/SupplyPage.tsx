@@ -1805,6 +1805,8 @@ export function SupplyPage() {
               (mode === 'fixed' ? 'fixed' : pending ? 'confirming' : 'accepted');
             const insufficient = validationState === 'insufficient';
             const quarantined = validationState === 'quarantined';
+            const rejectedAccounts = estimate?.rejectedAccounts ?? 0;
+            const hasRejectedAccounts = rejectedAccounts > 0;
             const upwardPending =
               pending &&
               !blocked &&
@@ -1813,7 +1815,7 @@ export function SupplyPage() {
               (estimate?.confirmationRounds ?? 0) < (estimate?.requiredRounds ?? 2) &&
               (estimate?.observedM ?? 0) > adoptedM;
             const downwardPending = pending && usingFallback;
-            const showValidationNotice = pending || insufficient;
+            const showValidationNotice = pending || insufficient || hasRejectedAccounts;
             return (
               <article
                 className={`${styles.quotaEstimateCard} ${
@@ -1907,6 +1909,8 @@ export function SupplyPage() {
                         ? 'supply.quota_plan_warning_insufficient'
                         : quarantined
                           ? 'supply.quota_plan_warning_quarantined'
+                          : hasRejectedAccounts
+                            ? 'supply.quota_plan_warning_rejected'
                           : blocked || downwardPending
                             ? 'supply.quota_plan_warning_pending'
                             : upwardPending
@@ -1919,6 +1923,7 @@ export function SupplyPage() {
                         observedAccounts: estimate?.uniqueAccounts ?? 0,
                         minimumAccounts: estimate?.minimumUniqueAccounts ?? 3,
                         completeAccounts: estimate?.completeWindowAccounts ?? 0,
+                        rejectedAccounts,
                       }
                     )}
                   </div>
