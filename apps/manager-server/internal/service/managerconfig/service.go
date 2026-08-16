@@ -772,8 +772,8 @@ func SupplyStrategyPreset(strategy string) supplyStrategyPreset {
 	case SupplyStrategyCostFirst:
 		return supplyStrategyPreset{
 			Strategy:                    SupplyStrategyCostFirst,
-			CriticalAvailableAccounts:   0,
-			HealthyAvailableAccounts:    2,
+			CriticalAvailableAccounts:   2,
+			HealthyAvailableAccounts:    3,
 			DefaultEmergencyMinAccounts: 1,
 			VirtualDemandTTLMinutes:     15,
 			AccountMaxRequestsBefore401: 50,

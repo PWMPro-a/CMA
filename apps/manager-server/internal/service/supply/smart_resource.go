@@ -1179,10 +1179,11 @@ func applySmartAccountQuantityEstimate(cfg store.ManagerSupplyConfig, resource *
 	if resource == nil {
 		return
 	}
-	projected := max(0, resource.TotalAccounts)
-	if projected <= 0 {
-		projected = max(0, resource.AvailableAccounts)
-	}
+	// Account replenishment is based on credentials that can actually serve
+	// traffic. Enabled-but-frozen credentials remain part of TotalAccounts for
+	// operator accounting, but treating them as projected availability masks a
+	// real pool shortage and can leave the gateway returning auth_unavailable.
+	projected := max(0, resource.AvailableAccounts)
 	healthyFloor := smartHealthyAvailableAccounts(cfg)
 	// Required account count uses the conservative quota estimate for a new
 	// credential. 401 request/time thresholds are churn warnings only: they do
