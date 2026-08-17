@@ -428,6 +428,22 @@ const toCodexInspectionSnapshot = (
   };
 };
 
+const isRecoverySupplyMetadata = (metadata: SupplyAccountLeaseItem | null): boolean => {
+  if (!metadata) return false;
+  const source = metadata.source?.trim().toLowerCase() ?? '';
+  const importMethod = metadata.importMethod?.trim().toLowerCase() ?? '';
+  const importAction = metadata.importAction?.trim().toLowerCase() ?? '';
+  const recoveryId = metadata.recoveryId?.trim() ?? '';
+  const orderId = metadata.orderId?.trim().toLowerCase() ?? '';
+  return (
+    source === 'recovery' ||
+    importMethod === 'reauth_replacement' ||
+    importAction === 'replace' ||
+    Boolean(recoveryId) ||
+    orderId.startsWith('recovery-')
+  );
+};
+
 export const buildAccountRows = (
   files: AuthFileItem[],
   stores: AccountQuotaStores,
@@ -477,7 +493,7 @@ export const buildAccountRows = (
     const fallbackImportMetadata: AuthFileImportMetadata | null = supplyMetadata
       ? {
           version: 1,
-          source: 'supply',
+          source: supplyMetadata.source || 'supply',
           method:
             supplyMetadata.importMethod ||
             (supplyMetadata.source === 'automatic'
@@ -500,6 +516,14 @@ export const buildAccountRows = (
               : '',
         }
       : null;
+    const importMetadata =
+      fallbackImportMetadata && isRecoverySupplyMetadata(supplyMetadata)
+        ? {
+            ...fallbackImportMetadata,
+            imported_at:
+              fallbackImportMetadata.imported_at || persistedImportMetadata?.imported_at || '',
+          }
+        : (persistedImportMetadata ?? fallbackImportMetadata);
     const expiryOverride =
       typeof supplyValue === 'number'
         ? supplyValue
@@ -522,7 +546,7 @@ export const buildAccountRows = (
       projectId: readProjectId(file),
       workspaceId: workspace.workspaceId,
       workspaceName: workspace.workspaceName,
-      importMetadata: persistedImportMetadata ?? fallbackImportMetadata,
+      importMetadata,
       supplyMetadata,
       note: readString(file.note),
       priority: readNumber(file.priority),

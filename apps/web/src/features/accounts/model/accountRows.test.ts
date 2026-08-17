@@ -230,6 +230,54 @@ describe('accountRows', () => {
     expect(row.supplyMetadata?.replacedFileName).toBe('expired.json');
   });
 
+  it('prefers Manager recovery metadata over a stale automatic supply marker', () => {
+    const [row] = buildAccountRows(
+      [
+        {
+          name: 'recovered.json',
+          type: 'codex',
+          cpamp_import: {
+            version: 1,
+            source: 'supply',
+            method: 'automatic_supply',
+            platform_id: 'legacy',
+            platform_name: '旧自动补货',
+            imported_by: 'cpa-manager-plus',
+            imported_at: '2026-08-16T06:00:00Z',
+          },
+        },
+      ],
+      emptyStores(),
+      undefined,
+      undefined,
+      new Map([
+        [
+          'recovered.json',
+          {
+            fileName: 'recovered.json',
+            orderId: 'recovery-23373',
+            supplierId: 'legacy',
+            platformName: 'sogouedu',
+            source: 'recovery',
+            importMethod: 'reauth_replacement',
+            importAction: 'replace',
+            replacedFileName: 'expired.json',
+            importedAtMs: Date.parse('2026-08-16T07:30:45Z'),
+          },
+        ],
+      ])
+    );
+
+    expect(row.importMetadata).toMatchObject({
+      source: 'recovery',
+      method: 'reauth_replacement',
+      platform_id: 'legacy',
+      platform_name: 'sogouedu',
+      imported_at: '2026-08-16T07:30:45.000Z',
+    });
+    expect(row.supplyMetadata?.replacedFileName).toBe('expired.json');
+  });
+
   it('preserves zero runtime current concurrency as an idle value', () => {
     const [row] = buildAccountRows(
       [{ name: 'idle.json', type: 'codex', runtime_current_concurrency: 0, max_concurrency: 8 }],
