@@ -450,8 +450,8 @@ func TestClientListsAndClaimsRecoveries(t *testing.T) {
 			_, _ = w.Write([]byte(`{"payload":{"recoveries":[{"recovery_id":"recovery-1","delivery_status":"claimable","product":"oauth_30d","source_order_id":8123,"original_email":"old@example.com","auth_file_name":"old.json","auth_index":"auth-1","claim_url":"` + server.URL + `/api/customer/recoveries/recovery-1/claim","claim_ticket":"ticket-1"}]}}`))
 		case "/api/customer/recoveries/recovery-1/claim":
 			claimCalls.Add(1)
-			if got := r.URL.Query().Get("ticket"); got != "" {
-				t.Fatalf("claim ticket leaked into URL = %q", got)
+			if got := r.URL.Query().Get("ticket"); got != "ticket-1" {
+				t.Fatalf("claim ticket query = %q", got)
 			}
 			if got := r.Header.Get("X-Recovery-Ticket"); got != "ticket-1" {
 				t.Fatalf("claim ticket header = %q", got)
@@ -490,6 +490,46 @@ func TestClientListsAndClaimsRecoveries(t *testing.T) {
 	}
 	if claimCalls.Load() != 1 || claimed.Recovery.ID != "recovery-1" || len(claimed.Accounts) != 1 || claimed.CredentialVersion != 2 {
 		t.Fatalf("claimed=%#v claimCalls=%d", claimed, claimCalls.Load())
+	}
+}
+
+func TestClientClaimsBugTeamRecoveryWithHeaderTicket(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"token"}`))
+		case "/api/customer/recoveries/recovery-1/claim":
+			if got := r.URL.Query().Get("ticket"); got != "" {
+				t.Fatalf("BugTeam claim ticket leaked into URL = %q", got)
+			}
+			if got := r.Header.Get("X-Recovery-Ticket"); got != "ticket-1" {
+				t.Fatalf("BugTeam claim ticket header = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"credential_version":2,"payload":{"type":"oauth","access_token":"access"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	credentials := Credentials{
+		PlatformType: "bugteam",
+		BaseURL:      server.URL,
+		Username:     "u",
+		Password:     "p",
+	}
+	claimed, err := client.ClaimRecovery(
+		context.Background(),
+		credentials,
+		"recovery-1",
+		server.URL+"/api/customer/recoveries/recovery-1/claim?ticket=ticket-1",
+	)
+	if err != nil {
+		t.Fatalf("claim BugTeam recovery: %v", err)
+	}
+	if claimed.CredentialVersion != 2 || len(claimed.Accounts) != 1 {
+		t.Fatalf("claimed=%#v", claimed)
 	}
 }
 

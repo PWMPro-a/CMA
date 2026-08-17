@@ -615,7 +615,14 @@ func (c *Client) ClaimRecovery(ctx context.Context, credentials Credentials, rec
 			ticket = strings.TrimSpace(parsed.Query().Get("ticket"))
 		}
 		query := parsed.Query()
-		query.Del("ticket")
+		if strings.EqualFold(strings.TrimSpace(credentials.PlatformType), "bugteam") {
+			query.Del("ticket")
+		} else if ticket != "" {
+			// The legacy supplier contract signs claim_url with a ticket query
+			// parameter. Keep it on the request while also sending the header for
+			// suppliers that accept the newer transport.
+			query.Set("ticket", ticket)
+		}
 		parsed.RawQuery = query.Encode()
 		endpoint = parsed.String()
 	}
