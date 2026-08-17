@@ -3027,7 +3027,12 @@ describe('AccountsPage replacement flows', () => {
       });
     }
     const file = makeCodexFile('normal.json', 'auth-normal', 'normal@example.com');
-    mocks.files = [file];
+    const unconfirmed = makeCodexFile(
+      'unconfirmed.json',
+      'auth-unconfirmed',
+      'unconfirmed@example.com'
+    );
+    mocks.files = [file, unconfirmed];
     mocks.location = { pathname: '/accounts', search: '?status=available' };
     mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
       status: 'success',
@@ -3042,12 +3047,12 @@ describe('AccountsPage replacement flows', () => {
     Object.assign(mocks.panelFeatureAvailability, { panelHostMode: 'manager_embedded' });
     mocks.getAccountPoolSummary.mockResolvedValue({
       checkedAtMs: Date.now(),
-      total: 1,
+      total: 2,
       normal: 1,
       needsAttention: 0,
       quotaRisk: 1,
       disabled: 0,
-      unconfirmed: 0,
+      unconfirmed: 1,
       classificationObserved: true,
       credentials: [
         {
@@ -3058,6 +3063,14 @@ describe('AccountsPage replacement flows', () => {
           bucket: 'quota_risk',
           schedulable: true,
         },
+        {
+          authFileName: unconfirmed.name,
+          provider: 'codex',
+          authIndex: 'auth-unconfirmed',
+          accountSnapshot: 'unconfirmed@example.com',
+          bucket: 'unconfirmed',
+          schedulable: true,
+        },
       ],
     });
 
@@ -3066,6 +3079,7 @@ describe('AccountsPage replacement flows', () => {
 
     expect(mocks.getAccountPoolSummary).toHaveBeenCalled();
     expect(treeText(renderer)).toContain('normal@example.com');
+    expect(treeText(renderer)).not.toContain('unconfirmed@example.com');
     expect(treeText(renderer)).toContain('accounts.health_available');
     expect(treeText(renderer)).not.toContain('accounts.health_weekly_exhausted');
     expect(treeText(renderer)).not.toContain('accounts.empty_title');

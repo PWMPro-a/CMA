@@ -1157,6 +1157,7 @@ func TestAccountPoolSummaryCountsSchedulableQuotaRiskAsAvailable(t *testing.T) {
 		total:                  46,
 		enabled:                26,
 		schedulable:            18,
+		operatorUsable:         18,
 		normal:                 3,
 		needsAttention:         0,
 		quotaRisk:              15,
@@ -1175,7 +1176,7 @@ func TestAccountPoolSummaryCountsSchedulableQuotaRiskAsAvailable(t *testing.T) {
 
 func TestAccountPoolSummarySeparatesEnabledPoolFromDisabledArchive(t *testing.T) {
 	summary := accountPoolSummaryFromStats(accountPoolStats{
-		total: 24, enabled: 14, schedulable: 3, normal: 3, needsAttention: 11,
+		total: 24, enabled: 14, schedulable: 3, operatorUsable: 3, normal: 3, needsAttention: 11,
 		classificationObserved: true,
 	}, time.Now())
 	if summary.Total != 14 || summary.Normal != 3 || summary.NeedsAttention != 11 || summary.Disabled != 10 {
@@ -1636,6 +1637,67 @@ func TestAccountPoolStatsUsesNewerHeaderEvidenceOverOlderInspectionFailures(t *t
 	)
 	if stats.normal != 1 || stats.quotaRisk != 1 || stats.needsAttention != 1 || stats.unconfirmed != 1 {
 		t.Fatalf("header-overlaid operator account buckets = %#v", stats)
+	}
+}
+
+func TestLatestOperatorInspectionEvidenceSkipsNewerSupplySnapshot(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "operator-inspection.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	now := time.Now().UnixMilli()
+	settings := model.DefaultCodexInspectionConfig()
+	settings.TargetTypes = []string{model.CodexInspectionTargetCodex}
+	settings.TargetType = model.CodexInspectionTargetCodex
+
+	scheduled, err := st.CreateCodexInspectionRun(context.Background(), store.CodexInspectionRun{
+		TriggerType:   model.CodexInspectionTriggerScheduled,
+		TriggerKey:    "scheduled",
+		Status:        model.CodexInspectionStatusCompleted,
+		StartedAtMS:   now - 2_000,
+		FinishedAtMS:  now - 1_500,
+		ProbeSetCount: 1,
+		SampledCount:  1,
+		Settings:      settings,
+	})
+	if err != nil {
+		t.Fatalf("create scheduled run: %v", err)
+	}
+	if _, err := st.InsertCodexInspectionResult(context.Background(), store.CodexInspectionResult{
+		RunID: scheduled.ID, AccountKey: "dead", FileName: "dead.json", Provider: "codex",
+		AuthIndex: "dead", Action: "delete", StatusCode: intPtr(http.StatusPaymentRequired),
+	}); err != nil {
+		t.Fatalf("insert scheduled result: %v", err)
+	}
+
+	supplyRun, err := st.CreateCodexInspectionRun(context.Background(), store.CodexInspectionRun{
+		TriggerType:   model.CodexInspectionTriggerSupplySnapshot,
+		TriggerKey:    "supply",
+		Status:        model.CodexInspectionStatusCompleted,
+		StartedAtMS:   now - 1_000,
+		FinishedAtMS:  now - 500,
+		ProbeSetCount: 1,
+		SampledCount:  1,
+		Settings:      settings,
+	})
+	if err != nil {
+		t.Fatalf("create supply run: %v", err)
+	}
+	usedPercent := 10.0
+	if _, err := st.InsertCodexInspectionResult(context.Background(), store.CodexInspectionResult{
+		RunID: supplyRun.ID, AccountKey: "dead", FileName: "dead.json", Provider: "codex",
+		AuthIndex: "dead", Action: "keep", UsedPercent: &usedPercent,
+	}); err != nil {
+		t.Fatalf("insert supply result: %v", err)
+	}
+
+	results, triggerType, err := New(st, nil).loadLatestOperatorInspectionEvidence(context.Background())
+	if err != nil {
+		t.Fatalf("load operator evidence: %v", err)
+	}
+	if triggerType != model.CodexInspectionTriggerScheduled || len(results) != 1 || results[0].Action != "delete" {
+		t.Fatalf("operator evidence trigger=%q results=%#v", triggerType, results)
 	}
 }
 

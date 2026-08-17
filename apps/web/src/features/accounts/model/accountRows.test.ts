@@ -1733,6 +1733,32 @@ describe('accountRows', () => {
     ).toEqual(['normal.json']);
   });
 
+  it('keeps schedulable unconfirmed credentials out of available and exposes them separately', () => {
+    const rows = buildAccountRows(
+      [
+        { name: 'verified.json', type: 'codex', authIndex: 'verified' },
+        { name: 'unconfirmed.json', type: 'codex', authIndex: 'unconfirmed' },
+      ],
+      emptyStores()
+    );
+    const poolStatusBySelectionKey = new Map([
+      [rows[0].selectionKey, 'normal' as const],
+      [rows[1].selectionKey, 'unconfirmed' as const],
+    ]);
+    const filter = (status: AccountStatusFilter) =>
+      filterAccountRows(rows, {
+        provider: 'all',
+        status,
+        plan: 'all',
+        quotaBand: 'all',
+        search: '',
+        poolStatusBySelectionKey,
+      }).map((row) => row.fileName);
+
+    expect(filter('available')).toEqual(['verified.json']);
+    expect(filter('unconfirmed')).toEqual(['unconfirmed.json']);
+  });
+
   it('keeps live disabled and failed credentials out of a briefly stale normal pool bucket', () => {
     const rows = buildAccountRows(
       [

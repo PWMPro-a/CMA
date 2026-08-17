@@ -930,13 +930,17 @@ func (s *Service) GetAccountPoolSummary(ctx context.Context) (AccountPoolSummary
 }
 
 func accountPoolSummaryFromStats(stats accountPoolStats, checkedAt time.Time) AccountPoolSummary {
+	available := stats.schedulable
+	if stats.classificationObserved {
+		available = stats.operatorUsable
+	}
 	return AccountPoolSummary{
 		CheckedAtMS: checkedAt.UnixMilli(),
 		Total:       max(0, stats.enabled),
-		// Availability is a live scheduling property, while quota risk is an
-		// overlapping warning. A credential that is still carrying requests must
-		// remain visible as available even when its remaining quota is low.
-		Normal:                 max(0, stats.schedulable),
+		// Availability requires current positive evidence. Quota-risk credentials
+		// remain included when they are still schedulable, while unconfirmed and
+		// actionable credentials stay out of the available list.
+		Normal:                 max(0, available),
 		NeedsAttention:         max(0, stats.needsAttention),
 		QuotaRisk:              max(0, stats.quotaRisk),
 		Disabled:               max(0, stats.total-stats.enabled),
@@ -5414,6 +5418,7 @@ type accountPoolStats struct {
 	enabled                     int
 	schedulable                 int
 	verifiedAvailable           int
+	operatorUsable              int
 	normal                      int
 	needsAttention              int
 	quotaRisk                   int
@@ -5519,6 +5524,19 @@ func (s *Service) loadOperatorAccountPoolStats(
 	if inspectionErr != nil {
 		results = nil
 		triggerType = ""
+	} else if !operatorInspectionAuthoritative(triggerType) {
+		// Supply snapshots are optimized for capacity planning and can be newer
+		// than the scheduled/manual health run. Using them as the sole operator
+		// truth lets an old quota header hide a later 401/402 finding. Prefer the
+		// latest completed authoritative run for list classification; live headers
+		// may still supersede it when they carry newer evidence.
+		authoritativeCtx, cancelAuthoritative := context.WithTimeout(ctx, 2*time.Second)
+		authoritativeResults, authoritativeTrigger, authoritativeErr := s.loadLatestOperatorInspectionEvidence(authoritativeCtx)
+		cancelAuthoritative()
+		if authoritativeErr == nil {
+			results = authoritativeResults
+			triggerType = authoritativeTrigger
+		}
 	}
 	stats = accountPoolStatsFromFilesAndCurrentEvidence(
 		stats.files,
@@ -5528,6 +5546,36 @@ func (s *Service) loadOperatorAccountPoolStats(
 		now,
 	)
 	return stats, liveErr
+}
+
+func (s *Service) loadLatestOperatorInspectionEvidence(ctx context.Context) ([]store.CodexInspectionResult, string, error) {
+	if s == nil || s.store == nil {
+		return nil, "", ErrCapacitySnapshotUnavailable
+	}
+	runs, err := s.store.ListCodexInspectionRuns(ctx, 50)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, run := range runs {
+		if run.Status != model.CodexInspectionStatusCompleted || !operatorInspectionAuthoritative(run.TriggerType) {
+			continue
+		}
+		results, err := s.store.ListCodexInspectionResults(ctx, run.ID)
+		if err != nil {
+			return nil, "", err
+		}
+		filtered := make([]store.CodexInspectionResult, 0, len(results))
+		for _, result := range results {
+			if isSmartCapacityInspectionResult(result) {
+				filtered = append(filtered, result)
+			}
+		}
+		if len(filtered) == 0 {
+			continue
+		}
+		return filtered, run.TriggerType, nil
+	}
+	return nil, "", ErrCapacitySnapshotUnavailable
 }
 
 func (s *Service) cachedOperatorHeaderSnapshots(
@@ -5750,9 +5798,9 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 		bucket := operatorAccountUnconfirmed
 		remainingFraction := 1.0
 		if isAvailableCodexFile(file) && len(resultsByFile[strings.TrimSpace(file.Name)]) == 0 {
-			// A live schedulable credential remains usable when no inspection row
-			// exists for that file. Ambiguous or non-authoritative inspection rows
-			// still stay unconfirmed unless direct quota/usability evidence exists.
+			// Preserve live capacity behavior when the selected inspection does not
+			// contain this file. The credential summary still uses authoritative
+			// inspection evidence whenever a matching row exists.
 			bucket = operatorAccountNormal
 		}
 		if smartAccountNeedsAttention(file.Raw) {
@@ -5777,6 +5825,9 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 			stats.quotaRisk++
 		default:
 			stats.unconfirmed++
+		}
+		if isAvailableCodexFile(file) && (bucket == operatorAccountNormal || bucket == operatorAccountQuotaRisk) {
+			stats.operatorUsable++
 		}
 		uniqueFileName := filesByName[strings.TrimSpace(file.Name)] == 1
 		stats.recordCredentialBucket(file, bucket, uniqueFileName)

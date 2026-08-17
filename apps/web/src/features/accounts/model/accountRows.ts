@@ -64,6 +64,7 @@ export const ACCOUNT_CODEX_STATUS_FILTERS = [
 export const ACCOUNT_STATUS_FILTERS = [
   'all',
   'available',
+  'unconfirmed',
   'disabled',
   'problem',
   'low',
@@ -827,6 +828,11 @@ const matchesStatusFilter = (
     return sharedPoolStatus
       ? sharedPoolStatus === 'normal' && !liveDisabled && !liveFailed
       : isAccountRowAvailable(row);
+  }
+  if (status === 'unconfirmed') {
+    return sharedPoolStatus
+      ? !liveDisabled && sharedPoolStatus === 'unconfirmed'
+      : !liveDisabled && classifyAccountMetricStatus(row, {}) === 'unconfirmed';
   }
   if (status === 'disabled') {
     return sharedPoolStatus ? liveDisabled || sharedPoolStatus === 'disabled' : row.disabled;
