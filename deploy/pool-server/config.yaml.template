@@ -35,6 +35,8 @@ codex:
     shadow: false
     max-entries: 65536
     max-retry-credentials: 2
+    # Only cold requests and new affinity bindings are capped here.
+    # Existing warm sessions stay on their bound credential for cache reuse.
     max-concurrency: 8
     websocket-pool-slots: 8
     max-session-requests: 2000
