@@ -1991,7 +1991,7 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 							return s.withRecoveryInterval(time.Second, cfg.Supply)
 						}
 						retryAt := time.UnixMilli(smartSupplyOrderTerminalAtMS(latest)).Add(
-							automaticRetryCycleCooldown(resource),
+							automaticRetryCycleCooldown(cfg.Supply, resource),
 						)
 						if wait := time.Until(retryAt); wait > 0 {
 							return s.withRecoveryInterval(wait, cfg.Supply)
@@ -7776,7 +7776,7 @@ func (s *Service) automaticCreateCooldownActive(ctx context.Context, cfg store.M
 				if state.nextQuantity > 0 {
 					return false, nil
 				}
-				seconds = int(automaticRetryCycleCooldown(resource) / time.Second)
+				seconds = int(automaticRetryCycleCooldown(cfg, resource) / time.Second)
 				last = maxInt64(last, smartSupplyOrderTerminalAtMS(latest))
 			} else {
 				seconds = max(1, int(retry.cooldown/time.Second))
@@ -7803,15 +7803,39 @@ func (s *Service) automaticCreateCooldownActive(ctx context.Context, cfg store.M
 
 const (
 	automaticRetryBurstWindow         = 10 * time.Minute
-	automaticRetryLadderCooldown      = 90 * time.Second
 	automaticUrgentRetryCycleCooldown = 10 * time.Second
 )
 
-func automaticRetryCycleCooldown(resource SmartResource) time.Duration {
-	if smartSupplyUrgentRetryRequired(resource) {
+// automaticRetryCycleCooldown starts a fresh segmented抢货 wave on the
+// operator-configured check cadence. The base/half/fifth ladder already bounds
+// one wave; adding a hidden 90-second pause after it is exhausted sharply
+// reduces the total quantity attempted exactly when realized fulfillment is
+// low. Urgent pool-vacuum cases may run faster, but a shortage cycle must never
+// run slower than the configured automatic check interval.
+func automaticRetryCycleCooldown(cfg store.ManagerSupplyConfig, resource SmartResource) time.Duration {
+	configured := time.Duration(smartAutomaticCheckIntervalSeconds(cfg, resource)) * time.Second
+	if configured <= 0 {
+		configured = 30 * time.Second
+	}
+	if smartSupplyUrgentRetryRequired(resource) && configured > automaticUrgentRetryCycleCooldown {
 		return automaticUrgentRetryCycleCooldown
 	}
-	return automaticRetryLadderCooldown
+	return configured
+}
+
+func smartSupplyShortageRetryCadenceRequired(resource SmartResource) bool {
+	if !smartShortageFastRetryAllowed(resource) {
+		return false
+	}
+	if smartResourceEmergency(resource) || smartResourceAtOrBelowWarning(resource) {
+		return true
+	}
+	switch resource.SupplyPressureLevel {
+	case smartSupplyPressureTight, smartSupplyPressureScarce:
+		return true
+	default:
+		return false
+	}
 }
 
 func smartSupplyUrgentRetryRequired(resource SmartResource) bool {
@@ -7895,7 +7919,7 @@ func (s *Service) automaticRetryPlan(
 		return smartEmergencyRetryPlan{}, err
 	}
 	if smartSupplyUrgentRetryRequired(resource) {
-		plan.cooldown = automaticUrgentRetryCycleCooldown
+		plan.cooldown = automaticRetryCycleCooldown(cfg, resource)
 		return plan, nil
 	}
 	switch {
@@ -7905,6 +7929,14 @@ func (s *Service) automaticRetryPlan(
 		plan.cooldown = 2 * time.Minute
 	case failures >= 2:
 		plan.cooldown = time.Minute
+	}
+	if smartSupplyShortageRetryCadenceRequired(resource) {
+		// Failure history changes quantity selection and keeps the segmented
+		// ladder active; it must not introduce a 1/2/5-minute local pause while
+		// the pool is critical or the supplier is tight/scarce. Repeating the
+		// bounded wave at the configured cadence increases total抢号 coverage
+		// without turning every individual order into one oversized request.
+		plan.cooldown = min(plan.cooldown, automaticRetryCycleCooldown(cfg, resource))
 	}
 	return plan, nil
 }

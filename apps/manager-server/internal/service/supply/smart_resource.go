@@ -2566,7 +2566,6 @@ const (
 	smartBalancedWarningCooldownSeconds         = 3 * 60
 	smartCostFirstProgressiveCooldownSeconds    = 15 * 60
 	smartCostFirstWarningCooldownSeconds        = 5 * 60
-	smartEmergencyDeliveryObservationSeconds    = 90
 )
 
 // smartSuccessfulOrderCooldownForResource keeps the procurement cadence aligned
@@ -2610,10 +2609,11 @@ func smartSuccessfulOrderCooldownForDelivery(cfg store.ManagerSupplyConfig, reso
 		return base
 	}
 	if smartResourceEmergency(resource) {
-		// Once a credential was actually imported, even an account-vacuum path
-		// must give the live account list and quota inspection time to observe it.
-		// Zero-delivery cancellations still use the separate fast retry ladder.
-		return max(base, smartEmergencyDeliveryObservationSeconds)
+		// A delivered small rung still gets one configured emergency observation
+		// cycle, but it must not silently turn a 30-second shortage cadence into a
+		// fixed 90-second pause. The next capacity snapshot decides whether the
+		// segmented ladder should continue.
+		return base
 	}
 	demand := math.Max(resource.ConsumeRCUPerMinute, resource.DemandPlanningRCUPerMinute)
 	unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
@@ -2635,7 +2635,11 @@ func smartSuccessfulOrderCooldownForDelivery(cfg store.ManagerSupplyConfig, reso
 func smartCreateCooldownForResource(cfg store.ManagerSupplyConfig, resource SmartResource) int {
 	cooldown := smartCreateCooldownSeconds(cfg)
 	if smartResourceEmergency(resource) {
-		return clampInt(min(cooldown, 60), 30, 60)
+		checkInterval := positiveOr(cfg.CheckIntervalSeconds, 60)
+		// During an emergency the automatic check cadence is also the maximum
+		// create cooldown. A configured 30-second loop therefore remains a real
+		// 30-second抢号 cadence instead of being stretched to a hidden minute.
+		return clampInt(min(cooldown, min(checkInterval, 60)), 1, 60)
 	}
 	if !smartResourceAtOrBelowWarning(resource) {
 		return cooldown

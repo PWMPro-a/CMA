@@ -821,8 +821,12 @@ func TestSuccessfulOrderCooldownScalesWithDeliveredCapacity(t *testing.T) {
 		t.Fatalf("two-account observation cooldown=%d, want 600", got)
 	}
 	resource.EmergencyShortage = true
-	if got := smartSuccessfulOrderCooldownForDelivery(cfg, resource, 1); got != 90 {
-		t.Fatalf("emergency successful-delivery cooldown=%d, want 90", got)
+	if got := smartSuccessfulOrderCooldownForDelivery(cfg, resource, 1); got != 60 {
+		t.Fatalf("emergency successful-delivery cooldown=%d, want configured emergency cadence 60", got)
+	}
+	cfg.CheckIntervalSeconds = 30
+	if got := smartSuccessfulOrderCooldownForDelivery(cfg, resource, 1); got != 30 {
+		t.Fatalf("thirty-second emergency successful-delivery cooldown=%d, want 30", got)
 	}
 }
 
@@ -996,6 +1000,9 @@ func TestSmartEmergencyShortageKeepsHardCreateCooldown(t *testing.T) {
 	}
 	fastCheck := cfg
 	fastCheck.CheckIntervalSeconds = 10
+	if got := smartCreateCooldownForResource(fastCheck, emergency); got != 10 {
+		t.Fatalf("configured ten-second emergency create cooldown=%d, want 10", got)
+	}
 	if got := smartAutomaticCheckIntervalSeconds(fastCheck, emergency); got != 10 {
 		t.Fatalf("configured ten-second emergency observation interval=%d, want 10", got)
 	}

@@ -573,8 +573,92 @@ func TestUrgentCapacityRetryKeepsTenSecondRhythmAfterCancellationBurst(t *testin
 	resource.AvailableAccounts = 10
 	resource.AvailableSustainMinutes = 20
 	plan, err = service.automaticRetryPlan(ctx, store.ManagerSupplyConfig{Product: "oauth_7d"}, resource, latest, now)
+	if err != nil || plan.cooldown != time.Minute {
+		t.Fatalf("critical shortage retry plan=%#v err=%v, want default configured cadence", plan, err)
+	}
+
+	resource.EmergencyShortage = false
+	resource.HealthLevel = smartHealthHealthy
+	plan, err = service.automaticRetryPlan(ctx, store.ManagerSupplyConfig{Product: "oauth_7d"}, resource, latest, now)
 	if err != nil || plan.cooldown != 5*time.Minute {
-		t.Fatalf("non-urgent retry plan=%#v err=%v", plan, err)
+		t.Fatalf("buffered non-scarce retry plan=%#v err=%v", plan, err)
+	}
+
+	resource.EmergencyShortage = true
+	resource.HealthLevel = smartHealthCritical
+	resource.SupplyPressureLevel = smartSupplyPressureScarce
+	resource.SupplyPressureReason = "supply_history_low_fulfillment"
+	plan, err = service.automaticRetryPlan(ctx, store.ManagerSupplyConfig{
+		Product: "oauth_7d", CheckIntervalSeconds: 30,
+	}, resource, latest, now)
+	if err != nil || plan.cooldown != 30*time.Second {
+		t.Fatalf("scarce retry plan=%#v err=%v, want configured 30-second cadence", plan, err)
+	}
+}
+
+func TestScarceRetryCycleUsesConfiguredCheckCadence(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{CheckIntervalSeconds: 30, CreateCooldownSeconds: 120}
+	resource := SmartResource{
+		SnapshotFresh: true, EmergencyShortage: true, HealthLevel: smartHealthCritical,
+		ConsumeRCUPerMinute: 1_000, CapacityGapRCU: 30_000,
+		AvailableAccounts: 9, CriticalAvailableAccounts: 2, AvailableSustainMinutes: 9.3,
+		SupplyPressureLevel: smartSupplyPressureScarce,
+	}
+	if got := automaticRetryCycleCooldown(cfg, resource); got != 30*time.Second {
+		t.Fatalf("scarce retry cycle cooldown=%s, want configured 30 seconds", got)
+	}
+
+	resource.AvailableAccounts = 1
+	resource.AvailableSustainMinutes = 1.5
+	if got := automaticRetryCycleCooldown(cfg, resource); got != automaticUrgentRetryCycleCooldown {
+		t.Fatalf("urgent retry cycle cooldown=%s, want %s", got, automaticUrgentRetryCycleCooldown)
+	}
+}
+
+func TestExhaustedScarceLadderSchedulesFreshWaveWithinConfiguredThirtySeconds(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "scarce-wave-cadence.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	enabled := true
+	cfg := store.ManagerSupplyConfig{
+		Enabled: &enabled, SmartEnabled: &enabled, Product: "oauth_7d",
+		CheckIntervalSeconds: 30, CreateCooldownSeconds: 120,
+		ReplenishBatchSize: 15, PrelockMaxQuantity: 9,
+	}
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{Supply: cfg}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	now := time.Now()
+	for index, quantity := range []int{9, 5, 2} {
+		age := time.Duration(3-index) * time.Second
+		reason := "emergency_retry_immediate_after_cancelled"
+		if index == 0 {
+			reason = "available_capacity_critical"
+		}
+		if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+			OrderID: fmt.Sprintf("scarce-wave-%d", quantity), Product: cfg.Product,
+			RequestedQuantity: quantity, Automatic: true, TriggerReason: reason,
+			Status: "cancelled", RemoteStatus: "cancelled",
+			CreatedAtMS: now.Add(-age - time.Second).UnixMilli(), CompletedAtMS: now.Add(-age).UnixMilli(),
+		}); err != nil {
+			t.Fatalf("create cancelled quantity %d: %v", quantity, err)
+		}
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), nil)
+	service.setSmartResource(SmartResource{
+		GeneratedAtMS: now.UnixMilli(), Enabled: true, SnapshotFresh: true,
+		EmergencyShortage: true, HealthLevel: smartHealthCritical,
+		ConsumeRCUPerMinute: 1_000, CapacityGapRCU: 30_000,
+		AvailableAccounts: 9, CriticalAvailableAccounts: 2, AvailableSustainMinutes: 9.3,
+		SupplyPressureLevel: smartSupplyPressureScarce,
+	})
+
+	interval := service.NextInterval(ctx)
+	if interval < 27*time.Second || interval > 31*time.Second {
+		t.Fatalf("fresh scarce wave interval=%s, want configured 30-second cycle from latest cancellation", interval)
 	}
 }
 
