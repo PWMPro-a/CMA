@@ -96,6 +96,35 @@ func TestSupplyPlatformSelectionSpreadsEqualOrdersAcrossSuppliers(t *testing.T) 
 	}
 }
 
+func TestSupplyPlatformSelectionPriorityFirstPrefersConfiguredPriority(t *testing.T) {
+	preferred := supplyPlatformTestOverview("sogouedu", 5, 300, 10_000, 60, 30, 10)
+	preferred.Priority = 1
+	cheaper := supplyPlatformTestOverview("bugteam", 5, 100, 10_000, 60, 100, 1)
+	cheaper.Priority = 2
+
+	if !supplyPlatformLessWithPriority(preferred, cheaper, 2, 0, nil, false, true) {
+		t.Fatal("priority-first selection should prefer the lower configured priority")
+	}
+	if supplyPlatformLessWithPriority(cheaper, preferred, 2, 0, nil, false, true) {
+		t.Fatal("priority-first selection should not let lower cost override configured priority")
+	}
+}
+
+func TestSupplyPlatformSelectionPriorityFirstStillFallsBackToDeliverableStock(t *testing.T) {
+	production := supplyPlatformTestOverview("sogouedu", 0, 300, 10_000, 60, 30, 10)
+	production.Priority = 1
+	production.Inventory.NeedsProduction = true
+	inStock := supplyPlatformTestOverview("bugteam", 5, 100, 10_000, 60, 100, 1)
+	inStock.Priority = 2
+
+	if supplyPlatformLessWithPriority(production, inStock, 2, 0, nil, false, true) {
+		t.Fatal("priority-first selection should fall back when the preferred platform has no deliverable stock")
+	}
+	if !supplyPlatformLessWithPriority(inStock, production, 2, 0, nil, false, true) {
+		t.Fatal("deliverable fallback stock should beat production-only preferred inventory")
+	}
+}
+
 func supplyPlatformTestOverview(id string, available int, unitPriceFen int64, balanceFen int64, lifetimeMinutes int64, usableQuotaM float64, effectiveCostFen float64) PlatformOverview {
 	return PlatformOverview{
 		ID: id,

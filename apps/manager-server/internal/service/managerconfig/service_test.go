@@ -194,6 +194,16 @@ func TestNormalizeSupplyConfigBoundsParallelAutomaticOrders(t *testing.T) {
 	}
 }
 
+func TestNormalizeSupplyConfigAcceptsPriorityFirstPlatformSelection(t *testing.T) {
+	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{
+		PlatformSelectionStrategy: SupplyPlatformSelectionPriorityFirst,
+	}, store.ManagerSupplyConfig{})
+
+	if next.PlatformSelectionStrategy != SupplyPlatformSelectionPriorityFirst {
+		t.Fatalf("platform selection strategy = %q, want %q", next.PlatformSelectionStrategy, SupplyPlatformSelectionPriorityFirst)
+	}
+}
+
 func TestNormalizeSupplyConfigAppliesSupplyStrategyPresets(t *testing.T) {
 	tests := []struct {
 		strategy                               string

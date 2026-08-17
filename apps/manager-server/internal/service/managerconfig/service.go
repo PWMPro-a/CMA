@@ -35,6 +35,7 @@ const (
 	SupplyPlatformBugTeam = "bugteam"
 
 	SupplyPlatformSelectionBestAvailable = "best_available"
+	SupplyPlatformSelectionPriorityFirst = "priority_first"
 )
 
 type supplyStrategyPreset struct {
@@ -463,7 +464,7 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	if selection == "" {
 		selection = strings.ToLower(strings.TrimSpace(next.PlatformSelectionStrategy))
 	}
-	if selection != SupplyPlatformSelectionBestAvailable {
+	if selection != SupplyPlatformSelectionBestAvailable && selection != SupplyPlatformSelectionPriorityFirst {
 		selection = SupplyPlatformSelectionBestAvailable
 	}
 	next.PlatformSelectionStrategy = selection

@@ -256,12 +256,16 @@ func (s *Service) selectSupplyPlatform(
 		return supplyPlatformSelection{all: statuses}, ErrNotConfigured
 	}
 	emergency := smartResourceEmergency(resource)
+	priorityFirst := strings.EqualFold(
+		strings.TrimSpace(cfg.PlatformSelectionStrategy),
+		managerconfigsvc.SupplyPlatformSelectionPriorityFirst,
+	)
 	sort.SliceStable(candidates, func(i, j int) bool {
 		leftIndex := candidates[i]
 		rightIndex := candidates[j]
 		left := statuses[leftIndex]
 		right := statuses[rightIndex]
-		return supplyPlatformLess(left, right, quantity, cfg.MinBalanceReserveFen, used, emergency)
+		return supplyPlatformLessWithPriority(left, right, quantity, cfg.MinBalanceReserveFen, used, emergency, priorityFirst)
 	})
 	selectedIndex := candidates[0]
 	statuses[selectedIndex].Selected = true
@@ -273,10 +277,27 @@ func (s *Service) selectSupplyPlatform(
 }
 
 func supplyPlatformLess(left PlatformOverview, right PlatformOverview, quantity int, balanceReserveFen int64, used map[string]struct{}, emergency bool) bool {
+	return supplyPlatformLessWithPriority(left, right, quantity, balanceReserveFen, used, emergency, false)
+}
+
+func supplyPlatformLessWithPriority(left PlatformOverview, right PlatformOverview, quantity int, balanceReserveFen int64, used map[string]struct{}, emergency bool, priorityFirst bool) bool {
 	leftTier := supplyPlatformAvailabilityTier(left, quantity, balanceReserveFen)
 	rightTier := supplyPlatformAvailabilityTier(right, quantity, balanceReserveFen)
 	if leftTier != rightTier {
 		return leftTier < rightTier
+	}
+	if priorityFirst && left.Priority != right.Priority {
+		leftPriority := left.Priority
+		rightPriority := right.Priority
+		if leftPriority <= 0 {
+			leftPriority = math.MaxInt
+		}
+		if rightPriority <= 0 {
+			rightPriority = math.MaxInt
+		}
+		if leftPriority != rightPriority {
+			return leftPriority < rightPriority
+		}
 	}
 	leftCost := left.CostPerUsableQuotaFen
 	if leftCost <= 0 {
