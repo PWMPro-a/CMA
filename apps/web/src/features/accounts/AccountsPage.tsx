@@ -250,6 +250,7 @@ import {
   type MonitoringAccountWindowUsageItem,
   type QuotaCooldownInfo,
   type SupplyAccountLeaseItem,
+  type SupplyAccountPoolCredentialSummary,
   type SupplyAccountPoolSummary,
   type UsageHeaderSnapshot,
 } from '@/services/api';
@@ -329,6 +330,8 @@ const getHealthStatusClass = (status: AccountListHealthStatusKey) => {
   switch (status) {
     case 'available':
       return styles.badgeGood;
+    case 'available_limited':
+      return styles.badgeWarn;
     case 'five_hour_cooldown':
     case 'weekly_cooldown':
     case 'monthly_cooldown':
@@ -1495,25 +1498,29 @@ export function AccountsPage() {
       ),
     [quotaCooldowns, rows]
   );
-  const accountPoolStatusByRowKey = useMemo(() => {
+  const accountPoolCredentialByRowKey = useMemo(() => {
     const itemsByRowKey = buildAccountOperationalItemsByRowKey(
       rows,
       accountPoolSummary?.credentials ?? []
     );
-    return new Map<string, AccountPoolCredentialBucket>(
+    return new Map<string, SupplyAccountPoolCredentialSummary>(
       Array.from(itemsByRowKey, ([rowKey, items]) => {
         const item = items[0];
         if (!item) return [rowKey, undefined] as const;
-        const bucket =
-          item.schedulable && item.bucket === 'quota_risk'
-            ? 'normal'
-            : item.bucket;
-        return [rowKey, bucket] as const;
-      }).filter(
-        (entry): entry is [string, AccountPoolCredentialBucket] => Boolean(entry[1])
-      )
+        return [rowKey, item] as const;
+      }).filter((entry): entry is [string, SupplyAccountPoolCredentialSummary] => Boolean(entry[1]))
     );
   }, [accountPoolSummary?.credentials, rows]);
+  const accountPoolStatusByRowKey = useMemo(
+    () =>
+      new Map<string, AccountPoolCredentialBucket>(
+        Array.from(accountPoolCredentialByRowKey, ([rowKey, item]) => {
+          const bucket = item.schedulable && item.bucket === 'quota_risk' ? 'normal' : item.bucket;
+          return [rowKey, bucket] as const;
+        })
+      ),
+    [accountPoolCredentialByRowKey]
+  );
   const metrics = useMemo(
     () =>
       buildAccountMetricsWithCodexPoolSummary(
@@ -4382,11 +4389,19 @@ export function AccountsPage() {
             const quotaCooldown = quotaCooldownsByRowKey.get(row.selectionKey)?.[0] ?? null;
             const codexStatus = codexStatusBySelectionKey.get(row.selectionKey) ?? null;
             const poolStatus = accountPoolStatusByRowKey.get(row.selectionKey) ?? null;
+            const poolCredential = accountPoolCredentialByRowKey.get(row.selectionKey) ?? null;
             const item = buildAccountListItem(row, {
               recommendation,
               quotaCooldown,
               codexStatus,
               poolStatus,
+              poolTemporaryLimit: poolCredential?.temporaryLimited
+                ? {
+                    kind: poolCredential.temporaryLimitKind,
+                    code: poolCredential.temporaryLimitCode,
+                    recoverAtMs: poolCredential.temporaryLimitRecoverAtMs,
+                  }
+                : null,
               quotaWindows,
             });
             const antigravityQuotaMatrix = buildAntigravityQuotaMatrix(row, quotaWindows);
@@ -4912,6 +4927,9 @@ export function AccountsPage() {
           )
         : undefined;
     const selectedCodexStatus = codexStatusBySelectionKey.get(selectedRow.selectionKey) ?? null;
+    const selectedPoolStatus = accountPoolStatusByRowKey.get(selectedRow.selectionKey) ?? null;
+    const selectedPoolCredential =
+      accountPoolCredentialByRowKey.get(selectedRow.selectionKey) ?? null;
     const hasMatchingDetailEvents = detailEventsRowKey === selectedRow.selectionKey;
     const rowEvents = hasMatchingDetailEvents ? detailEvents : [];
     const rowEventsSummary = hasMatchingDetailEvents ? detailEventsSummary : null;
@@ -4921,6 +4939,14 @@ export function AccountsPage() {
       recommendation: recommendationBySelectionKey.get(selectedRow.selectionKey) ?? null,
       quotaCooldown: selectedQuotaCooldown,
       codexStatus: selectedCodexStatus,
+      poolStatus: selectedPoolStatus,
+      poolTemporaryLimit: selectedPoolCredential?.temporaryLimited
+        ? {
+            kind: selectedPoolCredential.temporaryLimitKind,
+            code: selectedPoolCredential.temporaryLimitCode,
+            recoverAtMs: selectedPoolCredential.temporaryLimitRecoverAtMs,
+          }
+        : null,
       quotaWindows: selectedQuotaWindows,
       windowUsageByKey: matchingAccountWindowUsageByKey,
       actionCandidates: accountActionCandidates,

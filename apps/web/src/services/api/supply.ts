@@ -192,6 +192,11 @@ export interface SupplyAccountPoolCredentialSummary {
   bucket: SupplyAccountPoolCredentialBucket;
   /** Live Core scheduling eligibility; quota-risk credentials may still be schedulable. */
   schedulable?: boolean;
+  /** Temporary provider backoff that does not remove the credential from the available pool. */
+  temporaryLimited?: boolean;
+  temporaryLimitKind?: string;
+  temporaryLimitCode?: string;
+  temporaryLimitRecoverAtMs?: number;
 }
 
 export interface SupplySmartResource {

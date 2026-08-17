@@ -1860,6 +1860,82 @@ func TestOperatorHeaderAuthErrorWinsOverUnrelatedQuotaPercent(t *testing.T) {
 	}
 }
 
+func TestOperatorHeaderTemporaryRateLimitKeepsCredentialAvailable(t *testing.T) {
+	tests := []struct {
+		name     string
+		kind     string
+		code     string
+		want     operatorAccountBucket
+		usedRate *float64
+	}{
+		{name: "retry after", kind: "rate_limit", code: "retry_after", want: operatorAccountNormal},
+		{name: "too many requests", code: "too_many_requests", want: operatorAccountNormal},
+		{name: "http 429", code: "HTTP 429", want: operatorAccountNormal},
+		{name: "cooldown", kind: "cooldown", want: operatorAccountNormal},
+		{name: "low quota stays visible as quota risk", kind: "rate_limit", code: "retry_after", want: operatorAccountQuotaRisk, usedRate: float64Ptr(90)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot := store.HeaderSnapshot{
+				HeaderErrorKind: tt.kind,
+				HeaderErrorCode: tt.code,
+			}
+			if tt.usedRate != nil {
+				snapshot.ResponseMetadata = &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+					Primary: &usage.HeaderQuotaWindow{UsedPercent: tt.usedRate},
+				}}
+			}
+			if got := classifyOperatorAccountFromHeader(snapshot); got != tt.want {
+				t.Fatalf("temporary header limit bucket = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOperatorHeaderQuotaExhaustionRemainsQuotaRisk(t *testing.T) {
+	for _, code := range []string{"usage_limit_reached", "quota_exhausted", "insufficient_quota"} {
+		t.Run(code, func(t *testing.T) {
+			got := classifyOperatorAccountFromHeader(store.HeaderSnapshot{
+				HeaderErrorKind: "rate_limit",
+				HeaderErrorCode: code,
+			})
+			if got != operatorAccountQuotaRisk {
+				t.Fatalf("quota exhaustion bucket = %v, want quota risk", got)
+			}
+		})
+	}
+}
+
+func TestAccountPoolStatsKeepsTemporaryHeaderRateLimitInAvailablePool(t *testing.T) {
+	now := time.UnixMilli(10_000)
+	files := []cpaauthfiles.File{{
+		Name: "replenished.json", Provider: "codex", AuthIndex: "replenished",
+		Raw: map[string]any{"status": "active"},
+	}}
+	headers := []store.HeaderSnapshot{{
+		ID: 1, EventHash: "temporary-429", TimestampMS: 9_000,
+		AuthFileSnapshot: "replenished.json", AuthIndex: "replenished",
+		HeaderErrorKind: "rate_limit", HeaderErrorCode: "retry_after",
+	}}
+
+	stats := accountPoolStatsFromFilesAndCurrentEvidence(
+		files,
+		nil,
+		headers,
+		model.CodexInspectionTriggerSupplySnapshot,
+		now,
+	)
+	if stats.normal != 1 || stats.needsAttention != 0 || stats.operatorUsable != 1 || stats.schedulable != 1 {
+		t.Fatalf("temporary rate-limit pool statistics = %#v", stats)
+	}
+	items := accountPoolCredentialSummaries(stats)
+	if len(items) != 1 || items[0].Bucket != "normal" || !items[0].Schedulable ||
+		!items[0].TemporaryLimited || items[0].TemporaryLimitKind != "rate_limit" ||
+		items[0].TemporaryLimitCode != "retry_after" {
+		t.Fatalf("temporary rate-limit credential summary = %#v", items)
+	}
+}
+
 func TestOperatorHeaderSnapshotExpiresRecoveredRetryAfter(t *testing.T) {
 	now := time.UnixMilli(10_000)
 	snapshot := store.HeaderSnapshot{
@@ -2283,8 +2359,8 @@ func TestRecoverySyncClaimsImportsAndDisablesOriginalAccount(t *testing.T) {
 			if got := r.Header.Get("Idempotency-Key"); got != "cpam-recovery-rec-1" {
 				t.Fatalf("claim idempotency key = %q", got)
 			}
-			if got := r.URL.Query().Get("ticket"); got != "" {
-				t.Fatalf("claim ticket leaked into URL = %q", got)
+			if got := r.URL.Query().Get("ticket"); got != "ticket-1" {
+				t.Fatalf("legacy claim ticket = %q", got)
 			}
 			_, _ = w.Write([]byte(`{"credential_version":2,"payload":{"type":"oauth","name":"replacement","platform":"openai","credentials":{"access_token":"access-new","refresh_token":"refresh-new","email":"new@example.com","chatgpt_account_id":"acct-new","chatgpt_plan_type":"team","workspace_id":"workspace-new"}}}`))
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:

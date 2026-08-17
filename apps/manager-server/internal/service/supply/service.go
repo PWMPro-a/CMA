@@ -144,14 +144,18 @@ type AccountPoolSummary struct {
 // its status cards and filters cannot drift from the supply page's live pool
 // classification while local quota requests are still catching up.
 type AccountPoolCredentialSummary struct {
-	AuthFileName    string `json:"authFileName"`
-	RuntimeID       string `json:"runtimeId,omitempty"`
-	Provider        string `json:"provider,omitempty"`
-	AuthIndex       string `json:"authIndex,omitempty"`
-	AccountID       string `json:"accountId,omitempty"`
-	AccountSnapshot string `json:"accountSnapshot,omitempty"`
-	Bucket          string `json:"bucket"`
-	Schedulable     bool   `json:"schedulable"`
+	AuthFileName              string `json:"authFileName"`
+	RuntimeID                 string `json:"runtimeId,omitempty"`
+	Provider                  string `json:"provider,omitempty"`
+	AuthIndex                 string `json:"authIndex,omitempty"`
+	AccountID                 string `json:"accountId,omitempty"`
+	AccountSnapshot           string `json:"accountSnapshot,omitempty"`
+	Bucket                    string `json:"bucket"`
+	Schedulable               bool   `json:"schedulable"`
+	TemporaryLimited          bool   `json:"temporaryLimited,omitempty"`
+	TemporaryLimitKind        string `json:"temporaryLimitKind,omitempty"`
+	TemporaryLimitCode        string `json:"temporaryLimitCode,omitempty"`
+	TemporaryLimitRecoverAtMS int64  `json:"temporaryLimitRecoverAtMs,omitempty"`
 }
 
 // ActiveOrderStatus is deliberately smaller than Status. The management page
@@ -965,25 +969,36 @@ func accountPoolCredentialSummaries(stats accountPoolStats) []AccountPoolCredent
 			continue
 		}
 		bucket := "disabled"
+		temporaryLimit := operatorAccountTemporaryLimit{}
 		if !file.Disabled {
-			classified, matched := stats.bucketByCredential[operatorCredentialKey(file.Name, file.AuthIndex)]
+			credentialKey := operatorCredentialKey(file.Name, file.AuthIndex)
+			fileKey := operatorFileCredentialKey(file.Name)
+			classified, matched := stats.bucketByCredential[credentialKey]
 			if !matched && filesByName[strings.TrimSpace(file.Name)] == 1 {
-				classified, matched = stats.bucketByCredential[operatorFileCredentialKey(file.Name)]
+				classified, matched = stats.bucketByCredential[fileKey]
 			}
 			if !matched {
 				classified = operatorAccountUnconfirmed
 			}
 			bucket = operatorAccountBucketName(classified)
+			temporaryLimit = stats.temporaryLimitByCredential[credentialKey]
+			if !temporaryLimit.observed && filesByName[strings.TrimSpace(file.Name)] == 1 {
+				temporaryLimit = stats.temporaryLimitByCredential[fileKey]
+			}
 		}
 		items = append(items, AccountPoolCredentialSummary{
-			AuthFileName:    strings.TrimSpace(file.Name),
-			RuntimeID:       strings.TrimSpace(file.ID),
-			Provider:        strings.TrimSpace(file.Provider),
-			AuthIndex:       strings.TrimSpace(file.AuthIndex),
-			AccountID:       strings.TrimSpace(file.AccountID),
-			AccountSnapshot: strings.TrimSpace(file.AccountSnapshot),
-			Bucket:          bucket,
-			Schedulable:     isAvailableCodexFile(file),
+			AuthFileName:              strings.TrimSpace(file.Name),
+			RuntimeID:                 strings.TrimSpace(file.ID),
+			Provider:                  strings.TrimSpace(file.Provider),
+			AuthIndex:                 strings.TrimSpace(file.AuthIndex),
+			AccountID:                 strings.TrimSpace(file.AccountID),
+			AccountSnapshot:           strings.TrimSpace(file.AccountSnapshot),
+			Bucket:                    bucket,
+			Schedulable:               isAvailableCodexFile(file),
+			TemporaryLimited:          temporaryLimit.observed,
+			TemporaryLimitKind:        temporaryLimit.kind,
+			TemporaryLimitCode:        temporaryLimit.code,
+			TemporaryLimitRecoverAtMS: temporaryLimit.recoverAtMS,
 		})
 	}
 	sort.SliceStable(items, func(i, j int) bool {
@@ -5447,7 +5462,15 @@ type accountPoolStats struct {
 	liveObserved                bool
 	inspectionObserved          bool
 	bucketByCredential          map[string]operatorAccountBucket
+	temporaryLimitByCredential  map[string]operatorAccountTemporaryLimit
 	normalRemainingByCredential map[string]float64
+}
+
+type operatorAccountTemporaryLimit struct {
+	observed    bool
+	kind        string
+	code        string
+	recoverAtMS int64
 }
 
 func (s *Service) countAccountPoolStats(ctx context.Context, cfg store.ManagerConfig) (accountPoolStats, error) {
@@ -5633,6 +5656,7 @@ func accountPoolStatsFromFiles(files []cpaauthfiles.File) accountPoolStats {
 		files:                       files,
 		liveObserved:                true,
 		bucketByCredential:          make(map[string]operatorAccountBucket),
+		temporaryLimitByCredential:  make(map[string]operatorAccountTemporaryLimit),
 		normalRemainingByCredential: make(map[string]float64),
 	}
 	filesByName := make(map[string]int, len(files))
@@ -5711,6 +5735,23 @@ func (stats *accountPoolStats) recordCredentialBucket(file cpaauthfiles.File, bu
 	}
 }
 
+func (stats *accountPoolStats) recordCredentialTemporaryLimit(file cpaauthfiles.File, limit operatorAccountTemporaryLimit, uniqueFileName bool) {
+	if stats == nil || file.Disabled || !limit.observed {
+		return
+	}
+	if stats.temporaryLimitByCredential == nil {
+		stats.temporaryLimitByCredential = make(map[string]operatorAccountTemporaryLimit)
+	}
+	if key := operatorCredentialKey(file.Name, file.AuthIndex); key != "" {
+		stats.temporaryLimitByCredential[key] = limit
+	}
+	if uniqueFileName {
+		if key := operatorFileCredentialKey(file.Name); key != "" {
+			stats.temporaryLimitByCredential[key] = limit
+		}
+	}
+}
+
 func (stats *accountPoolStats) recordNormalCapacityEvidence(file cpaauthfiles.File, remaining float64, uniqueFileName bool) {
 	if stats == nil || file.Disabled {
 		return
@@ -5768,6 +5809,7 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 	stats.classificationObserved = true
 	stats.liveObserved = true
 	stats.bucketByCredential = make(map[string]operatorAccountBucket, len(files)*2)
+	stats.temporaryLimitByCredential = make(map[string]operatorAccountTemporaryLimit, len(files)*2)
 	stats.normalRemainingByCredential = make(map[string]float64, len(files)*2)
 
 	resultsByFile := make(map[string][]store.CodexInspectionResult, len(results))
@@ -5812,6 +5854,7 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 			headerMatched = false
 		}
 		bucket := operatorAccountUnconfirmed
+		temporaryLimit := operatorAccountTemporaryLimit{}
 		remainingFraction := 1.0
 		if isAvailableCodexFile(file) && len(resultsByFile[strings.TrimSpace(file.Name)]) == 0 {
 			// Preserve live capacity behavior when the selected inspection does not
@@ -5823,6 +5866,7 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 			bucket = operatorAccountNeedsAttention
 		} else if headerMatched && (!inspectionAuthoritative || !matched || header.TimestampMS > result.CreatedAtMS) {
 			bucket = classifyOperatorAccountFromHeader(header)
+			temporaryLimit, _ = operatorAccountTemporaryLimitFromHeader(header)
 			if usedPercent, hasQuota := operatorHeaderSnapshotUsedPercent(header); hasQuota {
 				remainingFraction = 1 - clampFloat(usedPercent/100, 0, 1)
 			}
@@ -5847,6 +5891,7 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 		}
 		uniqueFileName := filesByName[strings.TrimSpace(file.Name)] == 1
 		stats.recordCredentialBucket(file, bucket, uniqueFileName)
+		stats.recordCredentialTemporaryLimit(file, temporaryLimit, uniqueFileName)
 		if bucket == operatorAccountNormal {
 			stats.recordNormalCapacityEvidence(file, remainingFraction, uniqueFileName)
 		}
@@ -5890,6 +5935,16 @@ func classifyOperatorAccountFromHeader(snapshot store.HeaderSnapshot) operatorAc
 	if operatorHeaderSnapshotQuotaLimited(snapshot, errorKind, errorCode) {
 		return operatorAccountQuotaRisk
 	}
+	if operatorHeaderSnapshotTemporarilyLimited(errorKind, errorCode) {
+		// A short provider backoff confirms that the credential is accepted; it
+		// does not turn an enabled, schedulable account into an account requiring
+		// operator intervention. Preserve the independent low-quota signal when
+		// the same response also publishes a nearly exhausted quota window.
+		if hasQuota && usedPercent >= (1-smartNormalAccountMinimumRemainingFraction)*100 {
+			return operatorAccountQuotaRisk
+		}
+		return operatorAccountNormal
+	}
 	if errorKind != "" || errorCode != "" {
 		return operatorAccountNeedsAttention
 	}
@@ -5911,7 +5966,12 @@ func operatorHeaderSnapshotQuotaLimited(snapshot store.HeaderSnapshot, errorKind
 	for _, marker := range []string{
 		"usage_limit_reached",
 		"quota_exceeded",
+		"quota_exhausted",
 		"quota_depleted",
+		"insufficient_quota",
+		"billing_hard_limit",
+		"hard_limit_reached",
+		"credit_grant_exhausted",
 		"credits_depleted",
 	} {
 		if strings.Contains(errorText, marker) {
@@ -5919,6 +5979,47 @@ func operatorHeaderSnapshotQuotaLimited(snapshot store.HeaderSnapshot, errorKind
 		}
 	}
 	return false
+}
+
+func operatorHeaderSnapshotTemporarilyLimited(errorKind, errorCode string) bool {
+	errorText := strings.ToLower(strings.TrimSpace(errorKind + " " + errorCode))
+	for _, marker := range []string{
+		"rate_limit",
+		"rate-limit",
+		"retry_after",
+		"retry after",
+		"too_many_requests",
+		"too many requests",
+		"http 429",
+		"status 429",
+		"status_code:429",
+		"status_code\":429",
+		"cooldown",
+		"cooling",
+	} {
+		if strings.Contains(errorText, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func operatorAccountTemporaryLimitFromHeader(snapshot store.HeaderSnapshot) (operatorAccountTemporaryLimit, bool) {
+	errorKind := strings.ToLower(strings.TrimSpace(snapshot.HeaderErrorKind))
+	errorCode := strings.ToLower(strings.TrimSpace(snapshot.HeaderErrorCode))
+	if operatorHeaderSnapshotQuotaLimited(snapshot, errorKind, errorCode) ||
+		!operatorHeaderSnapshotTemporarilyLimited(errorKind, errorCode) {
+		return operatorAccountTemporaryLimit{}, false
+	}
+	limit := operatorAccountTemporaryLimit{
+		observed: true,
+		kind:     errorKind,
+		code:     errorCode,
+	}
+	if metadata := snapshot.ResponseMetadata; metadata != nil && metadata.Errors != nil {
+		limit.recoverAtMS = metadata.Errors.RetryAfterRecoverAtMS
+	}
+	return limit, true
 }
 
 func operatorHeaderSnapshotUsedPercent(snapshot store.HeaderSnapshot) (float64, bool) {

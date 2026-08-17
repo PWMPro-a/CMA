@@ -21,6 +21,7 @@ import {
   buildAccountListItem,
   getRecommendationActionLabelKey,
   type AccountListHealthStatusKey,
+  type AccountListPresentationOptions,
   type AccountListPresentationItem,
 } from './accountListPresentation';
 import { summarizeGroupedQuotaAvailability } from './accountQuotaSummary';
@@ -320,6 +321,8 @@ export interface BuildAccountDetailViewModelOptions {
   recommendation?: AccountRecommendation | null;
   quotaCooldown?: QuotaCooldownInfo | null;
   codexStatus?: AuthFileCodexStatusSummary | null;
+  poolStatus?: AccountListPresentationOptions['poolStatus'];
+  poolTemporaryLimit?: AccountListPresentationOptions['poolTemporaryLimit'];
   quotaWindows?: AccountDetailQuotaWindowInput[];
   windowUsageByKey?: Map<string, MonitoringAccountWindowUsageItem>;
   actionCandidates?: AccountActionCandidate[];
@@ -1389,6 +1392,8 @@ export const buildAccountDetailViewModel = (
     recommendation,
     quotaCooldown,
     codexStatus: options.codexStatus ?? null,
+    poolStatus: options.poolStatus ?? null,
+    poolTemporaryLimit: options.poolTemporaryLimit ?? null,
     quotaWindows,
   });
   const value = buildValueSummary(row, options.valueRow);

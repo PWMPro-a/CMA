@@ -155,9 +155,9 @@ describe('accountListPresentation', () => {
   });
 
   it('uses non-normal shared pool buckets as authoritative list states', () => {
-    expect(
-      buildAccountListItem(makeRow(), { poolStatus: 'needs_attention' }).health.status
-    ).toBe('exception');
+    expect(buildAccountListItem(makeRow(), { poolStatus: 'needs_attention' }).health.status).toBe(
+      'exception'
+    );
     expect(buildAccountListItem(makeRow(), { poolStatus: 'quota_risk' }).health.status).toBe(
       'limited'
     );
@@ -167,6 +167,23 @@ describe('accountListPresentation', () => {
     expect(buildAccountListItem(makeRow(), { poolStatus: 'disabled' }).health.status).toBe(
       'disabled'
     );
+  });
+
+  it('keeps a temporarily limited pool credential available while showing its state', () => {
+    const item = buildAccountListItem(makeRow(), {
+      poolStatus: 'normal',
+      poolTemporaryLimit: {
+        kind: 'rate_limit',
+        code: 'retry_after',
+        recoverAtMs: 1_800_000_000_000,
+      },
+    });
+
+    expect(item.health.status).toBe('available_limited');
+    expect(item.health.labelKey).toBe('accounts.health_available_limited');
+    expect(item.health.reasonKey).toBe('accounts.health_reason_available_limited');
+    expect(item.health.reasonTone).toBe('warning');
+    expect(item.health.tooltipParams).toEqual({ detail: 'rate_limit' });
   });
 
   it('summarizes quota refresh 401 as a quota refresh reauth reason', () => {

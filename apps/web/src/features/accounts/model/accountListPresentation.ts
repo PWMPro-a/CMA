@@ -29,6 +29,7 @@ export type AccountListHealthStatusKey =
   | 'disabled'
   | 'exception'
   | 'available'
+  | 'available_limited'
   | 'raw';
 export type AccountListHealthReasonTone = 'muted' | 'warning' | 'danger';
 
@@ -125,6 +126,11 @@ export interface AccountListPresentationOptions {
   } | null;
   codexStatus?: AuthFileCodexStatusSummary | null;
   poolStatus?: AccountPoolCredentialBucket | null;
+  poolTemporaryLimit?: {
+    kind?: string;
+    code?: string;
+    recoverAtMs?: number;
+  } | null;
   quotaWindows?: AccountListQuotaWindowInput[];
 }
 
@@ -468,6 +474,7 @@ const resolveHealthStatus = (
   quotaCooldown?: QuotaCooldownInfo | null,
   codexStatus?: AuthFileCodexStatusSummary | null,
   poolStatus?: AccountPoolCredentialBucket | null,
+  poolTemporaryLimit?: AccountListPresentationOptions['poolTemporaryLimit'],
   quotaWindows: AccountListQuotaWindowPresentation[] = []
 ): HealthStatusResolution => {
   const antigravityAvailability = resolveAntigravityAvailability(row, quotaWindows);
@@ -481,6 +488,23 @@ const resolveHealthStatus = (
           ? (antigravityAvailability.resetKind as AccountListSupportedLimitKind)
           : 'unknown'
       : resolveQuotaWindowLimitKind(quotaWindows);
+
+  if (
+    poolStatus === 'normal' &&
+    poolTemporaryLimit &&
+    !row.disabled &&
+    row.quota.status !== 'disabled'
+  ) {
+    const detail = getFirstDetail(poolTemporaryLimit.kind, poolTemporaryLimit.code);
+    return {
+      status: 'available_limited',
+      tooltipKey: 'accounts.health_tip_available_limited',
+      tooltipParams: { detail },
+      reasonKey: 'accounts.health_reason_available_limited',
+      reasonParams: { detail },
+      reasonTone: 'warning',
+    };
+  }
 
   if (poolStatus === 'normal' && !row.disabled && row.quota.status !== 'disabled') {
     return {
@@ -826,6 +850,7 @@ export const buildAccountListItem = (
     quotaCooldown,
     options.codexStatus ?? null,
     options.poolStatus ?? null,
+    options.poolTemporaryLimit ?? null,
     quotaWindows
   );
 

@@ -3085,6 +3085,55 @@ describe('AccountsPage replacement flows', () => {
     expect(treeText(renderer)).not.toContain('accounts.empty_title');
   });
 
+  it('shows a temporary limit badge without hiding the credential from available', async () => {
+    if (typeof window === 'undefined') {
+      vi.stubGlobal('window', {
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      });
+    }
+    const file = makeCodexFile('limited.json', 'auth-limited', 'limited@example.com');
+    mocks.files = [file];
+    mocks.location = { pathname: '/accounts', search: '?status=available' };
+    mocks.panelFeatureAvailability = {
+      checking: false,
+      managerServiceBase: '',
+      requestMonitoringAvailable: false,
+      serverCodexInspectionAvailable: false,
+    };
+    Object.assign(mocks.panelFeatureAvailability, { panelHostMode: 'manager_embedded' });
+    mocks.getAccountPoolSummary.mockResolvedValue({
+      checkedAtMs: Date.now(),
+      total: 1,
+      normal: 1,
+      needsAttention: 0,
+      quotaRisk: 0,
+      disabled: 0,
+      unconfirmed: 0,
+      classificationObserved: true,
+      credentials: [
+        {
+          authFileName: file.name,
+          provider: 'codex',
+          authIndex: 'auth-limited',
+          accountSnapshot: 'limited@example.com',
+          bucket: 'normal',
+          schedulable: true,
+          temporaryLimited: true,
+          temporaryLimitKind: 'rate_limit',
+          temporaryLimitCode: 'retry_after',
+        },
+      ],
+    });
+
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+
+    expect(treeText(renderer)).toContain('limited@example.com');
+    expect(treeText(renderer)).toContain('accounts.health_available_limited');
+    expect(treeText(renderer)).not.toContain('accounts.empty_title');
+  });
+
   it('groups import, source IP, and WebSocket tags inside the source column', async () => {
     if (typeof window === 'undefined') {
       vi.stubGlobal('window', {
@@ -3491,9 +3540,9 @@ describe('AccountsPage replacement flows', () => {
     ]);
 
     expect(renderer.root.findAllByProps({ 'data-account-quota-empty': 'true' })).toHaveLength(1);
-    expect(
-      readText(renderer.root.findAllByProps({ 'data-account-source': 'true' })[0])
-    ).toContain('accounts.list_source_unmarked');
+    expect(readText(renderer.root.findAllByProps({ 'data-account-source': 'true' })[0])).toContain(
+      'accounts.list_source_unmarked'
+    );
     expect(treeText(renderer)).not.toContain('SUM');
   });
 
