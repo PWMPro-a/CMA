@@ -478,6 +478,7 @@ describe('useVisualConfig', () => {
     expect(harness.getCurrent().visualValues.quotaSwitchProject).toBe(false);
     expect(harness.getCurrent().visualValues.quotaSwitchPreviewModel).toBe(false);
     expect(harness.getCurrent().visualValues.codexTailBurstEnabled).toBe(false);
+    expect(harness.getCurrent().visualValues.codexTailBurstNormalMaxConcurrency).toBe('8');
     expect(harness.getCurrent().visualValues.codexTailBurstToolInjectionEnabled).toBe(false);
     expect(harness.getCurrent().visualValues.wsAuth).toBe(true);
 
@@ -713,6 +714,7 @@ describe('useVisualConfig', () => {
         codexTailBurstTriggerRemainingPercent: '2',
         codexTailBurstSnapshotTtl: '90s',
         codexTailBurstExpiryWindow: '10m',
+        codexTailBurstNormalMaxConcurrency: '8',
         codexTailBurstMaxConcurrency: '32',
         codexTailBurstCollectorInterval: '45s',
         codexTailBurstCollectorMaxConcurrency: '4',
@@ -726,6 +728,7 @@ describe('useVisualConfig', () => {
         codexTailBurstTriggerRemainingPercent: '1.5',
         codexTailBurstSnapshotTtl: '2m',
         codexTailBurstExpiryWindow: '12m',
+        codexTailBurstNormalMaxConcurrency: '7',
         codexTailBurstMaxConcurrency: '48',
         codexTailBurstCollectorInterval: '30s',
         codexTailBurstCollectorMaxConcurrency: '6',
@@ -743,6 +746,7 @@ describe('useVisualConfig', () => {
           'trigger-remaining-ratio'?: number;
           'snapshot-ttl'?: string;
           'expiry-window'?: string;
+          'normal-max-concurrency'?: number;
           'max-concurrency'?: number;
           'quota-collector'?: {
             interval?: string;
@@ -763,6 +767,7 @@ describe('useVisualConfig', () => {
         'trigger-remaining-ratio': 0.015,
         'snapshot-ttl': '2m',
         'expiry-window': '12m',
+        'normal-max-concurrency': 7,
         'max-concurrency': 48,
         'tool-injection': { enabled: false },
       })
@@ -885,6 +890,7 @@ describe('useVisualConfig', () => {
         codexTailBurstEnabled: true,
         codexTailBurstTriggerRemainingPercent: '100',
         codexTailBurstExpiryWindow: 'soon',
+        codexTailBurstNormalMaxConcurrency: '0',
         codexTailBurstMaxConcurrency: '0',
         codexTailBurstCollectorMaxConcurrency: '17',
       });
@@ -893,6 +899,7 @@ describe('useVisualConfig', () => {
     expect(harness.getCurrent().visualValidationErrors).toMatchObject({
       codexTailBurstTriggerRemainingPercent: 'tail_burst_trigger_percent_range',
       codexTailBurstExpiryWindow: 'positive_duration',
+      codexTailBurstNormalMaxConcurrency: 'positive_integer',
       codexTailBurstMaxConcurrency: 'positive_integer',
       codexTailBurstCollectorMaxConcurrency: 'tail_burst_collector_concurrency_range',
     });

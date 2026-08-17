@@ -3760,6 +3760,8 @@
           "cache_affinity_hard_stop_percent_hint": "账号使用率达到此值后，已预热会话也会迁移；必须高于避让阈值且不超过 100。",
           "tail_burst_expiry_window": "临期入场窗口",
           "tail_burst_expiry_window_hint": "距离供应过期时间小于此时长时进入大并发，例如 10m。",
+          "tail_burst_normal_max_concurrency": "日常并发上限",
+          "tail_burst_normal_max_concurrency_hint": "普通状态下只限制冷请求和新亲和绑定，不打断已有缓存亲和；进入触发状态后改用入场账号最大并发。",
           "tail_burst_max_concurrency": "入场账号最大并发",
           "tail_burst_max_concurrency_hint": "临期或尾量账号的并发上限；账号自身配置的更高并发仍会保留。"
         },

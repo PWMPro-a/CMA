@@ -3760,6 +3760,8 @@
           "cache_affinity_hard_stop_percent_hint": "帳號使用率達到此值後，已預熱工作階段也會遷移；必須高於避讓門檻且不超過 100。",
           "tail_burst_expiry_window": "臨期進場視窗",
           "tail_burst_expiry_window_hint": "距離供應到期時間小於此時長時進入大併發，例如 10m。",
+          "tail_burst_normal_max_concurrency": "日常併發上限",
+          "tail_burst_normal_max_concurrency_hint": "普通狀態下只限制冷請求和新親和綁定，不中斷既有快取親和；進入觸發狀態後改用進場帳號最大併發。",
           "tail_burst_max_concurrency": "進場帳號最大併發",
           "tail_burst_max_concurrency_hint": "臨期或尾量帳號的併發上限；帳號自身設定的更高併發仍會保留。"
         },

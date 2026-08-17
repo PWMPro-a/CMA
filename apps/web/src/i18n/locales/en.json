@@ -3760,6 +3760,8 @@
           "cache_affinity_hard_stop_percent_hint": "At this usage level, warm sessions are moved too. Must exceed the preemption threshold and be at most 100.",
           "tail_burst_expiry_window": "Expiry entry window",
           "tail_burst_expiry_window_hint": "Enter the burst lane when supplier expiry is within this duration, for example 10m.",
+          "tail_burst_normal_max_concurrency": "Normal concurrency limit",
+          "tail_burst_normal_max_concurrency_hint": "Soft limit for cold requests and new affinity bindings during normal operation; existing cache-affinity bindings stay warm, and triggered accounts use the burst limit.",
           "tail_burst_max_concurrency": "Burst account max concurrency",
           "tail_burst_max_concurrency_hint": "Concurrency ceiling for expiring or low-quota accounts; a higher per-account setting is preserved."
         },

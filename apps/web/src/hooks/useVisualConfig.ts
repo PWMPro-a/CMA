@@ -735,6 +735,9 @@ export function getVisualConfigValidationErrors(
     codexTailBurstExpiryWindow: values.codexTailBurstEnabled
       ? getPositiveDurationError(values.codexTailBurstExpiryWindow)
       : undefined,
+    codexTailBurstNormalMaxConcurrency: values.codexTailBurstEnabled
+      ? getPositiveIntegerError(values.codexTailBurstNormalMaxConcurrency)
+      : undefined,
     codexTailBurstMaxConcurrency: values.codexTailBurstEnabled
       ? getPositiveIntegerError(values.codexTailBurstMaxConcurrency)
       : undefined,
@@ -875,6 +878,7 @@ function getNextDirtyFields(
       'codexTailBurstTriggerRemainingPercent',
       'codexTailBurstSnapshotTtl',
       'codexTailBurstExpiryWindow',
+      'codexTailBurstNormalMaxConcurrency',
       'codexTailBurstMaxConcurrency',
       'codexTailBurstCollectorInterval',
       'codexTailBurstCollectorMaxConcurrency',
@@ -1383,6 +1387,9 @@ export function useVisualConfig() {
         codexTailBurstExpiryWindow: readTailBurstDuration(
           codexTailBurst?.['expiry-window'] ?? codexTailBurst?.expiryWindow,
           '10m'
+        ),
+        codexTailBurstNormalMaxConcurrency: String(
+          codexTailBurst?.['normal-max-concurrency'] ?? codexTailBurst?.normalMaxConcurrency ?? 8
         ),
         codexTailBurstMaxConcurrency: String(
           codexTailBurst?.['max-concurrency'] ?? codexTailBurst?.maxConcurrency ?? 32
@@ -1903,6 +1910,7 @@ export function useVisualConfig() {
           isDirty('codexTailBurstTriggerRemainingPercent') ||
           isDirty('codexTailBurstSnapshotTtl') ||
           isDirty('codexTailBurstExpiryWindow') ||
+          isDirty('codexTailBurstNormalMaxConcurrency') ||
           isDirty('codexTailBurstMaxConcurrency') ||
           isDirty('codexTailBurstCollectorInterval') ||
           isDirty('codexTailBurstCollectorMaxConcurrency') ||
@@ -1936,6 +1944,13 @@ export function useVisualConfig() {
               doc,
               ['codex', 'tail-burst', 'expiry-window'],
               values.codexTailBurstExpiryWindow
+            );
+          }
+          if (isDirty('codexTailBurstNormalMaxConcurrency')) {
+            setIntFromStringInDoc(
+              doc,
+              ['codex', 'tail-burst', 'normal-max-concurrency'],
+              values.codexTailBurstNormalMaxConcurrency
             );
           }
           if (isDirty('codexTailBurstMaxConcurrency')) {
