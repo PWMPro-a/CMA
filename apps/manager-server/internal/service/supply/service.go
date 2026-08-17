@@ -6170,14 +6170,14 @@ func classifyOperatorAccount(file cpaauthfiles.File, result store.CodexInspectio
 	// The credential page normalizes a missing historical action to keep.
 	// Identity uncertainty, rather than an omitted legacy action, is what
 	// belongs in the unconfirmed bucket.
-	if action != "" && action != "keep" {
-		return operatorAccountNeedsAttention
-	}
 	// Quota-limited results can carry an error/status message describing the
 	// exhausted window. The credential page puts those in quota risk before
 	// diagnostic exceptions, so preserve the same precedence here.
 	if inspectionResultInCooldown(result) || result.IsQuota {
 		return operatorAccountQuotaRisk
+	}
+	if action != "" && action != "keep" {
+		return operatorAccountNeedsAttention
 	}
 	if strings.TrimSpace(result.ErrorKind) != "" || strings.TrimSpace(result.Error) != "" || strings.TrimSpace(result.ErrorDetail) != "" {
 		return operatorAccountNeedsAttention

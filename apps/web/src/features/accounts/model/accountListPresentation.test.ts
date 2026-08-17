@@ -186,6 +186,18 @@ describe('accountListPresentation', () => {
     expect(item.health.tooltipParams).toEqual({ detail: 'rate_limit' });
   });
 
+  it('keeps a schedulable quota-risk credential available while showing its state', () => {
+    const item = buildAccountListItem(makeRow(), {
+      poolStatus: 'normal',
+      poolQuotaRisk: true,
+    });
+
+    expect(item.health.status).toBe('available_quota_risk');
+    expect(item.health.labelKey).toBe('accounts.health_available_quota_risk');
+    expect(item.health.reasonKey).toBe('accounts.health_reason_available_quota_risk');
+    expect(item.health.reasonTone).toBe('warning');
+  });
+
   it('summarizes quota refresh 401 as a quota refresh reauth reason', () => {
     const item = buildAccountListItem(
       makeRow({

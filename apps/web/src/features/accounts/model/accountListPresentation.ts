@@ -30,6 +30,7 @@ export type AccountListHealthStatusKey =
   | 'exception'
   | 'available'
   | 'available_limited'
+  | 'available_quota_risk'
   | 'raw';
 export type AccountListHealthReasonTone = 'muted' | 'warning' | 'danger';
 
@@ -131,6 +132,7 @@ export interface AccountListPresentationOptions {
     code?: string;
     recoverAtMs?: number;
   } | null;
+  poolQuotaRisk?: boolean;
   quotaWindows?: AccountListQuotaWindowInput[];
 }
 
@@ -475,6 +477,7 @@ const resolveHealthStatus = (
   codexStatus?: AuthFileCodexStatusSummary | null,
   poolStatus?: AccountPoolCredentialBucket | null,
   poolTemporaryLimit?: AccountListPresentationOptions['poolTemporaryLimit'],
+  poolQuotaRisk?: boolean,
   quotaWindows: AccountListQuotaWindowPresentation[] = []
 ): HealthStatusResolution => {
   const antigravityAvailability = resolveAntigravityAvailability(row, quotaWindows);
@@ -501,6 +504,23 @@ const resolveHealthStatus = (
       tooltipKey: 'accounts.health_tip_available_limited',
       tooltipParams: { detail },
       reasonKey: 'accounts.health_reason_available_limited',
+      reasonParams: { detail },
+      reasonTone: 'warning',
+    };
+  }
+
+  if (
+    poolStatus === 'normal' &&
+    poolQuotaRisk &&
+    !row.disabled &&
+    row.quota.status !== 'disabled'
+  ) {
+    const detail = getFirstDetail(row.quota.rateLimitReachedType, row.quota.error, 'quota_risk');
+    return {
+      status: 'available_quota_risk',
+      tooltipKey: 'accounts.health_tip_available_quota_risk',
+      tooltipParams: { detail },
+      reasonKey: 'accounts.health_reason_available_quota_risk',
       reasonParams: { detail },
       reasonTone: 'warning',
     };
@@ -851,6 +871,7 @@ export const buildAccountListItem = (
     options.codexStatus ?? null,
     options.poolStatus ?? null,
     options.poolTemporaryLimit ?? null,
+    options.poolQuotaRisk ?? false,
     quotaWindows
   );
 

@@ -331,6 +331,7 @@ const getHealthStatusClass = (status: AccountListHealthStatusKey) => {
     case 'available':
       return styles.badgeGood;
     case 'available_limited':
+    case 'available_quota_risk':
       return styles.badgeWarn;
     case 'five_hour_cooldown':
     case 'weekly_cooldown':
@@ -4402,6 +4403,8 @@ export function AccountsPage() {
                     recoverAtMs: poolCredential.temporaryLimitRecoverAtMs,
                   }
                 : null,
+              poolQuotaRisk:
+                poolCredential?.schedulable === true && poolCredential.bucket === 'quota_risk',
               quotaWindows,
             });
             const antigravityQuotaMatrix = buildAntigravityQuotaMatrix(row, quotaWindows);
@@ -4947,6 +4950,9 @@ export function AccountsPage() {
             recoverAtMs: selectedPoolCredential.temporaryLimitRecoverAtMs,
           }
         : null,
+      poolQuotaRisk:
+        selectedPoolCredential?.schedulable === true &&
+        selectedPoolCredential.bucket === 'quota_risk',
       quotaWindows: selectedQuotaWindows,
       windowUsageByKey: matchingAccountWindowUsageByKey,
       actionCandidates: accountActionCandidates,

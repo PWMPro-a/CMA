@@ -3080,7 +3080,7 @@ describe('AccountsPage replacement flows', () => {
     expect(mocks.getAccountPoolSummary).toHaveBeenCalled();
     expect(treeText(renderer)).toContain('normal@example.com');
     expect(treeText(renderer)).not.toContain('unconfirmed@example.com');
-    expect(treeText(renderer)).toContain('accounts.health_available');
+    expect(treeText(renderer)).toContain('accounts.health_available_quota_risk');
     expect(treeText(renderer)).not.toContain('accounts.health_weekly_exhausted');
     expect(treeText(renderer)).not.toContain('accounts.empty_title');
   });

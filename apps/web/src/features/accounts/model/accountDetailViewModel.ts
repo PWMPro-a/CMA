@@ -323,6 +323,7 @@ export interface BuildAccountDetailViewModelOptions {
   codexStatus?: AuthFileCodexStatusSummary | null;
   poolStatus?: AccountListPresentationOptions['poolStatus'];
   poolTemporaryLimit?: AccountListPresentationOptions['poolTemporaryLimit'];
+  poolQuotaRisk?: AccountListPresentationOptions['poolQuotaRisk'];
   quotaWindows?: AccountDetailQuotaWindowInput[];
   windowUsageByKey?: Map<string, MonitoringAccountWindowUsageItem>;
   actionCandidates?: AccountActionCandidate[];
@@ -1394,6 +1395,7 @@ export const buildAccountDetailViewModel = (
     codexStatus: options.codexStatus ?? null,
     poolStatus: options.poolStatus ?? null,
     poolTemporaryLimit: options.poolTemporaryLimit ?? null,
+    poolQuotaRisk: options.poolQuotaRisk ?? false,
     quotaWindows,
   });
   const value = buildValueSummary(row, options.valueRow);

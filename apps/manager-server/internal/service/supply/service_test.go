@@ -1860,6 +1860,27 @@ func TestOperatorHeaderAuthErrorWinsOverUnrelatedQuotaPercent(t *testing.T) {
 	}
 }
 
+func TestOperatorInspectionQuotaActionRemainsQuotaRisk(t *testing.T) {
+	file := cpaauthfiles.File{
+		Name: "quota-risk.json", Provider: "codex", AuthIndex: "quota-risk",
+		Raw: map[string]any{"status": "active"},
+	}
+	usedPercent := 100.0
+	result := store.CodexInspectionResult{
+		FileName: "quota-risk.json", Provider: "codex", AuthIndex: "quota-risk",
+		Action: "disable", Status: "active", StatusCode: intPtr(http.StatusOK), IsQuota: true,
+		UsedPercent: &usedPercent,
+	}
+	if got := classifyOperatorAccount(file, result); got != operatorAccountQuotaRisk {
+		t.Fatalf("quota action bucket = %v, want quota risk", got)
+	}
+
+	stats := accountPoolStatsFromFilesAndInspection([]cpaauthfiles.File{file}, []store.CodexInspectionResult{result})
+	if stats.quotaRisk != 1 || stats.needsAttention != 0 || stats.operatorUsable != 1 || stats.schedulable != 1 {
+		t.Fatalf("quota action pool statistics = %#v", stats)
+	}
+}
+
 func TestOperatorHeaderTemporaryRateLimitKeepsCredentialAvailable(t *testing.T) {
 	tests := []struct {
 		name     string
