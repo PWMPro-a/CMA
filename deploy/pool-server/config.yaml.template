@@ -35,11 +35,19 @@ codex:
     shadow: false
     max-entries: 65536
     max-retry-credentials: 2
+    max-concurrency: 8
     websocket-pool-slots: 8
     max-session-requests: 2000
-    max-session-duration: "30m"
+    max-session-duration: "1h"
     quota-preempt-used-ratio: 0.97
     quota-hard-stop-used-ratio: 0.99
+  tail-burst:
+    enabled: false
+    quota-collector:
+      enabled: true
+      interval: "45s"
+      max-concurrency: 4
+      timeout: "8s"
 
 routing:
   strategy: round-robin

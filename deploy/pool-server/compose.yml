@@ -82,6 +82,7 @@ services:
       USAGE_POLL_INTERVAL_MS: "500"
       USAGE_QUERY_LIMIT: "50000"
       USAGE_CORS_ORIGINS: "*"
+      USAGE_QUOTA_COOLDOWN_ENABLED: "true"
     networks:
       - cpamp-cpa_default
     extra_hosts:
