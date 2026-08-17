@@ -387,10 +387,10 @@ func TestSuccessfulPartialDeliveryKeepsProgressiveCooldownUnlessEmergency(t *tes
 	resource.CriticalAvailableAccounts = 2
 	active, err = service.automaticCreateCooldownActive(context.Background(), cfg, resource)
 	if err != nil {
-		t.Fatalf("check account-vacuum cooldown bypass: %v", err)
+		t.Fatalf("check account-vacuum successful-delivery cooldown: %v", err)
 	}
-	if active {
-		t.Fatal("an account vacuum must continue immediately until the pool can serve")
+	if !active {
+		t.Fatal("an account vacuum must observe a successful delivery before buying the same expiry batch again")
 	}
 }
 

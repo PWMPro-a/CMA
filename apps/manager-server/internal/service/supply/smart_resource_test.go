@@ -820,6 +820,10 @@ func TestSuccessfulOrderCooldownScalesWithDeliveredCapacity(t *testing.T) {
 	if got := smartSuccessfulOrderCooldownForDelivery(cfg, resource, 2); got != 600 {
 		t.Fatalf("two-account observation cooldown=%d, want 600", got)
 	}
+	resource.EmergencyShortage = true
+	if got := smartSuccessfulOrderCooldownForDelivery(cfg, resource, 1); got != 90 {
+		t.Fatalf("emergency successful-delivery cooldown=%d, want 90", got)
+	}
 }
 
 func TestCustomSupplyEnablesConfiguredVerifiedHealthyFloor(t *testing.T) {

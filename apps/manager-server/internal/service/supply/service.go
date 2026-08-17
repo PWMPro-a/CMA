@@ -7741,15 +7741,6 @@ func (s *Service) automaticCreateCooldownActive(ctx context.Context, cfg store.M
 			// order creation. Supplier or inspection latency must not consume the
 			// interval intended to measure the capacity actually delivered.
 			last = maxInt64(last, smartSupplyOrderTerminalAtMS(latest))
-			if !recentAutomaticOrderCoversCurrentShortage(cfg, resource, latest) &&
-				smartResourceEmergency(resource) && smartAccountAvailabilityEmergency(resource) &&
-				(resource.PoolVacuumActive || resource.AvailableAccounts <= max(1, resource.CriticalAvailableAccounts)) {
-				// A real account vacuum must continue until the pool can serve. A
-				// capacity-only emergency still observes the delivered account for
-				// one short cooldown so a 10-second worker loop cannot buy several
-				// credentials from the same expiry batch before inspection catches up.
-				return false, nil
-			}
 			seconds = smartSuccessfulOrderCooldownForDelivery(cfg, resource, automaticOrderDeliveredQuantity(latest))
 		}
 	}

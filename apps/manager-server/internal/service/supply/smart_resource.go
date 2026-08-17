@@ -2566,6 +2566,7 @@ const (
 	smartBalancedWarningCooldownSeconds         = 3 * 60
 	smartCostFirstProgressiveCooldownSeconds    = 15 * 60
 	smartCostFirstWarningCooldownSeconds        = 5 * 60
+	smartEmergencyDeliveryObservationSeconds    = 90
 )
 
 // smartSuccessfulOrderCooldownForResource keeps the procurement cadence aligned
@@ -2605,8 +2606,14 @@ func smartSuccessfulOrderCooldownForResource(cfg store.ManagerSupplyConfig, reso
 // critical-waterline budget prevents the observation from delaying recovery.
 func smartSuccessfulOrderCooldownForDelivery(cfg store.ManagerSupplyConfig, resource SmartResource, delivered int) int {
 	base := smartSuccessfulOrderCooldownForResource(cfg, resource)
-	if delivered <= 0 || smartResourceEmergency(resource) {
+	if delivered <= 0 {
 		return base
+	}
+	if smartResourceEmergency(resource) {
+		// Once a credential was actually imported, even an account-vacuum path
+		// must give the live account list and quota inspection time to observe it.
+		// Zero-delivery cancellations still use the separate fast retry ladder.
+		return max(base, smartEmergencyDeliveryObservationSeconds)
 	}
 	demand := math.Max(resource.ConsumeRCUPerMinute, resource.DemandPlanningRCUPerMinute)
 	unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
