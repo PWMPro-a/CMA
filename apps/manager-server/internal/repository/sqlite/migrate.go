@@ -897,6 +897,7 @@ func Migrate(db *sql.DB) error {
 		`create table if not exists supply_recoveries (
 			id integer primary key autoincrement,
 			recovery_id text not null unique,
+			supplier_id text not null default '',
 			product text,
 			delivery_status text not null,
 			status text not null,
@@ -906,6 +907,7 @@ func Migrate(db *sql.DB) error {
 			original_auth_index text,
 			original_email text,
 			claim_url text,
+			claim_ticket text,
 			claim_order_id text,
 			item_count integer not null default 0,
 			imported_count integer not null default 0,
@@ -1335,6 +1337,8 @@ func ensureSupplyRecoveryColumns(db *sql.DB) error {
 	}{
 		{name: "credential_version", definition: "integer not null default 0"},
 		{name: "source_order_id", definition: "text"},
+		{name: "supplier_id", definition: "text not null default ''"},
+		{name: "claim_ticket", definition: "text"},
 	} {
 		if _, ok := existing[column.name]; ok {
 			continue
@@ -1343,8 +1347,15 @@ func ensureSupplyRecoveryColumns(db *sql.DB) error {
 			return err
 		}
 	}
-	_, err = db.Exec(`create index if not exists idx_supply_recoveries_source_order on supply_recoveries(source_order_id)`)
-	return err
+	for _, statement := range []string{
+		`create index if not exists idx_supply_recoveries_source_order on supply_recoveries(source_order_id)`,
+		`create index if not exists idx_supply_recoveries_supplier_status on supply_recoveries(supplier_id, status, updated_at_ms)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type usageMonitoringMigrationSnapshot struct {

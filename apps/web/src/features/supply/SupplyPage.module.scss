@@ -975,6 +975,13 @@
   gap: 10px;
 }
 
+.platformHint {
+  margin: -2px 0 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .platformQuotaGrid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

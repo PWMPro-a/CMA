@@ -16,16 +16,19 @@ import (
 )
 
 type PlatformOverview struct {
-	ID          string                  `json:"id"`
-	Name        string                  `json:"name,omitempty"`
-	Type        string                  `json:"type"`
-	Product     string                  `json:"product"`
-	Priority    int                     `json:"priority,omitempty"`
-	Selected    bool                    `json:"selected"`
-	CheckedAtMS int64                   `json:"checkedAtMs"`
-	Inventory   *supplyclient.Inventory `json:"inventory,omitempty"`
-	Balance     *supplyclient.Balance   `json:"balance,omitempty"`
-	LastError   string                  `json:"lastError,omitempty"`
+	ID                    string                  `json:"id"`
+	Name                  string                  `json:"name,omitempty"`
+	Type                  string                  `json:"type"`
+	Product               string                  `json:"product"`
+	Priority              int                     `json:"priority,omitempty"`
+	Selected              bool                    `json:"selected"`
+	CheckedAtMS           int64                   `json:"checkedAtMs"`
+	Inventory             *supplyclient.Inventory `json:"inventory,omitempty"`
+	Balance               *supplyclient.Balance   `json:"balance,omitempty"`
+	ExpectedQuotaM        float64                 `json:"expectedQuotaM,omitempty"`
+	UsableQuotaM          float64                 `json:"usableQuotaM,omitempty"`
+	CostPerUsableQuotaFen float64                 `json:"costPerUsableQuotaFen,omitempty"`
+	LastError             string                  `json:"lastError,omitempty"`
 }
 
 type supplyPlatformSelection struct {
@@ -104,19 +107,52 @@ func resolveSupplyPlatform(cfg store.ManagerSupplyConfig, supplierID string, pro
 	return store.ManagerSupplyPlatformConfig{}, ErrNotConfigured
 }
 
-func recoverySupplyPlatform(cfg store.ManagerSupplyConfig) (store.ManagerSupplyPlatformConfig, error) {
+func recoverySupplyPlatforms(cfg store.ManagerSupplyConfig) []store.ManagerSupplyPlatformConfig {
 	platforms := supplyPlatforms(cfg)
+	result := make([]store.ManagerSupplyPlatformConfig, 0, len(platforms))
+	for _, platform := range platforms {
+		if !supplyPlatformConfigured(platform) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformBugTeam) &&
+			strings.TrimSpace(platform.Token) == "" {
+			// BugTeam deliberately requires a customer API token for recovery
+			// listing and one-time ticket claims; browser/password sessions only
+			// cover inventory, ordering and downloads.
+			continue
+		}
+		result = append(result, platform)
+	}
+	return result
+}
+
+func recoverySupplyPlatform(cfg store.ManagerSupplyConfig, supplierID ...string) (store.ManagerSupplyPlatformConfig, error) {
+	platforms := recoverySupplyPlatforms(cfg)
+	requestedID := ""
+	if len(supplierID) > 0 {
+		requestedID = strings.TrimSpace(supplierID[0])
+	}
+	if requestedID != "" {
+		for _, platform := range platforms {
+			if strings.EqualFold(strings.TrimSpace(platform.ID), requestedID) {
+				return platform, nil
+			}
+		}
+		return store.ManagerSupplyPlatformConfig{}, fmt.Errorf("recovery supply platform %s is not configured with an API token", requestedID)
+	}
 	for _, platform := range platforms {
 		if strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformLegacy) {
 			return platform, nil
 		}
 	}
+	if len(platforms) > 0 {
+		return platforms[0], nil
+	}
 	return store.ManagerSupplyPlatformConfig{}, errors.New("no recovery-capable supply platform is configured")
 }
 
 func recoverySupplyPlatformConfigured(cfg store.ManagerSupplyConfig) bool {
-	platform, err := recoverySupplyPlatform(cfg)
-	return err == nil && supplyPlatformConfigured(platform)
+	return len(recoverySupplyPlatforms(cfg)) > 0
 }
 
 func supplyProductConfigured(cfg store.ManagerSupplyConfig, product string) bool {
@@ -146,6 +182,7 @@ func (s *Service) selectSupplyPlatform(
 		return supplyPlatformSelection{}, ErrNotConfigured
 	}
 	statuses := make([]PlatformOverview, len(platforms))
+	resource := s.currentSmartResource(cfg)
 	type result struct {
 		index     int
 		inventory supplyclient.Inventory
@@ -195,6 +232,7 @@ func (s *Service) selectSupplyPlatform(
 			}
 			status.Inventory = &item.inventory
 			status.Balance = &item.balance
+			applySupplyPlatformEconomics(&status, cfg, resource, platform, quantity)
 		}
 		statuses[item.index] = status
 	}
@@ -217,12 +255,13 @@ func (s *Service) selectSupplyPlatform(
 		}
 		return supplyPlatformSelection{all: statuses}, ErrNotConfigured
 	}
+	emergency := smartResourceEmergency(resource)
 	sort.SliceStable(candidates, func(i, j int) bool {
 		leftIndex := candidates[i]
 		rightIndex := candidates[j]
 		left := statuses[leftIndex]
 		right := statuses[rightIndex]
-		return supplyPlatformLess(left, right, quantity, used)
+		return supplyPlatformLess(left, right, quantity, cfg.MinBalanceReserveFen, used, emergency)
 	})
 	selectedIndex := candidates[0]
 	statuses[selectedIndex].Selected = true
@@ -233,22 +272,25 @@ func (s *Service) selectSupplyPlatform(
 	}, nil
 }
 
-func supplyPlatformLess(left PlatformOverview, right PlatformOverview, quantity int, used map[string]struct{}) bool {
-	leftUsed := 0
-	if _, ok := used[strings.ToLower(strings.TrimSpace(left.ID))]; ok {
-		leftUsed = 1
-	}
-	rightUsed := 0
-	if _, ok := used[strings.ToLower(strings.TrimSpace(right.ID))]; ok {
-		rightUsed = 1
-	}
-	if leftUsed != rightUsed {
-		return leftUsed < rightUsed
-	}
-	leftTier := supplyPlatformAvailabilityTier(left, quantity)
-	rightTier := supplyPlatformAvailabilityTier(right, quantity)
+func supplyPlatformLess(left PlatformOverview, right PlatformOverview, quantity int, balanceReserveFen int64, used map[string]struct{}, emergency bool) bool {
+	leftTier := supplyPlatformAvailabilityTier(left, quantity, balanceReserveFen)
+	rightTier := supplyPlatformAvailabilityTier(right, quantity, balanceReserveFen)
 	if leftTier != rightTier {
 		return leftTier < rightTier
+	}
+	leftCost := left.CostPerUsableQuotaFen
+	if leftCost <= 0 {
+		leftCost = math.MaxFloat64
+	}
+	rightCost := right.CostPerUsableQuotaFen
+	if rightCost <= 0 {
+		rightCost = math.MaxFloat64
+	}
+	if leftCost != rightCost {
+		return leftCost < rightCost
+	}
+	if left.UsableQuotaM != right.UsableQuotaM {
+		return left.UsableQuotaM > right.UsableQuotaM
 	}
 	leftPrice := int64(math.MaxInt64)
 	if left.Inventory != nil && left.Inventory.EstimatedUnitPriceFen > 0 {
@@ -269,17 +311,91 @@ func supplyPlatformLess(left PlatformOverview, right PlatformOverview, quantity 
 	if right.Inventory != nil {
 		rightLifetime = right.Inventory.MaximumRemainingSeconds
 	}
-	if leftLifetime != rightLifetime {
+	if emergency && leftLifetime != rightLifetime {
+		return leftLifetime > rightLifetime
+	}
+	leftUsed := 0
+	if _, ok := used[strings.ToLower(strings.TrimSpace(left.ID))]; ok {
+		leftUsed = 1
+	}
+	rightUsed := 0
+	if _, ok := used[strings.ToLower(strings.TrimSpace(right.ID))]; ok {
+		rightUsed = 1
+	}
+	if leftUsed != rightUsed {
+		// Normal procurement spreads expiry and supplier risk after comparing
+		// effective cost. Emergency procurement still gets the same protection,
+		// but only after immediate deliverability and usable capacity are equal.
+		return leftUsed < rightUsed
+	}
+	if !emergency && leftLifetime != rightLifetime {
 		return leftLifetime > rightLifetime
 	}
 	return left.Priority < right.Priority
 }
 
-func supplyPlatformAvailabilityTier(status PlatformOverview, quantity int) int {
+func applySupplyPlatformEconomics(
+	status *PlatformOverview,
+	cfg store.ManagerSupplyConfig,
+	resource SmartResource,
+	platform store.ManagerSupplyPlatformConfig,
+	quantity int,
+) {
+	if status == nil || status.Inventory == nil {
+		return
+	}
+	expectedQuotaM := supplyPlatformExpectedQuotaM(cfg, resource, platform)
+	usableQuotaM := expectedQuotaM
+	remainingSeconds := status.Inventory.MaximumRemainingSeconds
+	demandMPerMinute := math.Max(resource.ConsumeTokenMPerMinute, resource.DemandPlanningTokenMPerMinute)
+	if demandMPerMinute > 0 && remainingSeconds > 0 {
+		lifetimeDemandM := demandMPerMinute * (float64(remainingSeconds) / 60)
+		if quantity > 1 {
+			lifetimeDemandM /= float64(quantity)
+		}
+		if usableQuotaM <= 0 || lifetimeDemandM < usableQuotaM {
+			usableQuotaM = lifetimeDemandM
+		}
+	}
+	status.ExpectedQuotaM = round2(math.Max(expectedQuotaM, 0))
+	status.UsableQuotaM = round2(math.Max(usableQuotaM, 0))
+	if status.UsableQuotaM > 0 && status.Inventory.EstimatedUnitPriceFen > 0 {
+		status.CostPerUsableQuotaFen = math.Round((float64(status.Inventory.EstimatedUnitPriceFen)/status.UsableQuotaM)*100) / 100
+	}
+}
+
+func supplyPlatformExpectedQuotaM(
+	cfg store.ManagerSupplyConfig,
+	resource SmartResource,
+	platform store.ManagerSupplyPlatformConfig,
+) float64 {
+	supplierID := normalizeSmartQuotaSupplierID(platform.ID)
+	planType := "team"
+	for _, estimate := range resource.AccountQuotaPlanEstimates {
+		if normalizeSmartQuotaSupplierID(estimate.SupplierID) == supplierID &&
+			strings.EqualFold(strings.TrimSpace(estimate.PlanType), planType) && estimate.AdoptedM > 0 {
+			return estimate.AdoptedM
+		}
+	}
+	policy := smartQuotaPolicyForSupplier(cfg, platform.ID, planType)
+	if strings.EqualFold(policy.Mode, smartQuotaPolicyModeFixed) && policy.FixedM > 0 {
+		return policy.FixedM
+	}
+	if policy.FallbackM > 0 {
+		return policy.FallbackM
+	}
+	return smartQuotaFallbackForPlan(planType)
+}
+
+func supplyPlatformAvailabilityTier(status PlatformOverview, quantity int, balanceReserveFen int64) int {
 	if status.Inventory == nil || status.Balance == nil {
 		return 9
 	}
-	if status.Inventory.EstimatedTotalFen > 0 && status.Balance.AvailableFen < status.Inventory.EstimatedTotalFen {
+	requiredBalanceFen := status.Inventory.EstimatedTotalFen
+	if balanceReserveFen > 0 {
+		requiredBalanceFen += balanceReserveFen
+	}
+	if status.Inventory.EstimatedTotalFen > 0 && status.Balance.AvailableFen < requiredBalanceFen {
 		return 8
 	}
 	if status.Inventory.Available >= max(1, quantity) {

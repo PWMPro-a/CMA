@@ -2537,6 +2537,11 @@ export function SupplyPage() {
                             }
                           />
                         </div>
+                        {platform.type === 'bugteam' ? (
+                          <p className={styles.platformHint}>
+                            {t('supply.platform_bugteam_auth_hint')}
+                          </p>
+                        ) : null}
                         <div className={styles.platformQuotaGrid}>
                           {(['team', 'free'] as const).map((planType) => {
                             const globalPolicy = quotaPolicyForPlan(planType);
@@ -2598,6 +2603,20 @@ export function SupplyPage() {
                           <span>
                             {t('supply.estimated_total')}:{' '}
                             {live?.inventory ? formatMoney(live.inventory.estimatedTotalFen) : '-'}
+                          </span>
+                          <span>
+                            {t('supply.platform_expected_quota')}:{' '}
+                            {live?.expectedQuotaM ? formatTokenM(live.expectedQuotaM, 1) : '-'}
+                          </span>
+                          <span>
+                            {t('supply.platform_usable_quota')}:{' '}
+                            {live?.usableQuotaM ? formatTokenM(live.usableQuotaM, 1) : '-'}
+                          </span>
+                          <span>
+                            {t('supply.platform_cost_per_quota')}:{' '}
+                            {live?.costPerUsableQuotaFen
+                              ? `${formatMoney(live.costPerUsableQuotaFen)} / M`
+                              : '-'}
                           </span>
                           {live?.lastError ? <strong>{live.lastError}</strong> : null}
                         </div>

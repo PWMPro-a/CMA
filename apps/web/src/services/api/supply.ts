@@ -155,6 +155,9 @@ export interface SupplyPlatformOverview {
   checkedAtMs: number;
   inventory?: SupplyInventory;
   balance?: SupplyBalance;
+  expectedQuotaM?: number;
+  usableQuotaM?: number;
+  costPerUsableQuotaFen?: number;
   lastError?: string;
 }
 

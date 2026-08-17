@@ -2277,8 +2277,14 @@ func TestRecoverySyncClaimsImportsAndDisablesOriginalAccount(t *testing.T) {
 			_, _ = w.Write([]byte(`{"payload":{"recoveries":[{"id":"rec-1","delivery_status":"claimable","product":"oauth_30d","source_order_id":"source-rec-1","original_email":"old@example.com","original_account":"old.json","original_auth_index":"auth-1","claim_url":"` + server.URL + `/api/customer/recoveries/rec-1/claim?ticket=ticket-1"}]}}`))
 		case r.URL.Path == "/api/customer/recoveries/rec-1/claim" && r.Method == http.MethodPost:
 			claimCalls.Add(1)
-			if got := r.URL.Query().Get("ticket"); got != "ticket-1" {
+			if got := r.Header.Get("X-Recovery-Ticket"); got != "ticket-1" {
 				t.Fatalf("claim ticket = %q", got)
+			}
+			if got := r.Header.Get("Idempotency-Key"); got != "cpam-recovery-rec-1" {
+				t.Fatalf("claim idempotency key = %q", got)
+			}
+			if got := r.URL.Query().Get("ticket"); got != "" {
+				t.Fatalf("claim ticket leaked into URL = %q", got)
 			}
 			_, _ = w.Write([]byte(`{"credential_version":2,"payload":{"type":"oauth","name":"replacement","platform":"openai","credentials":{"access_token":"access-new","refresh_token":"refresh-new","email":"new@example.com","chatgpt_account_id":"acct-new","chatgpt_plan_type":"team","workspace_id":"workspace-new"}}}`))
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:

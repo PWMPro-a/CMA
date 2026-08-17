@@ -1,9 +1,13 @@
 package supplyclient
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -58,6 +62,83 @@ func TestClientLogsInAndReadsInventoryAndBalance(t *testing.T) {
 	}
 	if got := loginCalls.Load(); got != 1 {
 		t.Fatalf("login calls = %d, want 1", got)
+	}
+}
+
+func TestClientUsesBugTeamSessionAuthenticationForPasswordLogin(t *testing.T) {
+	var loginCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			loginCalls.Add(1)
+			var payload map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			if payload["account"] != "customer" || payload["password"] != "secret" || payload["username"] != "" {
+				t.Fatalf("BugTeam login payload = %#v", payload)
+			}
+			_, _ = w.Write([]byte(`{"session":"session-1"}`))
+		case "/api/customer/inventory", "/api/customer/balance":
+			if got := r.Header.Get("X-Customer-Session"); got != "session-1" {
+				t.Fatalf("BugTeam session = %q", got)
+			}
+			if got := r.Header.Get("X-Customer-Token"); got != "" {
+				t.Fatalf("unexpected BugTeam token header = %q", got)
+			}
+			if r.URL.Path == "/api/customer/inventory" {
+				_, _ = w.Write([]byte(`{"product":"team_1h","quantity":1,"available":1}`))
+			} else {
+				_, _ = w.Write([]byte(`{"available_fen":300}`))
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	credentials := Credentials{PlatformType: "bugteam", BaseURL: server.URL, Username: "customer", Password: "secret"}
+	if _, err := client.Inventory(context.Background(), credentials, "team_1h", 1); err != nil {
+		t.Fatalf("BugTeam inventory: %v", err)
+	}
+	if _, err := client.Balance(context.Background(), credentials); err != nil {
+		t.Fatalf("BugTeam balance: %v", err)
+	}
+	if loginCalls.Load() != 1 {
+		t.Fatalf("BugTeam login calls = %d, want 1", loginCalls.Load())
+	}
+}
+
+func TestClientFallsBackFromBugTeamAPITokenToPasswordSession(t *testing.T) {
+	var loginCalls atomic.Int32
+	var balanceCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			loginCalls.Add(1)
+			_, _ = w.Write([]byte(`{"session":"fallback-session"}`))
+		case "/api/customer/balance":
+			balanceCalls.Add(1)
+			if r.Header.Get("X-Customer-Token") == "expired-api-token" {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"message":"expired"}`))
+				return
+			}
+			if got := r.Header.Get("X-Customer-Session"); got != "fallback-session" {
+				t.Fatalf("fallback BugTeam session = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"available_fen":4005}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	balance, err := New(server.Client()).Balance(context.Background(), Credentials{
+		PlatformType: "bugteam", BaseURL: server.URL,
+		Token: "expired-api-token", Username: "customer", Password: "secret",
+	})
+	if err != nil || balance.AvailableFen != 4005 || loginCalls.Load() != 1 || balanceCalls.Load() != 2 {
+		t.Fatalf("balance=%#v err=%v login=%d balanceCalls=%d", balance, err, loginCalls.Load(), balanceCalls.Load())
 	}
 }
 
@@ -176,6 +257,74 @@ func TestClientCreatesPollsAndTakesOrder(t *testing.T) {
 	taken, err := client.Take(context.Background(), credentials, order.ID)
 	if err != nil || taken.Pending || len(taken.Accounts) != 2 {
 		t.Fatalf("take=%#v err=%v", taken, err)
+	}
+}
+
+func TestClientParsesBugTeamOrderStateAndDeliveredQuantity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Customer-Token"); got != "bugteam-token" {
+			t.Fatalf("BugTeam API token = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"order_id":"order-bugteam","product":"team_1h","quantity":3,"state":"completed","delivered_quantity":3,"charged_fen":840,"released_fen":60}`))
+	}))
+	defer server.Close()
+
+	order, err := New(server.Client()).GetOrder(context.Background(), Credentials{
+		PlatformType: "bugteam", BaseURL: server.URL, Token: "bugteam-token",
+	}, "order-bugteam")
+	if err != nil || order.ID != "order-bugteam" || order.Status != "completed" || order.ReadyQuantity != 3 || order.ChargedFen != 840 || order.ReleasedFen != 60 {
+		t.Fatalf("BugTeam order=%#v err=%v", order, err)
+	}
+}
+
+func TestClientDownloadsBugTeamCPAZIPWithManifestLease(t *testing.T) {
+	account := []byte(`{"type":"codex","email":"lease@example.com","access_token":"access"}`)
+	expiresAt := time.Now().Add(10 * time.Minute).UTC().Format(time.RFC3339Nano)
+	manifest := fmt.Sprintf(`{"schema_version":1,"items":[{"ordinal":1,"logical_name":"accounts/item-0001.json","content_sha256":"%x","expires_at":%q}]}`,
+		sha256.Sum256(account), expiresAt)
+	var archive bytes.Buffer
+	writer := zip.NewWriter(&archive)
+	manifestEntry, _ := writer.Create("manifest.json")
+	_, _ = manifestEntry.Write([]byte(manifest))
+	accountEntry, _ := writer.Create("accounts/item-0001.json")
+	_, _ = accountEntry.Write(account)
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close ZIP: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/customer/pickup/orders/order-zip/download" || r.URL.Query().Get("format") != "cpa" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.Header.Get("X-Customer-Token"); got != "bugteam-token" {
+			t.Fatalf("BugTeam ZIP token = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		_, _ = w.Write(archive.Bytes())
+	}))
+	defer server.Close()
+
+	result, err := New(server.Client()).Take(context.Background(), Credentials{
+		PlatformType: "bugteam", BaseURL: server.URL, Token: "bugteam-token", DeliveryMode: "cpa_zip",
+	}, "order-zip")
+	if err != nil || len(result.Accounts) != 1 || len(result.OrderItems) != 1 || !result.OrderItems[0].HasRemaining ||
+		result.OrderItems[0].RemainingSeconds < 590 || result.OrderItems[0].RemainingSeconds > 600 {
+		t.Fatalf("BugTeam ZIP result=%#v err=%v", result, err)
+	}
+}
+
+func TestCPAZIPRejectsTraversalEntry(t *testing.T) {
+	var archive bytes.Buffer
+	writer := zip.NewWriter(&archive)
+	entry, _ := writer.Create("../account.json")
+	_, _ = entry.Write([]byte(`{"type":"codex","access_token":"access"}`))
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close ZIP: %v", err)
+	}
+
+	if _, _, err := cpaDeliveryFromZIP(archive.Bytes(), time.Now()); err == nil {
+		t.Fatal("traversal ZIP entry was accepted")
 	}
 }
 
@@ -298,11 +447,17 @@ func TestClientListsAndClaimsRecoveries(t *testing.T) {
 			if got := r.Header.Get("X-Customer-Token"); got != "token" {
 				t.Fatalf("recoveries token = %q", got)
 			}
-			_, _ = w.Write([]byte(`{"payload":{"recoveries":[{"recovery_id":"recovery-1","delivery_status":"claimable","product":"oauth_30d","source_order_id":8123,"original_email":"old@example.com","auth_file_name":"old.json","auth_index":"auth-1","claim_url":"` + server.URL + `/api/customer/recoveries/recovery-1/claim?ticket=ticket-1"}]}}`))
+			_, _ = w.Write([]byte(`{"payload":{"recoveries":[{"recovery_id":"recovery-1","delivery_status":"claimable","product":"oauth_30d","source_order_id":8123,"original_email":"old@example.com","auth_file_name":"old.json","auth_index":"auth-1","claim_url":"` + server.URL + `/api/customer/recoveries/recovery-1/claim","claim_ticket":"ticket-1"}]}}`))
 		case "/api/customer/recoveries/recovery-1/claim":
 			claimCalls.Add(1)
-			if got := r.URL.Query().Get("ticket"); got != "ticket-1" {
-				t.Fatalf("claim ticket = %q", got)
+			if got := r.URL.Query().Get("ticket"); got != "" {
+				t.Fatalf("claim ticket leaked into URL = %q", got)
+			}
+			if got := r.Header.Get("X-Recovery-Ticket"); got != "ticket-1" {
+				t.Fatalf("claim ticket header = %q", got)
+			}
+			if got := r.Header.Get("Idempotency-Key"); got != "cpam-recovery-recovery-1" {
+				t.Fatalf("claim idempotency key = %q", got)
 			}
 			if got := r.Header.Get("X-Customer-Token"); got != "token" {
 				t.Fatalf("claim token = %q", got)
@@ -329,7 +484,7 @@ func TestClientListsAndClaimsRecoveries(t *testing.T) {
 		recoveries[0].OriginalAuthIndex != "auth-1" {
 		t.Fatalf("recoveries = %#v", recoveries)
 	}
-	claimed, err := client.ClaimRecovery(context.Background(), credentials, recoveries[0].ID, recoveries[0].ClaimURL)
+	claimed, err := client.ClaimRecovery(context.Background(), credentials, recoveries[0].ID, recoveries[0].ClaimURL, recoveries[0].ClaimTicket)
 	if err != nil {
 		t.Fatalf("claim recovery: %v", err)
 	}

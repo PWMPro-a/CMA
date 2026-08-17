@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,10 +21,12 @@ import (
 )
 
 const (
-	defaultTimeout       = 30 * time.Second
-	defaultTakeTimeout   = 3 * time.Minute
-	maxResponseBodyBytes = 16 * 1024 * 1024
-	maxDownloadBodyBytes = 64 * 1024 * 1024
+	defaultTimeout        = 30 * time.Second
+	defaultTakeTimeout    = 3 * time.Minute
+	maxResponseBodyBytes  = 16 * 1024 * 1024
+	maxDownloadBodyBytes  = 64 * 1024 * 1024
+	customerTokenHeader   = "X-Customer-Token"
+	customerSessionHeader = "X-Customer-Session"
 )
 
 type HTTPError struct {
@@ -115,6 +119,7 @@ type Recovery struct {
 	OriginalAccount   string          `json:"originalAccount,omitempty"`
 	OriginalAuthIndex string          `json:"originalAuthIndex,omitempty"`
 	ClaimURL          string          `json:"claimUrl,omitempty"`
+	ClaimTicket       string          `json:"-"`
 	StatusURL         string          `json:"statusUrl,omitempty"`
 	CredentialVersion int             `json:"credentialVersion,omitempty"`
 	RefundedFen       int64           `json:"refundedFen,omitempty"`
@@ -132,6 +137,7 @@ type ReplacementFile struct {
 	Ready             bool
 	StatusURL         string
 	ClaimURL          string
+	ClaimTicket       string
 	CredentialVersion int
 	Product           string
 	SourceOrderID     string
@@ -149,6 +155,7 @@ type RecoveryPage struct {
 type tokenState struct {
 	key       string
 	token     string
+	header    string
 	expiresAt time.Time
 }
 
@@ -284,39 +291,42 @@ func (c *Client) downloadCPA(ctx context.Context, credentials Credentials, order
 	if err != nil {
 		return TakeResult{}, err
 	}
-	accounts, err := cpaAccountsFromZIP(data)
+	accounts, items, err := cpaDeliveryFromZIP(data, time.Now())
 	if err != nil {
 		return TakeResult{}, err
 	}
 	return TakeResult{
 		Order: Order{
-			ID:     strings.TrimSpace(orderID),
-			Status: "completed",
+			ID:            strings.TrimSpace(orderID),
+			Status:        "completed",
+			ReadyQuantity: len(accounts),
 		},
-		Accounts: accounts,
-		Pending:  status == http.StatusAccepted,
+		Accounts:             accounts,
+		OrderItems:           items,
+		ItemRemainingSeconds: orderItemRemainingSeconds(items),
+		Pending:              status == http.StatusAccepted,
 	}, nil
 }
 
 func (c *Client) doAuthenticatedBytes(ctx context.Context, credentials Credentials, method string, path string, requestTimeout time.Duration) ([]byte, int, error) {
-	token, err := c.login(ctx, credentials, false)
+	auth, err := c.login(ctx, credentials, false)
 	if err != nil {
 		return nil, 0, err
 	}
-	data, status, err := c.requestBytes(ctx, credentials.BaseURL, method, path, token, requestTimeout)
+	data, status, err := c.requestBytes(ctx, credentials.BaseURL, method, path, auth, requestTimeout)
 	var httpErr *HTTPError
-	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized || strings.TrimSpace(credentials.Token) != "" {
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized || !canRefreshAuthentication(credentials) {
 		return data, status, err
 	}
 	c.invalidate(credentials)
-	token, err = c.login(ctx, credentials, true)
+	auth, err = c.login(ctx, credentials, true)
 	if err != nil {
 		return nil, 0, err
 	}
-	return c.requestBytes(ctx, credentials.BaseURL, method, path, token, requestTimeout)
+	return c.requestBytes(ctx, credentials.BaseURL, method, path, auth, requestTimeout)
 }
 
-func (c *Client) requestBytes(ctx context.Context, baseURL string, method string, endpointRef string, token string, requestTimeout time.Duration) ([]byte, int, error) {
+func (c *Client) requestBytes(ctx context.Context, baseURL string, method string, endpointRef string, auth tokenState, requestTimeout time.Duration) ([]byte, int, error) {
 	if requestTimeout <= 0 {
 		requestTimeout = c.timeout
 	}
@@ -330,9 +340,7 @@ func (c *Client) requestBytes(ctx context.Context, baseURL string, method string
 	if err != nil {
 		return nil, 0, err
 	}
-	if token != "" {
-		req.Header.Set("X-Customer-Token", token)
-	}
+	applyAuthentication(req.Header, auth)
 	res, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("%s %s: %w", method, endpointRef, err)
@@ -351,48 +359,158 @@ func (c *Client) requestBytes(ctx context.Context, baseURL string, method string
 			StatusCode:        res.StatusCode,
 			Message:           errorMessage(data),
 			Code:              errorCode(data),
-			RetryAfterSeconds: retryAfterSeconds(res.Header.Get("Retry-After"), time.Now()),
+			RetryAfterSeconds: responseRetryAfterSeconds(data, res.Header.Get("Retry-After"), time.Now()),
 		}
 	}
 	return data, res.StatusCode, nil
 }
 
-func cpaAccountsFromZIP(data []byte) ([]json.RawMessage, error) {
+type cpaManifest struct {
+	Items []cpaManifestItem `json:"items"`
+}
+
+type cpaManifestItem struct {
+	Ordinal       int    `json:"ordinal"`
+	LogicalName   string `json:"logical_name"`
+	ContentSHA256 string `json:"content_sha256"`
+	ExpiresAt     string `json:"expires_at"`
+}
+
+func cpaDeliveryFromZIP(data []byte, now time.Time) ([]json.RawMessage, []OrderItem, error) {
 	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
-		return nil, fmt.Errorf("decode supply CPA ZIP: %w", err)
+		return nil, nil, fmt.Errorf("decode supply CPA ZIP: %w", err)
 	}
-	accounts := make([]json.RawMessage, 0, len(reader.File))
+	files := make(map[string]*zip.File, len(reader.File))
+	fileNames := make([]string, 0, len(reader.File))
+	var manifest *zip.File
 	for _, file := range reader.File {
-		name := strings.ToLower(filepath.Base(file.Name))
-		if file.FileInfo().IsDir() || filepath.Ext(name) != ".json" || strings.Contains(name, "manifest") {
+		if file.FileInfo().IsDir() {
 			continue
 		}
-		if file.UncompressedSize64 > maxResponseBodyBytes {
-			return nil, fmt.Errorf("supply CPA ZIP entry %s exceeded size limit", filepath.Base(file.Name))
+		name := normalizedZIPName(file.Name)
+		if name == "" {
+			return nil, nil, fmt.Errorf("supply CPA ZIP contains invalid entry path %q", file.Name)
 		}
-		entry, err := file.Open()
-		if err != nil {
-			return nil, err
+		if _, duplicate := files[name]; duplicate {
+			return nil, nil, fmt.Errorf("supply CPA ZIP contains duplicate entry %s", name)
 		}
-		payload, readErr := io.ReadAll(io.LimitReader(entry, maxResponseBodyBytes+1))
-		closeErr := entry.Close()
+		files[name] = file
+		fileNames = append(fileNames, name)
+		if strings.EqualFold(filepath.Base(name), "manifest.json") {
+			manifest = file
+		}
+	}
+
+	var manifestItems []cpaManifestItem
+	if manifest != nil {
+		payload, readErr := readZIPJSON(manifest)
 		if readErr != nil {
-			return nil, readErr
+			return nil, nil, readErr
 		}
-		if closeErr != nil {
-			return nil, closeErr
+		var decoded cpaManifest
+		if err := json.Unmarshal(payload, &decoded); err != nil {
+			return nil, nil, fmt.Errorf("decode supply CPA manifest: %w", err)
 		}
-		payload = bytes.TrimSpace(payload)
-		if len(payload) == 0 || len(payload) > maxResponseBodyBytes || !json.Valid(payload) || !looksLikeCPAAccount(payload) {
+		manifestItems = decoded.Items
+		sort.SliceStable(manifestItems, func(i, j int) bool {
+			if manifestItems[i].Ordinal == manifestItems[j].Ordinal {
+				return normalizedZIPName(manifestItems[i].LogicalName) < normalizedZIPName(manifestItems[j].LogicalName)
+			}
+			return manifestItems[i].Ordinal < manifestItems[j].Ordinal
+		})
+	}
+
+	accounts := make([]json.RawMessage, 0, len(reader.File))
+	items := make([]OrderItem, 0, len(reader.File))
+	seen := make(map[string]struct{}, len(manifestItems))
+	for _, item := range manifestItems {
+		name := normalizedZIPName(item.LogicalName)
+		file := files[name]
+		if file == nil {
+			return nil, nil, fmt.Errorf("supply CPA manifest references missing entry %s", item.LogicalName)
+		}
+		payload, readErr := readZIPJSON(file)
+		if readErr != nil {
+			return nil, nil, readErr
+		}
+		if expected := strings.ToLower(strings.TrimSpace(item.ContentSHA256)); expected != "" {
+			actual := fmt.Sprintf("%x", sha256.Sum256(payload))
+			if actual != expected {
+				return nil, nil, fmt.Errorf("supply CPA ZIP entry %s failed manifest checksum", filepath.Base(file.Name))
+			}
+		}
+		if !looksLikeCPAAccount(payload) {
+			return nil, nil, fmt.Errorf("supply CPA ZIP entry %s is not an importable account", filepath.Base(file.Name))
+		}
+		accounts = append(accounts, append(json.RawMessage(nil), payload...))
+		orderItem := OrderItem{}
+		if expiresAt, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(item.ExpiresAt)); parseErr == nil {
+			orderItem.HasRemaining = true
+			orderItem.RemainingSeconds = max(int64(expiresAt.Sub(now)/time.Second), 0)
+		}
+		items = append(items, orderItem)
+		seen[name] = struct{}{}
+	}
+
+	sort.Strings(fileNames)
+	for _, name := range fileNames {
+		file := files[name]
+		if _, ok := seen[name]; ok || strings.EqualFold(filepath.Base(name), "manifest.json") || strings.ToLower(filepath.Ext(name)) != ".json" {
+			continue
+		}
+		payload, readErr := readZIPJSON(file)
+		if readErr != nil {
+			return nil, nil, readErr
+		}
+		if !looksLikeCPAAccount(payload) {
 			continue
 		}
 		accounts = append(accounts, append(json.RawMessage(nil), payload...))
+		items = append(items, OrderItem{})
 	}
 	if len(accounts) == 0 {
-		return nil, errors.New("supply CPA ZIP did not include importable account JSON files")
+		return nil, nil, errors.New("supply CPA ZIP did not include importable account JSON files")
 	}
-	return accounts, nil
+	return accounts, items, nil
+}
+
+func normalizedZIPName(name string) string {
+	name = filepath.ToSlash(strings.TrimSpace(name))
+	if name == "" || strings.HasPrefix(name, "/") || strings.ContainsRune(name, '\x00') {
+		return ""
+	}
+	name = strings.TrimPrefix(name, "./")
+	if name == "." || name == ".." || strings.HasPrefix(name, "../") || strings.Contains(name, "/../") {
+		return ""
+	}
+	return name
+}
+
+func readZIPJSON(file *zip.File) ([]byte, error) {
+	if file == nil {
+		return nil, errors.New("supply CPA ZIP entry is missing")
+	}
+	if file.UncompressedSize64 > maxResponseBodyBytes {
+		return nil, fmt.Errorf("supply CPA ZIP entry %s exceeded size limit", filepath.Base(file.Name))
+	}
+	entry, err := file.Open()
+	if err != nil {
+		return nil, err
+	}
+	payload, readErr := io.ReadAll(io.LimitReader(entry, maxResponseBodyBytes+1))
+	closeErr := entry.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	payload = bytes.TrimSpace(payload)
+	if len(payload) == 0 || len(payload) > maxResponseBodyBytes || !json.Valid(payload) {
+		return nil, fmt.Errorf("supply CPA ZIP entry %s is not valid JSON", filepath.Base(file.Name))
+	}
+	return payload, nil
 }
 
 func looksLikeCPAAccount(payload []byte) bool {
@@ -483,13 +601,30 @@ func (c *Client) GetRecovery(ctx context.Context, credentials Credentials, recov
 	return recovery, nil
 }
 
-func (c *Client) ClaimRecovery(ctx context.Context, credentials Credentials, recoveryID string, claimURL string) (RecoveryClaimResult, error) {
+func (c *Client) ClaimRecovery(ctx context.Context, credentials Credentials, recoveryID string, claimURL string, claimTicket ...string) (RecoveryClaimResult, error) {
 	endpoint := strings.TrimSpace(claimURL)
 	if endpoint == "" {
 		endpoint = "/api/customer/recoveries/" + url.PathEscape(strings.TrimSpace(recoveryID)) + "/claim"
 	}
+	ticket := ""
+	if len(claimTicket) > 0 {
+		ticket = strings.TrimSpace(claimTicket[0])
+	}
+	if parsed, err := url.Parse(endpoint); err == nil {
+		if ticket == "" {
+			ticket = strings.TrimSpace(parsed.Query().Get("ticket"))
+		}
+		query := parsed.Query()
+		query.Del("ticket")
+		parsed.RawQuery = query.Encode()
+		endpoint = parsed.String()
+	}
 	headers := make(http.Header)
 	headers.Set("Accept", "application/json")
+	headers.Set("Idempotency-Key", recoveryClaimIdempotencyKey(recoveryID))
+	if ticket != "" {
+		headers.Set("X-Recovery-Ticket", ticket)
+	}
 	value, _, err := c.doAuthenticatedWithHeaders(ctx, credentials, http.MethodPost, endpoint, nil, headers, c.takeTimeout)
 	if err != nil {
 		return RecoveryClaimResult{}, err
@@ -505,6 +640,14 @@ func (c *Client) ClaimRecovery(ctx context.Context, credentials Credentials, rec
 	}, nil
 }
 
+func recoveryClaimIdempotencyKey(recoveryID string) string {
+	recoveryID = strings.TrimSpace(recoveryID)
+	if recoveryID == "" {
+		return "cpam-recovery-claim"
+	}
+	return "cpam-recovery-" + recoveryID
+}
+
 func (c *Client) doAuthenticated(ctx context.Context, credentials Credentials, method string, path string, body any) (any, int, error) {
 	return c.doAuthenticatedWithHeaders(ctx, credentials, method, path, body, nil, c.timeout)
 }
@@ -514,36 +657,36 @@ func (c *Client) doAuthenticatedWithTimeout(ctx context.Context, credentials Cre
 }
 
 func (c *Client) doAuthenticatedWithHeaders(ctx context.Context, credentials Credentials, method string, path string, body any, headers http.Header, requestTimeout time.Duration) (any, int, error) {
-	token, err := c.login(ctx, credentials, false)
+	auth, err := c.login(ctx, credentials, false)
 	if err != nil {
 		return nil, 0, err
 	}
-	value, status, err := c.requestWithHeaders(ctx, credentials.BaseURL, method, path, body, token, headers, requestTimeout)
+	value, status, err := c.requestWithHeaders(ctx, credentials.BaseURL, method, path, body, auth, headers, requestTimeout)
 	var httpErr *HTTPError
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized {
 		return value, status, err
 	}
-	if strings.TrimSpace(credentials.Token) != "" {
+	if !canRefreshAuthentication(credentials) {
 		return value, status, err
 	}
 	c.invalidate(credentials)
-	token, err = c.login(ctx, credentials, true)
+	auth, err = c.login(ctx, credentials, true)
 	if err != nil {
 		return nil, 0, err
 	}
-	return c.requestWithHeaders(ctx, credentials.BaseURL, method, path, body, token, headers, requestTimeout)
+	return c.requestWithHeaders(ctx, credentials.BaseURL, method, path, body, auth, headers, requestTimeout)
 }
 
-func (c *Client) login(ctx context.Context, credentials Credentials, force bool) (string, error) {
-	if token := strings.TrimSpace(credentials.Token); token != "" {
-		return token, nil
-	}
+func (c *Client) login(ctx context.Context, credentials Credentials, force bool) (tokenState, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	key := credentialKey(credentials)
 	if state, ok := c.tokens[key]; !force && ok && state.token != "" && time.Now().Before(state.expiresAt) {
 		c.token = state
-		return state.token, nil
+		return state, nil
+	}
+	if token := strings.TrimSpace(credentials.Token); token != "" && (!force || !canPasswordLogin(credentials)) {
+		return tokenState{key: key, token: token, header: customerTokenHeader}, nil
 	}
 	payload := map[string]any{"password": credentials.Password}
 	if strings.EqualFold(strings.TrimSpace(credentials.PlatformType), "bugteam") {
@@ -551,18 +694,23 @@ func (c *Client) login(ctx context.Context, credentials Credentials, force bool)
 	} else {
 		payload["username"] = strings.TrimSpace(credentials.Username)
 	}
-	value, _, err := c.request(ctx, credentials.BaseURL, http.MethodPost, "/api/customer/login", payload, "")
+	value, _, err := c.request(ctx, credentials.BaseURL, http.MethodPost, "/api/customer/login", payload, tokenState{})
 	if err != nil {
-		return "", err
+		return tokenState{}, err
 	}
+	header := customerTokenHeader
 	token := findString(value, "token", "access_token", "accessToken")
-	if token == "" {
-		return "", errors.New("supply login response did not include token")
+	if token == "" && strings.EqualFold(strings.TrimSpace(credentials.PlatformType), "bugteam") {
+		token = findString(value, "session", "customer_session", "customerSession")
+		header = customerSessionHeader
 	}
-	state := tokenState{key: key, token: token, expiresAt: time.Now().Add(29 * 24 * time.Hour)}
+	if token == "" {
+		return tokenState{}, errors.New("supply login response did not include token or session")
+	}
+	state := tokenState{key: key, token: token, header: header, expiresAt: time.Now().Add(29 * 24 * time.Hour)}
 	c.tokens[key] = state
 	c.token = state
-	return token, nil
+	return state, nil
 }
 
 func (c *Client) invalidate(credentials Credentials) {
@@ -575,15 +723,37 @@ func (c *Client) invalidate(credentials Credentials) {
 	}
 }
 
-func (c *Client) request(ctx context.Context, baseURL string, method string, endpointRef string, body any, token string) (any, int, error) {
-	return c.requestWithTimeout(ctx, baseURL, method, endpointRef, body, token, c.timeout)
+func canPasswordLogin(credentials Credentials) bool {
+	return strings.TrimSpace(credentials.Username) != "" && credentials.Password != ""
 }
 
-func (c *Client) requestWithTimeout(ctx context.Context, baseURL string, method string, endpointRef string, body any, token string, requestTimeout time.Duration) (any, int, error) {
-	return c.requestWithHeaders(ctx, baseURL, method, endpointRef, body, token, nil, requestTimeout)
+func canRefreshAuthentication(credentials Credentials) bool {
+	if strings.TrimSpace(credentials.Token) == "" {
+		return canPasswordLogin(credentials)
+	}
+	return strings.EqualFold(strings.TrimSpace(credentials.PlatformType), "bugteam") && canPasswordLogin(credentials)
 }
 
-func (c *Client) requestWithHeaders(ctx context.Context, baseURL string, method string, endpointRef string, body any, token string, headers http.Header, requestTimeout time.Duration) (any, int, error) {
+func applyAuthentication(headers http.Header, auth tokenState) {
+	if strings.TrimSpace(auth.token) == "" {
+		return
+	}
+	header := strings.TrimSpace(auth.header)
+	if header == "" {
+		header = customerTokenHeader
+	}
+	headers.Set(header, auth.token)
+}
+
+func (c *Client) request(ctx context.Context, baseURL string, method string, endpointRef string, body any, auth tokenState) (any, int, error) {
+	return c.requestWithTimeout(ctx, baseURL, method, endpointRef, body, auth, c.timeout)
+}
+
+func (c *Client) requestWithTimeout(ctx context.Context, baseURL string, method string, endpointRef string, body any, auth tokenState, requestTimeout time.Duration) (any, int, error) {
+	return c.requestWithHeaders(ctx, baseURL, method, endpointRef, body, auth, nil, requestTimeout)
+}
+
+func (c *Client) requestWithHeaders(ctx context.Context, baseURL string, method string, endpointRef string, body any, auth tokenState, headers http.Header, requestTimeout time.Duration) (any, int, error) {
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -608,9 +778,7 @@ func (c *Client) requestWithHeaders(ctx context.Context, baseURL string, method 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if token != "" {
-		req.Header.Set("X-Customer-Token", token)
-	}
+	applyAuthentication(req.Header, auth)
 	for key, values := range headers {
 		for _, value := range values {
 			req.Header.Add(key, value)
@@ -634,7 +802,7 @@ func (c *Client) requestWithHeaders(ctx context.Context, baseURL string, method 
 			StatusCode:        res.StatusCode,
 			Message:           errorMessage(data),
 			Code:              errorCode(data),
-			RetryAfterSeconds: retryAfterSeconds(res.Header.Get("Retry-After"), time.Now()),
+			RetryAfterSeconds: responseRetryAfterSeconds(data, res.Header.Get("Retry-After"), time.Now()),
 		}
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
@@ -652,14 +820,14 @@ func (c *Client) requestWithHeaders(ctx context.Context, baseURL string, method 
 func parseOrder(root map[string]any) Order {
 	return Order{
 		ID:                stringValue(root, "id", "order_id", "orderId"),
-		Status:            strings.ToLower(stringValue(root, "status")),
+		Status:            strings.ToLower(stringValue(root, "status", "state")),
 		Product:           stringValue(root, "product"),
 		Quantity:          intValue(root, "quantity", "requested_quantity", "requestedQuantity"),
-		ReadyQuantity:     intValue(root, "ready_quantity", "readyQuantity", "available"),
+		ReadyQuantity:     intValue(root, "ready_quantity", "readyQuantity", "delivered_quantity", "deliveredQuantity", "available"),
 		Progress:          intValue(root, "progress", "progress_percent", "progressPercent"),
 		ChargedFen:        int64Value(root, "charged_fen", "chargedFen"),
 		ReleasedFen:       int64Value(root, "released_fen", "releasedFen"),
-		RetryAfterSeconds: intValue(root, "retry_after_seconds", "retryAfterSeconds"),
+		RetryAfterSeconds: intValue(root, "retry_after_seconds", "retryAfterSeconds", "retry_after", "retryAfter"),
 		StatusURL:         stringValue(root, "status_url", "statusUrl"),
 		TakeURL:           stringValue(root, "take_url", "takeUrl"),
 	}
@@ -826,6 +994,7 @@ func parseRecovery(root map[string]any) Recovery {
 		OriginalAccount:   stringValue(root, "original_account", "originalAccount", "auth_file_name", "authFileName", "file_name", "fileName", "account"),
 		OriginalAuthIndex: stringValue(root, "original_auth_index", "originalAuthIndex", "auth_index", "authIndex"),
 		ClaimURL:          claimURL,
+		ClaimTicket:       stringValue(root, "claim_ticket", "claimTicket"),
 		StatusURL:         stringValue(root, "status_url", "statusUrl"),
 		CredentialVersion: int(int64Value(root, "credential_version", "credentialVersion")),
 		RefundedFen:       int64Value(root, "refunded_fen", "refundedFen", "refund_fen", "refundFen"),
@@ -872,6 +1041,7 @@ func parseReplacementFiles(values []any) []ReplacementFile {
 			Ready:             boolValue(object, "ready") || strings.EqualFold(stringValue(object, "delivery_status", "deliveryStatus", "status"), "claimable"),
 			StatusURL:         stringValue(object, "status_url", "statusUrl"),
 			ClaimURL:          claimURL,
+			ClaimTicket:       stringValue(object, "claim_ticket", "claimTicket"),
 			CredentialVersion: int(int64Value(object, "credential_version", "credentialVersion")),
 			Product:           stringValue(object, "product"),
 			SourceOrderID:     stringValue(object, "source_order_id", "sourceOrderId"),
@@ -1174,6 +1344,19 @@ func retryAfterSeconds(value string, now time.Time) int {
 	}
 	seconds := int(math.Ceil(deadline.Sub(now).Seconds()))
 	return max(seconds, 0)
+}
+
+func responseRetryAfterSeconds(data []byte, header string, now time.Time) int {
+	if seconds := retryAfterSeconds(header, now); seconds > 0 {
+		return seconds
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if decoder.Decode(&value) != nil {
+		return 0
+	}
+	return int(findInt64(value, "retry_after_seconds", "retryAfterSeconds", "retry_after", "retryAfter"))
 }
 
 func credentialKey(credentials Credentials) string {

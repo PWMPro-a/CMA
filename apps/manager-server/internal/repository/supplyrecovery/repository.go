@@ -78,16 +78,21 @@ func (r *repository) UpsertMany(ctx context.Context, recoveries []model.SupplyRe
 			if err != nil {
 				return err
 			}
+			claimTicket, err := r.protect(recovery.ClaimTicket)
+			if err != nil {
+				return err
+			}
 			rawJSON, err := r.protect(recovery.RawJSON)
 			if err != nil {
 				return err
 			}
 			result, err := tx.ExecContext(ctx, `insert into supply_recoveries (
-			recovery_id, product, delivery_status, status, credential_version, source_order_id, original_file_name, original_auth_index,
-			original_email, claim_url, claim_order_id, item_count, imported_count, refunded_fen,
+			recovery_id, supplier_id, product, delivery_status, status, credential_version, source_order_id, original_file_name, original_auth_index,
+			original_email, claim_url, claim_ticket, claim_order_id, item_count, imported_count, refunded_fen,
 			last_error, raw_json, last_seen_at_ms, claimed_at_ms, created_at_ms, updated_at_ms
-		) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		on conflict(recovery_id) do update set
+			supplier_id = coalesce(nullif(excluded.supplier_id, ''), supply_recoveries.supplier_id),
 			product = excluded.product,
 			delivery_status = excluded.delivery_status,
 			credential_version = case
@@ -105,15 +110,16 @@ func (r *repository) UpsertMany(ctx context.Context, recoveries []model.SupplyRe
 			original_auth_index = coalesce(nullif(excluded.original_auth_index, ''), supply_recoveries.original_auth_index),
 			original_email = coalesce(nullif(excluded.original_email, ''), supply_recoveries.original_email),
 			claim_url = coalesce(nullif(excluded.claim_url, ''), supply_recoveries.claim_url),
+			claim_ticket = coalesce(nullif(excluded.claim_ticket, ''), supply_recoveries.claim_ticket),
 			refunded_fen = case when excluded.refunded_fen > 0 then excluded.refunded_fen else supply_recoveries.refunded_fen end,
 			last_error = excluded.last_error,
 			raw_json = coalesce(nullif(excluded.raw_json, ''), supply_recoveries.raw_json),
 			last_seen_at_ms = excluded.last_seen_at_ms,
 			updated_at_ms = excluded.updated_at_ms`,
-				recovery.RecoveryID, nullString(recovery.Product), strings.ToLower(strings.TrimSpace(recovery.DeliveryStatus)), recovery.Status,
+				recovery.RecoveryID, strings.TrimSpace(recovery.SupplierID), nullString(recovery.Product), strings.ToLower(strings.TrimSpace(recovery.DeliveryStatus)), recovery.Status,
 				recovery.CredentialVersion, nullString(recovery.SourceOrderID),
 				nullString(recovery.OriginalFileName), nullString(recovery.OriginalAuthIndex), nullString(recovery.OriginalEmail),
-				nullString(claimURL), nullString(recovery.ClaimOrderID), recovery.ItemCount, recovery.ImportedCount,
+				nullString(claimURL), nullString(claimTicket), nullString(recovery.ClaimOrderID), recovery.ItemCount, recovery.ImportedCount,
 				recovery.RefundedFen, nullString(recovery.LastError), nullString(rawJSON), recovery.LastSeenAtMS,
 				nullPositive(recovery.ClaimedAtMS), now, now,
 			)
@@ -257,13 +263,13 @@ func (r *repository) PersistClaim(ctx context.Context, recovery model.SupplyReco
 	}
 	return sqliterepo.WithTxBusyRetry(ctx, r.db, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `insert or ignore into supply_orders (
-			order_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
+			order_id, supplier_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
 			ready_quantity, progress, status_url, take_url, charged_fen, released_fen,
 			item_count, imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms,
 			created_at_ms, updated_at_ms
-		) values (?, ?, ?, 1, 'recovery', 'recovery_claimed', 'recovery_importing', 'recovery_claimed',
+		) values (?, ?, ?, ?, 1, 'recovery', 'recovery_claimed', 'recovery_importing', 'recovery_claimed',
 			0, 0, null, null, 0, 0, ?, 0, null, null, null, null, ?, ?)`,
-			order.OrderID, order.Product, len(protected), len(protected), claimedAtMS, claimedAtMS)
+			order.OrderID, strings.TrimSpace(order.SupplierID), order.Product, len(protected), len(protected), claimedAtMS, claimedAtMS)
 		if err != nil {
 			return err
 		}
@@ -281,7 +287,7 @@ func (r *repository) PersistClaim(ctx context.Context, recovery model.SupplyReco
 		}
 		result, err := tx.ExecContext(ctx, `update supply_recoveries set status = 'importing',
 			delivery_status = coalesce(nullif(?, ''), delivery_status), credential_version = case when ? > credential_version then ? else credential_version end,
-			claim_url = null, claim_order_id = ?, item_count = ?, imported_count = 0, last_error = null,
+			claim_url = null, claim_ticket = null, claim_order_id = ?, item_count = ?, imported_count = 0, last_error = null,
 			claimed_at_ms = ?, updated_at_ms = ? where recovery_id = ?`,
 			strings.ToLower(strings.TrimSpace(recovery.DeliveryStatus)), recovery.CredentialVersion, recovery.CredentialVersion,
 			order.OrderID, len(protected), claimedAtMS, claimedAtMS, recovery.RecoveryID)
@@ -463,8 +469,8 @@ func (r *repository) list(ctx context.Context, query string, args ...any) ([]mod
 	return recoveries, rows.Err()
 }
 
-const recoverySelect = `select id, recovery_id, product, delivery_status, status, original_file_name,
-	credential_version, source_order_id, original_auth_index, original_email, claim_url, claim_order_id, item_count, imported_count,
+const recoverySelect = `select id, recovery_id, supplier_id, product, delivery_status, status, original_file_name,
+	credential_version, source_order_id, original_auth_index, original_email, claim_url, claim_ticket, claim_order_id, item_count, imported_count,
 	refunded_fen, last_error, raw_json, last_seen_at_ms, claimed_at_ms, created_at_ms, updated_at_ms
 	from supply_recoveries`
 
@@ -472,10 +478,10 @@ type scanner interface{ Scan(...any) error }
 
 func (r *repository) scan(row scanner) (model.SupplyRecovery, error) {
 	var recovery model.SupplyRecovery
-	var product, originalFileName, sourceOrderID, originalAuthIndex, originalEmail, claimURL, claimOrderID, lastError, rawJSON sql.NullString
+	var supplierID, product, originalFileName, sourceOrderID, originalAuthIndex, originalEmail, claimURL, claimTicket, claimOrderID, lastError, rawJSON sql.NullString
 	var claimedAtMS sql.NullInt64
-	if err := row.Scan(&recovery.ID, &recovery.RecoveryID, &product, &recovery.DeliveryStatus, &recovery.Status,
-		&originalFileName, &recovery.CredentialVersion, &sourceOrderID, &originalAuthIndex, &originalEmail, &claimURL, &claimOrderID, &recovery.ItemCount,
+	if err := row.Scan(&recovery.ID, &recovery.RecoveryID, &supplierID, &product, &recovery.DeliveryStatus, &recovery.Status,
+		&originalFileName, &recovery.CredentialVersion, &sourceOrderID, &originalAuthIndex, &originalEmail, &claimURL, &claimTicket, &claimOrderID, &recovery.ItemCount,
 		&recovery.ImportedCount, &recovery.RefundedFen, &lastError, &rawJSON, &recovery.LastSeenAtMS,
 		&claimedAtMS, &recovery.CreatedAtMS, &recovery.UpdatedAtMS); err != nil {
 		return model.SupplyRecovery{}, err
@@ -484,16 +490,22 @@ func (r *repository) scan(row scanner) (model.SupplyRecovery, error) {
 	if err != nil {
 		return model.SupplyRecovery{}, err
 	}
+	unprotectedClaimTicket, err := r.unprotect(claimTicket.String)
+	if err != nil {
+		return model.SupplyRecovery{}, err
+	}
 	unprotectedRawJSON, err := r.unprotect(rawJSON.String)
 	if err != nil {
 		return model.SupplyRecovery{}, err
 	}
+	recovery.SupplierID = supplierID.String
 	recovery.Product = product.String
 	recovery.SourceOrderID = sourceOrderID.String
 	recovery.OriginalFileName = originalFileName.String
 	recovery.OriginalAuthIndex = originalAuthIndex.String
 	recovery.OriginalEmail = originalEmail.String
 	recovery.ClaimURL = unprotectedClaimURL
+	recovery.ClaimTicket = unprotectedClaimTicket
 	recovery.ClaimOrderID = claimOrderID.String
 	recovery.LastError = lastError.String
 	recovery.RawJSON = unprotectedRawJSON

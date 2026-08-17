@@ -2893,6 +2893,7 @@ func (s *Service) syncTakeReplacementFiles(ctx context.Context, cfg store.Manage
 			OriginalAccount:   file.OriginalAccount,
 			OriginalAuthIndex: file.OriginalAuthIndex,
 			ClaimURL:          file.ClaimURL,
+			ClaimTicket:       file.ClaimTicket,
 			StatusURL:         file.StatusURL,
 			CredentialVersion: file.CredentialVersion,
 			Raw:               file.Raw,
@@ -2902,7 +2903,7 @@ func (s *Service) syncTakeReplacementFiles(ctx context.Context, cfg store.Manage
 			if strings.TrimSpace(file.StatusURL) != "" {
 				latest, err := s.supplyClient.GetRecovery(ctx, credentials, file.RecoveryID, file.StatusURL)
 				if err != nil {
-					local := supplyRecoveryFromClient(remote)
+					local := supplyRecoveryFromClient(remote, platform.ID)
 					local.LastError = "replacement status refresh deferred: " + safeError(err)
 					recoveries = append(recoveries, local)
 					continue
@@ -2910,7 +2911,7 @@ func (s *Service) syncTakeReplacementFiles(ctx context.Context, cfg store.Manage
 				mergeSupplyRecovery(&remote, latest)
 			}
 		}
-		recoveries = append(recoveries, supplyRecoveryFromClient(remote))
+		recoveries = append(recoveries, supplyRecoveryFromClient(remote, platform.ID))
 	}
 	_, err = s.store.UpsertSupplyRecoveries(ctx, recoveries)
 	return err
@@ -2943,6 +2944,9 @@ func mergeSupplyRecovery(target *supplyclient.Recovery, source supplyclient.Reco
 	}
 	if source.ClaimURL != "" {
 		target.ClaimURL = source.ClaimURL
+	}
+	if source.ClaimTicket != "" {
+		target.ClaimTicket = source.ClaimTicket
 	}
 	if source.StatusURL != "" {
 		target.StatusURL = source.StatusURL
@@ -5045,35 +5049,40 @@ func (s *Service) syncRecoveriesOnce(ctx context.Context, cfg store.ManagerConfi
 	} else {
 		mergePendingResult(imported, failed, nil)
 	}
-	platform, err := recoverySupplyPlatform(cfg.Supply)
-	if err != nil {
+	platforms := recoverySupplyPlatforms(cfg.Supply)
+	if len(platforms) == 0 {
+		err := errors.New("no recovery-capable supply platform is configured")
 		if firstErr != nil {
 			return result, errors.Join(firstErr, err)
 		}
 		return result, err
 	}
-	credentials := supplyPlatformCredentials(platform)
-	remoteRecoveries, err := s.supplyClient.Recoveries(ctx, credentials)
-	if err != nil {
-		if firstErr != nil {
-			return result, errors.Join(firstErr, err)
-		}
-		return result, err
-	}
-	localRecoveries := make([]store.SupplyRecovery, 0, len(remoteRecoveries))
-	for _, remote := range remoteRecoveries {
-		local := supplyRecoveryFromClient(remote)
-		if local.RecoveryID == "" {
+	localRecoveries := make([]store.SupplyRecovery, 0)
+	for _, platform := range platforms {
+		remoteRecoveries, err := s.supplyClient.Recoveries(ctx, supplyPlatformCredentials(platform))
+		if err != nil {
+			platformErr := fmt.Errorf("recovery platform %s: %w", firstNonEmptyString(platform.Name, platform.ID), err)
+			if firstErr == nil {
+				firstErr = platformErr
+			} else {
+				firstErr = errors.Join(firstErr, platformErr)
+			}
 			continue
 		}
-		result.Seen++
-		if local.Status == "claimable" {
-			result.Claimable++
+		for _, remote := range remoteRecoveries {
+			local := supplyRecoveryFromClient(remote, platform.ID)
+			if local.RecoveryID == "" {
+				continue
+			}
+			result.Seen++
+			if local.Status == "claimable" {
+				result.Claimable++
+			}
+			if local.Status == "refunded" {
+				result.Refunded++
+			}
+			localRecoveries = append(localRecoveries, local)
 		}
-		if local.Status == "refunded" {
-			result.Refunded++
-		}
-		localRecoveries = append(localRecoveries, local)
 	}
 	if _, err := s.store.UpsertSupplyRecoveries(ctx, localRecoveries); err != nil {
 		if firstErr != nil {
@@ -5139,11 +5148,17 @@ func (s *Service) syncRecoveriesOnce(ctx context.Context, cfg store.ManagerConfi
 }
 
 func (s *Service) claimRecovery(ctx context.Context, cfg store.ManagerConfig, recovery store.SupplyRecovery) error {
-	platform, err := recoverySupplyPlatform(cfg.Supply)
+	platform, err := recoverySupplyPlatform(cfg.Supply, recovery.SupplierID)
 	if err != nil {
 		return err
 	}
-	claimed, err := s.supplyClient.ClaimRecovery(ctx, supplyPlatformCredentials(platform), recovery.RecoveryID, recovery.ClaimURL)
+	claimed, err := s.supplyClient.ClaimRecovery(
+		ctx,
+		supplyPlatformCredentials(platform),
+		recovery.RecoveryID,
+		recovery.ClaimURL,
+		recovery.ClaimTicket,
+	)
 	if err != nil {
 		return err
 	}
@@ -5192,6 +5207,7 @@ func (s *Service) claimRecovery(ctx context.Context, cfg store.ManagerConfig, re
 	recovery.LastSeenAtMS = claimedAtMS
 	order := store.SupplyOrder{
 		OrderID:           orderID,
+		SupplierID:        firstNonEmptyString(recovery.SupplierID, platform.ID),
 		Product:           product,
 		RequestedQuantity: len(items),
 		Automatic:         true,
@@ -9222,14 +9238,19 @@ func recoveryNextSyncInterval(cfg store.ManagerSupplyConfig, err error, autoClai
 	return interval
 }
 
-func supplyRecoveryFromClient(remote supplyclient.Recovery) store.SupplyRecovery {
+func supplyRecoveryFromClient(remote supplyclient.Recovery, supplierID ...string) store.SupplyRecovery {
 	status := supplyRecoveryStatus(remote)
 	originalFileName := strings.TrimSpace(remote.OriginalAccount)
 	if !strings.HasSuffix(strings.ToLower(originalFileName), ".json") {
 		originalFileName = ""
 	}
+	resolvedSupplierID := ""
+	if len(supplierID) > 0 {
+		resolvedSupplierID = strings.TrimSpace(supplierID[0])
+	}
 	return store.SupplyRecovery{
 		RecoveryID:        strings.TrimSpace(remote.ID),
+		SupplierID:        resolvedSupplierID,
 		Product:           strings.TrimSpace(remote.Product),
 		DeliveryStatus:    strings.ToLower(strings.TrimSpace(remote.DeliveryStatus)),
 		Status:            status,
@@ -9239,6 +9260,7 @@ func supplyRecoveryFromClient(remote supplyclient.Recovery) store.SupplyRecovery
 		OriginalEmail:     strings.TrimSpace(remote.OriginalEmail),
 		CredentialVersion: remote.CredentialVersion,
 		ClaimURL:          strings.TrimSpace(remote.ClaimURL),
+		ClaimTicket:       strings.TrimSpace(remote.ClaimTicket),
 		RefundedFen:       remote.RefundedFen,
 		RawJSON:           string(remote.Raw),
 		LastSeenAtMS:      time.Now().UnixMilli(),

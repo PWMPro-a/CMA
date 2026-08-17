@@ -57,6 +57,7 @@ type SupplyImportItem struct {
 type SupplyRecovery struct {
 	ID                  int64                      `json:"id"`
 	RecoveryID          string                     `json:"recoveryId"`
+	SupplierID          string                     `json:"supplierId,omitempty"`
 	Product             string                     `json:"product,omitempty"`
 	DeliveryStatus      string                     `json:"deliveryStatus"`
 	Status              string                     `json:"status"`
@@ -66,6 +67,7 @@ type SupplyRecovery struct {
 	OriginalAuthIndex   string                     `json:"originalAuthIndex,omitempty"`
 	OriginalEmail       string                     `json:"originalEmail,omitempty"`
 	ClaimURL            string                     `json:"-"`
+	ClaimTicket         string                     `json:"-"`
 	ClaimOrderID        string                     `json:"claimOrderId,omitempty"`
 	ItemCount           int                        `json:"itemCount"`
 	ImportedCount       int                        `json:"importedCount"`
