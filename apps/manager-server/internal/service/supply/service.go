@@ -5552,12 +5552,17 @@ func (s *Service) loadOperatorAccountPoolStats(
 	cancel()
 	now := time.Now()
 	headerCtx, cancelHeaders := context.WithTimeout(ctx, 2*time.Second)
-	headers, headerErr := s.cachedOperatorHeaderSnapshots(headerCtx, len(stats.files), now)
+	headers, _ := s.cachedOperatorHeaderSnapshots(headerCtx, len(stats.files), now)
 	cancelHeaders()
-	if headerErr != nil && len(headers) == 0 && inspectionErr != nil {
-		return stats, liveErr
-	}
-
+	// SQLite evidence reads can briefly lose the writer race on a busy pool.
+	// The live CPA auth-file snapshot is still authoritative for whether a
+	// credential is enabled and schedulable, so continue through the shared
+	// classifier even when both persisted evidence sources are temporarily
+	// unavailable. That classifier keeps raw auth errors actionable, preserves
+	// genuinely unschedulable unknowns as unconfirmed, and treats live
+	// schedulable credentials missing from the selected evidence as available.
+	// Returning the bare file stats here made every enabled account flash as
+	// unconfirmed during a transient SQLITE_BUSY window.
 	results := inspectionSnapshot.results
 	triggerType := inspectionSnapshot.run.TriggerType
 	if inspectionErr != nil {

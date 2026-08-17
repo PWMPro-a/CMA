@@ -1147,6 +1147,9 @@ func TestOperatorAccountPoolStatsSharesOneSnapshotUntilInvalidated(t *testing.T)
 	if requests.Load() != 1 || first.total != 1 || first.enabled != 1 || second.total != first.total || second.enabled != first.enabled {
 		t.Fatalf("shared operator snapshot requests=%d first=%#v second=%#v", requests.Load(), first, second)
 	}
+	if !first.classificationObserved || first.normal != 1 || first.unconfirmed != 0 || first.operatorUsable != 1 {
+		t.Fatalf("live schedulable fallback classification = %#v", first)
+	}
 
 	service.invalidateAuthFilesCache()
 	refreshed, err := service.countOperatorAccountPoolStats(context.Background(), cfg)
