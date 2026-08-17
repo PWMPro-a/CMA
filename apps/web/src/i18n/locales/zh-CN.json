@@ -5619,6 +5619,8 @@
     "smart_reason_supply_plenty_release_oversized": "货源充足且预锁批量偏大，释放后改走小批量补货",
     "smart_reason_supply_plenty_small_batch": "货源充足，采用少量多次补货避免浪费",
     "smart_reason_supply_plenty_small_take": "货源充足且小批量订单已就绪，执行提货",
+    "smart_reason_supply_history_recovering": "最近连续两次快速完整交付，先按单账号探测并观察，不再受旧失败记录影响整批抢购",
+    "smart_reason_supply_lifetime_capacity_wait": "当前库存批次的剩余寿命内无法完整消耗一个新账号，本轮不采购，等待新库存或现有容量下降",
     "smart_reason_supply_scarce_full_batch": "货源紧张，按限制内尽量一步到位预锁",
     "smart_reason_supply_scarce_moderate_batch": "货源紧张但容量未到紧急水位，先降为 5 个以内中等批量预锁",
     "smart_reason_supply_tight_full_batch": "货源偏紧，按推荐批量预锁",

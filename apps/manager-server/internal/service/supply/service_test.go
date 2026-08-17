@@ -376,10 +376,21 @@ func TestSuccessfulPartialDeliveryKeepsProgressiveCooldownUnlessEmergency(t *tes
 	resource.EmergencyShortage = true
 	active, err = service.automaticCreateCooldownActive(context.Background(), cfg, resource)
 	if err != nil {
-		t.Fatalf("check emergency cooldown bypass: %v", err)
+		t.Fatalf("check capacity-emergency cooldown: %v", err)
+	}
+	if !active {
+		t.Fatal("a capacity-only emergency must briefly observe a delivered account before buying the same expiry batch again")
+	}
+
+	resource.EmergencyReason = "critical_available_accounts"
+	resource.AvailableAccounts = 1
+	resource.CriticalAvailableAccounts = 2
+	active, err = service.automaticCreateCooldownActive(context.Background(), cfg, resource)
+	if err != nil {
+		t.Fatalf("check account-vacuum cooldown bypass: %v", err)
 	}
 	if active {
-		t.Fatal("a real emergency must continue immediately when the successful partial batch does not cover the shortage")
+		t.Fatal("an account vacuum must continue immediately until the pool can serve")
 	}
 }
 
@@ -882,6 +893,41 @@ func TestSmartSupplyPressureRecentSuccessStreakOverridesOlderFailures(t *testing
 		// The reliability window closes at the first older failure once the latest
 		// three orders have already established a new successful regime.
 		t.Fatalf("short-window metrics = %#v", pressure)
+	}
+}
+
+func TestSmartSupplyPressureTwoFastSuccessesEnterRecoveryProbe(t *testing.T) {
+	now := time.Now()
+	orders := make([]store.SupplyOrder, 0, 6)
+	for index := 0; index < 4; index++ {
+		createdAt := now.Add(-time.Duration(index+10) * time.Minute)
+		orders = append(orders, store.SupplyOrder{
+			OrderID: fmt.Sprintf("old-cancelled-%d", index), Product: "oauth_7d",
+			RequestedQuantity: 5, Automatic: true, Status: "cancelled",
+			CreatedAtMS: createdAt.UnixMilli(), CompletedAtMS: createdAt.Add(time.Second).UnixMilli(),
+		})
+	}
+	for index := 0; index < 2; index++ {
+		createdAt := now.Add(-time.Duration(index+1) * time.Minute)
+		orders = append(orders, store.SupplyOrder{
+			OrderID: fmt.Sprintf("recent-completed-%d", index), Product: "oauth_7d",
+			RequestedQuantity: 1, ImportedCount: 1, Automatic: true, Status: "completed",
+			CreatedAtMS: createdAt.UnixMilli(), CompletedAtMS: createdAt.Add(10 * time.Second).UnixMilli(),
+		})
+	}
+
+	pressure := smartSupplyPressureFromOrders(
+		store.ManagerSupplyConfig{Product: "oauth_7d"},
+		supplyclient.Inventory{Available: 15, MinimumRemainingSeconds: 2735, MaximumRemainingSeconds: 2735},
+		4,
+		orders,
+	)
+	if pressure.reliablyAvailable || !pressure.recoveringAvailable || pressure.level != smartSupplyPressurePlenty ||
+		pressure.reason != "supply_history_recovering" {
+		t.Fatalf("recovering supply was not reduced to a probe: %#v", pressure)
+	}
+	if pressure.recentSuccessStreak != 2 || pressure.inventoryMinRemainSeconds != 2735 {
+		t.Fatalf("recovery evidence = %#v", pressure)
 	}
 }
 

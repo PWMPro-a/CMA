@@ -5619,6 +5619,8 @@
     "smart_reason_supply_plenty_release_oversized": "貨源充足且預鎖批量偏大，釋放後改走小批量補貨",
     "smart_reason_supply_plenty_small_batch": "貨源充足，採用少量多次補貨避免浪費",
     "smart_reason_supply_plenty_small_take": "貨源充足且小批量訂單已就緒，執行提貨",
+    "smart_reason_supply_history_recovering": "最近連續兩次快速完整交付，先按單帳號探測並觀察，不再受舊失敗記錄影響整批搶購",
+    "smart_reason_supply_lifetime_capacity_wait": "目前庫存批次的剩餘壽命內無法完整消耗一個新帳號，本輪不採購，等待新庫存或現有容量下降",
     "smart_reason_supply_scarce_full_batch": "貨源緊張，按限制內盡量一步到位預鎖",
     "smart_reason_supply_scarce_moderate_batch": "貨源緊張但容量未到緊急水位，先降為 5 個以內中等批量預鎖",
     "smart_reason_supply_tight_full_batch": "貨源偏緊，按推薦批量預鎖",

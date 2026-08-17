@@ -196,6 +196,8 @@ type SmartResource struct {
 	SupplyPressureReason            string  `json:"supplyPressureReason,omitempty"`
 	SupplyInventoryAvailable        int     `json:"supplyInventoryAvailable,omitempty"`
 	SupplyInventoryMissing          int     `json:"supplyInventoryMissing,omitempty"`
+	SupplyInventoryMinRemainMinutes float64 `json:"supplyInventoryMinRemainingMinutes,omitempty"`
+	SupplyInventoryMaxRemainMinutes float64 `json:"supplyInventoryMaxRemainingMinutes,omitempty"`
 	SupplyNeedsProduction           bool    `json:"supplyNeedsProduction,omitempty"`
 	SupplyAvgFulfillSeconds         int     `json:"supplyAvgFulfillSeconds,omitempty"`
 	SupplyRecentWaiting             int     `json:"supplyRecentWaiting,omitempty"`
@@ -206,6 +208,7 @@ type SmartResource struct {
 	SupplyRecentDeliveredQuantity   int     `json:"supplyRecentDeliveredQuantity,omitempty"`
 	SupplyFulfillmentRate           float64 `json:"supplyFulfillmentRate,omitempty"`
 	SupplyReliable                  bool    `json:"supplyReliable,omitempty"`
+	SupplyRecovering                bool    `json:"supplyRecovering,omitempty"`
 	SupplyRecentSuccessStreak       int     `json:"supplyRecentSuccessStreak,omitempty"`
 	SupplyShortWindowOrders         int     `json:"supplyShortWindowOrders,omitempty"`
 	SupplyShortWindowFulfillment    float64 `json:"supplyShortWindowFulfillmentRate,omitempty"`
@@ -213,6 +216,9 @@ type SmartResource struct {
 	PurchaseTimingTriggerMinutes    float64 `json:"purchaseTimingTriggerMinutes,omitempty"`
 	PurchaseTimingWaitMinutes       float64 `json:"purchaseTimingWaitMinutes,omitempty"`
 	PurchaseTimingEligibleQuantity  int     `json:"purchaseTimingEligibleQuantity,omitempty"`
+	PurchaseSupplyLifetimeMinutes   float64 `json:"purchaseSupplyLifetimeMinutes,omitempty"`
+	PurchaseLifetimeQuantityLimit   int     `json:"purchaseLifetimeQuantityLimit,omitempty"`
+	PurchaseLifetimeLimited         bool    `json:"purchaseLifetimeLimited,omitempty"`
 	UsageSampleMinutes              int     `json:"usageSampleMinutes"`
 	AccountCacheAgeSeconds          int     `json:"accountCacheAgeSeconds"`
 	LockedOrderID                   string  `json:"lockedOrderId,omitempty"`
@@ -2591,6 +2597,29 @@ func smartSuccessfulOrderCooldownForResource(cfg store.ManagerSupplyConfig, reso
 		return max(smartCreateCooldownForResource(cfg, resource), warningMinimum)
 	}
 	return max(base, normalMinimum)
+}
+
+// smartSuccessfulOrderCooldownForDelivery observes a larger successful batch
+// for longer when the pool still has runway. Half of the delivered capacity's
+// estimated consumption time is enough to reveal the real burn rate while the
+// critical-waterline budget prevents the observation from delaying recovery.
+func smartSuccessfulOrderCooldownForDelivery(cfg store.ManagerSupplyConfig, resource SmartResource, delivered int) int {
+	base := smartSuccessfulOrderCooldownForResource(cfg, resource)
+	if delivered <= 0 || smartResourceEmergency(resource) {
+		return base
+	}
+	demand := math.Max(resource.ConsumeRCUPerMinute, resource.DemandPlanningRCUPerMinute)
+	unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
+	if demand <= 0 || unit <= 0 {
+		return base
+	}
+	deliveredRunwayMinutes := float64(delivered) * unit / demand
+	criticalBudgetMinutes := math.Max(0, resource.EstimatedSustainMinutes-float64(max(1, resource.CriticalMinutes)))
+	observationMinutes := math.Min(deliveredRunwayMinutes/2, criticalBudgetMinutes/2)
+	if observationMinutes <= 0 {
+		return base
+	}
+	return max(base, int(math.Ceil(observationMinutes*60)))
 }
 
 // smartCreateCooldownForResource shortens recovery retries without ever

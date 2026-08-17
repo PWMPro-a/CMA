@@ -295,6 +295,8 @@ export interface SupplySmartResource {
   supplyPressureReason?: string;
   supplyInventoryAvailable?: number;
   supplyInventoryMissing?: number;
+  supplyInventoryMinRemainingMinutes?: number;
+  supplyInventoryMaxRemainingMinutes?: number;
   supplyNeedsProduction?: boolean;
   supplyAvgFulfillSeconds?: number;
   supplyRecentWaiting?: number;
@@ -304,10 +306,18 @@ export interface SupplySmartResource {
   supplyRecentRequestedQuantity?: number;
   supplyRecentDeliveredQuantity?: number;
   supplyFulfillmentRate?: number;
+  supplyReliable?: boolean;
+  supplyRecovering?: boolean;
+  supplyRecentSuccessStreak?: number;
+  supplyShortWindowOrders?: number;
+  supplyShortWindowFulfillmentRate?: number;
   purchaseLeadMinutes?: number;
   purchaseTimingTriggerMinutes?: number;
   purchaseTimingWaitMinutes?: number;
   purchaseTimingEligibleQuantity?: number;
+  purchaseSupplyLifetimeMinutes?: number;
+  purchaseLifetimeQuantityLimit?: number;
+  purchaseLifetimeLimited?: boolean;
   usageSampleMinutes: number;
   lockedOrderId?: string;
   lockedOrderAgeSeconds?: number;

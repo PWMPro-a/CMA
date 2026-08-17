@@ -800,6 +800,28 @@ func TestSuccessfulOrderCooldownFollowsSupplyStrategyAndHealthLevel(t *testing.T
 	}
 }
 
+func TestSuccessfulOrderCooldownScalesWithDeliveredCapacity(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		CreateCooldownSeconds: 120,
+		Strategy:              managerconfigsvc.SupplyStrategyStrongSupply,
+	}
+	resource := SmartResource{
+		HealthLevel:                    smartHealthHealthy,
+		CriticalMinutes:                15,
+		EstimatedSustainMinutes:        55,
+		ConsumeRCUPerMinute:            100,
+		DemandPlanningRCUPerMinute:     100,
+		TokenCapacityMode:              smartTokenCapacityMode,
+		EstimatedNewAccountCapacityRCU: 1_000,
+	}
+	if got := smartSuccessfulOrderCooldownForDelivery(cfg, resource, 1); got != 300 {
+		t.Fatalf("one-account observation cooldown=%d, want 300", got)
+	}
+	if got := smartSuccessfulOrderCooldownForDelivery(cfg, resource, 2); got != 600 {
+		t.Fatalf("two-account observation cooldown=%d, want 600", got)
+	}
+}
+
 func TestCustomSupplyEnablesConfiguredVerifiedHealthyFloor(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		Strategy:                 managerconfigsvc.SupplyStrategyCustom,
@@ -3548,6 +3570,78 @@ func TestSmartPurchaseTimingDoesNotDelayLowWaterRefill(t *testing.T) {
 	)
 	if quantity != 1 || reason != "low_water_staged_batch" {
 		t.Fatalf("low-water purchase = %d/%q, want immediate staged refill", quantity, reason)
+	}
+}
+
+func TestSmartPurchaseTimingCapsOrdersBySupplierBatchLifetime(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		ReplenishBatchSize:   10,
+		PrelockMinQuantity:   1,
+		PrelockMaxQuantity:   10,
+		PollIntervalSeconds:  3,
+		HealthyMinutesTarget: 30,
+		WarningMinutes:       20,
+		CriticalMinutes:      15,
+	}
+	pressure := smartSupplyPressure{
+		level:                     smartSupplyPressureScarce,
+		inventoryAvailable:        15,
+		inventoryMinRemainSeconds: 2735,
+		inventoryMaxRemainSeconds: 2735,
+		fulfillmentRate:           0.8,
+		recentCancelled:           98,
+	}
+	resource := SmartResource{
+		HealthLevel:                    smartHealthWarning,
+		DemandTrend:                    smartDemandTrendStable,
+		EffectiveHealthyMinutes:        30,
+		WarningMinutes:                 20,
+		CriticalMinutes:                15,
+		EstimatedSustainMinutes:        55,
+		CurrentCapacityRCU:             5_493.8,
+		CapacityGapRCU:                 1_000,
+		ConsumeRCUPerMinute:            99.89,
+		DemandPlanningRCUPerMinute:     99.89,
+		TokenCapacityMode:              smartTokenCapacityMode,
+		EstimatedNewAccountCapacityRCU: 1_050,
+	}
+	quantity, reason, timing := smartPrelockQuantityForSupplyPressureWithTiming(cfg, resource, pressure, 4)
+	if quantity != 0 || reason != "supply_lifetime_capacity_wait" || !timing.lifetimeLimited ||
+		timing.supplyLifetimeMinutes != 45.6 || timing.lifetimeQuantityLimit != 0 {
+		t.Fatalf("lifetime-overflow purchase = %d/%q timing=%#v, want blocked", quantity, reason, timing)
+	}
+
+	resource.CurrentCapacityRCU = 3_000
+	resource.EstimatedSustainMinutes = round1(resource.CurrentCapacityRCU / resource.ConsumeRCUPerMinute)
+	quantity, reason, timing = smartPrelockQuantityForSupplyPressureWithTiming(cfg, resource, pressure, 4)
+	if quantity != 1 || reason != "supply_scarce_full_batch" || timing.lifetimeQuantityLimit != 1 ||
+		timing.eligibleQuantity != 1 {
+		t.Fatalf("one-useful-account purchase = %d/%q timing=%#v, want one", quantity, reason, timing)
+	}
+}
+
+func TestSmartPurchaseTimingKeepsAccountVacuumRefillAboveLifetimeCap(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{ReplenishBatchSize: 10, PrelockMinQuantity: 1, PrelockMaxQuantity: 10}
+	resource := SmartResource{
+		HealthLevel:                    smartHealthCritical,
+		EmergencyShortage:              true,
+		EmergencyReason:                "critical_available_accounts",
+		AvailableAccounts:              1,
+		CriticalAvailableAccounts:      2,
+		ConsumeRCUPerMinute:            100,
+		DemandPlanningRCUPerMinute:     100,
+		CurrentCapacityRCU:             5_000,
+		TokenCapacityMode:              smartTokenCapacityMode,
+		EstimatedNewAccountCapacityRCU: 1_000,
+	}
+	quantity, reason, timing := smartPrelockQuantityForSupplyPressureWithTiming(
+		cfg,
+		resource,
+		smartSupplyPressure{level: smartSupplyPressurePlenty, inventoryMinRemainSeconds: 600},
+		5,
+	)
+	if quantity != 5 || reason != resource.EmergencyReason || timing.lifetimeLimited {
+		t.Fatalf("account-vacuum refill = %d/%q timing=%#v, want uncapped 5", quantity, reason, timing)
 	}
 }
 

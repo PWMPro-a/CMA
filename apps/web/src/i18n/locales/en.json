@@ -5619,6 +5619,8 @@
     "smart_reason_supply_plenty_release_oversized": "Supply is plentiful and the locked batch is too large; release and switch to small batches",
     "smart_reason_supply_plenty_small_batch": "Supply is plentiful; use small repeated replenishment to reduce waste",
     "smart_reason_supply_plenty_small_take": "Supply is plentiful and the small order is ready; take it now",
+    "smart_reason_supply_history_recovering": "Two recent fast, complete deliveries prove recovery; probe one account and observe instead of buying a batch from stale failures",
+    "smart_reason_supply_lifetime_capacity_wait": "The current inventory batch expires before another account can be fully consumed; wait for fresher stock or lower existing capacity",
     "smart_reason_supply_scarce_full_batch": "Supply is scarce; prelock as much as allowed within limits",
     "smart_reason_supply_scarce_moderate_batch": "Supply is scarce but capacity is not critical; downshift to a moderate batch of up to 5",
     "smart_reason_supply_tight_full_batch": "Supply is tight; prelock the recommended batch",
