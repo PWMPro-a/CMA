@@ -4740,6 +4740,79 @@ func TestFinishedPartialDeliverySettlesPermanentImportFailure(t *testing.T) {
 	}
 }
 
+func TestFinishedDeliverySettlesStableUnavailableImportFailure(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "stable-unavailable-import.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	order, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "order-stable-unavailable", Product: "team_1h", RequestedQuantity: 2,
+		Automatic: true, Status: "partial", RemoteStatus: "completed",
+	})
+	if err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	now := time.Now()
+	if _, err := st.InsertSupplyImportItems(ctx, order.OrderID, []store.SupplyImportItem{
+		{OrderID: order.OrderID, ItemKey: "good", FileName: "good.json", PayloadJSON: `{}`,
+			LeaseExpiresAtMS: now.Add(30 * time.Minute).UnixMilli()},
+		{OrderID: order.OrderID, ItemKey: "disabled", FileName: "disabled.json", PayloadJSON: `{}`,
+			LeaseExpiresAtMS: now.Add(30 * time.Minute).UnixMilli()},
+	}); err != nil {
+		t.Fatalf("insert items: %v", err)
+	}
+	items, err := st.ListSupplyImportItemsByOrderIDs(ctx, []string{order.OrderID})
+	if err != nil || len(items) != 2 {
+		t.Fatalf("list items=%#v err=%v", items, err)
+	}
+	for _, item := range items {
+		if item.ItemKey == "good" {
+			err = st.MarkSupplyImportItemImported(ctx, item.ID, now.UnixMilli())
+		} else {
+			err = st.MarkSupplyImportItemFailed(ctx, item.ID,
+				terminalCPAAuthUnavailableMessage+`: name="disabled.json" status="disabled" disabled=true`,
+				now.Add(time.Hour).UnixMilli())
+		}
+		if err != nil {
+			t.Fatalf("mark item %s: %v", item.ItemKey, err)
+		}
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), nil)
+	if err := service.importItems(ctx, store.ManagerConfig{}, &order); err != nil {
+		t.Fatalf("settle stable unavailable import: %v", err)
+	}
+	settled, found, err := st.GetSupplyOrder(ctx, order.OrderID)
+	if err != nil || !found {
+		t.Fatalf("load settled order found=%v err=%v", found, err)
+	}
+	if settled.Status != "completed_partial" || settled.ImportedCount != 1 ||
+		settled.CompletedAtMS <= 0 || !strings.Contains(settled.LastError, terminalCPAAuthUnavailableMessage) {
+		t.Fatalf("settled order = %#v", settled)
+	}
+}
+
+func TestWaitForCPAAuthLifecycleMarksStableUnavailableFilePermanent(t *testing.T) {
+	service := New(nil, nil)
+	err := service.waitForCPAAuthLifecycle(context.Background(), func(context.Context) (cpaauthfiles.File, error) {
+		return cpaauthfiles.File{
+			Name:     "disabled.json",
+			Provider: "codex",
+			Disabled: true,
+			Raw:      map[string]any{"status": "disabled"},
+		}, errors.New("CPA registered imported auth file but it is not available")
+	})
+	if err == nil || !strings.Contains(err.Error(), terminalCPAAuthUnavailableMessage) {
+		t.Fatalf("stable unavailable lifecycle error = %v", err)
+	}
+	if !permanentCPAAuthLifecycleFailure(err.Error()) {
+		t.Fatalf("stable unavailable lifecycle error was not permanent: %v", err)
+	}
+}
+
 func TestTerminalCPAAuthLifecycleErrorOnlyMatchesPermanentCredentialFailure(t *testing.T) {
 	permanent := cpaauthfiles.File{Name: "account.json", Raw: map[string]any{
 		"status":         "initialization_failed",

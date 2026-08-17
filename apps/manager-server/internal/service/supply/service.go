@@ -6584,7 +6584,7 @@ func (s *Service) reconcileSmartAccountPoolGuard(cfg store.ManagerSupplyConfig, 
 		return
 	}
 	s.clearPoolVacuum()
-	if resource.EmergencyReason != "available_capacity_critical" && resource.EmergencyReason != "critical_available_accounts" && resource.EmergencyReason != "emergency_pool_vacuum" &&
+	if !smartAccountAvailabilityEmergencyReason(resource.EmergencyReason) &&
 		resource.EmergencyReason != "healthy_available_accounts" {
 		return
 	}
@@ -6592,7 +6592,7 @@ func (s *Service) reconcileSmartAccountPoolGuard(cfg store.ManagerSupplyConfig, 
 	resource.PoolVacuumActive = false
 	resource.PoolVacuumStartedAtMS = 0
 	resource.PoolVacuumDurationSeconds = 0
-	if resource.DecisionReason == "available_capacity_critical" || resource.DecisionReason == "critical_available_accounts" || resource.DecisionReason == "emergency_pool_vacuum" ||
+	if smartAccountAvailabilityEmergencyReason(resource.DecisionReason) ||
 		resource.DecisionReason == "healthy_available_accounts" {
 		resource.EmergencyShortage = false
 		if resource.ConsumeRCUPerMinute <= 0 && resource.DemandTrend != smartDemandTrendFalling {
@@ -8680,6 +8680,8 @@ func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.Manage
 
 const cpaAuthLifecycleWaitTimeout = 90 * time.Second
 
+const terminalCPAAuthUnavailableMessage = "CPA auth file is terminally unavailable"
+
 func (s *Service) waitForCPAAuthLifecycle(ctx context.Context, find func(context.Context) (cpaauthfiles.File, error)) error {
 	if find == nil {
 		return errors.New("CPA auth lifecycle lookup is unavailable")
@@ -8700,7 +8702,8 @@ func (s *Service) waitForCPAAuthLifecycle(ctx context.Context, find func(context
 				return lifecycleErr
 			}
 			if !isCPAAuthLifecyclePending(file) {
-				return err
+				return fmt.Errorf("%s: name=%q status=%q disabled=%t: %w", terminalCPAAuthUnavailableMessage,
+					file.Name, textField(file.Raw, "status", "state"), file.Disabled, err)
 			}
 		}
 		select {
@@ -8748,6 +8751,7 @@ func permanentCPAAuthLifecycleFailure(value string) bool {
 		"hard_limit_reached",
 		"credit_grant_exhausted",
 		"exceeded your current quota",
+		strings.ToLower(terminalCPAAuthUnavailableMessage),
 	} {
 		if strings.Contains(value, marker) {
 			return true

@@ -227,6 +227,7 @@ type SmartResource struct {
 	Strategy                        string  `json:"strategy,omitempty"`
 	CriticalAvailableAccounts       int     `json:"criticalAvailableAccounts,omitempty"`
 	HealthyAvailableAccounts        int     `json:"healthyAvailableAccounts,omitempty"`
+	StartupAvailableAccounts        int     `json:"startupAvailableAccounts,omitempty"`
 	EmergencyMinAccounts            int     `json:"emergencyMinAccounts,omitempty"`
 	EmergencyReason                 string  `json:"emergencyReason,omitempty"`
 	PoolVacuumActive                bool    `json:"poolVacuumActive,omitempty"`
@@ -398,6 +399,7 @@ func defaultSmartResource(cfg store.ManagerSupplyConfig) SmartResource {
 		Strategy:                    strategy,
 		CriticalAvailableAccounts:   smartCriticalAvailableAccounts(cfg),
 		HealthyAvailableAccounts:    smartHealthyAvailableAccounts(cfg),
+		StartupAvailableAccounts:    smartStartupAvailableAccounts(cfg),
 		EmergencyMinAccounts:        smartEmergencyMinAccounts(cfg),
 		VirtualDemandTTLMinutes:     smartVirtualDemandTTLMinutes(cfg),
 		AccountMaxRequestsBefore401: smartAccountMaxRequestsBefore401(cfg),
@@ -1618,16 +1620,14 @@ func applySmartEmergencyAvailability(cfg store.ManagerSupplyConfig, resource *Sm
 	if resource == nil || !smartSupplyStrategyConfigured(cfg) {
 		return
 	}
-	critical := smartCriticalAvailableAccounts(cfg)
+	startup := smartStartupAvailableAccounts(cfg)
 	if !smartAvailableCapacityEmergency(cfg, *resource) {
 		return
 	}
-	// An idle pool only needs to avoid a true vacuum. Do not turn the
-	// configured healthy floor into a purchase target when there is no current
-	// traffic: short-lived credentials would otherwise be bought and expire
-	// unused. A positive but sub-critical pool is handled below by topping up
-	// only to the critical floor; an empty pool still receives the configured
-	// minimum emergency batch so the next request is not stranded.
+	// The startup account floor is independent of traffic. When the last usable
+	// credential disappears, successful traffic also becomes zero; relying only
+	// on burn-rate demand would therefore stop buying at exactly the moment the
+	// pool needs credentials to start serving again.
 	//
 	// A pool outage is different from genuine idleness: once the last account
 	// disappears, the current success rate immediately becomes zero even while
@@ -1637,8 +1637,8 @@ func applySmartEmergencyAvailability(cfg store.ManagerSupplyConfig, resource *Sm
 	// recreates the expiry-waste pattern that progressive replenishment avoids.
 	sizingResource, demandObserved := smartEmergencySizingResource(*resource)
 	if !demandObserved && resource.AvailableAccounts > 0 {
-		if resource.AvailableAccounts >= critical {
-			if resource.EmergencyReason == "available_capacity_critical" || resource.EmergencyReason == "critical_available_accounts" || resource.EmergencyReason == "emergency_pool_vacuum" {
+		if resource.AvailableAccounts >= startup {
+			if smartAccountAvailabilityEmergencyReason(resource.EmergencyReason) {
 				resource.EmergencyShortage = false
 				resource.EmergencyReason = ""
 				resource.PoolVacuumActive = false
@@ -1649,6 +1649,9 @@ func applySmartEmergencyAvailability(cfg store.ManagerSupplyConfig, resource *Sm
 		}
 	}
 	reason := "available_capacity_critical"
+	if !demandObserved && cfg.StartupAvailableAccounts != nil && resource.AvailableAccounts < startup {
+		reason = "startup_account_floor"
+	}
 	if resource.AvailableAccounts <= 0 {
 		reason = "emergency_pool_vacuum"
 		resource.PoolVacuumActive = true
@@ -1702,6 +1705,9 @@ func smartAvailableCapacity(resource SmartResource) float64 {
 }
 
 func smartAvailableCapacityEmergency(cfg store.ManagerSupplyConfig, resource SmartResource) bool {
+	if resource.AvailableAccounts < smartStartupAvailableAccounts(cfg) {
+		return true
+	}
 	criticalAccounts := smartCriticalAvailableAccounts(cfg)
 	if resource.AvailableAccounts <= criticalAccounts {
 		return true
@@ -2246,6 +2252,7 @@ func (s *Service) currentSmartResource(cfg store.ManagerSupplyConfig) SmartResou
 	resource.Strategy = managerconfigsvc.NormalizeSupplyStrategy(cfg.Strategy)
 	resource.CriticalAvailableAccounts = smartCriticalAvailableAccounts(cfg)
 	resource.HealthyAvailableAccounts = smartHealthyAvailableAccounts(cfg)
+	resource.StartupAvailableAccounts = smartStartupAvailableAccounts(cfg)
 	resource.EmergencyMinAccounts = smartEmergencyMinAccounts(cfg)
 	resource.VirtualDemandTTLMinutes = smartVirtualDemandTTLMinutes(cfg)
 	resource.AccountMaxRequestsBefore401 = smartAccountMaxRequestsBefore401(cfg)
@@ -2336,7 +2343,7 @@ func smartCriticalAvailableAccounts(cfg store.ManagerSupplyConfig) int {
 func smartSupplyStrategyConfigured(cfg store.ManagerSupplyConfig) bool {
 	return strings.TrimSpace(cfg.Strategy) != "" ||
 		cfg.CriticalAvailableAccounts > 0 || cfg.HealthyAvailableAccounts > 0 ||
-		cfg.DefaultEmergencyMinAccounts > 0 || cfg.VirtualDemandTTLMinutes > 0 ||
+		cfg.StartupAvailableAccounts != nil || cfg.DefaultEmergencyMinAccounts > 0 || cfg.VirtualDemandTTLMinutes > 0 ||
 		cfg.AccountMaxRequestsBefore401 > 0 || cfg.AccountMaxUsefulSeconds401 > 0 ||
 		cfg.EmergencyBypassUsageRate != nil || cfg.RecoveryTriggerOn401 != nil
 }
@@ -2347,6 +2354,13 @@ func smartHealthyAvailableAccounts(cfg store.ManagerSupplyConfig) int {
 		return smartCriticalAvailableAccounts(cfg)
 	}
 	return value
+}
+
+func smartStartupAvailableAccounts(cfg store.ManagerSupplyConfig) int {
+	if cfg.StartupAvailableAccounts == nil {
+		return smartCriticalAvailableAccounts(cfg)
+	}
+	return clampInt(*cfg.StartupAvailableAccounts, 1, 1000)
 }
 
 func smartHealthyFloorShortageEnabled(cfg store.ManagerSupplyConfig) bool {
@@ -2385,18 +2399,17 @@ func smartEmergencyRefillQuantity(cfg store.ManagerSupplyConfig, available int) 
 	return clampInt(max(minimum, toHealthy), 1, 100)
 }
 
-// smartIdleEmergencyRefillQuantity intentionally uses a smaller target than
-// the traffic-aware emergency path. With no current traffic, accounts below
-// the critical floor are brought only to that floor. A completely empty pool
-// still gets the configured minimum batch to preserve request availability.
+// smartIdleEmergencyRefillQuantity keeps the configured startup account floor
+// independent of traffic, so a completely exhausted pool continues supplier
+// retries until enough schedulable credentials exist to restart requests.
 func smartIdleEmergencyRefillQuantity(cfg store.ManagerSupplyConfig, available int) int {
-	if available <= 0 {
-		return smartEmergencyMinimumOrderQuantity(cfg)
+	if cfg.StartupAvailableAccounts == nil {
+		if available <= 0 || available <= smartCriticalAvailableAccounts(cfg) {
+			return smartEmergencyMinimumOrderQuantity(cfg)
+		}
+		return 0
 	}
-	if available <= smartCriticalAvailableAccounts(cfg) {
-		return smartEmergencyMinimumOrderQuantity(cfg)
-	}
-	return 0
+	return clampInt(max(0, smartStartupAvailableAccounts(cfg)-max(0, available)), 0, 100)
 }
 
 func smartVirtualDemandTTLMinutes(cfg store.ManagerSupplyConfig) int {
@@ -2515,16 +2528,20 @@ func smartAutomaticOrderQuantityLimit(cfg store.ManagerSupplyConfig, resource Sm
 	return max(1, limit)
 }
 
-func smartAccountAvailabilityEmergency(resource SmartResource) bool {
-	if resource.PoolVacuumActive {
-		return true
-	}
-	switch resource.EmergencyReason {
-	case "available_capacity_critical", "critical_available_accounts", "emergency_pool_vacuum":
+func smartAccountAvailabilityEmergencyReason(reason string) bool {
+	switch reason {
+	case "available_capacity_critical", "critical_available_accounts", "emergency_pool_vacuum", "startup_account_floor":
 		return true
 	default:
 		return false
 	}
+}
+
+func smartAccountAvailabilityEmergency(resource SmartResource) bool {
+	if resource.PoolVacuumActive {
+		return true
+	}
+	return smartAccountAvailabilityEmergencyReason(resource.EmergencyReason)
 }
 
 func smartRisingObservationQuantity(cfg store.ManagerSupplyConfig, resource SmartResource) int {

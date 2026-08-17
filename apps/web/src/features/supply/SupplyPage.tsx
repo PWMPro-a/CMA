@@ -34,6 +34,7 @@ import {
 } from '@/services/api';
 import { useNotificationStore } from '@/stores';
 import { resolveSupplyPoolAccountStats } from './model/poolAccountStats';
+import { resolvePurchasePlatformLabel } from './model/purchasePlatform';
 import styles from './SupplyPage.module.scss';
 
 const DEFAULT_QUOTA_ESTIMATION_POLICIES: Record<string, SupplyQuotaEstimationPolicy> = {
@@ -121,6 +122,7 @@ const emptyConfig: SupplyConfig = {
   revenueMultiplier: 0.06,
   criticalAvailableAccounts: 2,
   healthyAvailableAccounts: 10,
+  startupAvailableAccounts: 5,
   defaultEmergencyMinAccounts: 5,
   virtualDemandTtlMinutes: 60,
   accountMaxRequestsBefore401: 30,
@@ -920,6 +922,10 @@ export function SupplyPage() {
         (overview?.platforms ?? []).map((platform) => [platform.id.trim().toLowerCase(), platform])
       ),
     [overview?.platforms]
+  );
+  const purchasePlatforms = useMemo(
+    () => [...(status?.config?.platforms ?? draft.platforms ?? []), ...(overview?.platforms ?? [])],
+    [draft.platforms, overview?.platforms, status?.config?.platforms]
   );
   const poolAccounts = resolveSupplyPoolAccountStats(
     smart,
@@ -1911,11 +1917,11 @@ export function SupplyPage() {
                           ? 'supply.quota_plan_warning_quarantined'
                           : hasRejectedAccounts
                             ? 'supply.quota_plan_warning_rejected'
-                          : blocked || downwardPending
-                            ? 'supply.quota_plan_warning_pending'
-                            : upwardPending
-                              ? 'supply.quota_plan_warning_upward_pending'
-                              : 'supply.quota_plan_warning_staged',
+                            : blocked || downwardPending
+                              ? 'supply.quota_plan_warning_pending'
+                              : upwardPending
+                                ? 'supply.quota_plan_warning_upward_pending'
+                                : 'supply.quota_plan_warning_staged',
                       {
                         divergence: formatNumber(estimate?.divergencePercent, 1),
                         current: estimate?.confirmationRounds ?? 0,
@@ -2787,6 +2793,10 @@ export function SupplyPage() {
                     <strong>{draft.healthyAvailableAccounts ?? 0}</strong>
                   </div>
                   <div>
+                    <span>{t('supply.strategy_startup_accounts')}</span>
+                    <strong>{draft.startupAvailableAccounts ?? 0}</strong>
+                  </div>
+                  <div>
                     <span>{t('supply.strategy_emergency_min_accounts')}</span>
                     <strong>{draft.defaultEmergencyMinAccounts ?? 0}</strong>
                   </div>
@@ -2802,6 +2812,19 @@ export function SupplyPage() {
                     <span>{t('supply.strategy_time_risk_limit')}</span>
                     <strong>{formatSeconds(draft.accountMaxUsefulSecondsBefore401)}</strong>
                   </div>
+                </div>
+                <div className={styles.formGrid}>
+                  <Input
+                    label={t('supply.strategy_startup_accounts')}
+                    hint={t('supply.strategy_startup_accounts_hint')}
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={draft.startupAvailableAccounts ?? 5}
+                    onChange={(event) =>
+                      updateDraft({ startupAvailableAccounts: Number(event.target.value) })
+                    }
+                  />
                 </div>
                 {draftStrategy === 'custom' ? (
                   <>
@@ -3099,6 +3122,7 @@ export function SupplyPage() {
                       <OrderSummary
                         key={order.orderId}
                         order={order}
+                        purchasePlatform={resolvePurchasePlatformLabel(order, purchasePlatforms)}
                         dismissing={action === 'dismiss'}
                         onDismissUncertain={dismissUncertain}
                       />
@@ -3821,6 +3845,7 @@ export function SupplyPage() {
                     <tr>
                       <th>{t('supply.order_id')}</th>
                       <th>{t('supply.product')}</th>
+                      <th>{t('supply.purchase_platform')}</th>
                       <th>{t('supply.order_type')}</th>
                       <th>{t('supply.quantity')}</th>
                       <th>{t('supply.import_progress')}</th>
@@ -3835,6 +3860,7 @@ export function SupplyPage() {
                       <tr key={order.orderId}>
                         <td className={styles.mono}>{order.orderId}</td>
                         <td>{order.product}</td>
+                        <td>{resolvePurchasePlatformLabel(order, purchasePlatforms)}</td>
                         <td>{order.automatic ? t('supply.automatic') : t('supply.manual')}</td>
                         <td>{order.requestedQuantity}</td>
                         <td>
@@ -3857,7 +3883,7 @@ export function SupplyPage() {
                     ))}
                     {!status?.orders?.length ? (
                       <tr>
-                        <td colSpan={9} className={styles.emptyCell}>
+                        <td colSpan={10} className={styles.emptyCell}>
                           {t('supply.no_history')}
                         </td>
                       </tr>
@@ -3875,10 +3901,12 @@ export function SupplyPage() {
 
 function OrderSummary({
   order,
+  purchasePlatform,
   dismissing,
   onDismissUncertain,
 }: {
   order: SupplyOrder;
+  purchasePlatform: string;
   dismissing: boolean;
   onDismissUncertain: (order: SupplyOrder) => void;
 }) {
@@ -3913,6 +3941,10 @@ function OrderSummary({
         <div>
           <dt>{t('supply.order_id')}</dt>
           <dd>{order.orderId}</dd>
+        </div>
+        <div>
+          <dt>{t('supply.purchase_platform')}</dt>
+          <dd>{purchasePlatform}</dd>
         </div>
         <div>
           <dt>{t('supply.remote_status')}</dt>

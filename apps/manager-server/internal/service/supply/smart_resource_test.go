@@ -1483,6 +1483,41 @@ func TestNoTrafficKeepsOnlyMinimumPoolAndCreatesNoCapacityOrder(t *testing.T) {
 	}
 }
 
+func TestStartupAccountFloorKeepsPurchasingWithoutTraffic(t *testing.T) {
+	startupAccounts := 5
+	cfg := store.ManagerSupplyConfig{
+		Strategy:                    managerconfigsvc.SupplyStrategyStrongSupply,
+		CriticalAvailableAccounts:   2,
+		HealthyAvailableAccounts:    10,
+		StartupAvailableAccounts:    &startupAccounts,
+		DefaultEmergencyMinAccounts: 5,
+		Product:                     "oauth_7d",
+	}
+
+	resource := SmartResource{AvailableAccounts: 4, DemandTrend: smartDemandTrendUnknown}
+	applySmartEmergencyAvailability(cfg, &resource, time.Now())
+	if !resource.EmergencyShortage || resource.EmergencyReason != "startup_account_floor" ||
+		resource.SuggestedAction != smartActionEmergencyReplenish || resource.SuggestedQuantity != 1 {
+		t.Fatalf("startup floor shortage = %#v", resource)
+	}
+	if !smartShortageFastRetryAllowed(resource) {
+		t.Fatal("startup floor shortage must keep the fast supplier retry loop active")
+	}
+
+	ready := SmartResource{AvailableAccounts: 5, DemandTrend: smartDemandTrendUnknown}
+	applySmartEmergencyAvailability(cfg, &ready, time.Now())
+	if ready.EmergencyShortage || ready.SuggestedQuantity != 0 {
+		t.Fatalf("startup floor should stop after the target is reached: %#v", ready)
+	}
+
+	empty := SmartResource{AvailableAccounts: 0, DemandTrend: smartDemandTrendUnknown}
+	applySmartEmergencyAvailability(cfg, &empty, time.Now())
+	if !empty.EmergencyShortage || empty.EmergencyReason != "emergency_pool_vacuum" ||
+		empty.SuggestedQuantity != 5 {
+		t.Fatalf("empty startup floor refill = %#v", empty)
+	}
+}
+
 func TestVirtualDemandSizesEmptyPoolEmergencyWithoutFixedBatchWaste(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		Strategy:                    managerconfigsvc.SupplyStrategyStrongSupply,
@@ -2312,6 +2347,76 @@ func TestStrongSupplySkipsCreateWithoutUsageAboveCriticalWaterline(t *testing.T)
 		t.Fatalf("get status: %v", err)
 	}
 	if status.ActiveOrder != nil || status.SmartResource.DecisionReason != "usage_rate_not_ready" {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
+func TestStartupAccountFloorCreatesWithoutUsageAboveCriticalWaterline(t *testing.T) {
+	var createCalls atomic.Int32
+	var createQuantity atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex"},{"name":"b.json","provider":"codex"},{"name":"c.json","provider":"codex"}]}`))
+		case "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":10,"estimated_total_fen":100}`))
+		case "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":10000}`))
+		case "/api/customer/pickup/orders":
+			createCalls.Add(1)
+			var payload struct {
+				Quantity int `json:"quantity"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode create payload: %v", err)
+			}
+			createQuantity.Store(int32(payload.Quantity))
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"order":{"id":"order-startup-floor","status":"waiting_inventory","quantity":2}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "smart-startup-floor.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	startupAccounts := 5
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password",
+			Product: "oauth_30d", TargetAvailableAccounts: 100, ReplenishBatchSize: 5,
+			Strategy: managerconfigsvc.SupplyStrategyStrongSupply, CriticalAvailableAccounts: 2,
+			StartupAvailableAccounts: &startupAccounts,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	seedCompletedQuotaInspection(t, st,
+		store.CodexInspectionResult{FileName: "a.json", UsedPercent: floatPtr(0)},
+		store.CodexInspectionResult{FileName: "b.json", UsedPercent: floatPtr(0)},
+		store.CodexInspectionResult{FileName: "c.json", UsedPercent: floatPtr(0)},
+	)
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("run automatic: %v", err)
+	}
+	if createCalls.Load() != 1 || createQuantity.Load() != 2 {
+		t.Fatalf("create calls/quantity = %d/%d, want 1/2", createCalls.Load(), createQuantity.Load())
+	}
+	status, err := service.GetStatus(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	if status.ActiveOrder == nil || status.SmartResource.DecisionReason != "startup_account_floor" {
 		t.Fatalf("status = %#v", status)
 	}
 }

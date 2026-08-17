@@ -64,6 +64,7 @@ type ManagerSupplyConfig struct {
 	RevenueMultiplier           float64                                       `json:"revenueMultiplier,omitempty"`
 	CriticalAvailableAccounts   int                                           `json:"criticalAvailableAccounts,omitempty"`
 	HealthyAvailableAccounts    int                                           `json:"healthyAvailableAccounts,omitempty"`
+	StartupAvailableAccounts    *int                                          `json:"startupAvailableAccounts,omitempty"`
 	DefaultEmergencyMinAccounts int                                           `json:"defaultEmergencyMinAccounts,omitempty"`
 	VirtualDemandTTLMinutes     int                                           `json:"virtualDemandTtlMinutes,omitempty"`
 	AccountMaxRequestsBefore401 int                                           `json:"accountMaxRequestsBefore401,omitempty"`

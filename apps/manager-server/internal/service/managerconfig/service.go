@@ -417,7 +417,18 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	next.NewAccountConfidence = BoundedFloatOrDefault(submitted.NewAccountConfidence, next.NewAccountConfidence, 0.7, 0.1, 1)
 	next.MinBalanceReserveFen = BoundedOptionalInt64(submitted.MinBalanceReserveFen, next.MinBalanceReserveFen, 100_000_000)
 	next.RevenueMultiplier = BoundedFloatOrDefault(submitted.RevenueMultiplier, next.RevenueMultiplier, 0.06, 0.000001, 100)
+	if submitted.StartupAvailableAccounts != nil {
+		value := clampInt(*submitted.StartupAvailableAccounts, 1, 1000)
+		next.StartupAvailableAccounts = &value
+	}
 	next = NormalizeSupplyStrategyConfig(next, submitted)
+	if next.StartupAvailableAccounts != nil {
+		value := clampInt(*next.StartupAvailableAccounts, 1, 1000)
+		if value < next.CriticalAvailableAccounts {
+			value = next.CriticalAvailableAccounts
+		}
+		next.StartupAvailableAccounts = &value
+	}
 	if submitted.RecoverySyncEnabled != nil {
 		next.RecoverySyncEnabled = BoolPtr(*submitted.RecoverySyncEnabled)
 	} else if next.RecoverySyncEnabled == nil {

@@ -208,6 +208,7 @@ func TestNormalizeSupplyConfigAppliesSupplyStrategyPresets(t *testing.T) {
 		t.Run(test.strategy, func(t *testing.T) {
 			next := NormalizeSupplyConfig(store.ManagerSupplyConfig{Strategy: test.strategy}, store.ManagerSupplyConfig{})
 			if next.Strategy != test.strategy ||
+				next.StartupAvailableAccounts != nil ||
 				next.CriticalAvailableAccounts != test.critical ||
 				next.HealthyAvailableAccounts != test.healthy ||
 				next.DefaultEmergencyMinAccounts != test.emergency ||
@@ -231,10 +232,12 @@ func TestNormalizeSupplyConfigAppliesSupplyStrategyPresets(t *testing.T) {
 
 func TestNormalizeSupplyConfigPreservesCustomSupplyStrategy(t *testing.T) {
 	off := false
+	startupAccounts := 8
 	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{
 		Strategy:                    SupplyStrategyCustom,
 		CriticalAvailableAccounts:   4,
 		HealthyAvailableAccounts:    3,
+		StartupAvailableAccounts:    &startupAccounts,
 		DefaultEmergencyMinAccounts: 7,
 		VirtualDemandTTLMinutes:     45,
 		AccountMaxRequestsBefore401: 35,
@@ -243,6 +246,7 @@ func TestNormalizeSupplyConfigPreservesCustomSupplyStrategy(t *testing.T) {
 		RecoveryTriggerOn401:        &off,
 	}, store.ManagerSupplyConfig{})
 	if next.Strategy != SupplyStrategyCustom || next.CriticalAvailableAccounts != 4 ||
+		next.StartupAvailableAccounts == nil || *next.StartupAvailableAccounts != 8 ||
 		next.HealthyAvailableAccounts != 4 || next.DefaultEmergencyMinAccounts != 7 ||
 		next.VirtualDemandTTLMinutes != 45 || next.AccountMaxRequestsBefore401 != 35 ||
 		next.AccountMaxUsefulSeconds401 != 135 {

@@ -62,6 +62,7 @@ export interface SupplyConfig {
   revenueMultiplier?: number;
   criticalAvailableAccounts?: number;
   healthyAvailableAccounts?: number;
+  startupAvailableAccounts?: number;
   defaultEmergencyMinAccounts?: number;
   virtualDemandTtlMinutes?: number;
   accountMaxRequestsBefore401?: number;
@@ -328,6 +329,7 @@ export interface SupplySmartResource {
   strategy?: string;
   criticalAvailableAccounts?: number;
   healthyAvailableAccounts?: number;
+  startupAvailableAccounts?: number;
   emergencyMinAccounts?: number;
   emergencyReason?: string;
   poolVacuumActive?: boolean;
