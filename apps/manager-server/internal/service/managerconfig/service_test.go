@@ -129,16 +129,19 @@ func TestNormalizeSupplyConfigClearsPlatformUsernameButKeepsTokenAuthentication(
 
 func TestNormalizeSupplyConfigKeepsNvtokensPlatformType(t *testing.T) {
 	enabled := true
+	maxUnitPriceFen := int64(800)
 	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{
 		Platforms: []store.ManagerSupplyPlatformConfig{{
-			ID:       "nvtokens-main",
-			Name:     "nvtokens",
-			Type:     SupplyPlatformNvtokens,
-			Enabled:  &enabled,
-			BaseURL:  "https://nvtokens.com/",
-			Username: "buyer",
-			Password: "secret",
-			Product:  "oauth_30d",
+			ID:                  "nvtokens-main",
+			Name:                "nvtokens",
+			Type:                SupplyPlatformNvtokens,
+			Enabled:             &enabled,
+			BaseURL:             "https://nvtokens.com/",
+			Username:            "buyer",
+			Password:            "secret",
+			Product:             "oauth_30d",
+			PurchaseAccountType: "access_refresh",
+			MaxUnitPriceFen:     &maxUnitPriceFen,
 		}},
 	}, store.ManagerSupplyConfig{})
 	if len(next.Platforms) != 1 {
@@ -148,8 +151,60 @@ func TestNormalizeSupplyConfigKeepsNvtokensPlatformType(t *testing.T) {
 	if platform.Type != SupplyPlatformNvtokens || platform.BaseURL != "https://nvtokens.com" || platform.Product != "oauth_30d" {
 		t.Fatalf("nvtokens platform = %#v", platform)
 	}
+	if platform.PurchaseAccountType != SupplyPurchaseAccountHasRefreshToken ||
+		platform.MaxUnitPriceFen == nil || *platform.MaxUnitPriceFen != 800 {
+		t.Fatalf("nvtokens purchase filters = %#v", platform)
+	}
 	if err := ValidateSupplyConfig(store.ManagerSupplyConfig{Enabled: &enabled, Platforms: next.Platforms}); err != nil {
 		t.Fatalf("validate nvtokens platform: %v", err)
+	}
+}
+
+func TestNormalizeSupplyConfigDefaultsPreservesAndClearsNvtokensPurchaseFilters(t *testing.T) {
+	enabled := true
+	basePlatform := store.ManagerSupplyPlatformConfig{
+		ID:       "nvtokens-main",
+		Type:     SupplyPlatformNvtokens,
+		Enabled:  &enabled,
+		BaseURL:  "https://nvtokens.com",
+		Username: "buyer",
+		Password: "secret",
+		Product:  "oauth_30d",
+	}
+	defaulted := NormalizeSupplyConfig(store.ManagerSupplyConfig{
+		Platforms: []store.ManagerSupplyPlatformConfig{basePlatform},
+	}, store.ManagerSupplyConfig{})
+	if got := defaulted.Platforms[0].PurchaseAccountType; got != SupplyPurchaseAccountAll {
+		t.Fatalf("default purchase account type = %q, want %q", got, SupplyPurchaseAccountAll)
+	}
+
+	maxUnitPriceFen := int64(1350)
+	currentPlatform := basePlatform
+	currentPlatform.PurchaseAccountType = SupplyPurchaseAccountWithoutRefreshToken
+	currentPlatform.MaxUnitPriceFen = &maxUnitPriceFen
+	preserved := NormalizeSupplyConfig(store.ManagerSupplyConfig{
+		Platforms: []store.ManagerSupplyPlatformConfig{basePlatform},
+	}, store.ManagerSupplyConfig{Platforms: []store.ManagerSupplyPlatformConfig{currentPlatform}})
+	if preserved.Platforms[0].PurchaseAccountType != SupplyPurchaseAccountWithoutRefreshToken ||
+		preserved.Platforms[0].MaxUnitPriceFen == nil || *preserved.Platforms[0].MaxUnitPriceFen != 1350 {
+		t.Fatalf("preserved nvtokens purchase filters = %#v", preserved.Platforms[0])
+	}
+
+	zero := int64(0)
+	clearPlatform := basePlatform
+	clearPlatform.PurchaseAccountType = "invalid-value"
+	clearPlatform.MaxUnitPriceFen = &zero
+	cleared := NormalizeSupplyConfig(store.ManagerSupplyConfig{
+		Platforms: []store.ManagerSupplyPlatformConfig{clearPlatform},
+	}, preserved)
+	if cleared.Platforms[0].PurchaseAccountType != SupplyPurchaseAccountAll || cleared.Platforms[0].MaxUnitPriceFen != nil {
+		t.Fatalf("cleared nvtokens purchase filters = %#v", cleared.Platforms[0])
+	}
+
+	invalid := basePlatform
+	invalid.PurchaseAccountType = "invalid-value"
+	if err := ValidateSupplyConfig(store.ManagerSupplyConfig{Enabled: &enabled, Platforms: []store.ManagerSupplyPlatformConfig{invalid}}); err == nil {
+		t.Fatal("invalid nvtokens purchase account type should fail validation")
 	}
 }
 

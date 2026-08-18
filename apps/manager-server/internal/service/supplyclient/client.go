@@ -55,13 +55,15 @@ func (e *HTTPError) Error() string {
 }
 
 type Credentials struct {
-	ID           string
-	PlatformType string
-	BaseURL      string
-	Username     string
-	Password     string
-	Token        string
-	DeliveryMode string
+	ID                  string
+	PlatformType        string
+	BaseURL             string
+	Username            string
+	Password            string
+	Token               string
+	DeliveryMode        string
+	PurchaseAccountType string
+	MaxUnitPriceFen     int64
 }
 
 type Inventory struct {
@@ -326,18 +328,22 @@ func isNvtokens(credentials Credentials) bool {
 }
 
 // nvtokensPurchasePayload mirrors the workspace extraction request used by the
-// nvtokens UI. CPAM only chooses the product and quantity; all optional filters
-// stay at their neutral values so supplier-side inventory rules remain in
-// control.
-func nvtokensPurchasePayload(product string, quantity int) map[string]any {
+// nvtokens UI. CPAM supplies the product, quantity and platform-level purchase
+// filters while keeping the remaining supplier rules at their neutral values.
+func nvtokensPurchasePayload(credentials Credentials, product string, quantity int) map[string]any {
 	salePlan := "plus"
 	switch strings.ToLower(strings.TrimSpace(product)) {
 	case "team_1h":
 		salePlan = "team"
 	}
+	credentialType := normalizeNvtokensCredentialType(credentials.PurchaseAccountType)
+	var maxUnitPriceCents any
+	if credentials.MaxUnitPriceFen > 0 {
+		maxUnitPriceCents = credentials.MaxUnitPriceFen
+	}
 	return map[string]any{
 		"quantity":                        quantity,
-		"credential_type":                 "all",
+		"credential_type":                 credentialType,
 		"inventory_token_filter":          "all",
 		"sale_plan_filter":                salePlan,
 		"subscription_payment_channels":   []string{},
@@ -345,12 +351,23 @@ func nvtokensPurchasePayload(product string, quantity int) map[string]any {
 		"plus_subscription_custom_hours":  nil,
 		"plus_subscription_age_max_hours": nil,
 		"email_suffixes":                  []string{},
-		"max_unit_price_cents":            nil,
+		"max_unit_price_cents":            maxUnitPriceCents,
 		"purchase_priority":               "price_first",
 		"preferred_sellers":               []string{},
 		"seller_whitelist":                []string{},
 		"seller_blacklist":                []string{},
 		"preferred_channel_ids":           []string{},
+	}
+}
+
+func normalizeNvtokensCredentialType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "has_refresh_token", "access_refresh", "refresh_token":
+		return "has_refresh_token"
+	case "without_refresh_token", "access_token", "id_token", "session_token", "unknown":
+		return "without_refresh_token"
+	default:
+		return "all"
 	}
 }
 
@@ -363,7 +380,7 @@ func (c *Client) nvtokensInventory(ctx context.Context, credentials Credentials,
 		credentials,
 		http.MethodPost,
 		"/api/workspace/extractions/estimate",
-		nvtokensPurchasePayload(product, quantity),
+		nvtokensPurchasePayload(credentials, product, quantity),
 		c.timeout,
 	)
 	if err != nil {
@@ -461,7 +478,7 @@ func (c *Client) nvtokensCreateOrder(ctx context.Context, credentials Credential
 		credentials,
 		http.MethodPost,
 		"/api/workspace/extractions/batch",
-		nvtokensPurchasePayload(product, quantity),
+		nvtokensPurchasePayload(credentials, product, quantity),
 		headers,
 		nvtokensBatchTimeout,
 	)

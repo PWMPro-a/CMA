@@ -7,9 +7,24 @@ import (
 	"testing"
 	"time"
 
+	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/supplyclient"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
+
+func TestSupplyPlatformCredentialsIncludeNvtokensPurchaseFilters(t *testing.T) {
+	maxUnitPriceFen := int64(800)
+	credentials := supplyPlatformCredentials(store.ManagerSupplyPlatformConfig{
+		ID:                  "nvtokens-main",
+		Type:                managerconfigsvc.SupplyPlatformNvtokens,
+		BaseURL:             "https://nvtokens.com/",
+		PurchaseAccountType: managerconfigsvc.SupplyPurchaseAccountHasRefreshToken,
+		MaxUnitPriceFen:     &maxUnitPriceFen,
+	})
+	if credentials.PurchaseAccountType != managerconfigsvc.SupplyPurchaseAccountHasRefreshToken || credentials.MaxUnitPriceFen != 800 {
+		t.Fatalf("nvtokens credentials = %#v", credentials)
+	}
+}
 
 func TestSupplyPlatformEconomicsUsesSupplierQuotaAndLifetimeDemand(t *testing.T) {
 	status := PlatformOverview{Inventory: &supplyclient.Inventory{

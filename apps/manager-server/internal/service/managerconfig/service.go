@@ -35,6 +35,10 @@ const (
 	SupplyPlatformBugTeam  = "bugteam"
 	SupplyPlatformNvtokens = "nvtokens"
 
+	SupplyPurchaseAccountAll                 = "all"
+	SupplyPurchaseAccountHasRefreshToken     = "has_refresh_token"
+	SupplyPurchaseAccountWithoutRefreshToken = "without_refresh_token"
+
 	SupplyPlatformSelectionBestAvailable = "best_available"
 	SupplyPlatformSelectionPriorityFirst = "priority_first"
 )
@@ -547,6 +551,17 @@ func normalizeSupplyPlatforms(submitted []store.ManagerSupplyPlatformConfig, cur
 				platform.Product = "oauth_30d"
 			}
 		}
+		if platformType == SupplyPlatformNvtokens {
+			purchaseAccountType := strings.TrimSpace(raw.PurchaseAccountType)
+			if purchaseAccountType == "" {
+				purchaseAccountType = platform.PurchaseAccountType
+			}
+			platform.PurchaseAccountType = normalizeSupplyPurchaseAccountType(purchaseAccountType)
+			platform.MaxUnitPriceFen = normalizeSupplyMaxUnitPriceFen(raw.MaxUnitPriceFen, platform.MaxUnitPriceFen)
+		} else {
+			platform.PurchaseAccountType = ""
+			platform.MaxUnitPriceFen = nil
+		}
 		if raw.Priority > 0 {
 			platform.Priority = clampInt(raw.Priority, 1, 1000)
 		} else if platform.Priority <= 0 {
@@ -588,6 +603,43 @@ func normalizeSupplyPlatformType(value string) string {
 	default:
 		return SupplyPlatformLegacy
 	}
+}
+
+func normalizeSupplyPurchaseAccountType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case SupplyPurchaseAccountHasRefreshToken, "access_refresh", "refresh_token":
+		return SupplyPurchaseAccountHasRefreshToken
+	case SupplyPurchaseAccountWithoutRefreshToken, "access_token", "id_token", "session_token", "unknown":
+		return SupplyPurchaseAccountWithoutRefreshToken
+	default:
+		return SupplyPurchaseAccountAll
+	}
+}
+
+func supportedSupplyPurchaseAccountType(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", SupplyPurchaseAccountAll,
+		SupplyPurchaseAccountHasRefreshToken, "access_refresh", "refresh_token",
+		SupplyPurchaseAccountWithoutRefreshToken, "access_token", "id_token", "session_token", "unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeSupplyMaxUnitPriceFen(submitted *int64, current *int64) *int64 {
+	if submitted == nil {
+		if current == nil || *current <= 0 {
+			return nil
+		}
+		value := min(*current, int64(100_000_000))
+		return &value
+	}
+	if *submitted <= 0 {
+		return nil
+	}
+	value := min(*submitted, int64(100_000_000))
+	return &value
 }
 
 func normalizeSupplyPlatformID(value string) string {
@@ -865,6 +917,12 @@ func validateSupplyPlatform(platform store.ManagerSupplyPlatformConfig) error {
 			return errors.New("product must be team_1h")
 		}
 	case SupplyPlatformNvtokens:
+		if !supportedSupplyPurchaseAccountType(platform.PurchaseAccountType) {
+			return errors.New("purchaseAccountType must be all, has_refresh_token or without_refresh_token")
+		}
+		if platform.MaxUnitPriceFen != nil && *platform.MaxUnitPriceFen < 0 {
+			return errors.New("maxUnitPriceFen must be zero or greater")
+		}
 		switch strings.ToLower(strings.TrimSpace(platform.Product)) {
 		case "oauth_30d", "oauth_7d", "team_1h":
 		default:

@@ -6,6 +6,11 @@ export type SupplyProduct = 'oauth_30d' | 'oauth_7d' | 'team_1h';
 export type SupplyStrategy = 'strong_supply' | 'balanced' | 'cost_first' | 'custom';
 export type SupplyQuotaEstimationMode = 'auto' | 'fixed' | string;
 export type SupplyPlatformType = 'legacy' | 'bugteam' | 'nvtokens' | string;
+export type SupplyPurchaseAccountType =
+  | 'all'
+  | 'has_refresh_token'
+  | 'without_refresh_token'
+  | string;
 
 export interface SupplyQuotaEstimationPolicy {
   mode: SupplyQuotaEstimationMode;
@@ -26,6 +31,8 @@ export interface SupplyPlatformConfig {
   token?: string;
   tokenConfigured?: boolean;
   product: SupplyProduct | string;
+  purchaseAccountType?: SupplyPurchaseAccountType;
+  maxUnitPriceFen?: number;
   priority?: number;
   emergencyOnly?: boolean;
   quotaEstimationPolicies?: Record<string, SupplyQuotaEstimationPolicy>;

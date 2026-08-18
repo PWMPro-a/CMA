@@ -65,6 +65,8 @@ const newSupplyPlatform = (
   token: '',
   tokenConfigured: false,
   product: type === 'bugteam' ? 'team_1h' : 'oauth_30d',
+  purchaseAccountType: type === 'nvtokens' ? 'all' : undefined,
+  maxUnitPriceFen: type === 'nvtokens' ? 0 : undefined,
   priority: index + 1,
   emergencyOnly: type === 'bugteam',
   quotaEstimationPolicies: {},
@@ -79,6 +81,8 @@ const normalizeSupplyConfigForEditor = (config: SupplyConfig): SupplyConfig => {
           clearUsername: false,
           password: '',
           token: '',
+          purchaseAccountType:
+            platform.type === 'nvtokens' ? platform.purchaseAccountType || 'all' : undefined,
         }))
       : config.baseUrl || config.username || config.passwordConfigured
         ? [
@@ -519,6 +523,8 @@ export function SupplyPage() {
             baseUrl: 'https://nvtokens.com',
             product: next.product === 'team_1h' ? 'team_1h' : 'oauth_30d',
             emergencyOnly: false,
+            purchaseAccountType: next.purchaseAccountType || 'all',
+            maxUnitPriceFen: next.maxUnitPriceFen ?? 0,
           };
         }
         platforms[index] = next;
@@ -2641,6 +2647,56 @@ export function SupplyPage() {
                               }
                             />
                           </div>
+                          {platform.type === 'nvtokens' ? (
+                            <>
+                              <div className={styles.field}>
+                                <label>{t('supply.purchase_account_type')}</label>
+                                <Select
+                                  value={platform.purchaseAccountType || 'all'}
+                                  options={[
+                                    {
+                                      value: 'all',
+                                      label: t('supply.purchase_account_type_all'),
+                                    },
+                                    {
+                                      value: 'has_refresh_token',
+                                      label: t('supply.purchase_account_type_has_refresh_token'),
+                                    },
+                                    {
+                                      value: 'without_refresh_token',
+                                      label: t(
+                                        'supply.purchase_account_type_without_refresh_token'
+                                      ),
+                                    },
+                                  ]}
+                                  onChange={(purchaseAccountType) =>
+                                    updateSupplyPlatform(platformIndex, { purchaseAccountType })
+                                  }
+                                />
+                              </div>
+                              <Input
+                                label={t('supply.max_unit_price')}
+                                type="number"
+                                min={0}
+                                step={0.01}
+                                value={
+                                  (platform.maxUnitPriceFen ?? 0) > 0
+                                    ? (platform.maxUnitPriceFen ?? 0) / 100
+                                    : ''
+                                }
+                                placeholder={t('supply.max_unit_price_placeholder')}
+                                onChange={(event) => {
+                                  const yuan = Number(event.target.value);
+                                  updateSupplyPlatform(platformIndex, {
+                                    maxUnitPriceFen:
+                                      Number.isFinite(yuan) && yuan > 0
+                                        ? Math.round(yuan * 100)
+                                        : 0,
+                                  });
+                                }}
+                              />
+                            </>
+                          ) : null}
                           <Input
                             label={t('supply.platform_priority')}
                             type="number"

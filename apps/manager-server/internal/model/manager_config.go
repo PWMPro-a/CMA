@@ -97,6 +97,8 @@ type ManagerSupplyPlatformConfig struct {
 	Token                   string                                        `json:"token,omitempty"`
 	TokenConfigured         bool                                          `json:"tokenConfigured,omitempty"`
 	Product                 string                                        `json:"product"`
+	PurchaseAccountType     string                                        `json:"purchaseAccountType,omitempty"`
+	MaxUnitPriceFen         *int64                                        `json:"maxUnitPriceFen,omitempty"`
 	Priority                int                                           `json:"priority,omitempty"`
 	EmergencyOnly           bool                                          `json:"emergencyOnly,omitempty"`
 	QuotaEstimationPolicies map[string]ManagerSupplyQuotaEstimationPolicy `json:"quotaEstimationPolicies,omitempty"`

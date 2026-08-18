@@ -69,14 +69,23 @@ func supplyPlatformCredentials(platform store.ManagerSupplyPlatformConfig) suppl
 		deliveryMode = "nvtokens"
 	}
 	return supplyclient.Credentials{
-		ID:           strings.TrimSpace(platform.ID),
-		PlatformType: strings.ToLower(strings.TrimSpace(platform.Type)),
-		BaseURL:      strings.TrimRight(strings.TrimSpace(platform.BaseURL), "/"),
-		Username:     strings.TrimSpace(platform.Username),
-		Password:     platform.Password,
-		Token:        strings.TrimSpace(platform.Token),
-		DeliveryMode: deliveryMode,
+		ID:                  strings.TrimSpace(platform.ID),
+		PlatformType:        strings.ToLower(strings.TrimSpace(platform.Type)),
+		BaseURL:             strings.TrimRight(strings.TrimSpace(platform.BaseURL), "/"),
+		Username:            strings.TrimSpace(platform.Username),
+		Password:            platform.Password,
+		Token:               strings.TrimSpace(platform.Token),
+		DeliveryMode:        deliveryMode,
+		PurchaseAccountType: strings.ToLower(strings.TrimSpace(platform.PurchaseAccountType)),
+		MaxUnitPriceFen:     valueOrZero(platform.MaxUnitPriceFen),
 	}
+}
+
+func valueOrZero(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func supplyPlatformConfigured(platform store.ManagerSupplyPlatformConfig) bool {

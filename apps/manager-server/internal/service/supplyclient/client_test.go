@@ -88,11 +88,13 @@ func TestNvtokensUsesSessionCookieAndImportsCPABundle(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/workspace/extractions/estimate":
 			estimateCalls.Add(1)
+			assertNvtokensPurchaseFilters(t, r, "has_refresh_token", 800)
 			_, _ = w.Write([]byte(`{"estimate":{"total_cost_cents":240,"unit_price_cents":120,"available_quantity":9}}`))
 		case "/api/me":
 			_, _ = w.Write([]byte(`{"balance_cents":1000,"frozen_balance_cents":100,"available_balance_cents":900}`))
 		case "/api/workspace/extractions/batch":
 			batchCalls.Add(1)
+			assertNvtokensPurchaseFilters(t, r, "has_refresh_token", 800)
 			if got := r.Header.Get("Idempotency-Key"); got != "cpam-attempt-1" {
 				t.Fatalf("nvtokens idempotency key = %q", got)
 			}
@@ -104,7 +106,14 @@ func TestNvtokensUsesSessionCookieAndImportsCPABundle(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.Client())
-	credentials := Credentials{PlatformType: "nvtokens", BaseURL: server.URL, Username: "buyer", Password: "secret"}
+	credentials := Credentials{
+		PlatformType:        "nvtokens",
+		BaseURL:             server.URL,
+		Username:            "buyer",
+		Password:            "secret",
+		PurchaseAccountType: "access_refresh",
+		MaxUnitPriceFen:     800,
+	}
 	inventory, err := client.Inventory(context.Background(), credentials, "oauth_30d", 2)
 	if err != nil || inventory.Available != 9 || inventory.EstimatedTotalFen != 240 || inventory.EstimatedUnitPriceFen != 120 {
 		t.Fatalf("nvtokens inventory = %#v err=%v", inventory, err)
@@ -123,6 +132,20 @@ func TestNvtokensUsesSessionCookieAndImportsCPABundle(t *testing.T) {
 	}
 	if loginCalls.Load() != 1 || estimateCalls.Load() != 1 || batchCalls.Load() != 1 {
 		t.Fatalf("nvtokens calls login=%d estimate=%d batch=%d", loginCalls.Load(), estimateCalls.Load(), batchCalls.Load())
+	}
+}
+
+func assertNvtokensPurchaseFilters(t *testing.T, r *http.Request, accountType string, maxUnitPriceFen int64) {
+	t.Helper()
+	var payload map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode nvtokens purchase payload: %v", err)
+	}
+	if got := payload["credential_type"]; got != accountType {
+		t.Fatalf("credential_type = %#v, want %q", got, accountType)
+	}
+	if got := payload["max_unit_price_cents"]; got != float64(maxUnitPriceFen) {
+		t.Fatalf("max_unit_price_cents = %#v, want %d", got, maxUnitPriceFen)
 	}
 }
 
