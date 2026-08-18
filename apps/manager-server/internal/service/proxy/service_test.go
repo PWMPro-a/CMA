@@ -77,6 +77,23 @@ func TestAuthFileRuntimeStatusRequestRequiresExactReadView(t *testing.T) {
 	}
 }
 
+func TestIsClientCanceledProxyRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	canceledRequest := httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil).WithContext(ctx)
+	activeRequest := httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+
+	if !isClientCanceledProxyRequest(canceledRequest, errors.New("proxy write failed")) {
+		t.Fatal("canceled request context must be treated as a client cancellation")
+	}
+	if !isClientCanceledProxyRequest(activeRequest, context.Canceled) {
+		t.Fatal("context.Canceled proxy error must be treated as a client cancellation")
+	}
+	if isClientCanceledProxyRequest(activeRequest, errors.New("upstream unavailable")) {
+		t.Fatal("active request with upstream failure must remain a gateway error")
+	}
+}
+
 func testVerifiedAuthFileWriteRequest(t *testing.T, name string, currentContent []byte, nextContent []byte) *http.Request {
 	t.Helper()
 	var body bytes.Buffer

@@ -91,6 +91,7 @@ const authFileWriteIdentitiesHeader = "X-CPAMP-Auth-File-Write-Identities"
 const authFileWriteContentSHA256Header = "X-CPAMP-Auth-File-Write-Content-SHA256"
 const authFileViewQueryParam = "cpamp_view"
 const authFileRuntimeStatusView = "runtime-status"
+const statusClientClosedRequest = 499
 
 const maxAuthFileMutationRequestBytes int64 = 10*1024*1024 + 64*1024
 const maxAuthFileMutationResponseBytes int64 = 1024 * 1024
@@ -314,10 +315,13 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 		}
 	}
 	responseProcessed := false
-	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
+	proxy.ErrorHandler = func(w http.ResponseWriter, proxyRequest *http.Request, proxyErr error) {
 		if !responseProcessed {
 			if restoreErr := s.restoreInspectionOwnershipDetached(r.Context(), revokedOwnership); restoreErr != nil {
 				proxyErr = fmt.Errorf("%w; restore inspection ownership: %v", proxyErr, restoreErr)
+			} else if isClientCanceledProxyRequest(proxyRequest, proxyErr) {
+				w.WriteHeader(statusClientClosedRequest)
+				return
 			}
 		}
 		writeError(w, http.StatusBadGateway, proxyErr)
@@ -342,6 +346,10 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 		return s.restoreInspectionOwnershipDetached(r.Context(), ownershipItemsNotMutated(revokedOwnership, mutation))
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+func isClientCanceledProxyRequest(r *http.Request, proxyErr error) bool {
+	return errors.Is(proxyErr, context.Canceled) || (r != nil && r.Context().Err() != nil)
 }
 
 func isAuthFileRuntimeStatusRequest(r *http.Request) bool {
