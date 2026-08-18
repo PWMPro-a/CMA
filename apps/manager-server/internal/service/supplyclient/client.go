@@ -177,6 +177,7 @@ type tokenState struct {
 	key        string
 	token      string
 	header     string
+	cookie     string
 	cookieAuth bool
 	expiresAt  time.Time
 }
@@ -1258,6 +1259,23 @@ func (c *Client) login(ctx context.Context, credentials Credentials, force bool)
 		return state, nil
 	}
 	if isNvtokens(credentials) {
+		if token := strings.TrimSpace(credentials.Token); token != "" {
+			cookieValue := token
+			if strings.HasPrefix(strings.ToLower(cookieValue), "session=") {
+				cookieValue = strings.TrimSpace(strings.SplitN(cookieValue, "=", 2)[1])
+			}
+			state := tokenState{
+				key:        key,
+				token:      cookieValue,
+				header:     customerTokenHeader,
+				cookie:     (&http.Cookie{Name: "session", Value: cookieValue}).String(),
+				cookieAuth: true,
+				expiresAt:  time.Now().Add(12 * time.Hour),
+			}
+			c.tokens[key] = state
+			c.token = state
+			return state, nil
+		}
 		payload := map[string]any{
 			"username": strings.TrimSpace(credentials.Username),
 			"password": credentials.Password,
@@ -1331,6 +1349,9 @@ func canRefreshAuthentication(credentials Credentials) bool {
 }
 
 func applyAuthentication(headers http.Header, auth tokenState) {
+	if strings.TrimSpace(auth.cookie) != "" {
+		headers.Set("Cookie", auth.cookie)
+	}
 	if strings.TrimSpace(auth.token) == "" {
 		return
 	}

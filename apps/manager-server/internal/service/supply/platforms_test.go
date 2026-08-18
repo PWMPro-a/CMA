@@ -27,6 +27,40 @@ func TestSupplyPlatformCredentialsIncludeNvtokensPurchaseFilters(t *testing.T) {
 	}
 }
 
+func TestRequireCredentialsAcceptsNativeNvtokensProducts(t *testing.T) {
+	enabled := true
+	service := New(nil, nil, nil)
+	for _, product := range []string{"plus", "pro", "team", "bugteam", "k12", "grokfree", "grokpro", "free"} {
+		cfg := store.ManagerSupplyConfig{Platforms: []store.ManagerSupplyPlatformConfig{{
+			ID:      "nvtokens-main",
+			Type:    managerconfigsvc.SupplyPlatformNvtokens,
+			Enabled: &enabled,
+			BaseURL: "https://nvtokens.com",
+			Token:   "session-token",
+			Product: product,
+		}}}
+		if err := service.requireCredentials(cfg); err != nil {
+			t.Fatalf("product %s credentials: %v", product, err)
+		}
+	}
+}
+
+func TestRequireCredentialsRejectsProductFromAnotherPlatformType(t *testing.T) {
+	enabled := true
+	service := New(nil, nil, nil)
+	err := service.requireCredentials(store.ManagerSupplyConfig{Platforms: []store.ManagerSupplyPlatformConfig{{
+		ID:      "nvtokens-main",
+		Type:    managerconfigsvc.SupplyPlatformNvtokens,
+		Enabled: &enabled,
+		BaseURL: "https://nvtokens.com",
+		Token:   "session-token",
+		Product: "oauth_30d",
+	}}})
+	if err == nil {
+		t.Fatal("legacy product should be rejected for nvtokens")
+	}
+}
+
 func TestSupplyPlatformEconomicsUsesSupplierQuotaAndLifetimeDemand(t *testing.T) {
 	status := PlatformOverview{Inventory: &supplyclient.Inventory{
 		EstimatedUnitPriceFen:   120,

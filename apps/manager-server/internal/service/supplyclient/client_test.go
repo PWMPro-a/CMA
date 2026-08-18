@@ -135,6 +135,43 @@ func TestNvtokensUsesSessionCookieAndImportsCPABundle(t *testing.T) {
 	}
 }
 
+func TestNvtokensTokenSkipsCaptchaLoginAndUsesSessionCookie(t *testing.T) {
+	var loginCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/login":
+			loginCalls.Add(1)
+			http.Error(w, "captcha required", http.StatusBadRequest)
+		case "/api/workspace/seller-candidates":
+			cookie, err := r.Cookie("session")
+			if err != nil || cookie.Value != "session-token" {
+				t.Fatalf("session cookie = %#v err=%v", cookie, err)
+			}
+			if got := r.Header.Get(customerTokenHeader); got != "session-token" {
+				t.Fatalf("customer token = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"sellers":[{"sale_plans":["plus"],"sale_plan_counts":{"plus":3}}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	catalog, err := client.ProductCatalog(context.Background(), Credentials{
+		ID:           "nvtokens-main",
+		PlatformType: "nvtokens",
+		BaseURL:      server.URL,
+		Token:        "session=session-token",
+	})
+	if err != nil || len(catalog.Products) != 1 || catalog.Products[0].Code != "plus" {
+		t.Fatalf("catalog = %#v err=%v", catalog, err)
+	}
+	if got := loginCalls.Load(); got != 0 {
+		t.Fatalf("login calls = %d, want 0", got)
+	}
+}
+
 func TestNvtokensProductCatalogAggregatesNativeSalePlans(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

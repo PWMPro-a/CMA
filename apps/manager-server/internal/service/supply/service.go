@@ -8749,12 +8749,10 @@ func (s *Service) requireCredentials(cfg store.ManagerSupplyConfig) error {
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 			return fmt.Errorf("account supply platform %s base URL is invalid", platform.ID)
 		}
-		switch strings.ToLower(strings.TrimSpace(platform.Product)) {
-		case "oauth_30d", "oauth_7d", "team_1h":
-			configured++
-		default:
+		if !supplyProductSupportedByPlatform(platform, platform.Product) {
 			return fmt.Errorf("account supply platform %s product is invalid", platform.ID)
 		}
+		configured++
 	}
 	if configured == 0 {
 		return ErrNotConfigured
