@@ -198,7 +198,16 @@ export interface SupplyAccountPoolSummary {
   disabled: number;
   unconfirmed: number;
   classificationObserved: boolean;
+  plans?: SupplyAccountPoolPlanSummary[];
   credentials?: SupplyAccountPoolCredentialSummary[];
+}
+
+export interface SupplyAccountPoolPlanSummary {
+  key: string;
+  supplierId?: string;
+  supplierName?: string;
+  planType: string;
+  accountCount: number;
 }
 
 export type SupplyAccountPoolCredentialBucket =

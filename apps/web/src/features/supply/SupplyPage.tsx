@@ -35,6 +35,7 @@ import {
 } from '@/services/api';
 import { useNotificationStore } from '@/stores';
 import { resolveSupplyPoolAccountStats } from './model/poolAccountStats';
+import { reconcileLiveQuotaPlanAccounts } from './model/quotaPlanEstimates';
 import { resolvePurchasePlatformLabel } from './model/purchasePlatform';
 import styles from './SupplyPage.module.scss';
 
@@ -1754,7 +1755,11 @@ export function SupplyPage() {
       ...platform?.quotaEstimationPolicies?.[planType],
     };
   };
-  const quotaEstimateItems = smart?.accountQuotaPlanEstimates ?? [];
+  const quotaEstimateItems = reconcileLiveQuotaPlanAccounts(
+    smart?.accountQuotaPlanEstimates ?? [],
+    status?.accountPool?.plans ?? [],
+    quotaPolicyForSupplier
+  );
 
   if (loading && !status) {
     return <div className={styles.loading}>{t('common.loading')}</div>;
@@ -1948,7 +1953,10 @@ export function SupplyPage() {
                   </span>
                   <span>
                     {t('supply.quota_plan_samples')}: {formatInteger(estimate?.uniqueAccounts ?? 0)}
-                    /{formatInteger(estimate?.minimumUniqueAccounts ?? 3)}
+                  </span>
+                  <span>
+                    {t('supply.quota_plan_minimum_samples')}:{' '}
+                    {formatInteger(estimate?.minimumUniqueAccounts ?? 3)}
                   </span>
                   <span>
                     {t('supply.quota_plan_fallback')}:{' '}

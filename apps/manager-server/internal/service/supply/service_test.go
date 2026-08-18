@@ -1308,6 +1308,68 @@ func TestAccountPoolSummarySeparatesEnabledPoolFromDisabledArchive(t *testing.T)
 	}
 }
 
+func TestAccountPoolPlanSummariesUseLiveSchedulablePopulation(t *testing.T) {
+	files := make([]cpaauthfiles.File, 0, 22)
+	results := make([]store.CodexInspectionResult, 0, 22)
+	add := func(planType string, count int) {
+		for index := 0; index < count; index++ {
+			name := fmt.Sprintf("%s-%02d.json", firstNonEmptyString(planType, "unknown"), index)
+			authIndex := fmt.Sprintf("%s-%02d", firstNonEmptyString(planType, "unknown"), index)
+			raw := map[string]any{
+				"status": "active",
+				"cpamp_import": map[string]any{
+					"platform_id":   "legacy",
+					"platform_name": "Legacy supplier",
+				},
+			}
+			if planType != "" {
+				raw["plan_type"] = planType
+			}
+			files = append(files, cpaauthfiles.File{
+				Name: name, Provider: "codex", AuthIndex: authIndex, Raw: raw,
+			})
+			usedPercent := 10.0
+			results = append(results, store.CodexInspectionResult{
+				FileName: name, Provider: "codex", AuthIndex: authIndex,
+				Action: "keep", Status: "active", UsedPercent: &usedPercent,
+			})
+		}
+	}
+	add("plus", 11)
+	add("team", 3)
+	add("", 7)
+	// This account is still schedulable, but it needs attention and must not be
+	// counted in either the top availability number or the live plan cards.
+	files = append(files, cpaauthfiles.File{
+		Name: "broken.json", Provider: "codex", AuthIndex: "broken",
+		Raw: map[string]any{
+			"status": "active", "plan_type": "plus",
+			"cpamp_import": map[string]any{"platform_id": "legacy"},
+		},
+	})
+	results = append(results, store.CodexInspectionResult{
+		FileName: "broken.json", Provider: "codex", AuthIndex: "broken",
+		Action: "reauth", Status: "error",
+	})
+
+	stats := accountPoolStatsFromFilesAndInspection(files, results)
+	summary := accountPoolSummaryFromStats(stats, time.Now())
+	summary.Plans = accountPoolPlanSummaries(stats, store.ManagerSupplyConfig{}, nil)
+	if summary.Normal != 21 || summary.NeedsAttention != 1 {
+		t.Fatalf("live account summary = %#v", summary)
+	}
+	counts := make(map[string]int, len(summary.Plans))
+	planTotal := 0
+	for _, plan := range summary.Plans {
+		counts[plan.Key] = plan.AccountCount
+		planTotal += plan.AccountCount
+	}
+	if counts["legacy:plus"] != 11 || counts["legacy:team"] != 3 ||
+		counts["legacy:unknown"] != 7 || planTotal != summary.Normal {
+		t.Fatalf("live plan summaries = %#v; available=%d", summary.Plans, summary.Normal)
+	}
+}
+
 func TestAccountPoolCredentialSummariesPublishExactSharedBuckets(t *testing.T) {
 	files := []cpaauthfiles.File{
 		{Name: "normal.json", Provider: "codex", AuthIndex: "normal", AccountID: "account-normal", Raw: map[string]any{"status": "active"}},

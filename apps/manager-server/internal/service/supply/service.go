@@ -138,7 +138,20 @@ type AccountPoolSummary struct {
 	Disabled               int                            `json:"disabled"`
 	Unconfirmed            int                            `json:"unconfirmed"`
 	ClassificationObserved bool                           `json:"classificationObserved"`
+	Plans                  []AccountPoolPlanSummary       `json:"plans,omitempty"`
 	Credentials            []AccountPoolCredentialSummary `json:"credentials,omitempty"`
+}
+
+// AccountPoolPlanSummary is the live schedulable account split used only for
+// dashboard counts. SmartQuotaPlanEstimate.AccountCount remains tied to the
+// completed capacity inspection so changing this view cannot change ordering
+// or quota planning.
+type AccountPoolPlanSummary struct {
+	Key          string `json:"key"`
+	SupplierID   string `json:"supplierId,omitempty"`
+	SupplierName string `json:"supplierName,omitempty"`
+	PlanType     string `json:"planType"`
+	AccountCount int    `json:"accountCount"`
 }
 
 // AccountPoolCredentialSummary publishes the exact credential-level bucket
@@ -823,6 +836,7 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 			applySmartAccountQuantityEstimate(cfg.Supply, &resource)
 			overviewAvailable = poolStats.operatorAvailable(resource.SchedulableAccounts)
 			summary := accountPoolSummaryFromStats(poolStats, time.Now())
+			summary.Plans = accountPoolPlanSummaries(poolStats, cfg.Supply, resource.quotaSupplierByFile)
 			accountPool = &summary
 		}
 	}
@@ -938,6 +952,7 @@ func (s *Service) GetAccountPoolSummary(ctx context.Context) (AccountPoolSummary
 		return AccountPoolSummary{}, statsErr
 	}
 	summary := accountPoolSummaryFromStats(stats, time.Now())
+	summary.Plans = accountPoolPlanSummaries(stats, cfg.Supply, nil)
 	summary.Credentials = accountPoolCredentialSummaries(stats)
 	return summary, nil
 }
@@ -960,6 +975,94 @@ func accountPoolSummaryFromStats(stats accountPoolStats, checkedAt time.Time) Ac
 		Unconfirmed:            max(0, stats.unconfirmed),
 		ClassificationObserved: stats.classificationObserved,
 	}
+}
+
+func accountPoolPlanSummaries(
+	stats accountPoolStats,
+	cfg store.ManagerSupplyConfig,
+	supplierByFile map[string]string,
+) []AccountPoolPlanSummary {
+	if len(stats.files) == 0 {
+		return nil
+	}
+	type planKey struct {
+		supplierID string
+		planType   string
+	}
+	platforms := supplyPlatforms(cfg)
+	platformByID := make(map[string]store.ManagerSupplyPlatformConfig, len(platforms))
+	for _, platform := range platforms {
+		platformByID[normalizeSmartQuotaSupplierID(platform.ID)] = platform
+	}
+	counts := make(map[planKey]int)
+	names := make(map[planKey]string)
+	for index, file := range stats.files {
+		if !isCodexAuthFile(file) || file.Disabled || !isAvailableCodexFile(file) ||
+			index >= len(stats.operatorUsableByFile) || !stats.operatorUsableByFile[index] {
+			continue
+		}
+		planType := resolveSupplyPlanType(file.Raw)
+		if planType == "" {
+			planType = "unknown"
+		}
+		planType = strings.ToLower(strings.TrimSpace(planType))
+		marker := mapFromMap(file.Raw, "cpamp_import")
+		supplierID := normalizeSmartQuotaSupplierID(supplierByFile[strings.TrimSpace(file.Name)])
+		if supplierID == "" {
+			supplierID = normalizeSmartQuotaSupplierID(firstNonEmptyString(
+				stringFromMap(marker, "platform_id", "platformId", "supplier_id", "supplierId"),
+				stringFromMap(file.Raw, "platform_id", "platformId", "supplier_id", "supplierId"),
+			))
+		}
+		if supplierID == "" && len(platforms) == 1 {
+			supplierID = normalizeSmartQuotaSupplierID(platforms[0].ID)
+		}
+		key := planKey{supplierID: supplierID, planType: planType}
+		counts[key]++
+		name := stringFromMap(marker, "platform_name", "platformName", "supplier_name", "supplierName")
+		if platform, ok := platformByID[supplierID]; ok {
+			name = firstNonEmptyString(platform.Name, platform.ID, name)
+		}
+		if strings.TrimSpace(name) != "" {
+			names[key] = strings.TrimSpace(name)
+		}
+	}
+	if len(counts) == 0 {
+		return nil
+	}
+	items := make([]AccountPoolPlanSummary, 0, len(counts))
+	for key, count := range counts {
+		items = append(items, AccountPoolPlanSummary{
+			Key:          smartQuotaPublicContextKey(key.supplierID, key.planType),
+			SupplierID:   key.supplierID,
+			SupplierName: names[key],
+			PlanType:     key.planType,
+			AccountCount: count,
+		})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		leftSupplier := normalizeSmartQuotaSupplierID(items[i].SupplierID)
+		rightSupplier := normalizeSmartQuotaSupplierID(items[j].SupplierID)
+		if leftSupplier != rightSupplier {
+			return leftSupplier < rightSupplier
+		}
+		planRank := func(planType string) int {
+			switch strings.ToLower(strings.TrimSpace(planType)) {
+			case "team":
+				return 0
+			case "plus":
+				return 1
+			case "free":
+				return 2
+			default:
+				return 3
+			}
+		}
+		leftRank := planRank(items[i].PlanType)
+		rightRank := planRank(items[j].PlanType)
+		return leftRank < rightRank || (leftRank == rightRank && items[i].PlanType < items[j].PlanType)
+	})
+	return items
 }
 
 func accountPoolCredentialSummaries(stats accountPoolStats) []AccountPoolCredentialSummary {
@@ -5516,6 +5619,7 @@ type accountPoolStats struct {
 	bucketByCredential          map[string]operatorAccountBucket
 	temporaryLimitByCredential  map[string]operatorAccountTemporaryLimit
 	normalRemainingByCredential map[string]float64
+	operatorUsableByFile        []bool
 }
 
 type operatorAccountTemporaryLimit struct {
@@ -5715,6 +5819,7 @@ func accountPoolStatsFromFiles(files []cpaauthfiles.File) accountPoolStats {
 		bucketByCredential:          make(map[string]operatorAccountBucket),
 		temporaryLimitByCredential:  make(map[string]operatorAccountTemporaryLimit),
 		normalRemainingByCredential: make(map[string]float64),
+		operatorUsableByFile:        make([]bool, len(files)),
 	}
 	filesByName := make(map[string]int, len(files))
 	for _, file := range files {
@@ -5722,7 +5827,7 @@ func accountPoolStatsFromFiles(files []cpaauthfiles.File) accountPoolStats {
 			filesByName[strings.TrimSpace(file.Name)]++
 		}
 	}
-	for _, file := range files {
+	for index, file := range files {
 		if !isCodexAuthFile(file) {
 			continue
 		}
@@ -5739,6 +5844,7 @@ func accountPoolStatsFromFiles(files []cpaauthfiles.File) accountPoolStats {
 		}
 		if isAvailableCodexFile(file) {
 			stats.schedulable++
+			stats.operatorUsableByFile[index] = true
 			limit, observed := smartAccountConcurrencyLimit(file.Raw)
 			switch {
 			case !observed:
@@ -5868,6 +5974,7 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 	stats.bucketByCredential = make(map[string]operatorAccountBucket, len(files)*2)
 	stats.temporaryLimitByCredential = make(map[string]operatorAccountTemporaryLimit, len(files)*2)
 	stats.normalRemainingByCredential = make(map[string]float64, len(files)*2)
+	stats.operatorUsableByFile = make([]bool, len(files))
 
 	resultsByFile := make(map[string][]store.CodexInspectionResult, len(results))
 	filesByName := make(map[string]int, len(files))
@@ -5897,7 +6004,7 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 	}
 	inspectionAuthoritative := operatorInspectionAuthoritative(inspectionTriggerType)
 
-	for _, file := range files {
+	for index, file := range files {
 		if !isCodexAuthFile(file) || file.Disabled {
 			continue
 		}
@@ -5945,6 +6052,7 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 		}
 		if isAvailableCodexFile(file) && (bucket == operatorAccountNormal || bucket == operatorAccountQuotaRisk) {
 			stats.operatorUsable++
+			stats.operatorUsableByFile[index] = true
 		}
 		uniqueFileName := filesByName[strings.TrimSpace(file.Name)] == 1
 		stats.recordCredentialBucket(file, bucket, uniqueFileName)
