@@ -2722,6 +2722,111 @@ func TestRunAutoActionDisableExecutesReauthSuggestionAsDisable(t *testing.T) {
 	}
 }
 
+func TestRunAutoActionDisablesEnabledAccountBeforeDisabledPoolScanCompletes(t *testing.T) {
+	slowProbeStarted := make(chan struct{})
+	releaseSlowProbe := make(chan struct{})
+	fastAccountDisabled := make(chan struct{})
+	var slowStartedOnce sync.Once
+	var fastDisabledOnce sync.Once
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"files":[{"id":"runtime-fast","name":"auth-fast.json","auth_index":"auth-fast","provider":"codex","account":"fast@example.com","status":"ok","state":"ready"},{"id":"runtime-slow","name":"auth-slow.json","auth_index":"auth-slow","provider":"codex","account":"slow@example.com","disabled":true,"status":"disabled","state":"ready"}]}`))
+		case r.URL.Path == "/v0/management/api-call" && r.Method == http.MethodPost:
+			var payload struct {
+				AuthIndex string `json:"authIndex"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode api-call payload: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			switch payload.AuthIndex {
+			case "auth-fast":
+				_, _ = w.Write([]byte(`{"status_code":401,"body":{"error":{"code":"token_invalidated","message":"token invalidated"}}}`))
+			case "auth-slow":
+				slowStartedOnce.Do(func() { close(slowProbeStarted) })
+				<-releaseSlowProbe
+				_, _ = w.Write([]byte(`{"status_code":200,"body":{"rate_limit":{"primary_window":{"used_percent":100,"limit_window_seconds":18000},"secondary_window":{"used_percent":100,"limit_window_seconds":604800}}}}`))
+			default:
+				t.Errorf("unexpected auth index %q", payload.AuthIndex)
+				w.WriteHeader(http.StatusBadRequest)
+			}
+		case r.URL.Path == "/v0/management/auth-files/status" && r.Method == http.MethodPatch:
+			var payload struct {
+				Name      string `json:"name"`
+				AuthIndex string `json:"auth_index"`
+				Disabled  bool   `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode patch payload: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if payload.Name != "runtime-fast" || payload.AuthIndex != "auth-fast" || !payload.Disabled {
+				t.Errorf("unexpected patch payload: %#v", payload)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			fastDisabledOnce.Do(func() { close(fastAccountDisabled) })
+			_, _ = w.Write([]byte(`{"status":"ok","disabled":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	db := newCodexInspectionTestStore(t)
+	managerCfg := newCodexInspectionManagerConfig(upstream.URL)
+	managerCfg.CodexInspection.AutoActionMode = model.CodexInspectionAutoActionDisable
+	managerCfg.CodexInspection.AutoRecoverEnabled = false
+	managerCfg.CodexInspection.Workers = 1
+	managerCfg.CodexInspection.DeleteWorkers = 1
+	if err := db.SaveManagerConfig(context.Background(), managerCfg); err != nil {
+		t.Fatalf("save manager config: %v", err)
+	}
+
+	type runResult struct {
+		detail RunDetail
+		err    error
+	}
+	runDone := make(chan runResult, 1)
+	go func() {
+		detail, err := newCodexInspectionTestService(t, db).Run(context.Background(), RunRequest{
+			TriggerType: "manual",
+			TriggerKey:  "manual",
+		})
+		runDone <- runResult{detail: detail, err: err}
+	}()
+
+	select {
+	case <-slowProbeStarted:
+	case <-time.After(3 * time.Second):
+		close(releaseSlowProbe)
+		t.Fatal("disabled account probe did not start")
+	}
+	select {
+	case <-fastAccountDisabled:
+	case <-time.After(time.Second):
+		close(releaseSlowProbe)
+		t.Fatal("enabled invalid account was not disabled before the disabled pool scan")
+	}
+	close(releaseSlowProbe)
+
+	result := <-runDone
+	if result.err != nil {
+		t.Fatalf("run inspection: %v", result.err)
+	}
+	if len(result.detail.Results) != 2 ||
+		result.detail.Results[0].FileName != "auth-fast.json" ||
+		result.detail.Results[0].ActionStatus != model.CodexInspectionActionStatusSuccess ||
+		result.detail.Results[0].ExecutedAction != "disable" ||
+		!result.detail.Results[0].Disabled {
+		t.Fatalf("priority auto-disable results = %#v", result.detail.Results)
+	}
+}
+
 func TestRunAutoActionSkipsDuplicateFileNameResults(t *testing.T) {
 	var deleteCalls int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

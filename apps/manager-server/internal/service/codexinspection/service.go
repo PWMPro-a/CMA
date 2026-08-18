@@ -47,6 +47,8 @@ const (
 	resultPersistenceTimeout  = 8 * time.Second
 	cancelledPersistTimeout   = 2 * time.Second
 	minimumInspectionLease    = time.Millisecond
+	minImmediateActionBatch   = 64
+	maxImmediateActionBatch   = 256
 	userCancelRequestReason   = "用户请求取消巡检"
 	userCancelledReason       = "用户主动取消巡检"
 )
@@ -574,7 +576,37 @@ func (s *Service) executeRun(ctx context.Context, req RunRequest, run model.Code
 		"targetTypes":   settings.TargetProviders(),
 	})
 
-	results := s.inspectAccounts(ctx, setup, settings, sampled, logger)
+	results := make([]model.CodexInspectionResult, 0, len(sampled))
+	actionOutcomes := make([]ActionOutcome, 0)
+	priorityAccounts, deferredAccounts := prioritizeInspectionAccounts(settings, sampled)
+	if len(priorityAccounts) > 0 {
+		batchSize := immediateActionBatchSize(settings)
+		for start := 0; start < len(priorityAccounts); {
+			end := immediateActionBatchEnd(priorityAccounts, start, batchSize)
+			batchResults := s.inspectAccounts(ctx, setup, settings, priorityAccounts[start:end], logger)
+			if ctx.Err() == nil {
+				if failures := s.persistInspectionResults(ctx, run.ID, batchResults, logger); failures > 0 {
+					log.Printf("persist priority codex inspection results run %d: %d writes failed", run.ID, failures)
+				}
+				batchResults = resolveAutoActionResults(settings.AutoActionMode, batchResults)
+				batchOutcomes := s.executeAutoActions(ctx, setup, settings, batchResults, logger)
+				batchResults = applyActionOutcomes(batchResults, batchOutcomes)
+				actionOutcomes = append(actionOutcomes, batchOutcomes...)
+				if failures := s.persistInspectionResults(ctx, run.ID, batchResults, logger); failures > 0 {
+					log.Printf("persist priority codex inspection action results run %d: %d writes failed", run.ID, failures)
+				}
+			}
+			results = append(results, batchResults...)
+			if ctx.Err() != nil {
+				break
+			}
+			start = end
+		}
+	}
+	if ctx.Err() == nil && len(deferredAccounts) > 0 {
+		results = append(results, s.inspectAccounts(ctx, setup, settings, deferredAccounts, logger)...)
+	}
+	sortInspectionResults(results)
 	if err := ctx.Err(); err != nil {
 		// Persist the partial probe set once, with a bounded budget, before the
 		// lifecycle transition below. Avoid a second full pass here: a large
@@ -605,9 +637,10 @@ func (s *Service) executeRun(ctx context.Context, req RunRequest, run model.Code
 	}
 
 	results = resolveAutoActionResults(settings.AutoActionMode, results)
-	actionOutcomes := s.executeAutoActions(ctx, setup, settings, results, logger)
+	remainingOutcomes := s.executeAutoActions(ctx, setup, settings, results, logger)
+	actionOutcomes = append(actionOutcomes, remainingOutcomes...)
 	actionSummary := summarizeActionOutcomes(actionOutcomes)
-	results = applyActionOutcomes(results, actionOutcomes)
+	results = applyActionOutcomes(results, remainingOutcomes)
 	resultWriteFailures := 0
 	hasAutoActionMode := model.NormalizeCodexInspectionAutoActionMode(settings.AutoActionMode, model.CodexInspectionAutoActionNone) != model.CodexInspectionAutoActionNone || settings.AutoRecoverEnabled
 	if hasAutoActionMode || initialResultWriteFailures > 0 {
@@ -1742,13 +1775,70 @@ func (s *Service) inspectAccounts(
 	for result := range results {
 		out = append(out, result)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].FileName == out[j].FileName {
-			return out[i].DisplayAccount < out[j].DisplayAccount
-		}
-		return out[i].FileName < out[j].FileName
-	})
+	sortInspectionResults(out)
 	return out
+}
+
+func prioritizeInspectionAccounts(settings model.ManagerCodexInspectionConfig, accounts []account) ([]account, []account) {
+	mode := model.NormalizeCodexInspectionAutoActionMode(settings.AutoActionMode, model.CodexInspectionAutoActionNone)
+	if mode != model.CodexInspectionAutoActionDisable && mode != model.CodexInspectionAutoActionDelete {
+		return nil, accounts
+	}
+	fileHasDisabledAccount := make(map[string]bool, len(accounts))
+	for _, item := range accounts {
+		fileName := strings.TrimSpace(item.FileName)
+		if fileName == "" || item.Disabled {
+			fileHasDisabledAccount[fileName] = true
+		}
+	}
+	enabled := make([]account, 0, len(accounts))
+	disabled := make([]account, 0, len(accounts))
+	for _, item := range accounts {
+		if item.Disabled || fileHasDisabledAccount[strings.TrimSpace(item.FileName)] {
+			disabled = append(disabled, item)
+			continue
+		}
+		enabled = append(enabled, item)
+	}
+	sort.SliceStable(enabled, func(i, j int) bool {
+		if enabled[i].FileName == enabled[j].FileName {
+			return enabled[i].DisplayAccount < enabled[j].DisplayAccount
+		}
+		return enabled[i].FileName < enabled[j].FileName
+	})
+	return enabled, disabled
+}
+
+func immediateActionBatchSize(settings model.ManagerCodexInspectionConfig) int {
+	batchSize := settings.Workers * 8
+	if batchSize < minImmediateActionBatch {
+		return minImmediateActionBatch
+	}
+	if batchSize > maxImmediateActionBatch {
+		return maxImmediateActionBatch
+	}
+	return batchSize
+}
+
+func immediateActionBatchEnd(accounts []account, start int, batchSize int) int {
+	end := min(start+batchSize, len(accounts))
+	if end == len(accounts) || end <= start {
+		return end
+	}
+	lastFileName := accounts[end-1].FileName
+	for end < len(accounts) && accounts[end].FileName == lastFileName {
+		end++
+	}
+	return end
+}
+
+func sortInspectionResults(results []model.CodexInspectionResult) {
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].FileName == results[j].FileName {
+			return results[i].DisplayAccount < results[j].DisplayAccount
+		}
+		return results[i].FileName < results[j].FileName
+	})
 }
 
 func (s *Service) inspectSingleAccount(
@@ -2063,6 +2153,9 @@ func countSuggestedActionResults(results []model.CodexInspectionResult) int {
 	count := 0
 	for _, result := range results {
 		if result.Action != "" && result.Action != "keep" {
+			if inspectionActionAlreadyAttempted(result) {
+				continue
+			}
 			count++
 		}
 	}
@@ -2082,6 +2175,9 @@ func countPendingActionResults(results []model.CodexInspectionResult, outcomes [
 	count := 0
 	for _, result := range results {
 		if result.Action == "" || result.Action == "keep" {
+			continue
+		}
+		if inspectionActionAlreadyAttempted(result) {
 			continue
 		}
 		if _, ok := terminal[result.AccountKey]; ok {
@@ -3313,6 +3409,9 @@ func hasInspectionActionIdentity(result model.CodexInspectionResult) bool {
 }
 
 func allowAutoAction(mode string, autoRecoverEnabled bool, result model.CodexInspectionResult) bool {
+	if inspectionActionAlreadyAttempted(result) {
+		return false
+	}
 	if result.Action == "enable" {
 		return autoRecoverEnabled && result.AutoRecoverEligible
 	}
@@ -3326,6 +3425,14 @@ func allowAutoAction(mode string, autoRecoverEnabled bool, result model.CodexIns
 	default:
 		return false
 	}
+}
+
+func inspectionActionAlreadyAttempted(result model.CodexInspectionResult) bool {
+	status := model.NormalizeCodexInspectionActionStatus(result.ActionStatus, result.Action)
+	return status == model.CodexInspectionActionStatusSuccess ||
+		status == model.CodexInspectionActionStatusFailed ||
+		status == model.CodexInspectionActionStatusSkipped ||
+		status == model.CodexInspectionActionStatusNeedsReview
 }
 
 func (s *Service) applyDisableOwnership(ctx context.Context, accounts []account, logger runLogger) {
