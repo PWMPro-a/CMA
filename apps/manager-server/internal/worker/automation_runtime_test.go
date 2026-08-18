@@ -54,9 +54,10 @@ func TestAutomationRuntimeReloadUpdatesAutoDisable(t *testing.T) {
 	ctx := context.Background()
 	settings := automationsvc.New(config.Config{}, st)
 	account := &recordingAccountAutomationWorker{}
-	runtime := NewAutomationRuntime(settings, nil, &recordingQuotaAutomationWorker{}, account)
+	quota := &recordingQuotaAutomationWorker{}
+	runtime := NewAutomationRuntime(settings, nil, quota, account)
 
-	if _, err := settings.Update(ctx, automationsvc.UpdateRequest{AccountActionsEnabled: boolPtr(true), AccountActionsAutoDisable: boolPtr(true)}); err != nil {
+	if _, err := settings.Update(ctx, automationsvc.UpdateRequest{QuotaCooldownEnabled: boolPtr(true), AccountActionsEnabled: boolPtr(true), AccountActionsAutoDisable: boolPtr(true)}); err != nil {
 		t.Fatalf("enable auto-disable: %v", err)
 	}
 	if err := runtime.Reload(ctx); err != nil {
@@ -65,16 +66,24 @@ func TestAutomationRuntimeReloadUpdatesAutoDisable(t *testing.T) {
 	if !account.autoDisable {
 		t.Fatalf("autoDisable not enabled after reload")
 	}
+	if !quota.enabled {
+		t.Fatalf("quota cooldown not enabled after reload")
+	}
 }
 
 type recordingQuotaAutomationWorker struct {
 	startCount   int
 	handleCount  int
 	runtimeCount int
+	enabled      bool
 }
 
 func (w *recordingQuotaAutomationWorker) Start(context.Context) {
 	w.startCount++
+}
+
+func (w *recordingQuotaAutomationWorker) SetEnabled(enabled bool) {
+	w.enabled = enabled
 }
 
 func (w *recordingQuotaAutomationWorker) HandleUsageEvents(context.Context, collectorpkg.RuntimeConfig, []usage.Event) {

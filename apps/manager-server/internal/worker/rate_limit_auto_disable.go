@@ -22,15 +22,16 @@ import (
 )
 
 const (
-	quotaAutoDisableQueueSize     = 256
-	quotaAutoDisableDefaultTick   = 15 * time.Second
-	quotaAutoDisableActionTimeout = 30 * time.Second
-	quotaCooldownDueLimit         = 100
-	xaiFreeUsageCooldown          = 24 * time.Hour
-	quotaReasonCodexUsageLimit    = "codex_usage_limit_reached"
-	quotaReasonXAIFreeUsage       = "xai_free_usage_exhausted"
-	quotaWindowRolling24H         = "rolling_24h"
-	quotaWindowUnknown            = "unknown"
+	quotaAutoDisableQueueSize      = 256
+	quotaAutoDisableDefaultTick    = 15 * time.Second
+	quotaAutoDisableActionTimeout  = 30 * time.Second
+	quotaAutoDisableReconcileLimit = 2000
+	quotaCooldownDueLimit          = 100
+	xaiFreeUsageCooldown           = 24 * time.Hour
+	quotaReasonCodexUsageLimit     = "codex_usage_limit_reached"
+	quotaReasonXAIFreeUsage        = "xai_free_usage_exhausted"
+	quotaWindowRolling24H          = "rolling_24h"
+	quotaWindowUnknown             = "unknown"
 )
 
 // RateLimitAutoDisableWorker reacts to request-monitoring events in near real time.
@@ -44,10 +45,14 @@ type RateLimitAutoDisableWorker struct {
 	authFileMutations   *cpaauthfiles.MutationCoordinator
 	compensationTimeout time.Duration
 
-	jobs chan quotaAutoDisableCandidate
+	jobs                  chan quotaAutoDisableCandidate
+	reconcileWake         chan struct{}
+	reconciledEventHashes map[string]struct{}
+	reconciledEventOrder  []string
 
 	operationMu         sync.Mutex
 	mu                  sync.RWMutex
+	enabled             bool
 	baseURL             string
 	managementKey       string
 	enableCheckInterval time.Duration
@@ -85,12 +90,15 @@ func NewRateLimitAutoDisableWorkerWithMutationCoordinator(
 		coordinator = cpaauthfiles.NewMutationCoordinator()
 	}
 	w := &RateLimitAutoDisableWorker{
-		store:               st,
-		client:              &http.Client{Timeout: quotaAutoDisableActionTimeout},
-		authFileMutations:   coordinator,
-		compensationTimeout: authFileMutationCompensationTimeout,
-		jobs:                make(chan quotaAutoDisableCandidate, quotaAutoDisableQueueSize),
-		enableCheckInterval: quotaAutoDisableDefaultTick,
+		store:                 st,
+		client:                &http.Client{Timeout: quotaAutoDisableActionTimeout},
+		authFileMutations:     coordinator,
+		compensationTimeout:   authFileMutationCompensationTimeout,
+		jobs:                  make(chan quotaAutoDisableCandidate, quotaAutoDisableQueueSize),
+		reconcileWake:         make(chan struct{}, 1),
+		reconciledEventHashes: make(map[string]struct{}, quotaAutoDisableReconcileLimit),
+		reconciledEventOrder:  make([]string, 0, quotaAutoDisableReconcileLimit*2),
+		enableCheckInterval:   quotaAutoDisableDefaultTick,
 	}
 	if len(initial) > 0 {
 		w.setRuntimeConfig(initial[0].CPAUpstreamURL, initial[0].ManagementKey)
@@ -100,6 +108,25 @@ func NewRateLimitAutoDisableWorkerWithMutationCoordinator(
 
 func (w *RateLimitAutoDisableWorker) Start(ctx context.Context) {
 	go w.run(ctx)
+}
+
+// SetEnabled controls only discovery of new quota cooldown candidates. Due
+// cooldown recovery remains active so switching the feature off never strands
+// credentials that this worker previously disabled.
+func (w *RateLimitAutoDisableWorker) SetEnabled(enabled bool) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	changed := w.enabled != enabled
+	w.enabled = enabled
+	w.mu.Unlock()
+	if changed && enabled {
+		select {
+		case w.reconcileWake <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (w *RateLimitAutoDisableWorker) UpdateRuntimeConfig(ctx context.Context, cfg collectorpkg.RuntimeConfig) {
@@ -160,16 +187,83 @@ func (w *RateLimitAutoDisableWorker) run(ctx context.Context) {
 	defer ticker.Stop()
 
 	w.enableDue(ctx, time.Now())
+	if w.isEnabled() {
+		w.reconcileRecentUsageEvents(ctx, time.Now())
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case candidate := <-w.jobs:
 			w.handleCandidate(ctx, candidate)
+		case <-w.reconcileWake:
+			if w.isEnabled() {
+				w.reconcileRecentUsageEvents(ctx, time.Now())
+			}
 		case <-ticker.C:
 			w.enableDue(ctx, time.Now())
+			if w.isEnabled() {
+				w.reconcileRecentUsageEvents(ctx, time.Now())
+			}
 		}
 	}
+}
+
+func (w *RateLimitAutoDisableWorker) isEnabled() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.enabled
+}
+
+// reconcileRecentUsageEvents is a bounded safety net for events that were
+// persisted but missed the near-real-time handler, for example during a
+// feature toggle or process restart. Candidate classification stays identical
+// to the live path and therefore still requires strict provider evidence and a
+// usable recovery time.
+func (w *RateLimitAutoDisableWorker) reconcileRecentUsageEvents(ctx context.Context, now time.Time) {
+	if w == nil || w.store == nil || w.store.UsageEvents == nil || !w.isEnabled() {
+		return
+	}
+	baseURL, managementKey := w.runtimeConfig()
+	if baseURL == "" || managementKey == "" {
+		return
+	}
+	events, err := w.store.UsageEvents.ListRecent(ctx, quotaAutoDisableReconcileLimit)
+	if err != nil {
+		log.Printf("[quota-auto-disable] failed to reconcile recent usage events: %v", err)
+		return
+	}
+	for index := len(events) - 1; index >= 0; index-- {
+		event := events[index]
+		eventHash := strings.TrimSpace(event.EventHash)
+		if eventHash != "" {
+			if _, seen := w.reconciledEventHashes[eventHash]; seen {
+				continue
+			}
+			w.reconciledEventHashes[eventHash] = struct{}{}
+			w.reconciledEventOrder = append(w.reconciledEventOrder, eventHash)
+		}
+		candidate, ok := quotaAutoDisableCandidateFromEvent(event, baseURL, managementKey, now)
+		if !ok {
+			continue
+		}
+		w.handleCandidate(ctx, candidate)
+	}
+	w.compactReconciledEventHashes()
+}
+
+func (w *RateLimitAutoDisableWorker) compactReconciledEventHashes() {
+	const retainedBatches = 2
+	maxRetained := quotaAutoDisableReconcileLimit * retainedBatches
+	if len(w.reconciledEventOrder) <= maxRetained {
+		return
+	}
+	remove := len(w.reconciledEventOrder) - maxRetained
+	for _, eventHash := range w.reconciledEventOrder[:remove] {
+		delete(w.reconciledEventHashes, eventHash)
+	}
+	copy(w.reconciledEventOrder, w.reconciledEventOrder[remove:])
+	w.reconciledEventOrder = w.reconciledEventOrder[:maxRetained]
 }
 
 func (w *RateLimitAutoDisableWorker) setRuntimeConfig(baseURL string, managementKey string) bool {

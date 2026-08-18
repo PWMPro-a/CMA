@@ -11,6 +11,7 @@ import (
 
 type quotaAutomationWorker interface {
 	Start(ctx context.Context)
+	SetEnabled(enabled bool)
 	HandleUsageEvents(ctx context.Context, cfg collectorpkg.RuntimeConfig, events []usage.Event)
 	UpdateRuntimeConfig(ctx context.Context, cfg collectorpkg.RuntimeConfig)
 }
@@ -48,10 +49,16 @@ func (r *AutomationRuntime) Start(ctx context.Context) {
 	if r == nil {
 		return
 	}
+	settings := automationsvc.RuntimeSettings{}
+	if r.settings != nil {
+		settings = r.settings.RuntimeSettings(ctx)
+	}
 	if r.quotaWorker != nil {
+		r.quotaWorker.SetEnabled(settings.QuotaCooldownEnabled)
 		r.quotaWorker.Start(ctx)
 	}
 	if r.accountWorker != nil {
+		r.accountWorker.SetAutoDisable(settings.AccountActionsAutoDisable)
 		r.accountWorker.Start(ctx)
 	}
 	if r.manager != nil && r.handler != nil {
@@ -72,6 +79,9 @@ func (r *AutomationRuntime) Reload(ctx context.Context) error {
 		return nil
 	}
 	settings := r.settings.RuntimeSettings(ctx)
+	if r.quotaWorker != nil {
+		r.quotaWorker.SetEnabled(settings.QuotaCooldownEnabled)
+	}
 	if r.accountWorker != nil {
 		r.accountWorker.SetAutoDisable(settings.AccountActionsAutoDisable)
 	}
@@ -98,6 +108,9 @@ func (h *automationUsageHandler) HandleUsageEvents(ctx context.Context, cfg coll
 		return
 	}
 	settings := h.settings.RuntimeSettings(ctx)
+	if h.quotaWorker != nil {
+		h.quotaWorker.SetEnabled(settings.QuotaCooldownEnabled)
+	}
 	if settings.QuotaCooldownEnabled && h.quotaWorker != nil {
 		h.quotaWorker.HandleUsageEvents(ctx, cfg, events)
 	}

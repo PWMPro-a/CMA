@@ -106,6 +106,109 @@ func TestQuotaAutoDisableCandidateRequiresStrictCodexUsageLimit(t *testing.T) {
 	}
 }
 
+func TestRateLimitAutoDisableWorkerReconcilesPersistedQuotaEventWhenEnabled(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	var mu sync.Mutex
+	disabled := false
+	patches := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-management-key" {
+			http.Error(w, "missing auth", http.StatusUnauthorized)
+			return
+		}
+		switch {
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			mu.Lock()
+			currentDisabled := disabled
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"id":         "runtime-codex-auth-1",
+				"name":       "codex-auth.json",
+				"auth_index": "auth-1",
+				"account":    "user@example.com",
+				"provider":   "codex",
+				"disabled":   currentDisabled,
+			}})
+		case r.URL.Path == "/v0/management/auth-files/status" && r.Method == http.MethodPatch:
+			var item struct {
+				Disabled bool `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			disabled = item.Disabled
+			patches++
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	now := time.Now()
+	usedPercent := 100.0
+	windowMinutes := 10_080.0
+	recoverAt := now.Add(time.Hour)
+	event := usage.Event{
+		EventHash:        "evt-persisted-quota",
+		TimestampMS:      now.UnixMilli(),
+		Timestamp:        now.Format(time.RFC3339Nano),
+		Provider:         "codex",
+		Model:            "gpt-test",
+		AuthFileSnapshot: "codex-auth.json",
+		AuthIndex:        "auth-1",
+		AccountSnapshot:  "user@example.com",
+		Failed:           true,
+		FailStatusCode:   http.StatusTooManyRequests,
+		ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+			ReachedWindowKind: "weekly",
+			RecoverAtMS:       recoverAt.UnixMilli(),
+			Primary: &usage.HeaderQuotaWindow{
+				UsedPercent:   &usedPercent,
+				ResetAtMS:     recoverAt.UnixMilli(),
+				WindowMinutes: &windowMinutes,
+			},
+		}},
+		CreatedAtMS: now.UnixMilli(),
+	}
+	if result, err := st.InsertEvents(context.Background(), []usage.Event{event}); err != nil {
+		t.Fatalf("insert persisted quota event: %v", err)
+	} else if result.Inserted != 1 {
+		t.Fatalf("inserted events = %d, want 1", result.Inserted)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "test-management-key",
+	})
+	worker.enableCheckInterval = 10 * time.Millisecond
+	worker.SetEnabled(true)
+	worker.Start(ctx)
+
+	waitForWorkerTest(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return disabled && patches == 1
+	})
+	active, err := st.QuotaCooldowns.ListActive(context.Background())
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(active) != 1 || active[0].EventHash != event.EventHash || active[0].Owner != model.QuotaCooldownOwnerUsage429 {
+		t.Fatalf("active cooldowns = %#v", active)
+	}
+}
+
 func TestQuotaAutoDisableCandidateAcceptsXAIIncludedFreeUsageExhausted(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	for _, statusCode := range []int{http.StatusPaymentRequired, http.StatusTooManyRequests} {
