@@ -44,12 +44,20 @@ const DEFAULT_QUOTA_ESTIMATION_POLICIES: Record<string, SupplyQuotaEstimationPol
   free: { mode: 'auto', fallbackM: 10, fixedM: 10 },
 };
 
-const newSupplyPlatform = (type: 'legacy' | 'bugteam', index: number): SupplyPlatformConfig => ({
+const newSupplyPlatform = (
+  type: 'legacy' | 'bugteam' | 'nvtokens',
+  index: number,
+): SupplyPlatformConfig => ({
   id: `${type}-${Date.now().toString(36)}-${index + 1}`,
-  name: type === 'bugteam' ? 'BugTeam' : `Supply ${index + 1}`,
+  name: type === 'bugteam' ? 'BugTeam' : type === 'nvtokens' ? 'nvtokens' : `Supply ${index + 1}`,
   type,
   enabled: true,
-  baseUrl: type === 'bugteam' ? 'https://bugteam.team' : 'https://sogouedu.cc',
+  baseUrl:
+    type === 'bugteam'
+      ? 'https://bugteam.team'
+      : type === 'nvtokens'
+        ? 'https://nvtokens.com'
+        : 'https://sogouedu.cc',
   username: '',
   clearUsername: false,
   password: '',
@@ -503,6 +511,14 @@ export function SupplyPage() {
             baseUrl: 'https://bugteam.team',
             product: 'team_1h',
             emergencyOnly: true,
+          };
+        } else if (patch.type === 'nvtokens') {
+          next = {
+            ...next,
+            type: 'nvtokens',
+            baseUrl: 'https://nvtokens.com',
+            product: next.product === 'team_1h' ? 'team_1h' : 'oauth_30d',
+            emergencyOnly: false,
           };
         }
         platforms[index] = next;
@@ -2519,6 +2535,7 @@ export function SupplyPage() {
                               options={[
                                 { value: 'legacy', label: t('supply.platform_type_legacy') },
                                 { value: 'bugteam', label: t('supply.platform_type_bugteam') },
+                                { value: 'nvtokens', label: t('supply.platform_type_nvtokens') },
                               ]}
                               onChange={(type) => updateSupplyPlatform(platformIndex, { type })}
                             />
@@ -2614,6 +2631,9 @@ export function SupplyPage() {
                                   : [
                                       { value: 'oauth_30d', label: t('supply.product_30d') },
                                       { value: 'oauth_7d', label: t('supply.product_7d') },
+                                      ...(platform.type === 'nvtokens'
+                                        ? [{ value: 'team_1h', label: t('supply.product_team_1h') }]
+                                        : []),
                                     ]
                               }
                               onChange={(product) =>

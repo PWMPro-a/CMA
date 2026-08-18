@@ -65,6 +65,67 @@ func TestClientLogsInAndReadsInventoryAndBalance(t *testing.T) {
 	}
 }
 
+func TestNvtokensUsesSessionCookieAndImportsCPABundle(t *testing.T) {
+	var loginCalls atomic.Int32
+	var estimateCalls atomic.Int32
+	var batchCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/login" {
+			loginCalls.Add(1)
+			var payload map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			if payload["username"] != "buyer" || payload["password"] != "secret" {
+				t.Fatalf("nvtokens login payload = %#v", payload)
+			}
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: "nvtokens-session", Path: "/"})
+			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
+			return
+		}
+		cookie, _ := r.Cookie("session")
+		if cookie == nil || cookie.Value != "nvtokens-session" || r.Header.Get("X-Customer-Token") != "" {
+			t.Fatalf("nvtokens authentication headers/cookies = %#v", r.Header)
+		}
+		switch r.URL.Path {
+		case "/api/workspace/extractions/estimate":
+			estimateCalls.Add(1)
+			_, _ = w.Write([]byte(`{"estimate":{"total_cost_cents":240,"unit_price_cents":120,"available_quantity":9}}`))
+		case "/api/me":
+			_, _ = w.Write([]byte(`{"balance_cents":1000,"frozen_balance_cents":100,"available_balance_cents":900}`))
+		case "/api/workspace/extractions/batch":
+			batchCalls.Add(1)
+			if got := r.Header.Get("Idempotency-Key"); got != "cpam-attempt-1" {
+				t.Fatalf("nvtokens idempotency key = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"summary":{"total_cost_cents":240},"cpa_bundle":{"type":"sub2api-data","version":1,"accounts":[{"type":"codex","access_token":"a","refresh_token":"r"}]}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	credentials := Credentials{PlatformType: "nvtokens", BaseURL: server.URL, Username: "buyer", Password: "secret"}
+	inventory, err := client.Inventory(context.Background(), credentials, "oauth_30d", 2)
+	if err != nil || inventory.Available != 9 || inventory.EstimatedTotalFen != 240 || inventory.EstimatedUnitPriceFen != 120 {
+		t.Fatalf("nvtokens inventory = %#v err=%v", inventory, err)
+	}
+	balance, err := client.Balance(context.Background(), credentials)
+	if err != nil || balance.AvailableFen != 900 || balance.HeldFen != 100 {
+		t.Fatalf("nvtokens balance = %#v err=%v", balance, err)
+	}
+	order, err := client.CreateOrder(context.Background(), credentials, "oauth_30d", 2, "cpam-attempt-1")
+	if err != nil || order.Status != "completed" || order.ReadyQuantity != 1 {
+		t.Fatalf("nvtokens order = %#v err=%v", order, err)
+	}
+	taken, err := client.Take(context.Background(), credentials, order.ID)
+	if err != nil || taken.Pending || len(taken.Accounts) != 1 {
+		t.Fatalf("nvtokens take = %#v err=%v", taken, err)
+	}
+	if loginCalls.Load() != 1 || estimateCalls.Load() != 1 || batchCalls.Load() != 1 {
+		t.Fatalf("nvtokens calls login=%d estimate=%d batch=%d", loginCalls.Load(), estimateCalls.Load(), batchCalls.Load())
+	}
+}
+
 func TestClientUsesBugTeamSessionAuthenticationForPasswordLogin(t *testing.T) {
 	var loginCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

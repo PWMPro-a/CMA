@@ -5404,6 +5404,7 @@
     "platform_type": "Тип платформы",
     "platform_type_bugteam": "BugTeam",
     "platform_type_legacy": "Совместимый поставщик",
+    "platform_type_nvtokens": "Пул аккаунтов nvtokens",
     "platform_unassigned": "Без платформы / ручной импорт",
     "batch_size": "Максимум за один раз",
     "max_concurrent_orders": "Количество параллельных заказов",

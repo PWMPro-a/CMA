@@ -127,6 +127,32 @@ func TestNormalizeSupplyConfigClearsPlatformUsernameButKeepsTokenAuthentication(
 	}
 }
 
+func TestNormalizeSupplyConfigKeepsNvtokensPlatformType(t *testing.T) {
+	enabled := true
+	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{
+		Platforms: []store.ManagerSupplyPlatformConfig{{
+			ID:       "nvtokens-main",
+			Name:     "nvtokens",
+			Type:     SupplyPlatformNvtokens,
+			Enabled:  &enabled,
+			BaseURL:  "https://nvtokens.com/",
+			Username: "buyer",
+			Password: "secret",
+			Product:  "oauth_30d",
+		}},
+	}, store.ManagerSupplyConfig{})
+	if len(next.Platforms) != 1 {
+		t.Fatalf("platforms = %#v", next.Platforms)
+	}
+	platform := next.Platforms[0]
+	if platform.Type != SupplyPlatformNvtokens || platform.BaseURL != "https://nvtokens.com" || platform.Product != "oauth_30d" {
+		t.Fatalf("nvtokens platform = %#v", platform)
+	}
+	if err := ValidateSupplyConfig(store.ManagerSupplyConfig{Enabled: &enabled, Platforms: next.Platforms}); err != nil {
+		t.Fatalf("validate nvtokens platform: %v", err)
+	}
+}
+
 func TestNormalizeSupplyConfigDefaultsRecoveryControls(t *testing.T) {
 	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{}, store.ManagerSupplyConfig{})
 	if next.RecoverySyncEnabled == nil || !*next.RecoverySyncEnabled {

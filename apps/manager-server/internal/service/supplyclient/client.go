@@ -11,6 +11,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"path/filepath"
 	"sort"
@@ -27,6 +28,8 @@ const (
 	maxDownloadBodyBytes  = 64 * 1024 * 1024
 	customerTokenHeader   = "X-Customer-Token"
 	customerSessionHeader = "X-Customer-Session"
+	nvtokensPlatform      = "nvtokens"
+	nvtokensBatchTimeout  = 10 * time.Minute
 )
 
 type HTTPError struct {
@@ -153,25 +156,37 @@ type RecoveryPage struct {
 }
 
 type tokenState struct {
-	key       string
-	token     string
-	header    string
-	expiresAt time.Time
+	key        string
+	token      string
+	header     string
+	cookieAuth bool
+	expiresAt  time.Time
 }
 
 type Client struct {
-	httpClient  *http.Client
-	timeout     time.Duration
-	takeTimeout time.Duration
-	mu          sync.Mutex
-	token       tokenState
-	tokens      map[string]tokenState
+	httpClient      *http.Client
+	timeout         time.Duration
+	takeTimeout     time.Duration
+	mu              sync.Mutex
+	token           tokenState
+	tokens          map[string]tokenState
+	nvtokensResults map[string]TakeResult
 }
 
 func New(httpClient *http.Client, timeout ...time.Duration) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	// nvtokens authenticates with the HttpOnly session cookie set by /api/login.
+	// Keep a private client copy and cookie jar so the supplier session does not
+	// leak into the other services that share the application's HTTP client.
+	clientCopy := *httpClient
+	if clientCopy.Jar == nil {
+		if jar, err := cookiejar.New(nil); err == nil {
+			clientCopy.Jar = jar
+		}
+	}
+	httpClient = &clientCopy
 	requestTimeout := defaultTimeout
 	if len(timeout) > 0 && timeout[0] > 0 {
 		requestTimeout = timeout[0]
@@ -180,7 +195,13 @@ func New(httpClient *http.Client, timeout ...time.Duration) *Client {
 	if requestTimeout > takeTimeout {
 		takeTimeout = requestTimeout
 	}
-	return &Client{httpClient: httpClient, timeout: requestTimeout, takeTimeout: takeTimeout, tokens: make(map[string]tokenState)}
+	return &Client{
+		httpClient:      httpClient,
+		timeout:         requestTimeout,
+		takeTimeout:     takeTimeout,
+		tokens:          make(map[string]tokenState),
+		nvtokensResults: make(map[string]TakeResult),
+	}
 }
 
 // DefaultTakeTimeout is intentionally longer than the normal API timeout.
@@ -189,6 +210,9 @@ func New(httpClient *http.Client, timeout ...time.Duration) *Client {
 func DefaultTakeTimeout() time.Duration { return defaultTakeTimeout }
 
 func (c *Client) Inventory(ctx context.Context, credentials Credentials, product string, quantity int) (Inventory, error) {
+	if isNvtokens(credentials) {
+		return c.nvtokensInventory(ctx, credentials, product, quantity)
+	}
 	query := url.Values{}
 	query.Set("product", strings.TrimSpace(product))
 	query.Set("quantity", strconv.Itoa(quantity))
@@ -211,6 +235,9 @@ func (c *Client) Inventory(ctx context.Context, credentials Credentials, product
 }
 
 func (c *Client) Balance(ctx context.Context, credentials Credentials) (Balance, error) {
+	if isNvtokens(credentials) {
+		return c.nvtokensBalance(ctx, credentials)
+	}
 	value, _, err := c.doAuthenticated(ctx, credentials, http.MethodGet, "/api/customer/balance", nil)
 	if err != nil {
 		return Balance{}, err
@@ -225,6 +252,9 @@ func (c *Client) Balance(ctx context.Context, credentials Credentials) (Balance,
 }
 
 func (c *Client) CreateOrder(ctx context.Context, credentials Credentials, product string, quantity int, idempotencyKey ...string) (Order, error) {
+	if isNvtokens(credentials) {
+		return c.nvtokensCreateOrder(ctx, credentials, product, quantity, idempotencyKey...)
+	}
 	payload := map[string]any{"product": strings.TrimSpace(product), "quantity": quantity}
 	headers := make(http.Header)
 	if len(idempotencyKey) > 0 && strings.TrimSpace(idempotencyKey[0]) != "" {
@@ -242,6 +272,9 @@ func (c *Client) CreateOrder(ctx context.Context, credentials Credentials, produ
 }
 
 func (c *Client) GetOrder(ctx context.Context, credentials Credentials, orderID string, statusURL ...string) (Order, error) {
+	if isNvtokens(credentials) {
+		return c.nvtokensGetOrder(ctx, credentials, orderID, statusURL...)
+	}
 	endpoint := "/api/customer/pickup/orders/" + url.PathEscape(strings.TrimSpace(orderID))
 	if len(statusURL) > 0 && strings.TrimSpace(statusURL[0]) != "" {
 		endpoint = strings.TrimSpace(statusURL[0])
@@ -258,6 +291,9 @@ func (c *Client) GetOrder(ctx context.Context, credentials Credentials, orderID 
 }
 
 func (c *Client) Take(ctx context.Context, credentials Credentials, orderID string, takeURL ...string) (TakeResult, error) {
+	if isNvtokens(credentials) {
+		return c.nvtokensTake(ctx, credentials, orderID, takeURL...)
+	}
 	if strings.EqualFold(strings.TrimSpace(credentials.DeliveryMode), "cpa_zip") {
 		return c.downloadCPA(ctx, credentials, orderID)
 	}
@@ -283,6 +319,329 @@ func (c *Client) Take(ctx context.Context, credentials Credentials, orderID stri
 		ReplacementFiles:     replacementFiles(value),
 		Pending:              status == http.StatusAccepted,
 	}, nil
+}
+
+func isNvtokens(credentials Credentials) bool {
+	return strings.EqualFold(strings.TrimSpace(credentials.PlatformType), nvtokensPlatform)
+}
+
+// nvtokensPurchasePayload mirrors the workspace extraction request used by the
+// nvtokens UI. CPAM only chooses the product and quantity; all optional filters
+// stay at their neutral values so supplier-side inventory rules remain in
+// control.
+func nvtokensPurchasePayload(product string, quantity int) map[string]any {
+	salePlan := "plus"
+	switch strings.ToLower(strings.TrimSpace(product)) {
+	case "team_1h":
+		salePlan = "team"
+	}
+	return map[string]any{
+		"quantity":                        quantity,
+		"credential_type":                 "all",
+		"inventory_token_filter":          "all",
+		"sale_plan_filter":                salePlan,
+		"subscription_payment_channels":   []string{},
+		"plus_subscription_time_filter":   "all",
+		"plus_subscription_custom_hours":  nil,
+		"plus_subscription_age_max_hours": nil,
+		"email_suffixes":                  []string{},
+		"max_unit_price_cents":            nil,
+		"purchase_priority":               "price_first",
+		"preferred_sellers":               []string{},
+		"seller_whitelist":                []string{},
+		"seller_blacklist":                []string{},
+		"preferred_channel_ids":           []string{},
+	}
+}
+
+func (c *Client) nvtokensInventory(ctx context.Context, credentials Credentials, product string, quantity int) (Inventory, error) {
+	if quantity <= 0 {
+		quantity = 1
+	}
+	value, _, err := c.doAuthenticatedWithTimeout(
+		ctx,
+		credentials,
+		http.MethodPost,
+		"/api/workspace/extractions/estimate",
+		nvtokensPurchasePayload(product, quantity),
+		c.timeout,
+	)
+	if err != nil {
+		return Inventory{}, err
+	}
+	root := primaryObject(value)
+	estimate := nestedObject(root, "estimate", "quote", "pricing")
+	available := intValue(root,
+		"available_quantity", "availableQuantity", "inventory_available", "inventoryAvailable",
+		"max_quantity", "maxQuantity", "available")
+	if available == 0 {
+		available = intValue(estimate,
+			"available_quantity", "availableQuantity", "inventory_available", "inventoryAvailable",
+			"max_quantity", "maxQuantity", "available")
+	}
+	// The estimate endpoint may omit inventory counts while still returning a
+	// valid price quote. Treat the requested quantity as available in that case;
+	// the subsequent purchase call remains the authoritative availability check.
+	if available == 0 && quantity > 0 {
+		available = quantity
+	}
+	totalFen := int64Value(root, "estimated_total_fen", "estimatedTotalFen", "total_fen", "totalFen")
+	if totalFen == 0 {
+		totalFen = int64Value(estimate, "estimated_total_fen", "estimatedTotalFen", "total_fen", "totalFen")
+	}
+	unitFen := int64Value(root, "estimated_unit_price_fen", "estimatedUnitPriceFen", "unit_fen", "unitFen")
+	if unitFen == 0 {
+		unitFen = int64Value(estimate, "estimated_unit_price_fen", "estimatedUnitPriceFen", "unit_fen", "unitFen")
+	}
+	if totalFen == 0 {
+		totalFen = int64Value(root, "total_cost_cents", "totalCostCents", "total_price_cents", "totalPriceCents")
+		if totalFen == 0 {
+			totalFen = int64Value(estimate, "total_cost_cents", "totalCostCents", "total_price_cents", "totalPriceCents")
+		}
+	}
+	if unitFen == 0 {
+		unitFen = int64Value(root, "unit_price_cents", "unitPriceCents", "price_cents", "priceCents")
+		if unitFen == 0 {
+			unitFen = int64Value(estimate, "unit_price_cents", "unitPriceCents", "price_cents", "priceCents")
+		}
+	}
+	if totalFen == 0 && unitFen > 0 {
+		totalFen = unitFen * int64(quantity)
+	}
+	if unitFen == 0 && totalFen > 0 {
+		unitFen = totalFen / int64(maxInt(quantity, 1))
+	}
+	return Inventory{
+		Product:               strings.TrimSpace(product),
+		RequestedQuantity:     quantity,
+		Available:             maxInt(available, 0),
+		Missing:               maxInt(quantity-available, 0),
+		EstimatedTotalFen:     totalFen,
+		EstimatedUnitPriceFen: unitFen,
+	}, nil
+}
+
+func (c *Client) nvtokensBalance(ctx context.Context, credentials Credentials) (Balance, error) {
+	value, _, err := c.doAuthenticated(ctx, credentials, http.MethodGet, "/api/me", nil)
+	if err != nil {
+		return Balance{}, err
+	}
+	root := primaryObject(value)
+	user := nestedObject(root, "user", "account", "balance")
+	balance := int64Value(root, "balance_cents", "balanceCents", "balance_fen", "balanceFen")
+	if balance == 0 {
+		balance = int64Value(user, "balance_cents", "balanceCents", "balance_fen", "balanceFen")
+	}
+	held := int64Value(root, "frozen_balance_cents", "frozenBalanceCents", "held_fen", "heldFen")
+	if held == 0 {
+		held = int64Value(user, "frozen_balance_cents", "frozenBalanceCents", "held_fen", "heldFen")
+	}
+	available := int64Value(root, "available_balance_cents", "availableBalanceCents", "available_fen", "availableFen")
+	if available == 0 {
+		available = int64Value(user, "available_balance_cents", "availableBalanceCents", "available_fen", "availableFen")
+	}
+	if available == 0 && balance > held {
+		available = balance - held
+	}
+	return Balance{
+		BalanceFen:   balance,
+		HeldFen:      held,
+		AvailableFen: available,
+		Currency:     firstNonEmpty(stringValue(root, "currency"), stringValue(user, "currency"), "CNY"),
+	}, nil
+}
+
+func (c *Client) nvtokensCreateOrder(ctx context.Context, credentials Credentials, product string, quantity int, idempotencyKey ...string) (Order, error) {
+	headers := make(http.Header)
+	if len(idempotencyKey) > 0 && strings.TrimSpace(idempotencyKey[0]) != "" {
+		headers.Set("Idempotency-Key", strings.TrimSpace(idempotencyKey[0]))
+	}
+	value, status, err := c.doAuthenticatedWithHeaders(
+		ctx,
+		credentials,
+		http.MethodPost,
+		"/api/workspace/extractions/batch",
+		nvtokensPurchasePayload(product, quantity),
+		headers,
+		nvtokensBatchTimeout,
+	)
+	if err != nil {
+		return Order{}, err
+	}
+	orderID := firstNonEmpty(
+		findString(value, "id", "order_id", "orderId", "extraction_id", "extractionId", "request_id", "requestId"),
+		firstString(idempotencyKey...),
+		fmt.Sprintf("nvtokens-%d", time.Now().UnixNano()),
+	)
+	order := parseOrderValue(value)
+	order.ID = orderID
+	if order.Product == "" {
+		order.Product = strings.TrimSpace(product)
+	}
+	if order.Quantity == 0 {
+		order.Quantity = quantity
+	}
+	if order.ReadyQuantity == 0 {
+		order.ReadyQuantity = len(nvtokensResultAccounts(value))
+	}
+	if order.Progress == 0 && (status >= http.StatusOK && status < http.StatusMultipleChoices) {
+		order.Progress = 100
+	}
+	if order.Status == "" {
+		if status == http.StatusAccepted {
+			order.Status = "processing"
+		} else {
+			order.Status = "completed"
+		}
+	}
+	order.ChargedFen = firstInt64(
+		order.ChargedFen,
+		findInt64(value, "charged_fen", "chargedFen", "total_cost_cents", "totalCostCents", "cost_cents", "costCents"),
+	)
+	result := TakeResult{Order: order, Accounts: nvtokensResultAccounts(value), Pending: status == http.StatusAccepted}
+	if len(result.Accounts) > 0 {
+		order.Status = "completed"
+		result.Pending = false
+		result.Order.Status = "completed"
+		result.Order.ReadyQuantity = len(result.Accounts)
+		result.Order.Progress = 100
+	}
+	c.mu.Lock()
+	c.nvtokensResults[credentialKey(credentials)+"|"+order.ID] = result
+	c.mu.Unlock()
+	return order, nil
+}
+
+func (c *Client) nvtokensGetOrder(ctx context.Context, credentials Credentials, orderID string, statusURL ...string) (Order, error) {
+	key := credentialKey(credentials) + "|" + strings.TrimSpace(orderID)
+	c.mu.Lock()
+	if result, ok := c.nvtokensResults[key]; ok {
+		c.mu.Unlock()
+		return result.Order, nil
+	}
+	c.mu.Unlock()
+	endpoint := "/api/workspace/extractions/" + url.PathEscape(strings.TrimSpace(orderID))
+	if len(statusURL) > 0 && strings.TrimSpace(statusURL[0]) != "" {
+		endpoint = strings.TrimSpace(statusURL[0])
+	}
+	value, status, err := c.doAuthenticated(ctx, credentials, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return Order{}, err
+	}
+	order := parseOrderValue(value)
+	if order.ID == "" {
+		order.ID = strings.TrimSpace(orderID)
+	}
+	if order.Status == "" {
+		order.Status = "completed"
+	}
+	if status == http.StatusAccepted {
+		order.Status = "processing"
+	}
+	accounts := nvtokensResultAccounts(value)
+	if len(accounts) > 0 {
+		order.Status = "completed"
+		order.ReadyQuantity = len(accounts)
+	}
+	c.mu.Lock()
+	c.nvtokensResults[key] = TakeResult{Order: order, Accounts: accounts, Pending: status == http.StatusAccepted}
+	c.mu.Unlock()
+	return order, nil
+}
+
+func (c *Client) nvtokensTake(ctx context.Context, credentials Credentials, orderID string, takeURL ...string) (TakeResult, error) {
+	key := credentialKey(credentials) + "|" + strings.TrimSpace(orderID)
+	c.mu.Lock()
+	if result, ok := c.nvtokensResults[key]; ok && len(result.Accounts) > 0 {
+		c.mu.Unlock()
+		return result, nil
+	}
+	c.mu.Unlock()
+	endpoint := "/api/workspace/extractions/" + url.PathEscape(strings.TrimSpace(orderID))
+	if len(takeURL) > 0 && strings.TrimSpace(takeURL[0]) != "" {
+		endpoint = strings.TrimSpace(takeURL[0])
+	}
+	value, status, err := c.doAuthenticatedWithTimeout(ctx, credentials, http.MethodGet, endpoint, nil, nvtokensBatchTimeout)
+	if err != nil {
+		return TakeResult{}, err
+	}
+	order := parseOrderValue(value)
+	if order.ID == "" {
+		order.ID = strings.TrimSpace(orderID)
+	}
+	if order.Status == "" {
+		order.Status = "completed"
+	}
+	accounts := nvtokensResultAccounts(value)
+	if len(accounts) == 0 {
+		return TakeResult{}, errors.New("nvtokens extraction response did not include importable account JSON")
+	}
+	order.Status = "completed"
+	order.ReadyQuantity = len(accounts)
+	result := TakeResult{Order: order, Accounts: accounts, Pending: status == http.StatusAccepted}
+	c.mu.Lock()
+	c.nvtokensResults[key] = result
+	c.mu.Unlock()
+	return result, nil
+}
+
+func nvtokensResultAccounts(value any) []json.RawMessage {
+	root, _ := value.(map[string]any)
+	if root == nil {
+		return nil
+	}
+	for _, key := range []string{"cpa_bundle", "cpaBundle", "sub2api_bundle", "sub2apiBundle", "cockpit_bundle", "cockpitBundle"} {
+		if bundle, ok := root[key]; ok && bundle != nil {
+			if data, err := json.Marshal(bundle); err == nil && len(data) > 0 {
+				return []json.RawMessage{data}
+			}
+		}
+	}
+	for _, key := range []string{"data", "payload", "result"} {
+		if child, ok := root[key].(map[string]any); ok {
+			if accounts := nvtokensResultAccounts(child); len(accounts) > 0 {
+				return accounts
+			}
+		}
+	}
+	for _, key := range []string{"results", "items"} {
+		if list, ok := root[key].([]any); ok {
+			accounts := make([]json.RawMessage, 0, len(list))
+			for _, item := range list {
+				object, ok := item.(map[string]any)
+				if !ok || (hasBoolField(object, "success", "ok", "failed") &&
+					(!boolValue(object, "success", "ok") || boolValue(object, "failed"))) {
+					continue
+				}
+				if stringValue(object, "error", "error_message", "errorMessage") != "" {
+					continue
+				}
+				candidate := item
+				for _, field := range []string{"account_json", "accountJson", "account", "credential", "data"} {
+					if nested, exists := object[field]; exists && nested != nil {
+						candidate = nested
+						break
+					}
+				}
+				if data, ok := nvtokensAccountBytes(candidate); ok && looksLikeCPAAccount(data) {
+					accounts = append(accounts, data)
+				}
+			}
+			if len(accounts) > 0 {
+				return accounts
+			}
+		}
+	}
+	return rawAccounts(value)
+}
+
+func nvtokensAccountBytes(value any) ([]byte, bool) {
+	if text, ok := value.(string); ok {
+		data := bytes.TrimSpace([]byte(text))
+		return data, len(data) > 0 && json.Valid(data)
+	}
+	data, err := json.Marshal(value)
+	return data, err == nil && len(data) > 0
 }
 
 func (c *Client) downloadCPA(ctx context.Context, credentials Credentials, orderID string) (TakeResult, error) {
@@ -340,6 +699,8 @@ func (c *Client) requestBytes(ctx context.Context, baseURL string, method string
 	if err != nil {
 		return nil, 0, err
 	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; CPA-Manager/1.0)")
 	applyAuthentication(req.Header, auth)
 	res, err := c.httpClient.Do(req)
 	if err != nil {
@@ -688,7 +1049,31 @@ func (c *Client) login(ctx context.Context, credentials Credentials, force bool)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	key := credentialKey(credentials)
-	if state, ok := c.tokens[key]; !force && ok && state.token != "" && time.Now().Before(state.expiresAt) {
+	if state, ok := c.tokens[key]; !force && ok && (state.token != "" || state.cookieAuth) && time.Now().Before(state.expiresAt) {
+		c.token = state
+		return state, nil
+	}
+	if isNvtokens(credentials) {
+		payload := map[string]any{
+			"username": strings.TrimSpace(credentials.Username),
+			"password": credentials.Password,
+		}
+		value, _, err := c.request(ctx, credentials.BaseURL, http.MethodPost, "/api/login", payload, tokenState{})
+		if err != nil {
+			return tokenState{}, err
+		}
+		// The web client uses the HttpOnly session cookie set by this endpoint.
+		// A token field is accepted as a fallback for deployments that expose an
+		// API token in addition to the browser session.
+		token := findString(value, "token", "access_token", "accessToken")
+		state := tokenState{
+			key:        key,
+			token:      token,
+			header:     customerTokenHeader,
+			cookieAuth: true,
+			expiresAt:  time.Now().Add(12 * time.Hour),
+		}
+		c.tokens[key] = state
 		c.token = state
 		return state, nil
 	}
@@ -785,6 +1170,8 @@ func (c *Client) requestWithHeaders(ctx context.Context, baseURL string, method 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; CPA-Manager/1.0)")
 	applyAuthentication(req.Header, auth)
 	for key, values := range headers {
 		for _, value := range values {
@@ -1203,6 +1590,44 @@ func primaryObject(value any) map[string]any {
 	return root
 }
 
+func nestedObject(root map[string]any, keys ...string) map[string]any {
+	for _, key := range keys {
+		if child, ok := root[key].(map[string]any); ok {
+			return child
+		}
+	}
+	return nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if text := strings.TrimSpace(value); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func firstString(values ...string) string {
+	return firstNonEmpty(values...)
+}
+
+func firstInt64(values ...int64) int64 {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func maxInt(value, minimum int) int {
+	if value < minimum {
+		return minimum
+	}
+	return value
+}
+
 func findString(value any, keys ...string) string {
 	if root, ok := value.(map[string]any); ok {
 		if result := stringValue(root, keys...); result != "" {
@@ -1298,6 +1723,15 @@ func boolValue(root map[string]any, keys ...string) bool {
 		case json.Number:
 			result, _ := typed.Int64()
 			return result != 0
+		}
+	}
+	return false
+}
+
+func hasBoolField(root map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		if _, ok := root[key]; ok {
+			return true
 		}
 	}
 	return false

@@ -31,8 +31,9 @@ const (
 )
 
 const (
-	SupplyPlatformLegacy  = "legacy"
-	SupplyPlatformBugTeam = "bugteam"
+	SupplyPlatformLegacy   = "legacy"
+	SupplyPlatformBugTeam  = "bugteam"
+	SupplyPlatformNvtokens = "nvtokens"
 
 	SupplyPlatformSelectionBestAvailable = "best_available"
 	SupplyPlatformSelectionPriorityFirst = "priority_first"
@@ -582,6 +583,8 @@ func normalizeSupplyPlatformType(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case SupplyPlatformBugTeam:
 		return SupplyPlatformBugTeam
+	case SupplyPlatformNvtokens:
+		return SupplyPlatformNvtokens
 	default:
 		return SupplyPlatformLegacy
 	}
@@ -607,6 +610,9 @@ func normalizeSupplyPlatformID(value string) string {
 func defaultSupplyPlatformName(platformType string) string {
 	if platformType == SupplyPlatformBugTeam {
 		return "BugTeam"
+	}
+	if platformType == SupplyPlatformNvtokens {
+		return "nvtokens"
 	}
 	return "Legacy supplier"
 }
@@ -857,6 +863,12 @@ func validateSupplyPlatform(platform store.ManagerSupplyPlatformConfig) error {
 	case SupplyPlatformBugTeam:
 		if !strings.EqualFold(strings.TrimSpace(platform.Product), "team_1h") {
 			return errors.New("product must be team_1h")
+		}
+	case SupplyPlatformNvtokens:
+		switch strings.ToLower(strings.TrimSpace(platform.Product)) {
+		case "oauth_30d", "oauth_7d", "team_1h":
+		default:
+			return errors.New("product must be oauth_30d, oauth_7d or team_1h")
 		}
 	default:
 		switch strings.ToLower(strings.TrimSpace(platform.Product)) {

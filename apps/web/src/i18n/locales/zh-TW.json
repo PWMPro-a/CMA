@@ -5404,6 +5404,7 @@
     "platform_type": "平台類型",
     "platform_type_bugteam": "BugTeam",
     "platform_type_legacy": "相容供應平台",
+    "platform_type_nvtokens": "nvtokens 帳號池",
     "platform_unassigned": "未歸屬 / 手動匯入",
     "batch_size": "單次補貨上限",
     "max_concurrent_orders": "並行搶貨訂單數",

@@ -5,7 +5,7 @@ export const SUPPLY_REPLENISH_TIMEOUT_MS = 15 * 60 * 1000;
 export type SupplyProduct = 'oauth_30d' | 'oauth_7d' | 'team_1h';
 export type SupplyStrategy = 'strong_supply' | 'balanced' | 'cost_first' | 'custom';
 export type SupplyQuotaEstimationMode = 'auto' | 'fixed' | string;
-export type SupplyPlatformType = 'legacy' | 'bugteam' | string;
+export type SupplyPlatformType = 'legacy' | 'bugteam' | 'nvtokens' | string;
 
 export interface SupplyQuotaEstimationPolicy {
   mode: SupplyQuotaEstimationMode;

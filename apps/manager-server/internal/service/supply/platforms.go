@@ -65,6 +65,8 @@ func supplyPlatformCredentials(platform store.ManagerSupplyPlatformConfig) suppl
 	deliveryMode := "take_json"
 	if strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformBugTeam) {
 		deliveryMode = "cpa_zip"
+	} else if strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformNvtokens) {
+		deliveryMode = "nvtokens"
 	}
 	return supplyclient.Credentials{
 		ID:           strings.TrimSpace(platform.ID),
@@ -113,6 +115,11 @@ func recoverySupplyPlatforms(cfg store.ManagerSupplyConfig) []store.ManagerSuppl
 	result := make([]store.ManagerSupplyPlatformConfig, 0, len(platforms))
 	for _, platform := range platforms {
 		if !supplyPlatformConfigured(platform) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformNvtokens) {
+			// nvtokens delivers fresh extraction bundles but has no compatible
+			// customer recovery/claim contract.
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformBugTeam) &&

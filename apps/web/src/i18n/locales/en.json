@@ -5404,6 +5404,7 @@
     "platform_type": "Platform type",
     "platform_type_bugteam": "BugTeam",
     "platform_type_legacy": "Compatible supplier",
+    "platform_type_nvtokens": "nvtokens account pool",
     "platform_unassigned": "Unassigned / manual import",
     "batch_size": "Maximum batch size",
     "max_concurrent_orders": "Parallel order count",
