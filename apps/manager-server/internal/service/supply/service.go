@@ -1956,7 +1956,7 @@ func (s *Service) NextInterval(ctx context.Context) time.Duration {
 	}
 	if orders, err := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders); err == nil && len(orders) > 0 {
 		if eligible, eligibilityErr := s.automaticParallelCreateEligible(ctx, cfg.Supply, orders); eligibilityErr == nil && eligible {
-			// Build the 10/5/2 emergency ladder immediately. Supplier retry-after
+			// Build the full-size emergency competition immediately. Supplier retry-after
 			// delays polling of an existing reservation, not creation of the next
 			// bounded competing quantity.
 			return s.withRecoveryInterval(time.Second, cfg.Supply)
@@ -2125,20 +2125,19 @@ func openOrdersAllowParallelCreate(orders []store.SupplyOrder) bool {
 }
 
 type parallelSupplyCompetition struct {
-	anchor              store.SupplyOrder
-	attempts            int
-	attemptedQuantities map[int]struct{}
+	anchor   store.SupplyOrder
+	attempts int
 }
 
 func isParallelSupplyOrder(order store.SupplyOrder) bool {
 	return order.Automatic && strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.TriggerReason)), "parallel_")
 }
 
-// parallelSupplyCompetitionForOrders keeps a bounded 10/5/2-style ladder
+// parallelSupplyCompetitionForOrders keeps a bounded full-size competition
 // attached to the oldest non-parallel reservation that is still waiting for
-// stock. Terminal parallel attempts remain part of that ladder: cancelling a
-// quantity-5 competitor must not immediately create another quantity-5 order
-// while the original quantity-10 reservation is still active.
+// stock. Terminal parallel attempts remain part of the same bounded wave, so a
+// cancelled competitor still consumes one of the two competition slots while
+// the anchor reservation is active.
 func parallelSupplyCompetitionForOrders(
 	cfg store.ManagerSupplyConfig,
 	openOrders []store.SupplyOrder,
@@ -2160,13 +2159,7 @@ func parallelSupplyCompetitionForOrders(
 	if !found {
 		return parallelSupplyCompetition{}, false
 	}
-	competition := parallelSupplyCompetition{
-		anchor:              anchor,
-		attemptedQuantities: make(map[int]struct{}, 2),
-	}
-	if anchor.RequestedQuantity > 0 {
-		competition.attemptedQuantities[anchor.RequestedQuantity] = struct{}{}
-	}
+	competition := parallelSupplyCompetition{anchor: anchor}
 	seen := make(map[string]struct{}, len(openOrders)+len(history))
 	add := func(order store.SupplyOrder) {
 		if !isParallelSupplyOrder(order) || !isSupplierPurchaseHistoryOrder(order) ||
@@ -2183,9 +2176,6 @@ func parallelSupplyCompetitionForOrders(
 		}
 		seen[key] = struct{}{}
 		competition.attempts++
-		if order.RequestedQuantity > 0 {
-			competition.attemptedQuantities[order.RequestedQuantity] = struct{}{}
-		}
 	}
 	for _, order := range history {
 		add(order)
@@ -2276,10 +2266,12 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	}
 	parallelEligible := false
 	var immediateRetryOrder *store.SupplyOrder
-	if len(openOrders) > 0 {
-		if manualQuantity > 0 {
+	manualParallel := manualQuantity > 0 && len(openOrders) > 0
+	if manualParallel {
+		if len(openOrders) >= maxConcurrentSupplyOrders(supplyCfg) {
 			return ErrOrderInProgress
 		}
+	} else if len(openOrders) > 0 {
 		active := selectSupplyOrderToProcess(openOrders, time.Now().UnixMilli())
 		switch active.Status {
 		case "creating", "create_uncertain", "importing", "partial":
@@ -2588,11 +2580,11 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			!isSmartEmergencyRetryReason(resource.DecisionReason) {
 			resource.DecisionReason = "emergency_refill_to_healthy"
 		}
-		// Parallel emergency抢货 uses a bounded descending quantity ladder
-		// instead of repeating the full shortage quantity. For a verified need
-		// of 10 accounts, the three possible reservations are 10, 5 and 2.
-		// Existing ready/take admission still evaluates aggregate capacity, so a
-		// smaller reservation can win without making every full-sized order paid.
+		// Parallel emergency抢货 repeats the current full shortage inside the
+		// bounded three-order window. For a verified need of 10 accounts, the
+		// three competing reservations are 10, 10 and 10. Existing ready/take
+		// admission still evaluates aggregate capacity before any reservation is
+		// paid, so reservation coverage can be aggressive without blind overbuying.
 		if parallelEligible {
 			competition, found, competitionErr := s.parallelSupplyCompetition(ctx, supplyCfg, openOrders)
 			if competitionErr != nil {
@@ -2664,7 +2656,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	}
 
 	triggerReason := supplyOrderTriggerReason(resource, manualQuantity == 0)
-	if manualQuantity == 0 && len(openOrders) > 0 && maxConcurrentSupplyOrders(supplyCfg) > 1 {
+	if len(openOrders) > 0 && maxConcurrentSupplyOrders(supplyCfg) > 1 {
 		triggerReason = parallelSupplyTriggerReason(triggerReason)
 	}
 	attempt := store.SupplyOrder{
@@ -7660,10 +7652,13 @@ func supplyCreatePlanningResource(
 }
 
 // emergencyParallelOrderQuantity returns the next bounded quantity in the
-// emergency抢货 ladder. The primary order keeps the complete calculated
-// shortage; its first and second competitors use one half and one fifth. The
-// stage is based on all attempts in the current primary-order cycle, including
-// cancelled rows, so a failed quantity is never submitted repeatedly.
+// emergency抢货 competition. Every bounded competitor requests the current
+// calculated shortage. This deliberately overbooks reservations while stock is
+// scarce: supplier reservations are not paid until the aggregate take budget
+// admits them, and the larger request gives partial/fragmented stock more ways
+// to satisfy the shortage. The stage is based on all attempts in the current
+// primary-order cycle, including cancelled rows, so the three-order ceiling is
+// still respected.
 func emergencyParallelOrderQuantity(
 	resource SmartResource,
 	quantity int,
@@ -7674,23 +7669,10 @@ func emergencyParallelOrderQuantity(
 		(!smartResourceEmergency(resource) && !isSmartEmergencyRetryReason(resource.DecisionReason)) {
 		return quantity
 	}
-	divisors := [...]int{2, 5}
-	if competition.attempts < 0 || competition.attempts >= len(divisors) {
+	if competition.attempts < 0 || competition.attempts >= 2 {
 		return 0
 	}
-	baseQuantity := max(quantity, competition.anchor.RequestedQuantity)
-	for stage := competition.attempts; stage < len(divisors); stage++ {
-		candidate := clampInt(
-			int(math.Ceil(float64(baseQuantity)/float64(divisors[stage]))),
-			1,
-			quantity,
-		)
-		if _, duplicate := competition.attemptedQuantities[candidate]; duplicate {
-			continue
-		}
-		return candidate
-	}
-	return 0
+	return quantity
 }
 
 // readySupplyOrderAccepted applies a deterministic aggregate take budget to
@@ -8082,10 +8064,9 @@ func (s *Service) automaticRetryPlan(
 // it behind a long local backoff.
 func (s *Service) automaticParallelCreateBlocked(ctx context.Context, cfg store.ManagerSupplyConfig) (bool, error) {
 	// Keep the competition window full after cancellations. The hard
-	// maxConcurrentSupplyOrders limit, aggregate take admission, and the
-	// descending quantity ladder are the duplicate/over-capacity guards. A
-	// historical zero-delivery burst is a reason to try smaller quantities,
-	// not a reason to stop trying altogether.
+	// maxConcurrentSupplyOrders limit and aggregate take admission are the
+	// over-capacity guards. A historical zero-delivery burst is a reason to keep
+	// competing for stock, not a reason to stop trying altogether.
 	return false, nil
 }
 

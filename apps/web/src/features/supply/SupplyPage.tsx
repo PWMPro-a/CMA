@@ -981,6 +981,8 @@ export function SupplyPage() {
   const smartModeEnabled = smart?.enabled ?? draft.smartEnabled !== false;
   const activeOrder = status?.activeOrder;
   const activeOrders = status?.activeOrders ?? (activeOrder ? [activeOrder] : []);
+  const manualOrderLimit = Math.max(1, Math.min(3, status?.config?.maxConcurrentOrders ?? 3));
+  const manualOrderLimitReached = activeOrders.length >= manualOrderLimit;
   const latestAutomaticOrder = status?.orders?.find(
     (order) => order.automatic && order.strategy !== 'recovery'
   );
@@ -3134,7 +3136,7 @@ export function SupplyPage() {
                     value={manualSupplierId}
                     options={manualPlatformOptions}
                     onChange={setManualSupplierId}
-                    disabled={manualPlatformOptions.length === 0 || activeOrders.length > 0}
+                    disabled={manualPlatformOptions.length === 0 || manualOrderLimitReached}
                     ariaLabel={t('supply.manual_platform')}
                   />
                   <small>
@@ -3163,11 +3165,11 @@ export function SupplyPage() {
                 <Button
                   fullWidth
                   loading={action === 'replenish'}
-                  disabled={activeOrders.length > 0 || !manualSupplierId}
+                  disabled={manualOrderLimitReached || !manualSupplierId}
                   onClick={() => void replenish()}
                 >
-                  {activeOrders.length > 0
-                    ? t('supply.order_in_progress')
+                  {manualOrderLimitReached
+                    ? t('supply.order_limit_reached', { count: manualOrderLimit })
                     : t('supply.replenish_now')}
                 </Button>
               </article>

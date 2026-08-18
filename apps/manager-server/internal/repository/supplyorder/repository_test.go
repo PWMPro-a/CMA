@@ -61,6 +61,18 @@ func TestRecoveryImportDoesNotBlockPurchaseOrder(t *testing.T) {
 	if err != nil || len(open) != 2 || open[0].OrderID != purchase.OrderID || open[1].OrderID != parallel.OrderID {
 		t.Fatalf("parallel open purchases = %#v err=%v", open, err)
 	}
+
+	manualParallel, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "56815", Product: "oauth_7d", RequestedQuantity: 4,
+		TriggerReason: "parallel_manual", Status: "waiting_inventory",
+	})
+	if err != nil {
+		t.Fatalf("parallel manual purchase should be accepted: %v", err)
+	}
+	open, err = st.ListOpenSupplyOrders(ctx, 10)
+	if err != nil || len(open) != 3 || open[2].OrderID != manualParallel.OrderID {
+		t.Fatalf("parallel manual open purchase = %#v err=%v", open, err)
+	}
 }
 
 func TestPurchaseQueriesExcludeRecoveryImportRows(t *testing.T) {

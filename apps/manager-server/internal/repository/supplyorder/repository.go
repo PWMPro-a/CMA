@@ -874,10 +874,12 @@ func isPurchaseOrder(order model.SupplyOrder) bool {
 		!strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.OrderID)), "recovery-")
 }
 
-// Parallel automatic reservations are explicitly marked by the service. Keep
-// the legacy single-open-order guard for manual and older automatic rows.
+// Parallel reservations are explicitly marked by the service. The service
+// applies the configured concurrency limit before creating either automatic or
+// manual competitors; this repository-level marker only permits that bounded
+// create to coexist with the anchor order.
 func isParallelPurchaseOrder(order model.SupplyOrder) bool {
-	return order.Automatic && strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.TriggerReason)), "parallel_")
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.TriggerReason)), "parallel_")
 }
 
 func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {

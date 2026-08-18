@@ -3333,22 +3333,68 @@ func TestAutomaticCancelledOrderImmediatelyCreatesNextLadderRung(t *testing.T) {
 	}
 }
 
-func TestManualReplenishmentRejectsConcurrentOrder(t *testing.T) {
+func TestManualReplenishmentSupportsConfiguredConcurrentOrders(t *testing.T) {
+	var creates atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":100,"missing":0,"estimated_total_fen":200,"estimated_unit_price_fen":100}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
+		case r.URL.Path == "/api/customer/pickup/orders" && r.Method == http.MethodPost:
+			index := creates.Add(1) + 1
+			_, _ = fmt.Fprintf(w, `{"order":{"id":"manual-%d","status":"waiting_inventory","quantity":2}}`, index)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
 	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
-		OrderID: "active-order", Product: "oauth_30d", RequestedQuantity: 2, Status: "waiting_inventory",
+		OrderID: "manual-1", Product: "oauth_30d", RequestedQuantity: 2, Status: "waiting_inventory",
 	}); err != nil {
 		t.Fatalf("create active order: %v", err)
 	}
+	enabled := true
+	smartDisabled := false
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, SmartEnabled: &smartDisabled, BaseURL: server.URL,
+			Username: "customer", Password: "password", Product: "oauth_30d", MaxConcurrentOrders: 3,
+		},
+	}); err != nil {
+		t.Fatalf("save manager config: %v", err)
+	}
 	managerConfig := managerconfigsvc.New(config.Config{}, st, nil)
-	service := New(st, managerConfig)
+	service := New(st, managerConfig, server.Client())
+	if _, err = service.Replenish(context.Background(), 2); err != nil {
+		t.Fatalf("create second manual order: %v", err)
+	}
+	if _, err = service.Replenish(context.Background(), 2); err != nil {
+		t.Fatalf("create third manual order: %v", err)
+	}
 	_, err = service.Replenish(context.Background(), 2)
 	if err != ErrOrderInProgress {
-		t.Fatalf("replenish error = %v, want %v", err, ErrOrderInProgress)
+		t.Fatalf("fourth replenish error = %v, want %v", err, ErrOrderInProgress)
+	}
+	orders, listErr := st.ListOpenSupplyOrders(context.Background(), 10)
+	if listErr != nil || len(orders) != 3 || creates.Load() != 2 {
+		t.Fatalf("manual open orders=%#v creates=%d err=%v", orders, creates.Load(), listErr)
+	}
+	for _, order := range orders[1:] {
+		if order.Automatic || order.TriggerReason != "parallel_manual" {
+			t.Fatalf("parallel manual order = %#v", order)
+		}
 	}
 }
 
@@ -3534,7 +3580,7 @@ func TestAutomaticReplenishmentDoesNotParallelizeOutsideSmartEmergency(t *testin
 	}
 }
 
-func TestAutomaticEmergencyReplenishmentCreatesTenFiveTwoLadderAndStops(t *testing.T) {
+func TestAutomaticEmergencyReplenishmentCreatesStrongParallelLadderAndStops(t *testing.T) {
 	var quantitiesMu sync.Mutex
 	quantities := make([]int, 0, 3)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3602,8 +3648,8 @@ func TestAutomaticEmergencyReplenishmentCreatesTenFiveTwoLadderAndStops(t *testi
 	quantitiesMu.Lock()
 	gotQuantities := append([]int(nil), quantities...)
 	quantitiesMu.Unlock()
-	if fmt.Sprint(gotQuantities) != "[10 5 2]" {
-		t.Fatalf("emergency ladder quantities = %v, want [10 5 2]", gotQuantities)
+	if fmt.Sprint(gotQuantities) != "[10 10 10]" {
+		t.Fatalf("emergency competition quantities = %v, want [10 10 10]", gotQuantities)
 	}
 	orders, err := st.ListOpenSupplyOrders(ctx, 10)
 	if err != nil || len(orders) != 3 {
@@ -3692,37 +3738,34 @@ func TestParallelSupplyCreatePlanningCompetesOnWaitingOrdersAndStopsOnCommittedS
 	}
 }
 
-func TestEmergencyParallelOrderQuantityUsesDescendingLadder(t *testing.T) {
+func TestEmergencyParallelOrderQuantityUsesFullSizeCompetition(t *testing.T) {
 	resource := SmartResource{
 		EmergencyShortage: true,
 		HealthLevel:       smartHealthCritical,
 	}
 	competition := parallelSupplyCompetition{
-		anchor:              store.SupplyOrder{OrderID: "primary", RequestedQuantity: 10, Status: "waiting_inventory"},
-		attemptedQuantities: map[int]struct{}{},
+		anchor: store.SupplyOrder{OrderID: "primary", RequestedQuantity: 10, Status: "waiting_inventory"},
 	}
 
 	if got := emergencyParallelOrderQuantity(resource, 10, parallelSupplyCompetition{}, false); got != 10 {
 		t.Fatalf("first emergency quantity = %d, want 10", got)
 	}
-	if got := emergencyParallelOrderQuantity(resource, 10, competition, true); got != 5 {
-		t.Fatalf("second emergency quantity = %d, want 5", got)
+	if got := emergencyParallelOrderQuantity(resource, 10, competition, true); got != 10 {
+		t.Fatalf("second emergency quantity = %d, want 10", got)
 	}
 	continuation := parallelSupplyCompetition{
-		anchor:              store.SupplyOrder{OrderID: "retry-3", RequestedQuantity: 3, Status: "waiting_inventory"},
-		attemptedQuantities: map[int]struct{}{3: {}},
+		anchor: store.SupplyOrder{OrderID: "retry-3", RequestedQuantity: 3, Status: "waiting_inventory"},
 	}
-	if got := emergencyParallelOrderQuantity(resource, 5, continuation, true); got != 1 {
-		t.Fatalf("duplicate half rung quantity = %d, want next untried rung 1", got)
+	if got := emergencyParallelOrderQuantity(resource, 5, continuation, true); got != 5 {
+		t.Fatalf("full-size emergency competition quantity = %d, want 5", got)
 	}
 	competition.attempts = 1
-	competition.attemptedQuantities[5] = struct{}{}
-	if got := emergencyParallelOrderQuantity(resource, 10, competition, true); got != 2 {
-		t.Fatalf("third emergency quantity = %d, want 2", got)
+	if got := emergencyParallelOrderQuantity(resource, 10, competition, true); got != 10 {
+		t.Fatalf("third emergency quantity = %d, want 10", got)
 	}
 	competition.anchor.RequestedQuantity = 17
-	if got := emergencyParallelOrderQuantity(resource, 17, competition, true); got != 4 {
-		t.Fatalf("third rounded emergency quantity = %d, want 4", got)
+	if got := emergencyParallelOrderQuantity(resource, 17, competition, true); got != 17 {
+		t.Fatalf("third full-size emergency quantity = %d, want 17", got)
 	}
 	competition.attempts = 2
 	if got := emergencyParallelOrderQuantity(resource, 17, competition, true); got != 0 {
