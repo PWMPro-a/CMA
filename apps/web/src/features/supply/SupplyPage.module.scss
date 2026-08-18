@@ -1131,6 +1131,23 @@
   align-items: end;
 }
 
+.manualPlatformField {
+  display: grid;
+  gap: 7px;
+}
+
+.manualPlatformField label {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.manualPlatformField small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .quoteBox {
   border-color: color-mix(in srgb, var(--primary-color) 22%, var(--border-color));
   background: color-mix(in srgb, var(--primary-color) 5%, var(--surface-subtle));

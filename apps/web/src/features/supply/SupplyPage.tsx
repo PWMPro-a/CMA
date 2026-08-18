@@ -56,6 +56,7 @@ const newSupplyPlatform = (type: 'legacy' | 'bugteam', index: number): SupplyPla
   tokenConfigured: false,
   product: type === 'bugteam' ? 'team_1h' : 'oauth_30d',
   priority: index + 1,
+  emergencyOnly: type === 'bugteam',
   quotaEstimationPolicies: {},
 });
 
@@ -424,6 +425,7 @@ export function SupplyPage() {
   const [report, setReport] = useState<SupplyReport | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [manualQuantity, setManualQuantity] = useState(10);
+  const [manualSupplierId, setManualSupplierId] = useState('');
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<SupplyWorkspaceTab>('overview');
   const [reportRangePreset, setReportRangePreset] = useState<ReportRangePreset>('today');
@@ -491,6 +493,7 @@ export function SupplyPage() {
             type: 'bugteam',
             baseUrl: 'https://bugteam.team',
             product: 'team_1h',
+            emergencyOnly: true,
           };
         }
         platforms[index] = next;
@@ -568,6 +571,21 @@ export function SupplyPage() {
     setManualQuantity((current) =>
       current > 0 ? current : Math.max(1, next.config?.replenishBatchSize || 10)
     );
+    setManualSupplierId((current) => {
+      const platforms = next.overview?.platforms ?? [];
+      const configuredIds = new Map(
+        platforms.map((platform) => [platform.id.trim().toLowerCase(), platform.id])
+      );
+      const currentID = current.trim().toLowerCase();
+      if (currentID && configuredIds.has(currentID)) {
+        return configuredIds.get(currentID) ?? current;
+      }
+      const recommendedID = next.overview?.selectedPlatformId?.trim().toLowerCase() ?? '';
+      if (recommendedID && configuredIds.has(recommendedID)) {
+        return configuredIds.get(recommendedID) ?? '';
+      }
+      return platforms[0]?.id ?? '';
+    });
   }, []);
 
   const load = useCallback(
@@ -837,7 +855,7 @@ export function SupplyPage() {
   const replenish = () =>
     runAction(
       'replenish',
-      () => supplyApi.replenish(manualQuantity),
+      () => supplyApi.replenish(manualQuantity, manualSupplierId),
       t('supply.replenish_started'),
       true
     );
@@ -923,6 +941,23 @@ export function SupplyPage() {
       ),
     [overview?.platforms]
   );
+  const manualPlatformOptions = useMemo(
+    () =>
+      (overview?.platforms ?? []).map((platform) => ({
+        value: platform.id,
+        label: `${platform.name || platform.id} · ${platform.product}${
+          platform.emergencyOnly ? ` · ${t('supply.platform_emergency_only_short')}` : ''
+        }`,
+      })),
+    [overview?.platforms, t]
+  );
+  const manualPlatform = manualSupplierId
+    ? platformOverviewById.get(manualSupplierId.trim().toLowerCase())
+    : undefined;
+  const manualInventory = manualPlatform?.inventory;
+  const recommendedPlatform = overview?.selectedPlatformId
+    ? platformOverviewById.get(overview.selectedPlatformId.trim().toLowerCase())
+    : undefined;
   const purchasePlatforms = useMemo(
     () => [...(status?.config?.platforms ?? draft.platforms ?? []), ...(overview?.platforms ?? [])],
     [draft.platforms, overview?.platforms, status?.config?.platforms]
@@ -2407,6 +2442,13 @@ export function SupplyPage() {
                               }
                               label={t('supply.platform_enabled')}
                             />
+                            <ToggleSwitch
+                              checked={platform.emergencyOnly === true}
+                              onChange={(emergencyOnly) =>
+                                updateSupplyPlatform(platformIndex, { emergencyOnly })
+                              }
+                              label={t('supply.platform_emergency_only')}
+                            />
                             <Button
                               variant="ghost"
                               size="xs"
@@ -2546,6 +2588,11 @@ export function SupplyPage() {
                         {platform.type === 'bugteam' ? (
                           <p className={styles.platformHint}>
                             {t('supply.platform_bugteam_auth_hint')}
+                          </p>
+                        ) : null}
+                        {platform.emergencyOnly ? (
+                          <p className={styles.platformHint}>
+                            {t('supply.platform_emergency_only_hint')}
                           </p>
                         ) : null}
                         <div className={styles.platformQuotaGrid}>
@@ -3081,6 +3128,21 @@ export function SupplyPage() {
                     <p>{t('supply.manual_hint')}</p>
                   </div>
                 </div>
+                <div className={styles.manualPlatformField}>
+                  <label>{t('supply.manual_platform')}</label>
+                  <Select
+                    value={manualSupplierId}
+                    options={manualPlatformOptions}
+                    onChange={setManualSupplierId}
+                    disabled={manualPlatformOptions.length === 0 || activeOrders.length > 0}
+                    ariaLabel={t('supply.manual_platform')}
+                  />
+                  <small>
+                    {t('supply.manual_platform_hint', {
+                      platform: recommendedPlatform?.name || recommendedPlatform?.id || '-',
+                    })}
+                  </small>
+                </div>
                 <div className={styles.orderComposer}>
                   <Input
                     label={t('supply.quantity')}
@@ -3092,14 +3154,16 @@ export function SupplyPage() {
                   />
                   <div className={styles.quoteBox}>
                     <span>{t('supply.estimated_total')}</span>
-                    <strong>{inventory ? formatMoney(inventory.estimatedTotalFen) : '-'}</strong>
+                    <strong>
+                      {manualInventory ? formatMoney(manualInventory.estimatedTotalFen) : '-'}
+                    </strong>
                     <small>{t('supply.quote_hint')}</small>
                   </div>
                 </div>
                 <Button
                   fullWidth
                   loading={action === 'replenish'}
-                  disabled={activeOrders.length > 0}
+                  disabled={activeOrders.length > 0 || !manualSupplierId}
                   onClick={() => void replenish()}
                 >
                   {activeOrders.length > 0

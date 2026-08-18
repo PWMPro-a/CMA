@@ -5397,7 +5397,7 @@
     "platform_name": "Platform name",
     "platform_priority": "Selection priority",
     "platform_remove": "Remove platform",
-    "platform_selected": "Selected this round",
+    "platform_selected": "Recommended for next order",
     "platform_token": "Customer Token",
     "platform_token_placeholder": "Enter a server-side customer Token directly",
     "platform_token_saved": "Token saved; leave blank to keep it",
@@ -6117,7 +6117,12 @@
     "forecast_purchase_trigger": "Purchase trigger runway",
     "forecast_purchase_trigger_wait_hint": "Wait about {{minutes}} before ordering so account lifetime does not start too early",
     "forecast_purchase_trigger_ready_hint": "Current demand can fully use {{quantity}} new account(s) without exceeding consumable capacity",
-    "smart_reason_purchase_timing_wait": "The current gap cannot fully consume one new account yet; ordering waits for the purchase trigger runway"
+    "smart_reason_purchase_timing_wait": "The current gap cannot fully consume one new account yet; ordering waits for the purchase trigger runway",
+    "manual_platform": "Purchase platform",
+    "manual_platform_hint": "Manual replenishment uses only the selected platform and never falls back. Next automatic recommendation: {{platform}}",
+    "platform_emergency_only": "Emergency purchases only",
+    "platform_emergency_only_short": "Fallback platform",
+    "platform_emergency_only_hint": "This platform is excluded from routine automatic purchasing and participates only during a smart-supply emergency. Explicit manual selection remains available."
   },
   "egress_ip": {
     "card_eyebrow": "One-click egress IP",

@@ -1235,11 +1235,15 @@ func (s *Service) Check(ctx context.Context) (Status, error) {
 	return s.GetStatus(ctx, 50)
 }
 
-func (s *Service) Replenish(ctx context.Context, quantity int) (Status, error) {
+func (s *Service) Replenish(ctx context.Context, quantity int, supplierID ...string) (Status, error) {
 	if quantity <= 0 || quantity > 100 {
 		return Status{}, ErrInvalidQuantity
 	}
-	if err := s.run(ctx, true, quantity, true); err != nil {
+	requestedSupplierID := ""
+	if len(supplierID) > 0 {
+		requestedSupplierID = strings.TrimSpace(supplierID[0])
+	}
+	if err := s.run(ctx, true, quantity, true, requestedSupplierID); err != nil {
 		s.recordError(err)
 		return Status{}, err
 	}
@@ -2232,7 +2236,7 @@ func (s *Service) automaticParallelCreateEligible(
 	return !blocked, nil
 }
 
-func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int, force bool) (err error) {
+func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int, force bool, manualSupplierID ...string) (err error) {
 	timing := newAutomaticRunTiming()
 	defer func() { timing.finish(err) }()
 	s.runMu.Lock()
@@ -2246,6 +2250,15 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		return err
 	}
 	supplyCfg := cfg.Supply
+	requestedSupplierID := ""
+	if manualQuantity > 0 && len(manualSupplierID) > 0 {
+		requestedSupplierID = strings.TrimSpace(manualSupplierID[0])
+	}
+	if requestedSupplierID != "" {
+		if _, err := resolveSupplyPlatform(supplyCfg, requestedSupplierID, ""); err != nil {
+			return err
+		}
+	}
 	_, baselineStarted := s.observeAutomaticEnabled(managerconfigsvc.SupplyEnabled(supplyCfg))
 	if baselineStarted && smartSupplyEnabled(supplyCfg) {
 		s.invalidateInspectionQuotaSnapshot()
@@ -2522,7 +2535,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	}
 
 	timing.next("supplier-quote")
-	selection, err := s.selectSupplyPlatform(ctx, supplyCfg, quantity, openOrders)
+	selection, err := s.selectSupplyPlatform(ctx, supplyCfg, quantity, openOrders, requestedSupplierID)
 	if err != nil {
 		return err
 	}

@@ -26,4 +26,14 @@ describe('supplyApi', () => {
     );
     expect(SUPPLY_REPLENISH_TIMEOUT_MS).toBe(15 * 60 * 1000);
   });
+
+  it('sends the explicitly selected supply platform', async () => {
+    await supplyApi.replenish(3, ' bugteam ');
+
+    expect(post).toHaveBeenCalledWith(
+      '/supply/replenish',
+      { quantity: 3, supplierId: 'bugteam' },
+      { timeout: SUPPLY_REPLENISH_TIMEOUT_MS }
+    );
+  });
 });

@@ -5397,7 +5397,7 @@
     "platform_name": "平台名称",
     "platform_priority": "选择优先级",
     "platform_remove": "删除平台",
-    "platform_selected": "本轮选中",
+    "platform_selected": "下一单自动推荐",
     "platform_token": "客户 Token",
     "platform_token_placeholder": "可直接填写服务端客户 Token",
     "platform_token_saved": "Token 已保存，留空表示不修改",
@@ -6117,7 +6117,12 @@
     "forecast_purchase_trigger": "采购触发水位",
     "forecast_purchase_trigger_wait_hint": "预计再等待 {{minutes}}；当前不下单，避免账号过早开始计时",
     "forecast_purchase_trigger_ready_hint": "当前可按真实消耗采购 {{quantity}} 个，避免超过可消耗容量",
-    "smart_reason_purchase_timing_wait": "当前缺口不足以完整消耗一个新账号；等待到采购触发水位再下单"
+    "smart_reason_purchase_timing_wait": "当前缺口不足以完整消耗一个新账号；等待到采购触发水位再下单",
+    "manual_platform": "采购平台",
+    "manual_platform_hint": "手动补货严格使用所选平台，不会自动切换。下一单自动推荐：{{platform}}",
+    "platform_emergency_only": "仅紧急采购",
+    "platform_emergency_only_short": "降级平台",
+    "platform_emergency_only_hint": "该平台不参与常规自动采购，仅在智能补货判断为紧急缺口时参与选择；手动明确选择时仍可下单。"
   },
   "egress_ip": {
     "card_eyebrow": "一键出口 IP",

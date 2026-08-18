@@ -1,7 +1,11 @@
 package supply
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/supplyclient"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
@@ -122,6 +126,49 @@ func TestSupplyPlatformSelectionPriorityFirstStillFallsBackToDeliverableStock(t 
 	}
 	if !supplyPlatformLessWithPriority(inStock, production, 2, 0, nil, false, true) {
 		t.Fatal("deliverable fallback stock should beat production-only preferred inventory")
+	}
+}
+
+func TestEmergencyOnlySupplyPlatformIsReservedForEmergencyOrExplicitSelection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("X-Customer-Token")
+		switch r.URL.Path {
+		case "/api/customer/inventory":
+			if token == "bugteam-token" {
+				_, _ = w.Write([]byte(`{"available":50,"estimated_total_fen":150,"estimated_unit_price_fen":75}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"available":0,"needs_production":true,"estimated_total_fen":100,"estimated_unit_price_fen":50}`))
+		case "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	enabled := true
+	cfg := store.ManagerSupplyConfig{Platforms: []store.ManagerSupplyPlatformConfig{
+		{ID: "legacy", Name: "sogouedu", Type: "legacy", Enabled: &enabled, BaseURL: server.URL, Token: "legacy-token", Product: "oauth_7d", Priority: 1},
+		{ID: "bugteam", Name: "BugTeam", Type: "bugteam", Enabled: &enabled, BaseURL: server.URL, Token: "bugteam-token", Product: "team_1h", Priority: 2, EmergencyOnly: true},
+	}}
+	service := New(nil, nil, server.Client())
+
+	selection, err := service.selectSupplyPlatform(context.Background(), cfg, 2, nil)
+	if err != nil || selection.platform.ID != "legacy" {
+		t.Fatalf("normal selection = %q err=%v, want legacy", selection.platform.ID, err)
+	}
+
+	service.setSmartResource(SmartResource{GeneratedAtMS: time.Now().UnixMilli(), EmergencyShortage: true})
+	selection, err = service.selectSupplyPlatform(context.Background(), cfg, 2, nil)
+	if err != nil || selection.platform.ID != "bugteam" {
+		t.Fatalf("emergency selection = %q err=%v, want bugteam", selection.platform.ID, err)
+	}
+
+	service.setSmartResource(SmartResource{GeneratedAtMS: time.Now().UnixMilli()})
+	selection, err = service.selectSupplyPlatform(context.Background(), cfg, 2, nil, "bugteam")
+	if err != nil || selection.platform.ID != "bugteam" {
+		t.Fatalf("explicit selection = %q err=%v, want bugteam", selection.platform.ID, err)
 	}
 }
 

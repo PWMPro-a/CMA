@@ -98,6 +98,7 @@ type ManagerSupplyPlatformConfig struct {
 	TokenConfigured         bool                                          `json:"tokenConfigured,omitempty"`
 	Product                 string                                        `json:"product"`
 	Priority                int                                           `json:"priority,omitempty"`
+	EmergencyOnly           bool                                          `json:"emergencyOnly,omitempty"`
 	QuotaEstimationPolicies map[string]ManagerSupplyQuotaEstimationPolicy `json:"quotaEstimationPolicies,omitempty"`
 }
 

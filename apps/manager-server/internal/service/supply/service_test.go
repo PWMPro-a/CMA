@@ -3352,6 +3352,127 @@ func TestManualReplenishmentRejectsConcurrentOrder(t *testing.T) {
 	}
 }
 
+func TestManualReplenishmentUsesExplicitSupplyPlatform(t *testing.T) {
+	var legacyCreates atomic.Int32
+	legacyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":100,"missing":0,"estimated_total_fen":100,"estimated_unit_price_fen":50}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
+		case r.URL.Path == "/api/customer/pickup/orders" && r.Method == http.MethodPost:
+			legacyCreates.Add(1)
+			_, _ = w.Write([]byte(`{"order":{"id":"legacy-order","status":"waiting_inventory","quantity":2}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer legacyServer.Close()
+
+	var bugTeamCreates atomic.Int32
+	bugTeamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Customer-Token"); got != "bugteam-token" {
+			t.Fatalf("BugTeam customer token = %q", got)
+		}
+		switch {
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":50,"missing":0,"estimated_total_fen":150,"estimated_unit_price_fen":75}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
+		case r.URL.Path == "/api/customer/pickup/orders" && r.Method == http.MethodPost:
+			bugTeamCreates.Add(1)
+			var request struct {
+				Product  string `json:"product"`
+				Quantity int    `json:"quantity"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("decode BugTeam create request: %v", err)
+			}
+			if request.Product != "team_1h" || request.Quantity != 2 {
+				t.Fatalf("BugTeam create request = %#v", request)
+			}
+			_, _ = w.Write([]byte(`{"order_id":"bugteam-order","status":"waiting_inventory","product":"team_1h","quantity":2}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer bugTeamServer.Close()
+
+	cpaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0/management/auth-files" {
+			_, _ = w.Write([]byte(`{"files":[]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer cpaServer.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "explicit-platform.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	ctx := context.Background()
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: cpaServer.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled:                   &enabled,
+			PlatformSelectionStrategy: managerconfigsvc.SupplyPlatformSelectionPriorityFirst,
+			Platforms: []store.ManagerSupplyPlatformConfig{
+				{ID: "legacy", Name: "sogouedu", Type: managerconfigsvc.SupplyPlatformLegacy, Enabled: &enabled, BaseURL: legacyServer.URL, Token: "legacy-token", Product: "oauth_7d", Priority: 1},
+				{ID: "bugteam", Name: "BugTeam", Type: managerconfigsvc.SupplyPlatformBugTeam, Enabled: &enabled, BaseURL: bugTeamServer.URL, Token: "bugteam-token", Product: "team_1h", Priority: 2, EmergencyOnly: true},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), bugTeamServer.Client())
+	if _, err := service.Replenish(ctx, 2, "bugteam"); err != nil {
+		t.Fatalf("manual BugTeam replenishment: %v", err)
+	}
+	if bugTeamCreates.Load() != 1 || legacyCreates.Load() != 0 {
+		t.Fatalf("create calls: BugTeam=%d legacy=%d", bugTeamCreates.Load(), legacyCreates.Load())
+	}
+	order, found, err := st.GetSupplyOrder(ctx, "bugteam-order")
+	if err != nil || !found {
+		t.Fatalf("load BugTeam order: found=%v err=%v", found, err)
+	}
+	if order.SupplierID != "bugteam" || order.Product != "team_1h" || order.Automatic {
+		t.Fatalf("persisted BugTeam order = %#v", order)
+	}
+}
+
+func TestManualReplenishmentDoesNotFallbackFromUnknownPlatform(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "unknown-platform.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	ctx := context.Background()
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{Supply: store.ManagerSupplyConfig{
+		Enabled: &enabled,
+		Platforms: []store.ManagerSupplyPlatformConfig{{
+			ID: "legacy", Type: managerconfigsvc.SupplyPlatformLegacy, Enabled: &enabled,
+			BaseURL: "https://supplier.invalid", Token: "token", Product: "oauth_7d",
+		}},
+	}}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil))
+	_, err = service.Replenish(ctx, 2, "bugteam")
+	if !errors.Is(err, ErrNotConfigured) || !strings.Contains(err.Error(), "bugteam") {
+		t.Fatalf("unknown platform error = %v", err)
+	}
+	orders, listErr := st.ListSupplyOrders(ctx, 10)
+	if listErr != nil || len(orders) != 0 {
+		t.Fatalf("orders after unknown platform request = %#v err=%v", orders, listErr)
+	}
+}
+
 func TestAutomaticReplenishmentDoesNotParallelizeOutsideSmartEmergency(t *testing.T) {
 	var createCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

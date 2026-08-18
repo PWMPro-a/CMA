@@ -551,6 +551,7 @@ func normalizeSupplyPlatforms(submitted []store.ManagerSupplyPlatformConfig, cur
 		} else if platform.Priority <= 0 {
 			platform.Priority = index + 1
 		}
+		platform.EmergencyOnly = raw.EmergencyOnly
 		if raw.QuotaEstimationPolicies != nil {
 			platform.QuotaEstimationPolicies = normalizeSupplyQuotaEstimationPolicyOverrides(
 				raw.QuotaEstimationPolicies,

@@ -27,6 +27,7 @@ export interface SupplyPlatformConfig {
   tokenConfigured?: boolean;
   product: SupplyProduct | string;
   priority?: number;
+  emergencyOnly?: boolean;
   quotaEstimationPolicies?: Record<string, SupplyQuotaEstimationPolicy>;
 }
 
@@ -152,6 +153,7 @@ export interface SupplyPlatformOverview {
   type: string;
   product: string;
   priority?: number;
+  emergencyOnly?: boolean;
   selected: boolean;
   checkedAtMs: number;
   inventory?: SupplyInventory;
@@ -889,8 +891,12 @@ export const supplyApi = {
   retryRecoveryImport: (recoveryId: string): Promise<SupplyRecovery> =>
     apiClient.post(`/supply/recoveries/${encodeURIComponent(recoveryId)}/retry-import`),
 
-  replenish: (quantity: number): Promise<SupplyStatus> =>
-    apiClient.post('/supply/replenish', { quantity }, { timeout: SUPPLY_REPLENISH_TIMEOUT_MS }),
+  replenish: (quantity: number, supplierId?: string): Promise<SupplyStatus> =>
+    apiClient.post(
+      '/supply/replenish',
+      { quantity, ...(supplierId?.trim() ? { supplierId: supplierId.trim() } : {}) },
+      { timeout: SUPPLY_REPLENISH_TIMEOUT_MS }
+    ),
 
   dismissCreateUncertain: (orderId: string): Promise<SupplyStatus> =>
     apiClient.post(`/supply/orders/${encodeURIComponent(orderId)}/dismiss-uncertain`),

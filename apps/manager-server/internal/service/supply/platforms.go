@@ -21,6 +21,7 @@ type PlatformOverview struct {
 	Type                  string                  `json:"type"`
 	Product               string                  `json:"product"`
 	Priority              int                     `json:"priority,omitempty"`
+	EmergencyOnly         bool                    `json:"emergencyOnly,omitempty"`
 	Selected              bool                    `json:"selected"`
 	CheckedAtMS           int64                   `json:"checkedAtMs"`
 	Inventory             *supplyclient.Inventory `json:"inventory,omitempty"`
@@ -93,7 +94,7 @@ func resolveSupplyPlatform(cfg store.ManagerSupplyConfig, supplierID string, pro
 				return platform, nil
 			}
 		}
-		return store.ManagerSupplyPlatformConfig{}, fmt.Errorf("supply platform %s is not configured", supplierID)
+		return store.ManagerSupplyPlatformConfig{}, fmt.Errorf("%w: supply platform %s is not enabled or configured", ErrNotConfigured, supplierID)
 	}
 	product = strings.TrimSpace(product)
 	for _, platform := range platforms {
@@ -176,12 +177,14 @@ func (s *Service) selectSupplyPlatform(
 	cfg store.ManagerSupplyConfig,
 	quantity int,
 	openOrders []store.SupplyOrder,
+	requestedSupplierID ...string,
 ) (supplyPlatformSelection, error) {
 	platforms := supplyPlatforms(cfg)
 	if len(platforms) == 0 {
 		return supplyPlatformSelection{}, ErrNotConfigured
 	}
 	statuses := make([]PlatformOverview, len(platforms))
+	quoteErrors := make([]error, len(platforms))
 	resource := s.currentSmartResource(cfg)
 	type result struct {
 		index     int
@@ -216,14 +219,16 @@ func (s *Service) selectSupplyPlatform(
 	for item := range results {
 		platform := platforms[item.index]
 		status := PlatformOverview{
-			ID:          platform.ID,
-			Name:        platform.Name,
-			Type:        platform.Type,
-			Product:     platform.Product,
-			Priority:    platform.Priority,
-			CheckedAtMS: checkedAtMS,
+			ID:            platform.ID,
+			Name:          platform.Name,
+			Type:          platform.Type,
+			Product:       platform.Product,
+			Priority:      platform.Priority,
+			EmergencyOnly: platform.EmergencyOnly,
+			CheckedAtMS:   checkedAtMS,
 		}
 		if item.err != nil {
+			quoteErrors[item.index] = item.err
 			status.LastError = safeError(item.err)
 			platformErrors = append(platformErrors, fmt.Errorf("%s: %w", firstNonEmptyString(platform.Name, platform.ID), item.err))
 		} else {
@@ -237,6 +242,39 @@ func (s *Service) selectSupplyPlatform(
 		statuses[item.index] = status
 	}
 
+	requestedID := ""
+	if len(requestedSupplierID) > 0 {
+		requestedID = strings.TrimSpace(requestedSupplierID[0])
+	}
+	if requestedID != "" {
+		selectedIndex := -1
+		for index, platform := range platforms {
+			if strings.EqualFold(strings.TrimSpace(platform.ID), requestedID) {
+				selectedIndex = index
+				break
+			}
+		}
+		if selectedIndex < 0 {
+			return supplyPlatformSelection{all: statuses}, fmt.Errorf("%w: supply platform %s is not enabled or configured", ErrNotConfigured, requestedID)
+		}
+		if quoteErrors[selectedIndex] != nil {
+			return supplyPlatformSelection{all: statuses}, fmt.Errorf(
+				"supply platform %s quote failed: %w",
+				firstNonEmptyString(platforms[selectedIndex].Name, platforms[selectedIndex].ID),
+				quoteErrors[selectedIndex],
+			)
+		}
+		if statuses[selectedIndex].Inventory == nil || statuses[selectedIndex].Balance == nil {
+			return supplyPlatformSelection{all: statuses}, fmt.Errorf("supply platform %s quote is incomplete", firstNonEmptyString(platforms[selectedIndex].Name, platforms[selectedIndex].ID))
+		}
+		statuses[selectedIndex].Selected = true
+		return supplyPlatformSelection{
+			platform: platforms[selectedIndex],
+			status:   statuses[selectedIndex],
+			all:      statuses,
+		}, nil
+	}
+
 	used := make(map[string]struct{}, len(openOrders))
 	for _, order := range openOrders {
 		if strings.TrimSpace(order.SupplierID) != "" {
@@ -244,8 +282,10 @@ func (s *Service) selectSupplyPlatform(
 		}
 	}
 	candidates := make([]int, 0, len(platforms))
+	emergency := smartResourceEmergency(resource)
 	for index := range statuses {
-		if statuses[index].Inventory != nil && statuses[index].Balance != nil {
+		if statuses[index].Inventory != nil && statuses[index].Balance != nil &&
+			(!platforms[index].EmergencyOnly || emergency) {
 			candidates = append(candidates, index)
 		}
 	}
@@ -255,7 +295,6 @@ func (s *Service) selectSupplyPlatform(
 		}
 		return supplyPlatformSelection{all: statuses}, ErrNotConfigured
 	}
-	emergency := smartResourceEmergency(resource)
 	priorityFirst := strings.EqualFold(
 		strings.TrimSpace(cfg.PlatformSelectionStrategy),
 		managerconfigsvc.SupplyPlatformSelectionPriorityFirst,

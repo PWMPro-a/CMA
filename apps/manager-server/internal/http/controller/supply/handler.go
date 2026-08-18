@@ -194,13 +194,14 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var req struct {
-			Quantity int `json:"quantity"`
+			Quantity   int    `json:"quantity"`
+			SupplierID string `json:"supplierId"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			response.Error(w, http.StatusBadRequest, err)
 			return
 		}
-		result, err := h.App.SupplyService.Replenish(r.Context(), req.Quantity)
+		result, err := h.App.SupplyService.Replenish(r.Context(), req.Quantity, req.SupplierID)
 		h.writeResult(w, result, err)
 	default:
 		response.MethodNotAllowed(w)
