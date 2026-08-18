@@ -3661,8 +3661,8 @@ func TestAutomaticEmergencyReplenishmentCreatesStrongParallelLadderAndStops(t *t
 	quantitiesMu.Lock()
 	gotQuantities := append([]int(nil), quantities...)
 	quantitiesMu.Unlock()
-	if fmt.Sprint(gotQuantities) != "[10 10 10]" {
-		t.Fatalf("emergency competition quantities = %v, want [10 10 10]", gotQuantities)
+	if fmt.Sprint(gotQuantities) != "[4 3 3]" {
+		t.Fatalf("emergency competition quantities = %v, want [4 3 3]", gotQuantities)
 	}
 	orders, err := st.ListOpenSupplyOrders(ctx, 10)
 	if err != nil || len(orders) != 3 {
@@ -3868,6 +3868,27 @@ func TestReadySupplyOrderTakeBudgetKeepsFirstScarceOrderWithinOverageAllowance(t
 	if readySupplyOrderAccepted(cfg, SmartResource{}, orders, &orders[1], need, allowance) ||
 		readySupplyOrderAccepted(cfg, SmartResource{}, orders, &orders[2], need, allowance) {
 		t.Fatal("later ready orders should wait until the accepted scarce order becomes irreversible")
+	}
+}
+
+func TestReadySupplyOrderTakeBudgetSelectsExactSmallOrderCombination(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{Product: "oauth_7d", NewAccountConfidence: 1}
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	orders := []store.SupplyOrder{
+		{ID: 1, OrderID: "ready-7-a", RequestedQuantity: 7, ReadyQuantity: 7, Automatic: true, Status: "ready", CreatedAtMS: 1},
+		{ID: 2, OrderID: "ready-7-b", RequestedQuantity: 7, ReadyQuantity: 7, Automatic: true, Status: "ready", CreatedAtMS: 2},
+		{ID: 3, OrderID: "ready-6", RequestedQuantity: 6, ReadyQuantity: 6, Automatic: true, Status: "ready", CreatedAtMS: 3},
+	}
+	need := 13 * unit
+	allowance := unit
+	if !readySupplyOrderAccepted(cfg, SmartResource{}, orders, &orders[0], need, allowance) {
+		t.Fatal("the first quantity-7 order should be accepted")
+	}
+	if readySupplyOrderAccepted(cfg, SmartResource{}, orders, &orders[1], need, allowance) {
+		t.Fatal("the second quantity-7 order should be excluded in favor of the exact 7 + 6 combination")
+	}
+	if !readySupplyOrderAccepted(cfg, SmartResource{}, orders, &orders[2], need, allowance) {
+		t.Fatal("the quantity-6 order should complete the exact live-deficit combination")
 	}
 }
 
@@ -5390,7 +5411,7 @@ func TestAutomaticOrderTakesWhenCapacityStillNeededWithoutReleaseProbe(t *testin
 		case r.URL.Path == "/api/customer/login":
 			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
 		case r.URL.Path == "/api/customer/pickup/orders/order-reserved" && r.Method == http.MethodGet:
-			_, _ = w.Write([]byte(`{"id":"order-reserved","status":"ready","ready_quantity":10,"progress":100,"take_url":"/api/customer/pickup/orders/order-reserved/take"}`))
+			_, _ = w.Write([]byte(`{"id":"order-reserved","status":"ready","ready_quantity":1,"progress":100,"take_url":"/api/customer/pickup/orders/order-reserved/take"}`))
 		case r.URL.Path == "/api/customer/pickup/orders/order-reserved/take" && r.Method == http.MethodPost:
 			takeCalls.Add(1)
 			_, _ = w.Write([]byte(`{"payload":{"accounts":[{"type":"codex","account":"reserved@example.com","access_token":"secret"}]},"status":"completed"}`))
@@ -5430,8 +5451,8 @@ func TestAutomaticOrderTakesWhenCapacityStillNeededWithoutReleaseProbe(t *testin
 		t.Fatalf("save config: %v", err)
 	}
 	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
-		OrderID: "order-reserved", Product: "oauth_7d", RequestedQuantity: 10, Automatic: true,
-		Status: "ready", ReadyQuantity: 10, Progress: 100,
+		OrderID: "order-reserved", Product: "oauth_7d", RequestedQuantity: 1, Automatic: true,
+		Status: "ready", ReadyQuantity: 1, Progress: 100,
 	}); err != nil {
 		t.Fatalf("create order: %v", err)
 	}
@@ -5448,6 +5469,52 @@ func TestAutomaticOrderTakesWhenCapacityStillNeededWithoutReleaseProbe(t *testin
 	}
 	if takeCalls.Load() != 1 || uploadCalls.Load() != 1 {
 		t.Fatalf("take=%d upload=%d, want 1/1", takeCalls.Load(), uploadCalls.Load())
+	}
+}
+
+func TestNonSmartAutomaticOrderReleasesQuantityFarAboveLiveDeficit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"files":[]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "non-smart-final-take-budget.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	smartDisabled := false
+	cfg := store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, SmartEnabled: &smartDisabled, Product: "oauth_7d",
+			TargetAvailableAccounts: 1, NewAccountConfidence: 1,
+		},
+	}
+	if err := st.SaveManagerConfig(ctx, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	order, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "oversized-ready-10", Product: "oauth_7d", RequestedQuantity: 10,
+		ReadyQuantity: 10, Automatic: true, Status: "ready",
+	})
+	if err != nil {
+		t.Fatalf("create oversized order: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	released, err := service.autoReleaseAutomaticOrderIfNotNeeded(ctx, cfg, &order, true)
+	if err != nil || !released {
+		t.Fatalf("oversized final decision released=%v err=%v", released, err)
+	}
+	order, _, err = st.GetSupplyOrder(ctx, order.OrderID)
+	if err != nil || order.Status != "released" {
+		t.Fatalf("oversized order after final decision = %#v err=%v", order, err)
 	}
 }
 

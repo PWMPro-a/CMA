@@ -22,6 +22,7 @@ const (
 type purchaseTaskOrderStats struct {
 	fulfilled        int
 	committedPending int
+	reservedPending  int
 	orderCount       int
 	activeOrderCount int
 }
@@ -213,14 +214,34 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 		if len(openOrders) >= maxConcurrentSupplyOrders(cfg.Supply) {
 			continue
 		}
-		remaining := task.TargetQuantity - stats.fulfilled - stats.committedPending
+		// An active supplier reservation already occupies part of the task target,
+		// even before inventory is ready or payment is committed. Subtract it here
+		// so parallel worker slots split one target instead of submitting several
+		// identical full-deficit orders.
+		remaining := task.TargetQuantity - stats.fulfilled - stats.reservedPending
 		if remaining <= 0 {
 			continue
 		}
-		quantity := min(100, remaining)
+		availableTaskSlots := max(1, task.MaxConcurrentOrders) - stats.activeOrderCount
+		availableGlobalSlots := maxConcurrentSupplyOrders(cfg.Supply) - len(openOrders)
+		quantity := purchaseTaskNextOrderQuantity(remaining, min(availableTaskSlots, availableGlobalSlots))
 		return s.createPurchaseTaskOrder(ctx, cfg, &task, quantity, openOrders, stats.activeOrderCount)
 	}
 	return nil
+}
+
+// purchaseTaskNextOrderQuantity shards the uncovered target across the worker
+// slots that can still be filled. For example, a target of 20 with three slots
+// becomes 7 + 7 + 6 instead of three competing orders of 20. Smaller supplier
+// reservations are easier to fill, while the aggregate reservation remains
+// bounded by the task target and the ready-order take budget chooses the final
+// live-deficit combination.
+func purchaseTaskNextOrderQuantity(remaining int, availableSlots int) int {
+	if remaining <= 0 || availableSlots <= 0 {
+		return 0
+	}
+	availableSlots = min(availableSlots, remaining)
+	return min(100, (remaining+availableSlots-1)/availableSlots)
 }
 
 func (s *Service) createPurchaseTaskOrder(
@@ -406,6 +427,10 @@ func summarizePurchaseTaskOrders(orders []store.SupplyOrder) purchaseTaskOrderSt
 		if committed > delivered {
 			stats.committedPending += committed - delivered
 		}
+		reserved := purchaseTaskOrderReservedQuantity(order)
+		if reserved > delivered {
+			stats.reservedPending += reserved - delivered
+		}
 	}
 	return stats
 }
@@ -434,6 +459,29 @@ func purchaseTaskOrderCommittedQuantity(order store.SupplyOrder) int {
 	return 0
 }
 
+// purchaseTaskOrderReservedQuantity counts the quantity already assigned to an
+// active child order. Waiting/creating orders reserve their requested quantity
+// for task sizing, while a ready order uses the quantity the supplier actually
+// secured so a partial fill can still enqueue only the uncovered remainder.
+func purchaseTaskOrderReservedQuantity(order store.SupplyOrder) int {
+	delivered := max(0, order.ImportedCount)
+	status := strings.ToLower(strings.TrimSpace(order.Status))
+	switch status {
+	case "creating", "create_uncertain", "created", "waiting_inventory":
+		return max(delivered, max(order.RequestedQuantity, max(order.ReadyQuantity, order.ItemCount)))
+	case "ready":
+		actual := max(order.ReadyQuantity, order.ItemCount)
+		if actual <= 0 {
+			actual = order.RequestedQuantity
+		}
+		return max(delivered, actual)
+	case "taking", "importing", "partial", "recovery_importing", "recovery_partial":
+		return max(delivered, max(order.RequestedQuantity, max(order.ReadyQuantity, order.ItemCount)))
+	default:
+		return delivered
+	}
+}
+
 func (s *Service) purchaseTaskOrderPollDue(cfg store.ManagerSupplyConfig, order store.SupplyOrder, nowMS int64) bool {
 	if order.SupplierRetryUntilMS > nowMS {
 		return false
@@ -460,6 +508,14 @@ func (s *Service) stopPurchaseTaskOrderIfNeeded(ctx context.Context, order *stor
 		return false, nil
 	}
 	status := strings.ToLower(strings.TrimSpace(order.Status))
+	if task.Source == "automatic" || order.Automatic {
+		// Automatic reservations must reach the live-deficit decision in
+		// autoReleaseAutomaticOrderIfNotNeeded. A task status can become completed
+		// or cancelled from an older planner snapshot; treating that status as the
+		// final decision would either discard newly scarce stock or take surplus
+		// without checking the pool immediately before Take.
+		return false, nil
+	}
 	if status == "taking" || status == "importing" || status == "partial" || order.ItemCount > order.ImportedCount || order.ChargedFen > 0 {
 		return false, nil
 	}

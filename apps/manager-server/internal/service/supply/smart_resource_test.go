@@ -2282,7 +2282,7 @@ func TestStrongSupplyCreatesMinimumEmergencyOrderWhenPoolIsEmptyAndUsageRateNotR
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if createCalls.Load() != 1 || createQuantity.Load() != 5 {
+	if createCalls.Load() != 1 || createQuantity.Load() != 2 {
 		t.Fatalf("create calls/quantity = %d/%d", createCalls.Load(), createQuantity.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
@@ -2409,8 +2409,8 @@ func TestStartupAccountFloorCreatesWithoutUsageAboveCriticalWaterline(t *testing
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if createCalls.Load() != 1 || createQuantity.Load() != 2 {
-		t.Fatalf("create calls/quantity = %d/%d, want 1/2", createCalls.Load(), createQuantity.Load())
+	if createCalls.Load() != 1 || createQuantity.Load() != 1 {
+		t.Fatalf("create calls/quantity = %d/%d, want 1/1", createCalls.Load(), createQuantity.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
 	if err != nil {
@@ -2973,8 +2973,8 @@ func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *t
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if createQuantity.Load() != 10 {
-		t.Fatalf("quota-capacity shortage should create one healthy-floor batch, quantity=%d", createQuantity.Load())
+	if createQuantity.Load() != 4 {
+		t.Fatalf("quota-capacity shortage should create the first small parallel shard, quantity=%d", createQuantity.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
 	if err != nil {
@@ -2985,7 +2985,7 @@ func TestSmartAutomaticUsesCapacitySizedBatchBelowWarningWhenSupplyIsPlenty(t *t
 		status.SmartResource.DecisionReason != "available_capacity_critical" {
 		t.Fatalf("smart resource = %#v", status.SmartResource)
 	}
-	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "available_capacity_critical" || status.Orders[0].RequestedQuantity != 10 {
+	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "available_capacity_critical" || status.Orders[0].RequestedQuantity != 4 {
 		t.Fatalf("staged order = %#v", status.Orders)
 	}
 }
@@ -3051,8 +3051,8 @@ func TestSmartAutomaticUsesQuotaSizedBatchWhenSupplyIsScarce(t *testing.T) {
 	if err := service.RunAutomatic(context.Background()); err != nil {
 		t.Fatalf("run automatic: %v", err)
 	}
-	if createQuantity.Load() != 10 {
-		t.Fatalf("scarce supply must still use the healthy-floor batch, quantity=%d", createQuantity.Load())
+	if createQuantity.Load() != 4 {
+		t.Fatalf("scarce supply must still create the first small parallel shard, quantity=%d", createQuantity.Load())
 	}
 	status, err := service.GetStatus(context.Background(), 10)
 	if err != nil {
@@ -3063,7 +3063,7 @@ func TestSmartAutomaticUsesQuotaSizedBatchWhenSupplyIsScarce(t *testing.T) {
 		status.SmartResource.DecisionReason != "available_capacity_critical" {
 		t.Fatalf("smart resource = %#v", status.SmartResource)
 	}
-	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "available_capacity_critical" || status.Orders[0].RequestedQuantity != 10 {
+	if len(status.Orders) == 0 || status.Orders[0].TriggerReason != "available_capacity_critical" || status.Orders[0].RequestedQuantity != 4 {
 		t.Fatalf("staged scarce order = %#v", status.Orders)
 	}
 }

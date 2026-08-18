@@ -2601,11 +2601,11 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			!isSmartEmergencyRetryReason(resource.DecisionReason) {
 			resource.DecisionReason = "emergency_refill_to_healthy"
 		}
-		// Parallel emergency抢货 repeats the current full shortage inside the
-		// bounded three-order window. For a verified need of 10 accounts, the
-		// three competing reservations are 10, 10 and 10. Existing ready/take
-		// admission still evaluates aggregate capacity before any reservation is
-		// paid, so reservation coverage can be aggressive without blind overbuying.
+		// Preserve the full verified shortage as the durable task target while the
+		// emergency competition window is open. The purchase-task worker shards
+		// this target across its remaining slots (for example 20 -> 7 + 7 + 6),
+		// and ready/take admission selects the best live-deficit combination before
+		// any reservation is paid.
 		if parallelEligible {
 			competition, found, competitionErr := s.parallelSupplyCompetition(ctx, supplyCfg, openOrders)
 			if competitionErr != nil {
@@ -3153,7 +3153,18 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 		return false, err
 	}
 	s.updateCPAOverview(available, cfg.Supply.TargetAvailableAccounts)
-	if available < cfg.Supply.TargetAvailableAccounts {
+	deficit := max(0, cfg.Supply.TargetAvailableAccounts-available)
+	if deficit <= 0 {
+		return true, s.markAutomaticOrderReleasedLocally(ctx, order)
+	}
+	orders, err := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
+	if err != nil {
+		return false, err
+	}
+	unit := smartEstimatedNewAccountCapacityForResource(cfg.Supply, SmartResource{})
+	need := float64(deficit) * unit
+	allowance := math.Max(unit, need*0.15)
+	if readySupplyOrderAccepted(cfg.Supply, SmartResource{}, orders, order, need, allowance) {
 		return false, nil
 	}
 	return true, s.markAutomaticOrderReleasedLocally(ctx, order)
@@ -7657,14 +7668,11 @@ func supplyCreatePlanningResource(
 	return resource
 }
 
-// emergencyParallelOrderQuantity returns the next bounded quantity in the
-// emergency抢货 competition. Every bounded competitor requests the current
-// calculated shortage. This deliberately overbooks reservations while stock is
-// scarce: supplier reservations are not paid until the aggregate take budget
-// admits them, and the larger request gives partial/fragmented stock more ways
-// to satisfy the shortage. The stage is based on all attempts in the current
-// primary-order cycle, including cancelled rows, so the three-order ceiling is
-// still respected.
+// emergencyParallelOrderQuantity keeps the current calculated shortage as the
+// durable task target while the bounded emergency competition remains active.
+// The purchase-task worker is responsible for splitting that target into small
+// child reservations; the attempt stage still includes cancelled rows so the
+// three-order ceiling is respected.
 func emergencyParallelOrderQuantity(
 	resource SmartResource,
 	quantity int,
