@@ -815,6 +815,43 @@ func TestEmergencyParallelNextIntervalStopsAfterTwoCancelledRungsForSamePrimary(
 	}
 }
 
+func TestAutomaticParallelCreateReplansActiveTaskWithFreeSlots(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "active-task-free-slots.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	enabled := true
+	cfg := store.ManagerSupplyConfig{
+		Enabled: &enabled, SmartEnabled: &enabled, Product: "oauth_7d",
+		MaxConcurrentOrders: 3,
+	}
+	task, err := st.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
+		TaskID: "purchase-growing-shortage", Source: "automatic", Product: "oauth_7d",
+		TargetQuantity: 20, Status: purchaseTaskStatusRunning, MaxConcurrentOrders: 3,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	oldWaiting, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "old-final-one", TaskID: task.TaskID, Product: "oauth_7d",
+		RequestedQuantity: 1, Automatic: true, Status: "waiting_inventory",
+		TriggerReason: "parallel_available_capacity_critical",
+	})
+	if err != nil {
+		t.Fatalf("create old waiting order: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil))
+	eligible, err := service.automaticParallelCreateEligible(ctx, cfg, []store.SupplyOrder{oldWaiting})
+	if err != nil {
+		t.Fatalf("parallel continuation eligibility: %v", err)
+	}
+	if !eligible {
+		t.Fatal("one old task order must leave the other emergency purchase slots available for replanning")
+	}
+}
+
 func TestAutomaticParallelCreateBlocksAfterZeroDeliveryBurst(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "supply-parallel-burst.sqlite"))
 	if err != nil {

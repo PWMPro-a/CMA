@@ -163,9 +163,10 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Supplier lifecycle reconciliation has priority over creating another
-	// reservation. This keeps retries idempotent and makes cancellation/completion
-	// close surplus child orders before a new attempt is admitted.
+	// Supplier lifecycle reconciliation runs before creating another reservation.
+	// A polled order that is still only waiting for inventory keeps its own slot,
+	// but must not consume the entire worker turn when the task has other slots and
+	// a newly enlarged shortage to cover.
 	for _, order := range openOrders {
 		if strings.TrimSpace(order.TaskID) == "" || !s.purchaseTaskOrderPollDue(cfg.Supply, order, nowMS) {
 			continue
@@ -178,7 +179,30 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 				return reconcileErr
 			}
 		}
-		return processErr
+		if processErr != nil {
+			return processErr
+		}
+		processed, found, getErr := s.store.GetSupplyOrder(ctx, order.OrderID)
+		if getErr != nil {
+			return getErr
+		}
+		if !found || isSupplyOrderCapacityCommitted(processed) {
+			return nil
+		}
+		switch strings.ToLower(strings.TrimSpace(processed.Status)) {
+		case "created", "waiting_inventory":
+			openOrders, err = s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
+			if err != nil {
+				return err
+			}
+			// Continue into task admission below. Only one supplier order was polled,
+			// and at most one new reservation is still created in this worker turn.
+		case "creating", "create_uncertain", "taking", "importing", "partial":
+			return nil
+		default:
+			return nil
+		}
+		break
 	}
 
 	tasks, err := s.store.ListActiveSupplyPurchaseTasks(ctx, 20)

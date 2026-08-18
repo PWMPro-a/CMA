@@ -117,6 +117,84 @@ func TestPurchaseTaskParallelSlotsCreateSmallOrdersWithinTarget(t *testing.T) {
 	}
 }
 
+func TestPurchaseTaskPollsOldWaitingOrderAndUsesRemainingSlotsSameTurn(t *testing.T) {
+	var createCalls atomic.Int32
+	var createdQuantity atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/pickup/orders/old-final-one" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"id":"old-final-one","status":"waiting_inventory","quantity":1,"retry_after_seconds":60}`))
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":0,"missing":100,"needs_production":true,"estimated_total_fen":4800,"estimated_unit_price_fen":300}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
+		case r.URL.Path == "/api/customer/pickup/orders" && r.Method == http.MethodPost:
+			var request struct {
+				Quantity int `json:"quantity"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("decode create request: %v", err)
+			}
+			createCalls.Add(1)
+			createdQuantity.Store(int32(request.Quantity))
+			_, _ = fmt.Fprintf(w, `{"order":{"id":"new-emergency-shard","status":"waiting_inventory","quantity":%d,"retry_after_seconds":60}}`, request.Quantity)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-old-slot.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	smartDisabled := false
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{Supply: store.ManagerSupplyConfig{
+		Enabled: &enabled, SmartEnabled: &smartDisabled, MaxConcurrentOrders: 3,
+		Platforms: []store.ManagerSupplyPlatformConfig{{
+			ID: "legacy", Type: managerconfigsvc.SupplyPlatformLegacy, Enabled: &enabled,
+			BaseURL: server.URL, Token: "supplier-token", Product: "oauth_7d",
+		}},
+	}}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	task, err := st.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
+		TaskID: "purchase-expanded-emergency", Source: "automatic", Product: "oauth_7d",
+		TargetQuantity: 51, Status: purchaseTaskStatusRunning, MaxConcurrentOrders: 3,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "completed-prefix", TaskID: task.TaskID, Product: "oauth_7d",
+		RequestedQuantity: 19, Automatic: true, Status: "completed", ItemCount: 19, ImportedCount: 19,
+	}); err != nil {
+		t.Fatalf("create completed prefix: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "old-final-one", TaskID: task.TaskID, SupplierID: "legacy", Product: "oauth_7d",
+		RequestedQuantity: 1, Automatic: true, Status: "waiting_inventory",
+		StatusURL:     "/api/customer/pickup/orders/old-final-one",
+		TriggerReason: "parallel_available_capacity_critical",
+	}); err != nil {
+		t.Fatalf("create old waiting order: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	if err := service.RunPurchaseTasks(ctx); err != nil {
+		t.Fatalf("run expanded task: %v", err)
+	}
+	if createCalls.Load() != 1 || createdQuantity.Load() != 16 {
+		t.Fatalf("new emergency shard calls/quantity = %d/%d, want 1/16", createCalls.Load(), createdQuantity.Load())
+	}
+	orders, err := st.ListOpenSupplyOrders(ctx, 10)
+	if err != nil || len(orders) != 2 {
+		t.Fatalf("open orders after same-turn admission = %#v err=%v", orders, err)
+	}
+}
+
 func TestPurchaseTaskRetriesCreateFailureUntilTargetIsFulfilled(t *testing.T) {
 	var createCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

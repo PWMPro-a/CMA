@@ -2229,6 +2229,15 @@ func (s *Service) automaticParallelCreateEligible(
 		!openOrdersAllowParallelCreate(orders) || !smartSupplyEnabled(cfg) {
 		return false, nil
 	}
+	if eligible, err := s.activePurchaseTaskParallelContinuationEligible(ctx, cfg, orders); err != nil {
+		return false, err
+	} else if eligible {
+		// A durable task can outlive its original shortage snapshot. Re-enter the
+		// planner while a waiting child still owns only one slot so a newly enlarged
+		// emergency deficit can expand the task and use the remaining slots. The
+		// fresh smart-resource pass later in run() remains the creation authority.
+		return true, nil
+	}
 	resource := s.currentSmartResource(cfg)
 	if !smartResourceEmergency(resource) && !isSmartEmergencyRetryReason(resource.DecisionReason) {
 		return false, nil
@@ -2245,6 +2254,27 @@ func (s *Service) automaticParallelCreateEligible(
 		return false, err
 	}
 	return !blocked, nil
+}
+
+func (s *Service) activePurchaseTaskParallelContinuationEligible(
+	ctx context.Context,
+	cfg store.ManagerSupplyConfig,
+	orders []store.SupplyOrder,
+) (bool, error) {
+	if s == nil || s.store == nil || maxConcurrentSupplyOrders(cfg) <= 1 ||
+		len(orders) == 0 || len(orders) >= maxConcurrentSupplyOrders(cfg) {
+		return false, nil
+	}
+	task, found, err := s.store.GetActiveAutomaticSupplyPurchaseTask(ctx)
+	if err != nil || !found {
+		return false, err
+	}
+	for _, order := range orders {
+		if strings.TrimSpace(order.TaskID) == task.TaskID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int, force bool, manualSupplierID ...string) (err error) {
