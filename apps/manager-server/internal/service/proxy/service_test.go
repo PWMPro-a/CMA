@@ -29,6 +29,54 @@ func testAuthFileContentSHA256(content []byte) string {
 	return fmt.Sprintf("%x", sha256.Sum256(content))
 }
 
+func TestCompactAuthFileRuntimeStatusResponseKeepsOnlyLiveListFields(t *testing.T) {
+	body := `{"files":[{"id":"runtime-1","name":"account.json","provider":"codex","auth_index":"auth-1","account":"user@example.com","disabled":false,"status":"active","runtime_current_concurrency":3,"runtime_frozen_until":"later","runtime_rate_limited_until":"latest","updated_at":"now","recent_requests":[{"success":1,"failed":0}],"id_token":{"plan_type":"team"},"cpamp_import":{"source":"supply"}}]}`
+	response := &http.Response{
+		Body:   io.NopCloser(strings.NewReader(body)),
+		Header: make(http.Header),
+	}
+	response.Header.Set("Content-Encoding", "gzip")
+
+	if err := compactAuthFileRuntimeStatusResponse(response); err != nil {
+		t.Fatalf("compact runtime status response: %v", err)
+	}
+	var payload struct {
+		Files []map[string]json.RawMessage `json:"files"`
+		Total int                          `json:"total"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode compact response: %v", err)
+	}
+	if payload.Total != 1 || len(payload.Files) != 1 {
+		t.Fatalf("compact payload = %#v", payload)
+	}
+	file := payload.Files[0]
+	for _, key := range []string{"id", "name", "provider", "auth_index", "account", "disabled", "status", "runtime_current_concurrency", "runtime_frozen_until", "runtime_rate_limited_until", "updated_at"} {
+		if _, ok := file[key]; !ok {
+			t.Fatalf("compact response missing %q: %#v", key, file)
+		}
+	}
+	for _, key := range []string{"recent_requests", "id_token", "cpamp_import"} {
+		if _, ok := file[key]; ok {
+			t.Fatalf("compact response retained heavy field %q: %#v", key, file)
+		}
+	}
+	if got := response.Header.Get("Content-Encoding"); got != "" {
+		t.Fatalf("Content-Encoding = %q, want empty", got)
+	}
+}
+
+func TestAuthFileRuntimeStatusRequestRequiresExactReadView(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/v0/management/auth-files?cpamp_view=runtime-status", nil)
+	if !isAuthFileRuntimeStatusRequest(request) {
+		t.Fatal("runtime status list request was not detected")
+	}
+	request.Method = http.MethodPatch
+	if isAuthFileRuntimeStatusRequest(request) {
+		t.Fatal("mutation request must not use the runtime status view")
+	}
+}
+
 func testVerifiedAuthFileWriteRequest(t *testing.T, name string, currentContent []byte, nextContent []byte) *http.Request {
 	t.Helper()
 	var body bytes.Buffer

@@ -7,6 +7,7 @@ const { mocks } = vi.hoisted(() => {
   return {
     mocks: {
       list: vi.fn(),
+      listRuntimeStatus: vi.fn(),
       saveJsonObject: vi.fn(),
       uploadFiles: vi.fn(),
       deleteAll: vi.fn(),
@@ -68,6 +69,7 @@ vi.mock('@/stores', () => ({
 vi.mock('@/services/api', () => ({
   authFilesApi: {
     list: mocks.list,
+    listRuntimeStatus: mocks.listRuntimeStatus,
     saveJsonObject: mocks.saveJsonObject,
     uploadFiles: mocks.uploadFiles,
     deleteAll: mocks.deleteAll,
@@ -200,6 +202,7 @@ const mountUseAuthFilesData = (
 
 beforeEach(() => {
   mocks.list.mockReset();
+  mocks.listRuntimeStatus.mockReset();
   mocks.saveJsonObject.mockReset();
   mocks.uploadFiles.mockReset();
   mocks.deleteAll.mockReset();
@@ -215,6 +218,7 @@ beforeEach(() => {
   mocks.showConfirmation.mockReset();
 
   mocks.list.mockResolvedValue({ files: [] });
+  mocks.listRuntimeStatus.mockResolvedValue({ files: [] });
   mocks.saveJsonObject.mockResolvedValue(undefined);
   mocks.uploadFiles.mockResolvedValue({ status: 'ok', uploaded: 0, files: [], failed: [] });
   mocks.deleteAll.mockResolvedValue(undefined);
@@ -2008,6 +2012,69 @@ describe('useAuthFilesData batchDelete', () => {
 });
 
 describe('useAuthFilesData status targeting', () => {
+  it('merges compact runtime status without replacing full credential metadata', async () => {
+    const fullFile = {
+      id: 'runtime-1',
+      name: 'codex.json',
+      type: 'codex',
+      auth_index: 'auth-1',
+      account: 'user@example.com',
+      disabled: false,
+      status: 'active',
+      runtime_current_concurrency: 0,
+      runtime_frozen_until: '2026-08-19T00:02:00Z',
+      runtime_rate_limited_until: '2026-08-19T00:03:00Z',
+      runtime_last_skip_reason: 'rate_limited',
+      recent_requests: [{ success: 8, failed: 1 }],
+      cpamp_import: {
+        version: 1,
+        source: 'manual',
+        method: 'file_upload',
+        platform_id: 'cpa',
+        platform_name: 'CPA',
+        imported_by: 'cpa-manager-plus',
+        imported_at: '2026-08-19T00:00:00Z',
+      },
+    } as AuthFileItem;
+    mocks.list.mockResolvedValue({ files: [fullFile] });
+    mocks.listRuntimeStatus.mockResolvedValue({
+      files: [
+        {
+          id: 'runtime-1',
+          name: 'codex.json',
+          type: 'codex',
+          auth_index: 'auth-1',
+          account: 'user@example.com',
+          disabled: true,
+          status: 'disabled',
+          runtime_current_concurrency: 4,
+          updated_at: '2026-08-19T00:01:00Z',
+        },
+      ],
+    });
+    const hook = mountUseAuthFilesData('connection-a');
+
+    await act(async () => hook.getCurrent().loadFiles());
+    await act(async () => hook.getCurrent().loadFiles({ silent: true, runtimeStatusOnly: true }));
+
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(mocks.listRuntimeStatus).toHaveBeenCalledTimes(1);
+    expect(hook.getCurrent().files).toEqual([
+      expect.objectContaining({
+        disabled: true,
+        status: 'disabled',
+        runtime_current_concurrency: 4,
+        updated_at: '2026-08-19T00:01:00Z',
+        recent_requests: [{ success: 8, failed: 1 }],
+        cpamp_import: fullFile.cpamp_import,
+      }),
+    ]);
+    expect(hook.getCurrent().files[0]).not.toHaveProperty('runtime_frozen_until');
+    expect(hook.getCurrent().files[0]).not.toHaveProperty('runtime_rate_limited_until');
+    expect(hook.getCurrent().files[0]).not.toHaveProperty('runtime_last_skip_reason');
+    hook.unmount();
+  });
+
   it('does not let an old connection load overwrite the new connection files', async () => {
     const oldFiles = [
       {

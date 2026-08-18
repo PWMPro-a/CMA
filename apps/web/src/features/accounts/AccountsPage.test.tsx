@@ -1178,7 +1178,10 @@ describe('AccountsPage replacement flows', () => {
     });
 
     expect(mocks.loadFiles).toHaveBeenCalledTimes(2);
-    expect(mocks.loadFiles).toHaveBeenLastCalledWith({ silent: true });
+    expect(mocks.loadFiles).toHaveBeenLastCalledWith({
+      silent: true,
+      runtimeStatusOnly: true,
+    });
   });
 
   it('clears quota snapshot state and ignores a late query from the previous connection', async () => {

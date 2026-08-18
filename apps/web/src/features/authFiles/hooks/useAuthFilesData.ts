@@ -107,7 +107,7 @@ export type UseAuthFilesDataResult = {
   batchRegistrationRetrying: boolean;
   batchFieldsUpdating: boolean;
   fileInputRef: RefObject<HTMLInputElement | null>;
-  loadFiles: (options?: { throwOnError?: boolean; silent?: boolean }) => Promise<void>;
+  loadFiles: (options?: LoadAuthFilesOptions) => Promise<void>;
   handleUploadClick: () => void;
   handleFileChange: (event: ChangeEvent<HTMLInputElement>) => Promise<void>;
   handleDroppedFiles: (files: File[]) => Promise<void>;
@@ -781,6 +781,69 @@ type UseAuthFilesDataOptions = {
   connectionFingerprint?: string | null;
 };
 
+type LoadAuthFilesOptions = {
+  throwOnError?: boolean;
+  silent?: boolean;
+  runtimeStatusOnly?: boolean;
+};
+
+const AUTH_FILE_RUNTIME_STATUS_FIELDS = [
+  'disabled',
+  'unavailable',
+  'status',
+  'status_message',
+  'statusMessage',
+  'runtime_current_concurrency',
+  'runtimeCurrentConcurrency',
+  'current_concurrency',
+  'currentConcurrency',
+  'active_requests',
+  'activeRequests',
+  'in_flight_requests',
+  'inFlightRequests',
+  'runtime_frozen_until',
+  'runtimeFrozenUntil',
+  'runtime_rate_limited_until',
+  'runtimeRateLimitedUntil',
+  'runtime_last_skip_reason',
+  'runtimeLastSkipReason',
+  'updated_at',
+  'updatedAt',
+  'updated_at_ms',
+  'updatedAtMs',
+] as const;
+
+const mergeAuthFileRuntimeStatus = (
+  current: AuthFileItem[],
+  snapshot: AuthFileItem[]
+): AuthFileItem[] => {
+  if (current.length === 0 || snapshot.length === 0) return current;
+  const snapshotByKey = new Map(snapshot.map((file) => [getAuthFileSelectionKey(file), file]));
+  let changed = false;
+  const next = current.map((file) => {
+    const status = snapshotByKey.get(getAuthFileSelectionKey(file));
+    if (!status) return file;
+    let nextFile: AuthFileItem | null = null;
+    for (const field of AUTH_FILE_RUNTIME_STATUS_FIELDS) {
+      const hasStatusField = Object.prototype.hasOwnProperty.call(status, field);
+      const hasCurrentField = Object.prototype.hasOwnProperty.call(file, field);
+      if (!hasStatusField) {
+        if (!hasCurrentField) continue;
+        nextFile ??= { ...file };
+        delete nextFile[field];
+        continue;
+      }
+      if (hasCurrentField && Object.is(file[field], status[field])) continue;
+      nextFile ??= { ...file };
+      (nextFile as Record<string, unknown>)[field] = status[field];
+    }
+    if (!nextFile) return file;
+    changed = true;
+    return nextFile;
+  });
+  return changed ? next : current;
+};
+
 const ACTIVE_AGENT_REGISTRATION_STATES = new Set(['queued', 'registering', 'retry_wait']);
 
 const hasActiveAgentIdentityRegistration = (file: AuthFileItem): boolean => {
@@ -816,6 +879,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
   const connectionFingerprintRef = useRef(connectionFingerprint);
   const authFilesOperationGenerationRef = useRef(0);
   const loadFilesRequestRef = useRef(0);
+  const runtimeStatusRequestRef = useRef(0);
   const filesRevisionRef = useRef(0);
   const batchStatusPendingRef = useRef<number | null>(null);
   const statusMutationPendingRef = useRef<Map<string, number>>(new Map());
@@ -832,6 +896,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
     connectionFingerprintRef.current = connectionFingerprint;
     authFilesOperationGenerationRef.current += 1;
     loadFilesRequestRef.current += 1;
+    runtimeStatusRequestRef.current += 1;
     batchStatusPendingRef.current = null;
     statusMutationPendingRef.current.clear();
     batchFieldsPendingRef.current = null;
@@ -850,6 +915,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
     return () => {
       authFilesOperationGenerationRef.current += 1;
       loadFilesRequestRef.current += 1;
+      runtimeStatusRequestRef.current += 1;
       credentialRefreshGenerationRef.current += 1;
     };
   }, [commitFiles, connectionFingerprint]);
@@ -962,9 +1028,25 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
   }, [files, selectedFiles.size]);
 
   const loadFiles = useCallback(
-    async (options?: { throwOnError?: boolean; silent?: boolean }) => {
+    async (options?: LoadAuthFilesOptions) => {
       const requestConnectionFingerprint = connectionFingerprint;
       const generation = authFilesOperationGenerationRef.current;
+      if (options?.runtimeStatusOnly) {
+        const requestID = ++runtimeStatusRequestRef.current;
+        const isCurrentRequest = () =>
+          authFilesOperationGenerationRef.current === generation &&
+          connectionFingerprintRef.current === requestConnectionFingerprint &&
+          runtimeStatusRequestRef.current === requestID;
+        try {
+          const data = await authFilesApi.listRuntimeStatus();
+          if (!isCurrentRequest()) return;
+          commitFiles((current) => mergeAuthFileRuntimeStatus(current, data?.files || []));
+        } catch (err: unknown) {
+          if (!isCurrentRequest() || !options.throwOnError) return;
+          throw err instanceof Error ? err : new Error(t('notification.refresh_failed'));
+        }
+        return;
+      }
       const requestID = ++loadFilesRequestRef.current;
       const isCurrentRequest = () =>
         authFilesOperationGenerationRef.current === generation &&

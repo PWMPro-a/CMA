@@ -168,6 +168,32 @@ describe('authFilesApi model endpoints', () => {
 });
 
 describe('authFilesApi list normalization', () => {
+  it('requests the compact runtime status view for passive account refreshes', async () => {
+    mocks.get.mockResolvedValue({
+      files: [
+        {
+          id: 'runtime-1',
+          name: 'codex.json',
+          auth_index: 'auth-1',
+          runtime_current_concurrency: 3,
+        },
+      ],
+    });
+
+    const result = await authFilesApi.listRuntimeStatus();
+
+    expect(mocks.get).toHaveBeenCalledWith('/auth-files', {
+      params: { cpamp_view: 'runtime-status' },
+    });
+    expect(result.files).toEqual([
+      expect.objectContaining({
+        id: 'runtime-1',
+        name: 'codex.json',
+        runtime_current_concurrency: 3,
+      }),
+    ]);
+  });
+
   it('requests config-backed credentials for the grouping workspace', async () => {
     mocks.get.mockResolvedValue({
       files: [

@@ -89,12 +89,55 @@ const authFileDeleteIdentitiesHeader = "X-CPAMP-Auth-File-Delete-Identities"
 const authFileMutationIdentityHeader = "X-CPAMP-Auth-File-Mutation-Identity"
 const authFileWriteIdentitiesHeader = "X-CPAMP-Auth-File-Write-Identities"
 const authFileWriteContentSHA256Header = "X-CPAMP-Auth-File-Write-Content-SHA256"
+const authFileViewQueryParam = "cpamp_view"
+const authFileRuntimeStatusView = "runtime-status"
 
 const maxAuthFileMutationRequestBytes int64 = 10*1024*1024 + 64*1024
 const maxAuthFileMutationResponseBytes int64 = 1024 * 1024
+const maxAuthFileRuntimeStatusResponseBytes int64 = 64 * 1024 * 1024
 const authFileOwnershipPersistenceTimeout = 5 * time.Second
 
 var errAuthFileMutationBodyTooLarge = errors.New("auth file mutation body is too large")
+
+var authFileRuntimeStatusFields = map[string]struct{}{
+	"id":                          {},
+	"name":                        {},
+	"type":                        {},
+	"provider":                    {},
+	"auth_index":                  {},
+	"authIndex":                   {},
+	"runtime_only":                {},
+	"runtimeOnly":                 {},
+	"config_backed":               {},
+	"account_id":                  {},
+	"accountId":                   {},
+	"account":                     {},
+	"email":                       {},
+	"label":                       {},
+	"disabled":                    {},
+	"unavailable":                 {},
+	"status":                      {},
+	"status_message":              {},
+	"statusMessage":               {},
+	"runtime_current_concurrency": {},
+	"runtimeCurrentConcurrency":   {},
+	"current_concurrency":         {},
+	"currentConcurrency":          {},
+	"active_requests":             {},
+	"activeRequests":              {},
+	"in_flight_requests":          {},
+	"inFlightRequests":            {},
+	"runtime_frozen_until":        {},
+	"runtimeFrozenUntil":          {},
+	"runtime_rate_limited_until":  {},
+	"runtimeRateLimitedUntil":     {},
+	"runtime_last_skip_reason":    {},
+	"runtimeLastSkipReason":       {},
+	"updated_at":                  {},
+	"updatedAt":                   {},
+	"updated_at_ms":               {},
+	"updatedAtMs":                 {},
+}
 
 var cpaBuiltinManagementPathHeads = map[string]struct{}{
 	"account-action-candidates": {},
@@ -182,6 +225,7 @@ func (s *Service) proxyWithSavedManagementKey(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error), useSavedManagementKey bool, rewritePluginOrigin bool) {
+	runtimeStatusView := isAuthFileRuntimeStatusRequest(r)
 	setup, ok, err := s.resolveSetup(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -259,6 +303,12 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 		req.Header.Del(authFileMutationIdentityHeader)
 		req.Header.Del(authFileWriteIdentitiesHeader)
 		req.Header.Del(authFileWriteContentSHA256Header)
+		if runtimeStatusView {
+			query := req.URL.Query()
+			query.Del(authFileViewQueryParam)
+			req.URL.RawQuery = query.Encode()
+			req.Header.Set("Accept-Encoding", "identity")
+		}
 		if ownershipMutation.clearAll || len(ownershipMutation.fileNames) > 0 || len(ownershipMutation.ownershipTargets) > 0 {
 			req.Header.Set("Accept-Encoding", "identity")
 		}
@@ -277,6 +327,11 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 			return s.restoreInspectionOwnershipDetached(r.Context(), revokedOwnership)
 		}
+		if runtimeStatusView {
+			if err := compactAuthFileRuntimeStatusResponse(response); err != nil {
+				return err
+			}
+		}
 		mutation, err := successfulAuthFileOwnershipMutation(response, ownershipMutation)
 		if err != nil {
 			// The upstream request may already have succeeded. Keep ownership revoked
@@ -287,6 +342,58 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 		return s.restoreInspectionOwnershipDetached(r.Context(), ownershipItemsNotMutated(revokedOwnership, mutation))
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+func isAuthFileRuntimeStatusRequest(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodGet {
+		return false
+	}
+	return strings.TrimRight(r.URL.Path, "/") == "/v0/management/auth-files" &&
+		strings.EqualFold(strings.TrimSpace(r.URL.Query().Get(authFileViewQueryParam)), authFileRuntimeStatusView)
+}
+
+func compactAuthFileRuntimeStatusResponse(response *http.Response) error {
+	if response == nil || response.Body == nil {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxAuthFileRuntimeStatusResponseBytes+1))
+	if err != nil {
+		return err
+	}
+	_ = response.Body.Close()
+	if int64(len(body)) > maxAuthFileRuntimeStatusResponseBytes {
+		return errors.New("auth file runtime status response is too large")
+	}
+
+	var payload struct {
+		Files []map[string]json.RawMessage `json:"files"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return fmt.Errorf("decode auth file runtime status response: %w", err)
+	}
+	for index, file := range payload.Files {
+		compact := make(map[string]json.RawMessage, len(authFileRuntimeStatusFields))
+		for key, value := range file {
+			if _, ok := authFileRuntimeStatusFields[key]; ok {
+				compact[key] = value
+			}
+		}
+		payload.Files[index] = compact
+	}
+	compactBody, err := json.Marshal(struct {
+		Files []map[string]json.RawMessage `json:"files"`
+		Total int                          `json:"total"`
+	}{Files: payload.Files, Total: len(payload.Files)})
+	if err != nil {
+		return fmt.Errorf("encode auth file runtime status response: %w", err)
+	}
+
+	response.Body = io.NopCloser(bytes.NewReader(compactBody))
+	response.ContentLength = int64(len(compactBody))
+	response.Header.Del("Content-Encoding")
+	response.Header.Set("Content-Length", fmt.Sprintf("%d", len(compactBody)))
+	response.Header.Set("Content-Type", "application/json; charset=utf-8")
+	return nil
 }
 
 func (s *Service) acquireAuthFileMutation(

@@ -1099,7 +1099,7 @@ export function AccountsPage() {
   // the account cards reflect live activity without touching request routing.
   useInterval(
     () => {
-      void loadFiles({ silent: true });
+      void loadFiles({ silent: true, runtimeStatusOnly: true });
     },
     activeView === 'accounts' && documentVisible && !loading
       ? PASSIVE_RUNTIME_CONCURRENCY_REFRESH_MS
@@ -5281,7 +5281,7 @@ export function AccountsPage() {
         loading={accountPoolSummaryAvailable && accountPoolSummaryLoading}
       />
       {error ? <div className={styles.errorBox}>{error}</div> : null}
-      {loading || (accountPoolSummaryAvailable && accountPoolSummaryLoading) ? (
+      {loading ? (
         <div className={styles.loadingPanel}>
           <LoadingSpinner />
         </div>

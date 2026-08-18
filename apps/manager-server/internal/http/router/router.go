@@ -60,7 +60,7 @@ func New(appCtx *app.Context) http.Handler {
 	mux.HandleFunc("/management.html", panelHandler.ManagementHTML)
 	mux.HandleFunc("/", rootHandler(appCtx, usageHandler, modelPriceHandler, apiKeyAliasHandler, accountActionHandler, codexInspectionHandler, codexQuotaHandler, containerOpsHandler, dashboardHandler, monitoringHandler, quotaSnapshotHandler, supplyHandler, proxyHandler))
 
-	return middleware.Recovery(middleware.RequestLogger(mux))
+	return middleware.Recovery(middleware.RequestLogger(middleware.CompressLargeResponses(mux)))
 }
 
 func rootHandler(

@@ -1176,6 +1176,13 @@ const buildAuthFileStatusPayload = (
 export const authFilesApi = {
   list: async () => dedupeAuthFilesResponse(await apiClient.get<AuthFilesResponse>('/auth-files')),
 
+  listRuntimeStatus: async () =>
+    dedupeAuthFilesResponse(
+      await apiClient.get<AuthFilesResponse>('/auth-files', {
+        params: { cpamp_view: 'runtime-status' },
+      })
+    ),
+
   listForGrouping: async () =>
     dedupeAuthFilesResponse(
       await apiClient.get<AuthFilesResponse>('/auth-files', {
