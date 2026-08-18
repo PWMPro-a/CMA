@@ -23,6 +23,9 @@ import {
   type SupplyConfig,
   type SupplyOrder,
   type SupplyPlatformConfig,
+  type SupplyPlatformOverview,
+  type SupplyPlatformProduct,
+  type SupplyPlatformProductCatalog,
   type SupplyPurchaseTask,
   type SupplyQuotaEstimationPolicy,
   type SupplyReport,
@@ -46,7 +49,7 @@ const DEFAULT_QUOTA_ESTIMATION_POLICIES: Record<string, SupplyQuotaEstimationPol
 
 const newSupplyPlatform = (
   type: 'legacy' | 'bugteam' | 'nvtokens',
-  index: number,
+  index: number
 ): SupplyPlatformConfig => ({
   id: `${type}-${Date.now().toString(36)}-${index + 1}`,
   name: type === 'bugteam' ? 'BugTeam' : type === 'nvtokens' ? 'nvtokens' : `Supply ${index + 1}`,
@@ -64,7 +67,7 @@ const newSupplyPlatform = (
   passwordConfigured: false,
   token: '',
   tokenConfigured: false,
-  product: type === 'bugteam' ? 'team_1h' : 'oauth_30d',
+  product: type === 'bugteam' ? 'team_1h' : type === 'nvtokens' ? 'plus' : 'oauth_30d',
   purchaseAccountType: type === 'nvtokens' ? 'all' : undefined,
   maxUnitPriceFen: type === 'nvtokens' ? 0 : undefined,
   priority: index + 1,
@@ -446,6 +449,13 @@ export function SupplyPage() {
   const [reportLoading, setReportLoading] = useState(false);
   const [manualQuantity, setManualQuantity] = useState(10);
   const [manualSupplierId, setManualSupplierId] = useState('');
+  const [manualProduct, setManualProduct] = useState('');
+  const [manualQuote, setManualQuote] = useState<SupplyPlatformOverview | null>(null);
+  const [manualQuoteLoading, setManualQuoteLoading] = useState(false);
+  const [manualQuoteError, setManualQuoteError] = useState('');
+  const [platformCatalogs, setPlatformCatalogs] = useState<
+    Record<string, { loading: boolean; error?: string; catalog?: SupplyPlatformProductCatalog }>
+  >({});
   const [cancellingTaskId, setCancellingTaskId] = useState('');
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<SupplyWorkspaceTab>('overview');
@@ -466,6 +476,7 @@ export function SupplyPage() {
   const activeOrderLoadInFlightRef = useRef(false);
   const actionInFlightRef = useRef(false);
   const refreshGenerationRef = useRef(0);
+  const catalogRequestedRef = useRef(new Set<string>());
   const hasActiveOrder = Boolean(status?.activeOrder);
 
   const updateDraft = useCallback((patch: Partial<SupplyConfig>) => {
@@ -503,6 +514,21 @@ export function SupplyPage() {
   const updateSupplyPlatform = useCallback(
     (index: number, patch: Partial<SupplyPlatformConfig>) => {
       configDirtyRef.current = true;
+      const catalogIdentityChanged =
+        patch.type !== undefined ||
+        patch.baseUrl !== undefined ||
+        patch.username !== undefined ||
+        patch.password !== undefined ||
+        patch.token !== undefined;
+      const existingCatalogKey = draft.platforms?.[index]?.id.trim().toLowerCase();
+      if (catalogIdentityChanged && existingCatalogKey) {
+        catalogRequestedRef.current.delete(existingCatalogKey);
+        setPlatformCatalogs((catalogs) => {
+          const updated = { ...catalogs };
+          delete updated[existingCatalogKey];
+          return updated;
+        });
+      }
       setDraft((current) => {
         const platforms = [...(current.platforms ?? [])];
         const existing = platforms[index];
@@ -511,27 +537,61 @@ export function SupplyPage() {
         if (patch.type === 'bugteam') {
           next = {
             ...next,
+            id: `bugteam-${Date.now().toString(36)}-${index + 1}`,
             type: 'bugteam',
             baseUrl: 'https://bugteam.team',
             product: 'team_1h',
             emergencyOnly: true,
+            username: '',
+            clearUsername: false,
+            password: '',
+            passwordConfigured: false,
+            token: '',
+            tokenConfigured: false,
+            purchaseAccountType: undefined,
+            maxUnitPriceFen: undefined,
           };
         } else if (patch.type === 'nvtokens') {
           next = {
             ...next,
+            id: `nvtokens-${Date.now().toString(36)}-${index + 1}`,
             type: 'nvtokens',
             baseUrl: 'https://nvtokens.com',
-            product: next.product === 'team_1h' ? 'team_1h' : 'oauth_30d',
+            product: 'plus',
             emergencyOnly: false,
-            purchaseAccountType: next.purchaseAccountType || 'all',
-            maxUnitPriceFen: next.maxUnitPriceFen ?? 0,
+            username: '',
+            clearUsername: false,
+            password: '',
+            passwordConfigured: false,
+            token: '',
+            tokenConfigured: false,
+            purchaseAccountType: 'all',
+            maxUnitPriceFen: 0,
+          };
+        } else if (patch.type === 'legacy') {
+          next = {
+            ...next,
+            id: `legacy-${Date.now().toString(36)}-${index + 1}`,
+            type: 'legacy',
+            baseUrl: 'https://sogouedu.cc',
+            product: 'oauth_30d',
+            emergencyOnly: false,
+            username: '',
+            clearUsername: false,
+            password: '',
+            passwordConfigured: false,
+            token: '',
+            tokenConfigured: false,
+            purchaseAccountType: undefined,
+            maxUnitPriceFen: undefined,
           };
         }
         platforms[index] = next;
+
         return { ...current, platforms };
       });
     },
-    []
+    [draft.platforms]
   );
 
   const updatePlatformQuotaEstimationPolicy = useCallback(
@@ -585,6 +645,49 @@ export function SupplyPage() {
     }));
   }, []);
 
+  const loadPlatformCatalog = useCallback(
+    async (platform: SupplyPlatformConfig, force = false) => {
+      const key = platform.id.trim().toLowerCase();
+      if (!key || (!force && catalogRequestedRef.current.has(key))) return;
+      catalogRequestedRef.current.add(key);
+      setPlatformCatalogs((current) => ({
+        ...current,
+        [key]: { ...current[key], loading: true, error: undefined },
+      }));
+      try {
+        const catalog = await supplyApi.getPlatformCatalog(platform);
+        setPlatformCatalogs((current) => ({
+          ...current,
+          [key]: { loading: false, catalog },
+        }));
+      } catch (error) {
+        catalogRequestedRef.current.delete(key);
+        setPlatformCatalogs((current) => ({
+          ...current,
+          [key]: {
+            ...current[key],
+            loading: false,
+            error: error instanceof Error ? error.message : t('common.unknown_error'),
+          },
+        }));
+      }
+    },
+    [t]
+  );
+
+  useEffect(() => {
+    for (const platform of draft.platforms ?? []) {
+      if (platform.type !== 'nvtokens' || platform.enabled === false) continue;
+      const hasAuthentication =
+        Boolean(platform.token?.trim() || platform.tokenConfigured) ||
+        (Boolean(platform.username?.trim()) &&
+          Boolean(platform.password?.trim() || platform.passwordConfigured));
+      if (platform.baseUrl.trim() && hasAuthentication) {
+        void loadPlatformCatalog(platform);
+      }
+    }
+  }, [draft.platforms, loadPlatformCatalog]);
+
   const selectSupplyStrategy = useCallback((strategy: SupplyStrategy) => {
     configDirtyRef.current = true;
     setDraft((current) => ({
@@ -603,7 +706,9 @@ export function SupplyPage() {
       current > 0 ? current : Math.max(1, next.config?.replenishBatchSize || 10)
     );
     setManualSupplierId((current) => {
-      const platforms = next.overview?.platforms ?? [];
+      const platforms = (next.config?.platforms ?? []).filter(
+        (platform) => platform.enabled !== false
+      );
       const configuredIds = new Map(
         platforms.map((platform) => [platform.id.trim().toLowerCase(), platform.id])
       );
@@ -615,7 +720,7 @@ export function SupplyPage() {
       if (recommendedID && configuredIds.has(recommendedID)) {
         return configuredIds.get(recommendedID) ?? '';
       }
-      return platforms[0]?.id ?? '';
+      return platforms[0]?.id ?? next.overview?.platforms?.[0]?.id ?? '';
     });
   }, []);
 
@@ -886,7 +991,7 @@ export function SupplyPage() {
   const replenish = () =>
     runAction(
       'replenish',
-      () => supplyApi.replenish(manualQuantity, manualSupplierId),
+      () => supplyApi.replenish(manualQuantity, manualSupplierId, manualProduct),
       t('supply.replenish_started'),
       true
     );
@@ -998,20 +1103,112 @@ export function SupplyPage() {
       ),
     [overview?.platforms]
   );
+  const configuredManualPlatforms = useMemo(
+    () => (draft.platforms ?? []).filter((platform) => platform.enabled !== false),
+    [draft.platforms]
+  );
   const manualPlatformOptions = useMemo(
     () =>
-      (overview?.platforms ?? []).map((platform) => ({
-        value: platform.id,
-        label: `${platform.name || platform.id} · ${platform.product}${
-          platform.emergencyOnly ? ` · ${t('supply.platform_emergency_only_short')}` : ''
-        }`,
-      })),
-    [overview?.platforms, t]
+      configuredManualPlatforms.map((platform) => {
+        const live = platformOverviewById.get(platform.id.trim().toLowerCase());
+        return {
+          value: platform.id,
+          label: `${platform.name || platform.id}${
+            platform.emergencyOnly ? ` · ${t('supply.platform_emergency_only_short')}` : ''
+          }${live?.lastError ? ` · ${t('supply.platform_quote_failed_short')}` : ''}`,
+        };
+      }),
+    [configuredManualPlatforms, platformOverviewById, t]
   );
-  const manualPlatform = manualSupplierId
-    ? platformOverviewById.get(manualSupplierId.trim().toLowerCase())
+  const manualPlatformConfig = manualSupplierId
+    ? configuredManualPlatforms.find(
+        (platform) => platform.id.trim().toLowerCase() === manualSupplierId.trim().toLowerCase()
+      )
     : undefined;
-  const manualInventory = manualPlatform?.inventory;
+  const manualCatalogState = manualPlatformConfig
+    ? platformCatalogs[manualPlatformConfig.id.trim().toLowerCase()]
+    : undefined;
+  const manualProductOptions = useMemo(() => {
+    if (!manualPlatformConfig) return [];
+    const products = manualCatalogState?.catalog?.products ?? [];
+    const fallback: SupplyPlatformProduct[] =
+      manualPlatformConfig.type === 'bugteam'
+        ? [{ code: 'team_1h', label: t('supply.product_team_1h'), available: 0 }]
+        : manualPlatformConfig.type === 'nvtokens'
+          ? [
+              {
+                code: manualPlatformConfig.product || 'plus',
+                label: manualPlatformConfig.product || 'Plus',
+                available: 0,
+              },
+            ]
+          : [
+              { code: 'oauth_30d', label: t('supply.product_30d'), available: 0 },
+              { code: 'oauth_7d', label: t('supply.product_7d'), available: 0 },
+              { code: 'team_1h', label: t('supply.product_team_1h'), available: 0 },
+            ];
+    return (products.length > 0 ? products : fallback).map((product) => {
+      const min = product.minUnitPriceFen ?? 0;
+      const max = product.maxUnitPriceFen ?? 0;
+      const price =
+        min > 0 && max > min
+          ? `${formatMoney(min)}–${formatMoney(max)}`
+          : min > 0 || max > 0
+            ? formatMoney(min || max)
+            : '';
+      return {
+        value: product.code,
+        label: `${product.label}${
+          products.length > 0
+            ? ` · ${t('supply.catalog_inventory', { value: product.available })}`
+            : ''
+        }${price ? ` · ${price}` : ''}`,
+      };
+    });
+  }, [manualCatalogState?.catalog?.products, manualPlatformConfig, t]);
+  useEffect(() => {
+    const values = new Set(manualProductOptions.map((option) => option.value));
+    if (manualProduct && values.has(manualProduct)) return;
+    setManualProduct(
+      values.has(manualPlatformConfig?.product ?? '')
+        ? (manualPlatformConfig?.product ?? '')
+        : (manualProductOptions[0]?.value ?? '')
+    );
+  }, [manualPlatformConfig?.product, manualProduct, manualProductOptions]);
+  useEffect(() => {
+    if (
+      activeTab !== 'orders' ||
+      !manualSupplierId ||
+      !manualProduct ||
+      manualQuantity < 1 ||
+      manualQuantity > 10000
+    ) {
+      setManualQuote(null);
+      setManualQuoteError('');
+      return undefined;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      setManualQuoteLoading(true);
+      setManualQuoteError('');
+      try {
+        const quote = await supplyApi.quote(manualQuantity, manualSupplierId, manualProduct);
+        if (!cancelled) setManualQuote(quote);
+      } catch (error) {
+        if (!cancelled) {
+          setManualQuote(null);
+          setManualQuoteError(error instanceof Error ? error.message : t('common.unknown_error'));
+        }
+      } finally {
+        if (!cancelled) setManualQuoteLoading(false);
+      }
+    }, 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeTab, manualProduct, manualQuantity, manualSupplierId, t]);
+  const manualInventory = manualQuote?.inventory;
   const recommendedPlatform = overview?.selectedPlatformId
     ? platformOverviewById.get(overview.selectedPlatformId.trim().toLowerCase())
     : undefined;
@@ -1677,9 +1874,7 @@ export function SupplyPage() {
         label: (
           <span className={styles.tabLabel}>
             {t('supply.tabs_orders')}
-            {orderTabCount > 0 ? (
-              <span className={styles.tabBadge}>{orderTabCount}</span>
-            ) : null}
+            {orderTabCount > 0 ? <span className={styles.tabBadge}>{orderTabCount}</span> : null}
           </span>
         ),
       },
@@ -2493,6 +2688,51 @@ export function SupplyPage() {
                 <div className={styles.platformList}>
                   {(draft.platforms ?? []).map((platform, platformIndex) => {
                     const live = platformOverviewById.get(platform.id.trim().toLowerCase());
+                    const catalogState = platformCatalogs[platform.id.trim().toLowerCase()];
+                    const catalogProducts = catalogState?.catalog?.products ?? [];
+                    const platformProductOptions = (() => {
+                      if (platform.type === 'bugteam') {
+                        return [{ value: 'team_1h', label: t('supply.product_team_1h') }];
+                      }
+                      if (platform.type !== 'nvtokens') {
+                        return [
+                          { value: 'oauth_30d', label: t('supply.product_30d') },
+                          { value: 'oauth_7d', label: t('supply.product_7d') },
+                          { value: 'team_1h', label: t('supply.product_team_1h') },
+                        ];
+                      }
+                      const options = catalogProducts.map((product) => {
+                        const min = product.minUnitPriceFen ?? 0;
+                        const max = product.maxUnitPriceFen ?? 0;
+                        const price =
+                          min > 0 && max > min
+                            ? `${formatMoney(min)}–${formatMoney(max)}`
+                            : min > 0 || max > 0
+                              ? formatMoney(min || max)
+                              : '';
+                        return {
+                          value: product.code,
+                          label: `${product.label} · ${t('supply.catalog_inventory', {
+                            value: product.available,
+                          })}${price ? ` · ${price}` : ''}`,
+                        };
+                      });
+                      if (options.length === 0) {
+                        return [
+                          {
+                            value: platform.product || 'plus',
+                            label: platform.product || 'Plus',
+                          },
+                        ];
+                      }
+                      if (!options.some((option) => option.value === platform.product)) {
+                        options.unshift({
+                          value: platform.product,
+                          label: `${platform.product} · ${t('supply.catalog_product_unavailable')}`,
+                        });
+                      }
+                      return options;
+                    })();
                     return (
                       <section className={styles.platformRow} key={platform.id || platformIndex}>
                         <div className={styles.platformRowHeader}>
@@ -2628,24 +2868,40 @@ export function SupplyPage() {
                             autoComplete="off"
                           />
                           <div className={styles.field}>
-                            <label>{t('supply.product')}</label>
+                            <div className={styles.fieldLabelRow}>
+                              <label>{t('supply.platform_default_product')}</label>
+                              {platform.type === 'nvtokens' ? (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="xs"
+                                  loading={catalogState?.loading === true}
+                                  onClick={() => void loadPlatformCatalog(platform, true)}
+                                >
+                                  <IconRefreshCw size={13} />
+                                  {t('supply.catalog_refresh')}
+                                </Button>
+                              ) : null}
+                            </div>
                             <Select
                               value={platform.product}
-                              options={
-                                platform.type === 'bugteam'
-                                  ? [{ value: 'team_1h', label: t('supply.product_team_1h') }]
-                                  : [
-                                      { value: 'oauth_30d', label: t('supply.product_30d') },
-                                      { value: 'oauth_7d', label: t('supply.product_7d') },
-                                      ...(platform.type === 'nvtokens'
-                                        ? [{ value: 'team_1h', label: t('supply.product_team_1h') }]
-                                        : []),
-                                    ]
-                              }
+                              options={platformProductOptions}
                               onChange={(product) =>
                                 updateSupplyPlatform(platformIndex, { product })
                               }
                             />
+                            {platform.type === 'nvtokens' ? (
+                              <small
+                                className={catalogState?.error ? styles.fieldError : undefined}
+                              >
+                                {catalogState?.error ||
+                                  (catalogState?.catalog
+                                    ? t('supply.catalog_loaded', {
+                                        count: catalogProducts.length,
+                                      })
+                                    : t('supply.catalog_auth_hint'))}
+                              </small>
+                            ) : null}
                           </div>
                           {platform.type === 'nvtokens' ? (
                             <>
@@ -3258,7 +3514,13 @@ export function SupplyPage() {
                   <Select
                     value={manualSupplierId}
                     options={manualPlatformOptions}
-                    onChange={setManualSupplierId}
+                    onChange={(supplierId) => {
+                      setManualSupplierId(supplierId);
+                      const selected = configuredManualPlatforms.find(
+                        (platform) => platform.id === supplierId
+                      );
+                      setManualProduct(selected?.product ?? '');
+                    }}
                     disabled={manualPlatformOptions.length === 0}
                     ariaLabel={t('supply.manual_platform')}
                   />
@@ -3267,6 +3529,37 @@ export function SupplyPage() {
                       platform: recommendedPlatform?.name || recommendedPlatform?.id || '-',
                     })}
                   </small>
+                </div>
+                <div className={styles.manualPlatformField}>
+                  <div className={styles.fieldLabelRow}>
+                    <label>{t('supply.manual_product')}</label>
+                    {manualPlatformConfig?.type === 'nvtokens' ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        loading={manualCatalogState?.loading === true}
+                        onClick={() =>
+                          manualPlatformConfig
+                            ? void loadPlatformCatalog(manualPlatformConfig, true)
+                            : undefined
+                        }
+                      >
+                        <IconRefreshCw size={13} />
+                        {t('supply.catalog_refresh')}
+                      </Button>
+                    ) : null}
+                  </div>
+                  <Select
+                    value={manualProduct}
+                    options={manualProductOptions}
+                    onChange={setManualProduct}
+                    disabled={!manualPlatformConfig || manualProductOptions.length === 0}
+                    ariaLabel={t('supply.manual_product')}
+                  />
+                  {manualCatalogState?.error ? (
+                    <small className={styles.fieldError}>{manualCatalogState.error}</small>
+                  ) : null}
                 </div>
                 <div className={styles.orderComposer}>
                   <Input
@@ -3280,15 +3573,28 @@ export function SupplyPage() {
                   <div className={styles.quoteBox}>
                     <span>{t('supply.estimated_total')}</span>
                     <strong>
-                      {manualInventory ? formatMoney(manualInventory.estimatedTotalFen) : '-'}
+                      {manualQuoteLoading
+                        ? t('common.loading')
+                        : manualInventory
+                          ? formatMoney(manualInventory.estimatedTotalFen)
+                          : '-'}
                     </strong>
-                    <small>{t('supply.quote_hint')}</small>
+                    <small className={manualQuoteError ? styles.fieldError : undefined}>
+                      {manualQuoteError || t('supply.quote_hint')}
+                    </small>
                   </div>
                 </div>
                 <Button
                   fullWidth
                   loading={action === 'replenish'}
-                  disabled={!manualSupplierId || manualQuantity < 1 || manualQuantity > 10000}
+                  disabled={
+                    !manualSupplierId ||
+                    !manualProduct ||
+                    manualQuoteLoading ||
+                    Boolean(manualQuoteError) ||
+                    manualQuantity < 1 ||
+                    manualQuantity > 10000
+                  }
                   onClick={() => void replenish()}
                 >
                   {t('supply.replenish_now')}
@@ -3371,7 +3677,9 @@ export function SupplyPage() {
                                     {task.fulfilledQuantity}/{task.targetQuantity}
                                   </span>
                                   <small>
-                                    {t('supply.purchase_task_remaining_value', { value: remaining })}
+                                    {t('supply.purchase_task_remaining_value', {
+                                      value: remaining,
+                                    })}
                                   </small>
                                 </div>
                                 <div className={styles.progressTrack}>
@@ -3401,7 +3709,9 @@ export function SupplyPage() {
                                 : '-'}
                             </td>
                             <td>
-                              <span className={styles.purchaseTaskError}>{task.lastError || '-'}</span>
+                              <span className={styles.purchaseTaskError}>
+                                {task.lastError || '-'}
+                              </span>
                             </td>
                             <td>
                               {purchaseTaskActive(task) ? (

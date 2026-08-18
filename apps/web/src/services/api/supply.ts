@@ -38,6 +38,22 @@ export interface SupplyPlatformConfig {
   quotaEstimationPolicies?: Record<string, SupplyQuotaEstimationPolicy>;
 }
 
+export interface SupplyPlatformProduct {
+  code: string;
+  label: string;
+  available: number;
+  minUnitPriceFen?: number;
+  maxUnitPriceFen?: number;
+}
+
+export interface SupplyPlatformProductCatalog {
+  platformId: string;
+  platformName?: string;
+  platformType: string;
+  checkedAtMs: number;
+  products: SupplyPlatformProduct[];
+}
+
 export interface SupplyConfig {
   enabled?: boolean;
   baseUrl: string;
@@ -912,6 +928,12 @@ export const supplyApi = {
 
   check: (): Promise<SupplyStatus> => apiClient.post('/supply/check'),
 
+  getPlatformCatalog: (platform: SupplyPlatformConfig): Promise<SupplyPlatformProductCatalog> =>
+    apiClient.post('/supply/platform-catalog', { platform }),
+
+  quote: (quantity: number, supplierId: string, product: string): Promise<SupplyPlatformOverview> =>
+    apiClient.post('/supply/quote', { quantity, supplierId, product }),
+
   getReport: (
     params: { fromMs?: number; toMs?: number; limit?: number } = {}
   ): Promise<SupplyReport> => apiClient.get('/supply/reports', { params }),
@@ -935,10 +957,14 @@ export const supplyApi = {
   retryRecoveryImport: (recoveryId: string): Promise<SupplyRecovery> =>
     apiClient.post(`/supply/recoveries/${encodeURIComponent(recoveryId)}/retry-import`),
 
-  replenish: (quantity: number, supplierId?: string): Promise<SupplyStatus> =>
+  replenish: (quantity: number, supplierId?: string, product?: string): Promise<SupplyStatus> =>
     apiClient.post(
       '/supply/replenish',
-      { quantity, ...(supplierId?.trim() ? { supplierId: supplierId.trim() } : {}) },
+      {
+        quantity,
+        ...(supplierId?.trim() ? { supplierId: supplierId.trim() } : {}),
+        ...(product?.trim() ? { product: product.trim() } : {}),
+      },
       { timeout: SUPPLY_REPLENISH_TIMEOUT_MS }
     ),
 

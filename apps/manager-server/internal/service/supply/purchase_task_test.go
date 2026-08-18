@@ -48,6 +48,70 @@ func TestPurchaseTaskNextOrderQuantityShardsRemainingTarget(t *testing.T) {
 	}
 }
 
+func TestUnavailablePlatformOrdersAreTerminatedAndTasksAreReplanned(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-platform-retired.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	cfg := store.ManagerSupplyConfig{Platforms: []store.ManagerSupplyPlatformConfig{{
+		ID: "nvtokens-main", Type: managerconfigsvc.SupplyPlatformNvtokens, Enabled: &enabled,
+		BaseURL: "https://nvtokens.com", Username: "buyer", Password: "secret", Product: "plus",
+	}}}
+	service := New(st, nil)
+
+	automatic, err := st.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
+		TaskID: "automatic-retired-platform", Source: "automatic", SupplierID: "legacy", Product: "oauth_7d",
+		TargetQuantity: 5, Status: purchaseTaskStatusRunning, MaxConcurrentOrders: 1,
+	})
+	if err != nil {
+		t.Fatalf("create automatic task: %v", err)
+	}
+	automaticOrder, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "automatic-old-order", TaskID: automatic.TaskID, SupplierID: "legacy", Product: "oauth_7d",
+		RequestedQuantity: 5, Automatic: true, Status: "waiting_inventory",
+	})
+	if err != nil {
+		t.Fatalf("create automatic order: %v", err)
+	}
+	remaining, err := service.reconcileUnavailableSupplyOrders(ctx, cfg, []store.SupplyOrder{automaticOrder})
+	if err != nil || len(remaining) != 0 {
+		t.Fatalf("automatic remaining = %#v err=%v", remaining, err)
+	}
+	automaticOrder, _, _ = st.GetSupplyOrder(ctx, automaticOrder.OrderID)
+	automatic, _, _ = st.GetSupplyPurchaseTask(ctx, automatic.TaskID)
+	if automaticOrder.Status != "failed" || automaticOrder.RemoteStatus != "platform_unavailable" {
+		t.Fatalf("retired automatic order = %#v", automaticOrder)
+	}
+	if automatic.Status != purchaseTaskStatusRunning || automatic.SupplierID != "" || automatic.Product != "" || automatic.NextAttemptAtMS != 0 {
+		t.Fatalf("replanned automatic task = %#v", automatic)
+	}
+
+	manual, err := st.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
+		TaskID: "manual-retired-platform", Source: "manual", SupplierID: "legacy", Product: "oauth_7d",
+		TargetQuantity: 2, Status: purchaseTaskStatusRunning, MaxConcurrentOrders: 1,
+	})
+	if err != nil {
+		t.Fatalf("create manual task: %v", err)
+	}
+	manualOrder, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "manual-old-order", TaskID: manual.TaskID, SupplierID: "legacy", Product: "oauth_7d",
+		RequestedQuantity: 2, Status: "waiting_inventory",
+	})
+	if err != nil {
+		t.Fatalf("create manual order: %v", err)
+	}
+	if _, err := service.reconcileUnavailableSupplyOrders(ctx, cfg, []store.SupplyOrder{manualOrder}); err != nil {
+		t.Fatalf("reconcile manual order: %v", err)
+	}
+	manual, _, _ = st.GetSupplyPurchaseTask(ctx, manual.TaskID)
+	if manual.Status != purchaseTaskStatusCancelled || manual.CancelledAtMS == 0 || manual.LastError == "" {
+		t.Fatalf("cancelled manual task = %#v", manual)
+	}
+}
+
 func TestPurchaseTaskParallelSlotsCreateSmallOrdersWithinTarget(t *testing.T) {
 	var createCalls atomic.Int32
 	quantities := make([]int, 0, 3)

@@ -32,6 +32,14 @@ type PlatformOverview struct {
 	LastError             string                  `json:"lastError,omitempty"`
 }
 
+type PlatformProductCatalog struct {
+	PlatformID   string                            `json:"platformId"`
+	PlatformName string                            `json:"platformName,omitempty"`
+	PlatformType string                            `json:"platformType"`
+	CheckedAtMS  int64                             `json:"checkedAtMs"`
+	Products     []supplyclient.ProductCatalogItem `json:"products"`
+}
+
 type supplyPlatformSelection struct {
 	platform store.ManagerSupplyPlatformConfig
 	status   PlatformOverview
@@ -96,6 +104,159 @@ func supplyPlatformConfigured(platform store.ManagerSupplyPlatformConfig) bool {
 	return credentials.Token != "" || (credentials.Username != "" && credentials.Password != "")
 }
 
+func supplyProductSupportedByPlatform(platform store.ManagerSupplyPlatformConfig, product string) bool {
+	product = strings.ToLower(strings.TrimSpace(product))
+	switch strings.ToLower(strings.TrimSpace(platform.Type)) {
+	case managerconfigsvc.SupplyPlatformBugTeam:
+		return product == "team_1h"
+	case managerconfigsvc.SupplyPlatformNvtokens:
+		switch product {
+		case "plus", "pro", "team", "bugteam", "k12", "grokfree", "grokpro", "free":
+			return true
+		default:
+			return false
+		}
+	default:
+		switch product {
+		case "oauth_30d", "oauth_7d", "team_1h":
+			return true
+		default:
+			return false
+		}
+	}
+}
+
+func mergeCatalogPlatform(draft store.ManagerSupplyPlatformConfig, saved store.ManagerSupplyConfig) store.ManagerSupplyPlatformConfig {
+	for _, current := range managerconfigsvc.SupplyPlatforms(saved) {
+		if !strings.EqualFold(strings.TrimSpace(current.ID), strings.TrimSpace(draft.ID)) {
+			continue
+		}
+		if strings.TrimSpace(draft.Type) == "" {
+			draft.Type = current.Type
+		}
+		if strings.TrimSpace(draft.Name) == "" {
+			draft.Name = current.Name
+		}
+		if strings.TrimSpace(draft.BaseURL) == "" {
+			draft.BaseURL = current.BaseURL
+		}
+		if strings.TrimSpace(draft.Username) == "" && !draft.ClearUsername {
+			draft.Username = current.Username
+		}
+		sameIdentity := strings.EqualFold(strings.TrimSpace(draft.Type), strings.TrimSpace(current.Type)) &&
+			strings.EqualFold(strings.TrimRight(strings.TrimSpace(draft.BaseURL), "/"), strings.TrimRight(strings.TrimSpace(current.BaseURL), "/")) &&
+			strings.EqualFold(strings.TrimSpace(draft.Username), strings.TrimSpace(current.Username))
+		if sameIdentity && strings.TrimSpace(draft.Password) == "" {
+			draft.Password = current.Password
+		}
+		if sameIdentity && strings.TrimSpace(draft.Token) == "" {
+			draft.Token = current.Token
+		}
+		if strings.TrimSpace(draft.Product) == "" {
+			draft.Product = current.Product
+		}
+		break
+	}
+	return draft
+}
+
+func staticSupplyProductCatalog(platform store.ManagerSupplyPlatformConfig) []supplyclient.ProductCatalogItem {
+	if strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformBugTeam) {
+		return []supplyclient.ProductCatalogItem{{Code: "team_1h", Label: "Team 1h"}}
+	}
+	return []supplyclient.ProductCatalogItem{
+		{Code: "oauth_30d", Label: "OAuth 30d"},
+		{Code: "oauth_7d", Label: "OAuth 7d"},
+		{Code: "team_1h", Label: "Team 1h"},
+	}
+}
+
+func (s *Service) GetPlatformProductCatalog(
+	ctx context.Context,
+	draft store.ManagerSupplyPlatformConfig,
+) (PlatformProductCatalog, error) {
+	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		return PlatformProductCatalog{}, err
+	}
+	platform := mergeCatalogPlatform(draft, cfg.Supply)
+	if strings.TrimSpace(platform.ID) == "" {
+		platform.ID = strings.ToLower(strings.TrimSpace(platform.Type))
+	}
+	result := PlatformProductCatalog{
+		PlatformID:   platform.ID,
+		PlatformName: platform.Name,
+		PlatformType: platform.Type,
+		CheckedAtMS:  time.Now().UnixMilli(),
+	}
+	if !strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformNvtokens) {
+		result.Products = staticSupplyProductCatalog(platform)
+		return result, nil
+	}
+	if !supplyPlatformConfigured(platform) {
+		return result, ErrNotConfigured
+	}
+	catalog, err := s.supplyClient.ProductCatalog(ctx, supplyPlatformCredentials(platform))
+	if err != nil {
+		return result, err
+	}
+	result.Products = catalog.Products
+	return result, nil
+}
+
+func (s *Service) QuotePlatformProduct(
+	ctx context.Context,
+	quantity int,
+	supplierID string,
+	product string,
+) (PlatformOverview, error) {
+	if quantity <= 0 || quantity > 10000 {
+		return PlatformOverview{}, ErrInvalidQuantity
+	}
+	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		return PlatformOverview{}, err
+	}
+	platform, err := resolveSupplyPlatform(cfg.Supply, supplierID, "")
+	if err != nil {
+		return PlatformOverview{}, err
+	}
+	product = strings.ToLower(strings.TrimSpace(product))
+	if product == "" {
+		product = platform.Product
+	}
+	if !supplyProductSupportedByPlatform(platform, product) {
+		return PlatformOverview{}, fmt.Errorf("product %s is not supported by supply platform %s", product, platform.ID)
+	}
+	platform.Product = product
+	if !supplyPlatformConfigured(platform) {
+		return PlatformOverview{}, ErrNotConfigured
+	}
+	credentials := supplyPlatformCredentials(platform)
+	inventory, err := s.supplyClient.Inventory(ctx, credentials, product, quantity)
+	if err != nil {
+		return PlatformOverview{}, err
+	}
+	balance, err := s.supplyClient.Balance(ctx, credentials)
+	if err != nil {
+		return PlatformOverview{}, err
+	}
+	status := PlatformOverview{
+		ID:            platform.ID,
+		Name:          platform.Name,
+		Type:          platform.Type,
+		Product:       product,
+		Priority:      platform.Priority,
+		EmergencyOnly: platform.EmergencyOnly,
+		Selected:      true,
+		CheckedAtMS:   time.Now().UnixMilli(),
+		Inventory:     &inventory,
+		Balance:       &balance,
+	}
+	applySupplyPlatformEconomics(&status, cfg.Supply, s.currentSmartResource(cfg.Supply), platform, quantity)
+	return status, nil
+}
+
 func resolveSupplyPlatform(cfg store.ManagerSupplyConfig, supplierID string, product string) (store.ManagerSupplyPlatformConfig, error) {
 	platforms := supplyPlatforms(cfg)
 	supplierID = strings.TrimSpace(supplierID)
@@ -112,6 +273,9 @@ func resolveSupplyPlatform(cfg store.ManagerSupplyConfig, supplierID string, pro
 		if strings.EqualFold(strings.TrimSpace(platform.Product), product) {
 			return platform, nil
 		}
+	}
+	if product != "" {
+		return store.ManagerSupplyPlatformConfig{}, fmt.Errorf("%w: no enabled supply platform is configured for product %s", ErrNotConfigured, product)
 	}
 	if len(platforms) > 0 {
 		return platforms[0], nil
@@ -195,9 +359,44 @@ func (s *Service) selectSupplyPlatform(
 	openOrders []store.SupplyOrder,
 	requestedSupplierID ...string,
 ) (supplyPlatformSelection, error) {
+	requestedID := ""
+	if len(requestedSupplierID) > 0 {
+		requestedID = strings.TrimSpace(requestedSupplierID[0])
+	}
+	return s.selectSupplyPlatformProduct(ctx, cfg, quantity, openOrders, requestedID, "")
+}
+
+func (s *Service) selectSupplyPlatformProduct(
+	ctx context.Context,
+	cfg store.ManagerSupplyConfig,
+	quantity int,
+	openOrders []store.SupplyOrder,
+	requestedID string,
+	requestedProduct string,
+) (supplyPlatformSelection, error) {
 	platforms := supplyPlatforms(cfg)
 	if len(platforms) == 0 {
 		return supplyPlatformSelection{}, ErrNotConfigured
+	}
+	requestedID = strings.TrimSpace(requestedID)
+	requestedProduct = strings.ToLower(strings.TrimSpace(requestedProduct))
+	requestedIndex := -1
+	if requestedID != "" {
+		for index := range platforms {
+			if strings.EqualFold(strings.TrimSpace(platforms[index].ID), requestedID) {
+				requestedIndex = index
+				break
+			}
+		}
+		if requestedIndex < 0 {
+			return supplyPlatformSelection{}, fmt.Errorf("%w: supply platform %s is not enabled or configured", ErrNotConfigured, requestedID)
+		}
+		if requestedProduct != "" {
+			if !supplyProductSupportedByPlatform(platforms[requestedIndex], requestedProduct) {
+				return supplyPlatformSelection{}, fmt.Errorf("product %s is not supported by supply platform %s", requestedProduct, requestedID)
+			}
+			platforms[requestedIndex].Product = requestedProduct
+		}
 	}
 	statuses := make([]PlatformOverview, len(platforms))
 	quoteErrors := make([]error, len(platforms))
@@ -258,21 +457,8 @@ func (s *Service) selectSupplyPlatform(
 		statuses[item.index] = status
 	}
 
-	requestedID := ""
-	if len(requestedSupplierID) > 0 {
-		requestedID = strings.TrimSpace(requestedSupplierID[0])
-	}
 	if requestedID != "" {
-		selectedIndex := -1
-		for index, platform := range platforms {
-			if strings.EqualFold(strings.TrimSpace(platform.ID), requestedID) {
-				selectedIndex = index
-				break
-			}
-		}
-		if selectedIndex < 0 {
-			return supplyPlatformSelection{all: statuses}, fmt.Errorf("%w: supply platform %s is not enabled or configured", ErrNotConfigured, requestedID)
-		}
+		selectedIndex := requestedIndex
 		if quoteErrors[selectedIndex] != nil {
 			return supplyPlatformSelection{all: statuses}, fmt.Errorf(
 				"supply platform %s quote failed: %w",

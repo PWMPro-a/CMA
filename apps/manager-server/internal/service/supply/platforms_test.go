@@ -2,6 +2,7 @@ package supply
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -184,6 +185,52 @@ func TestEmergencyOnlySupplyPlatformIsReservedForEmergencyOrExplicitSelection(t 
 	selection, err = service.selectSupplyPlatform(context.Background(), cfg, 2, nil, "bugteam")
 	if err != nil || selection.platform.ID != "bugteam" {
 		t.Fatalf("explicit selection = %q err=%v, want bugteam", selection.platform.ID, err)
+	}
+}
+
+func TestResolveSupplyPlatformDoesNotFallbackWhenProductIsUnknown(t *testing.T) {
+	enabled := true
+	cfg := store.ManagerSupplyConfig{Platforms: []store.ManagerSupplyPlatformConfig{{
+		ID: "supplier-a", Type: "legacy", Enabled: &enabled, BaseURL: "https://example.com", Token: "token", Product: "oauth_30d",
+	}}}
+	if _, err := resolveSupplyPlatform(cfg, "", "missing-product"); err == nil {
+		t.Fatal("unknown product should not fall back to the first platform")
+	}
+}
+
+func TestExplicitNvtokensProductQuoteUsesNativeProduct(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/login":
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: "quote-session", Path: "/"})
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/api/workspace/extractions/estimate":
+			payload := map[string]any{}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			if payload["sale_plan_filter"] != "pro" {
+				t.Fatalf("sale_plan_filter = %#v, want pro", payload["sale_plan_filter"])
+			}
+			_, _ = w.Write([]byte(`{"estimate":{"available_quantity":6,"total_cost_cents":1200,"unit_price_cents":600}}`))
+		case "/api/me":
+			_, _ = w.Write([]byte(`{"available_balance_cents":10000}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	enabled := true
+	cfg := store.ManagerSupplyConfig{Platforms: []store.ManagerSupplyPlatformConfig{{
+		ID: "nvtokens-main", Type: managerconfigsvc.SupplyPlatformNvtokens, Enabled: &enabled,
+		BaseURL: server.URL, Username: "buyer", Password: "secret", Product: "plus",
+	}}}
+	service := New(nil, nil, server.Client())
+	selection, err := service.selectSupplyPlatformProduct(context.Background(), cfg, 2, nil, "nvtokens-main", "pro")
+	if err != nil {
+		t.Fatalf("quote native product: %v", err)
+	}
+	if selection.platform.Product != "pro" || selection.status.Product != "pro" || selection.status.Inventory == nil || selection.status.Inventory.Available != 6 {
+		t.Fatalf("selection = %#v status=%#v", selection.platform, selection.status)
 	}
 }
 

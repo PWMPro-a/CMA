@@ -135,6 +135,59 @@ func TestNvtokensUsesSessionCookieAndImportsCPABundle(t *testing.T) {
 	}
 }
 
+func TestNvtokensProductCatalogAggregatesNativeSalePlans(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/login":
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: "catalog-session", Path: "/"})
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/api/workspace/seller-candidates":
+			cookie, err := r.Cookie("session")
+			if err != nil || cookie.Value != "catalog-session" {
+				t.Fatalf("catalog session cookie = %#v err=%v", cookie, err)
+			}
+			_, _ = w.Write([]byte(`{
+				"sellers":[
+					{"sale_plans":["plus","pro"],"sale_plan_counts":{"plus":5,"pro":2},"sale_plan_prices":{"plus":{"min_cents":190,"max_cents":350},"pro":{"min_cents":500,"max_cents":600}}},
+					{"sale_plan_counts":{"plus":3,"team":4},"sale_plan_prices":{"plus":{"min_cents":220,"max_cents":300},"team":{"min_cents":420,"max_cents":620}}},
+					{"sale_plan_stats":{"grokpro":{"available_count":7,"price_min_cents":80,"price_max_cents":120}}}
+				]
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	catalog, err := client.ProductCatalog(context.Background(), Credentials{
+		ID:           "nvtokens-main",
+		PlatformType: "nvtokens",
+		BaseURL:      server.URL,
+		Username:     "buyer",
+		Password:     "secret",
+	})
+	if err != nil {
+		t.Fatalf("product catalog: %v", err)
+	}
+	if len(catalog.Products) != 4 {
+		t.Fatalf("products = %#v", catalog.Products)
+	}
+	byCode := make(map[string]ProductCatalogItem, len(catalog.Products))
+	for _, product := range catalog.Products {
+		byCode[product.Code] = product
+	}
+	if plus := byCode["plus"]; plus.Label != "Plus" || plus.Available != 8 || plus.MinUnitPriceFen != 190 || plus.MaxUnitPriceFen != 350 {
+		t.Fatalf("plus = %#v", plus)
+	}
+	if team := byCode["team"]; team.Available != 4 || team.MinUnitPriceFen != 420 || team.MaxUnitPriceFen != 620 {
+		t.Fatalf("team = %#v", team)
+	}
+	if grokPro := byCode["grokpro"]; grokPro.Label != "GrokPro" || grokPro.Available != 7 || grokPro.MinUnitPriceFen != 80 || grokPro.MaxUnitPriceFen != 120 {
+		t.Fatalf("grokpro = %#v", grokPro)
+	}
+}
+
 func assertNvtokensPurchaseFilters(t *testing.T, r *http.Request, accountType string, maxUnitPriceFen int64) {
 	t.Helper()
 	var payload map[string]any
@@ -146,6 +199,21 @@ func assertNvtokensPurchaseFilters(t *testing.T, r *http.Request, accountType st
 	}
 	if got := payload["max_unit_price_cents"]; got != float64(maxUnitPriceFen) {
 		t.Fatalf("max_unit_price_cents = %#v, want %d", got, maxUnitPriceFen)
+	}
+	if got := payload["sale_plan_filter"]; got != "plus" {
+		t.Fatalf("sale_plan_filter = %#v, want plus", got)
+	}
+}
+
+func TestNvtokensPurchasePayloadPreservesNativeSalePlan(t *testing.T) {
+	for _, product := range []string{"plus", "pro", "team", "bugteam", "k12", "grokfree", "grokpro", "free"} {
+		payload := nvtokensPurchasePayload(Credentials{}, product, 1)
+		if got := payload["sale_plan_filter"]; got != product {
+			t.Fatalf("product %s sale_plan_filter = %#v", product, got)
+		}
+	}
+	if got := nvtokensPurchasePayload(Credentials{}, "team_1h", 1)["sale_plan_filter"]; got != "team" {
+		t.Fatalf("legacy team alias = %#v", got)
 	}
 }
 

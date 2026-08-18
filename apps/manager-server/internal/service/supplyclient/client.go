@@ -85,6 +85,22 @@ type Balance struct {
 	Currency     string `json:"currency"`
 }
 
+// ProductCatalog is the supplier-native product list used by the management
+// UI and manual procurement flow. Product codes are intentionally not mapped
+// to CPAM's legacy oauth_* aliases: callers must persist and submit the exact
+// code accepted by the selected supplier.
+type ProductCatalog struct {
+	Products []ProductCatalogItem `json:"products"`
+}
+
+type ProductCatalogItem struct {
+	Code            string `json:"code"`
+	Label           string `json:"label"`
+	Available       int    `json:"available"`
+	MinUnitPriceFen int64  `json:"minUnitPriceFen,omitempty"`
+	MaxUnitPriceFen int64  `json:"maxUnitPriceFen,omitempty"`
+}
+
 type Order struct {
 	ID                string `json:"id"`
 	Status            string `json:"status"`
@@ -253,6 +269,13 @@ func (c *Client) Balance(ctx context.Context, credentials Credentials) (Balance,
 	}, nil
 }
 
+func (c *Client) ProductCatalog(ctx context.Context, credentials Credentials) (ProductCatalog, error) {
+	if isNvtokens(credentials) {
+		return c.nvtokensProductCatalog(ctx, credentials)
+	}
+	return ProductCatalog{}, errors.New("supply platform does not expose a dynamic product catalog")
+}
+
 func (c *Client) CreateOrder(ctx context.Context, credentials Credentials, product string, quantity int, idempotencyKey ...string) (Order, error) {
 	if isNvtokens(credentials) {
 		return c.nvtokensCreateOrder(ctx, credentials, product, quantity, idempotencyKey...)
@@ -331,11 +354,7 @@ func isNvtokens(credentials Credentials) bool {
 // nvtokens UI. CPAM supplies the product, quantity and platform-level purchase
 // filters while keeping the remaining supplier rules at their neutral values.
 func nvtokensPurchasePayload(credentials Credentials, product string, quantity int) map[string]any {
-	salePlan := "plus"
-	switch strings.ToLower(strings.TrimSpace(product)) {
-	case "team_1h":
-		salePlan = "team"
-	}
+	salePlan := normalizeNvtokensSalePlan(product)
 	credentialType := normalizeNvtokensCredentialType(credentials.PurchaseAccountType)
 	var maxUnitPriceCents any
 	if credentials.MaxUnitPriceFen > 0 {
@@ -358,6 +377,174 @@ func nvtokensPurchasePayload(credentials Credentials, product string, quantity i
 		"seller_blacklist":                []string{},
 		"preferred_channel_ids":           []string{},
 	}
+}
+
+func normalizeNvtokensSalePlan(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "oauth_30d", "oauth_7d":
+		return "plus"
+	case "team_1h":
+		return "team"
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+}
+
+var nvtokensSalePlanOrder = []string{
+	"plus", "pro", "team", "bugteam", "k12", "grokfree", "grokpro", "free",
+}
+
+func nvtokensSalePlanLabel(code string) string {
+	switch normalizeNvtokensSalePlan(code) {
+	case "plus":
+		return "Plus"
+	case "pro":
+		return "Pro"
+	case "team":
+		return "Team"
+	case "bugteam":
+		return "BugTeam"
+	case "k12":
+		return "K12"
+	case "grokfree":
+		return "Grok Free"
+	case "grokpro":
+		return "GrokPro"
+	case "free":
+		return "Free"
+	default:
+		return strings.TrimSpace(code)
+	}
+}
+
+type nvtokensCatalogAggregate struct {
+	available int
+	minFen    int64
+	maxFen    int64
+}
+
+func (c *Client) nvtokensProductCatalog(ctx context.Context, credentials Credentials) (ProductCatalog, error) {
+	value, _, err := c.doAuthenticated(
+		ctx,
+		credentials,
+		http.MethodGet,
+		"/api/workspace/seller-candidates",
+		nil,
+	)
+	if err != nil {
+		return ProductCatalog{}, err
+	}
+	aggregates := make(map[string]nvtokensCatalogAggregate)
+	for _, seller := range nvtokensSellerCandidates(value) {
+		plans := make(map[string]struct{})
+		if values, ok := seller["sale_plans"].([]any); ok {
+			for _, raw := range values {
+				if code := normalizeNvtokensSalePlan(fmt.Sprint(raw)); code != "" {
+					plans[code] = struct{}{}
+				}
+			}
+		}
+		counts, _ := seller["sale_plan_counts"].(map[string]any)
+		prices, _ := seller["sale_plan_prices"].(map[string]any)
+		stats, _ := seller["sale_plan_stats"].(map[string]any)
+		for code := range counts {
+			plans[normalizeNvtokensSalePlan(code)] = struct{}{}
+		}
+		for code := range prices {
+			plans[normalizeNvtokensSalePlan(code)] = struct{}{}
+		}
+		for code := range stats {
+			plans[normalizeNvtokensSalePlan(code)] = struct{}{}
+		}
+		for code := range plans {
+			if code == "" || len(code) > 64 {
+				continue
+			}
+			aggregate := aggregates[code]
+			available := intValue(counts, code)
+			stat, _ := stats[code].(map[string]any)
+			available = maxInt(available, intValue(stat, "available_count", "availableCount"))
+			if available == 0 && counts == nil && code == "plus" {
+				available = intValue(seller, "available_count", "availableCount")
+			}
+			aggregate.available += maxInt(available, 0)
+
+			price, _ := prices[code].(map[string]any)
+			minFen := int64Value(price, "min_cents", "minCents", "price_min_cents", "priceMinCents")
+			maxFen := int64Value(price, "max_cents", "maxCents", "price_max_cents", "priceMaxCents")
+			if minFen == 0 {
+				minFen = int64Value(stat, "min_cents", "minCents", "price_min_cents", "priceMinCents")
+			}
+			if maxFen == 0 {
+				maxFen = int64Value(stat, "max_cents", "maxCents", "price_max_cents", "priceMaxCents")
+			}
+			if minFen > 0 && (aggregate.minFen == 0 || minFen < aggregate.minFen) {
+				aggregate.minFen = minFen
+			}
+			if maxFen > aggregate.maxFen {
+				aggregate.maxFen = maxFen
+			}
+			aggregates[code] = aggregate
+		}
+	}
+
+	ordered := make([]string, 0, len(aggregates))
+	seen := make(map[string]struct{}, len(aggregates))
+	for _, code := range nvtokensSalePlanOrder {
+		if _, ok := aggregates[code]; ok {
+			ordered = append(ordered, code)
+			seen[code] = struct{}{}
+		}
+	}
+	extra := make([]string, 0, len(aggregates))
+	for code := range aggregates {
+		if _, ok := seen[code]; !ok {
+			extra = append(extra, code)
+		}
+	}
+	sort.Strings(extra)
+	ordered = append(ordered, extra...)
+	products := make([]ProductCatalogItem, 0, len(ordered))
+	for _, code := range ordered {
+		aggregate := aggregates[code]
+		products = append(products, ProductCatalogItem{
+			Code:            code,
+			Label:           nvtokensSalePlanLabel(code),
+			Available:       aggregate.available,
+			MinUnitPriceFen: aggregate.minFen,
+			MaxUnitPriceFen: aggregate.maxFen,
+		})
+	}
+	if len(products) == 0 {
+		return ProductCatalog{}, errors.New("nvtokens product catalog did not include any sale plans")
+	}
+	return ProductCatalog{Products: products}, nil
+}
+
+func nvtokensSellerCandidates(value any) []map[string]any {
+	root, ok := value.(map[string]any)
+	if !ok || root == nil {
+		return nil
+	}
+	for _, key := range []string{"sellers", "candidates", "items"} {
+		if values, ok := root[key].([]any); ok {
+			result := make([]map[string]any, 0, len(values))
+			for _, raw := range values {
+				if seller, ok := raw.(map[string]any); ok {
+					result = append(result, seller)
+				}
+			}
+			return result
+		}
+	}
+	for _, key := range []string{"data", "payload", "result"} {
+		if child, ok := root[key]; ok {
+			if result := nvtokensSellerCandidates(child); len(result) > 0 {
+				return result
+			}
+		}
+	}
+	return nil
 }
 
 func normalizeNvtokensCredentialType(value string) string {

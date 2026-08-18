@@ -543,13 +543,17 @@ func normalizeSupplyPlatforms(submitted []store.ManagerSupplyPlatformConfig, cur
 		}
 		platform.ClearUsername = false
 		if value := strings.ToLower(strings.TrimSpace(raw.Product)); value != "" {
-			platform.Product = value
+			platform.Product = normalizeSupplyPlatformProduct(platformType, value)
 		} else if strings.TrimSpace(platform.Product) == "" {
 			if platformType == SupplyPlatformBugTeam {
 				platform.Product = "team_1h"
+			} else if platformType == SupplyPlatformNvtokens {
+				platform.Product = "plus"
 			} else {
 				platform.Product = "oauth_30d"
 			}
+		} else {
+			platform.Product = normalizeSupplyPlatformProduct(platformType, platform.Product)
 		}
 		if platformType == SupplyPlatformNvtokens {
 			purchaseAccountType := strings.TrimSpace(raw.PurchaseAccountType)
@@ -602,6 +606,30 @@ func normalizeSupplyPlatformType(value string) string {
 		return SupplyPlatformNvtokens
 	default:
 		return SupplyPlatformLegacy
+	}
+}
+
+func normalizeSupplyPlatformProduct(platformType string, value string) string {
+	product := strings.ToLower(strings.TrimSpace(value))
+	if normalizeSupplyPlatformType(platformType) != SupplyPlatformNvtokens {
+		return product
+	}
+	switch product {
+	case "", "oauth_30d", "oauth_7d":
+		return "plus"
+	case "team_1h":
+		return "team"
+	default:
+		return product
+	}
+}
+
+func supportedNvtokensProduct(value string) bool {
+	switch normalizeSupplyPlatformProduct(SupplyPlatformNvtokens, value) {
+	case "plus", "pro", "team", "bugteam", "k12", "grokfree", "grokpro", "free":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -923,10 +951,8 @@ func validateSupplyPlatform(platform store.ManagerSupplyPlatformConfig) error {
 		if platform.MaxUnitPriceFen != nil && *platform.MaxUnitPriceFen < 0 {
 			return errors.New("maxUnitPriceFen must be zero or greater")
 		}
-		switch strings.ToLower(strings.TrimSpace(platform.Product)) {
-		case "oauth_30d", "oauth_7d", "team_1h":
-		default:
-			return errors.New("product must be oauth_30d, oauth_7d or team_1h")
+		if !supportedNvtokensProduct(platform.Product) {
+			return errors.New("product must be a supported nvtokens sale plan")
 		}
 	default:
 		switch strings.ToLower(strings.TrimSpace(platform.Product)) {

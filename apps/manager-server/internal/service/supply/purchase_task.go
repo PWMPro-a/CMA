@@ -27,7 +27,7 @@ type purchaseTaskOrderStats struct {
 	activeOrderCount int
 }
 
-func (s *Service) createManualPurchaseTask(ctx context.Context, quantity int, supplierID string) (store.SupplyPurchaseTask, error) {
+func (s *Service) createManualPurchaseTask(ctx context.Context, quantity int, supplierID string, requestedProduct ...string) (store.SupplyPurchaseTask, error) {
 	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
 	if err != nil {
 		return store.SupplyPurchaseTask{}, err
@@ -42,11 +42,18 @@ func (s *Service) createManualPurchaseTask(ctx context.Context, quantity int, su
 	if !supplyPlatformConfigured(platform) {
 		return store.SupplyPurchaseTask{}, ErrNotConfigured
 	}
+	product := platform.Product
+	if len(requestedProduct) > 0 && strings.TrimSpace(requestedProduct[0]) != "" {
+		product = strings.ToLower(strings.TrimSpace(requestedProduct[0]))
+		if !supplyProductSupportedByPlatform(platform, product) {
+			return store.SupplyPurchaseTask{}, fmt.Errorf("product %s is not supported by supply platform %s", product, platform.ID)
+		}
+	}
 	return s.store.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
 		TaskID:              "purchase-" + uuid.NewString(),
 		Source:              "manual",
 		SupplierID:          platform.ID,
-		Product:             platform.Product,
+		Product:             product,
 		TargetQuantity:      quantity,
 		Status:              purchaseTaskStatusPending,
 		Strategy:            supplyOrderStrategy(cfg.Supply, false),
@@ -163,6 +170,10 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	openOrders, err = s.reconcileUnavailableSupplyOrders(ctx, cfg.Supply, openOrders)
+	if err != nil {
+		return err
+	}
 	// Supplier lifecycle reconciliation runs before creating another reservation.
 	// A polled order that is still only waiting for inventory keeps its own slot,
 	// but must not consume the entire worker turn when the task has other slots and
@@ -254,6 +265,68 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 	return nil
 }
 
+// reconcileUnavailableSupplyOrders closes local reservations whose configured
+// platform identity no longer exists. Automatic intents are immediately
+// replanned against the remaining healthy platform/product candidates; manual
+// intents are terminated because their explicit operator selection is gone.
+func (s *Service) reconcileUnavailableSupplyOrders(
+	ctx context.Context,
+	cfg store.ManagerSupplyConfig,
+	orders []store.SupplyOrder,
+) ([]store.SupplyOrder, error) {
+	changed := false
+	nowMS := time.Now().UnixMilli()
+	for _, order := range orders {
+		platform, resolveErr := resolveSupplyPlatform(cfg, order.SupplierID, order.Product)
+		if resolveErr == nil && supplyPlatformConfigured(platform) {
+			continue
+		}
+		if resolveErr == nil {
+			resolveErr = fmt.Errorf("%w: supply platform %s is not configured", ErrNotConfigured, order.SupplierID)
+		}
+		message := safeError(resolveErr)
+		order.Status = "failed"
+		order.RemoteStatus = "platform_unavailable"
+		order.LastError = message
+		order.NextPollAtMS = 0
+		order.SupplierRetryUntilMS = 0
+		order.CompletedAtMS = nowMS
+		if err := s.store.UpdateSupplyOrder(ctx, order); err != nil {
+			return nil, err
+		}
+		changed = true
+		if strings.TrimSpace(order.TaskID) == "" {
+			continue
+		}
+		task, found, err := s.store.GetSupplyPurchaseTask(ctx, order.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		if !found || task.Status == purchaseTaskStatusCompleted || task.Status == purchaseTaskStatusCancelled {
+			continue
+		}
+		task.LastError = message
+		if task.Source == "manual" {
+			task.Status = purchaseTaskStatusCancelled
+			task.CancelledAtMS = nowMS
+			task.NextAttemptAtMS = 0
+		} else {
+			task.Status = purchaseTaskStatusRunning
+			task.SupplierID = ""
+			task.Product = ""
+			task.NextAttemptAtMS = 0
+		}
+		if err := s.store.UpdateSupplyPurchaseTask(ctx, task); err != nil {
+			return nil, err
+		}
+	}
+	if !changed {
+		return orders, nil
+	}
+	s.invalidateSupplyOrdersCache()
+	return s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
+}
+
 // purchaseTaskNextOrderQuantity shards the uncovered target across the worker
 // slots that can still be filled. For example, a target of 20 with three slots
 // becomes 7 + 7 + 6 instead of three competing orders of 20. Smaller supplier
@@ -283,7 +356,7 @@ func (s *Service) createPurchaseTaskOrder(
 	if task.Source == "manual" {
 		requestedSupplierID = task.SupplierID
 	}
-	selection, err := s.selectSupplyPlatform(ctx, cfg.Supply, quantity, openOrders, requestedSupplierID)
+	selection, err := s.selectSupplyPlatformProduct(ctx, cfg.Supply, quantity, openOrders, requestedSupplierID, task.Product)
 	if err != nil {
 		return s.recordPurchaseTaskError(ctx, task, err)
 	}

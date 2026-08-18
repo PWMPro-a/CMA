@@ -1336,6 +1336,22 @@ func (s *Service) UpdateConfig(ctx context.Context, config store.ManagerSupplyCo
 	} else if !isEnabled {
 		s.observeAutomaticEnabled(false)
 	}
+	if resolved, _, _, resolveErr := s.managerConfig.ResolveManagerConfigWithSource(ctx); resolveErr == nil {
+		if openOrders, listErr := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders); listErr == nil {
+			_, _ = s.reconcileUnavailableSupplyOrders(ctx, resolved.Supply, openOrders)
+		}
+	}
+	// Platform identity, product, filters, and credentials all affect quotes.
+	// Drop the previous runtime quote so the response is hydrated from the newly
+	// saved platform graph rather than displaying a stale supplier/error pair.
+	s.stateMu.Lock()
+	s.overview.Inventory = nil
+	s.overview.Balance = nil
+	s.overview.Platforms = nil
+	s.overview.SelectedPlatformID = ""
+	s.overview.LastError = ""
+	s.overview.CheckedAtMS = 0
+	s.stateMu.Unlock()
 	return s.GetStatus(ctx, 50)
 }
 
@@ -1348,14 +1364,18 @@ func (s *Service) Check(ctx context.Context) (Status, error) {
 }
 
 func (s *Service) Replenish(ctx context.Context, quantity int, supplierID ...string) (Status, error) {
-	if quantity <= 0 || quantity > 10000 {
-		return Status{}, ErrInvalidQuantity
-	}
 	requestedSupplierID := ""
 	if len(supplierID) > 0 {
 		requestedSupplierID = strings.TrimSpace(supplierID[0])
 	}
-	if _, err := s.createManualPurchaseTask(ctx, quantity, requestedSupplierID); err != nil {
+	return s.ReplenishProduct(ctx, quantity, requestedSupplierID, "")
+}
+
+func (s *Service) ReplenishProduct(ctx context.Context, quantity int, supplierID string, product string) (Status, error) {
+	if quantity <= 0 || quantity > 10000 {
+		return Status{}, ErrInvalidQuantity
+	}
+	if _, err := s.createManualPurchaseTask(ctx, quantity, strings.TrimSpace(supplierID), strings.TrimSpace(product)); err != nil {
 		s.recordError(err)
 		return Status{}, err
 	}
@@ -3641,19 +3661,22 @@ func (s *Service) refreshOverview(ctx context.Context, cfg store.ManagerConfig, 
 
 func (s *Service) refreshSupplyOverview(ctx context.Context, cfg store.ManagerSupplyConfig, available int, quantity int) error {
 	selection, err := s.selectSupplyPlatform(ctx, cfg, quantity, nil)
+	overview := Overview{
+		CheckedAtMS:  time.Now().UnixMilli(),
+		CPAAvailable: available,
+		CPATarget:    cfg.TargetAvailableAccounts,
+		CPADeficit:   max(0, cfg.TargetAvailableAccounts-available),
+		Platforms:    selection.all,
+	}
 	if err != nil {
+		overview.LastError = safeError(err)
+		s.setOverview(overview)
 		return err
 	}
-	s.setOverview(Overview{
-		CheckedAtMS:        time.Now().UnixMilli(),
-		CPAAvailable:       available,
-		CPATarget:          cfg.TargetAvailableAccounts,
-		CPADeficit:         max(0, cfg.TargetAvailableAccounts-available),
-		Inventory:          selection.status.Inventory,
-		Balance:            selection.status.Balance,
-		SelectedPlatformID: selection.platform.ID,
-		Platforms:          selection.all,
-	})
+	overview.Inventory = selection.status.Inventory
+	overview.Balance = selection.status.Balance
+	overview.SelectedPlatformID = selection.platform.ID
+	s.setOverview(overview)
 	return nil
 }
 
@@ -3692,6 +3715,7 @@ func (s *Service) hydrateOverviewIfNeeded(ctx context.Context, cfg store.Manager
 	s.overview.CPATarget = cfg.TargetAvailableAccounts
 	s.overview.CPADeficit = max(0, cfg.TargetAvailableAccounts-s.overview.CPAAvailable)
 	if err != nil {
+		s.overview.Platforms = selection.all
 		s.overview.LastError = safeError(err)
 		return
 	}

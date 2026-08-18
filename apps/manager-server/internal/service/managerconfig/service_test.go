@@ -148,7 +148,7 @@ func TestNormalizeSupplyConfigKeepsNvtokensPlatformType(t *testing.T) {
 		t.Fatalf("platforms = %#v", next.Platforms)
 	}
 	platform := next.Platforms[0]
-	if platform.Type != SupplyPlatformNvtokens || platform.BaseURL != "https://nvtokens.com" || platform.Product != "oauth_30d" {
+	if platform.Type != SupplyPlatformNvtokens || platform.BaseURL != "https://nvtokens.com" || platform.Product != "plus" {
 		t.Fatalf("nvtokens platform = %#v", platform)
 	}
 	if platform.PurchaseAccountType != SupplyPurchaseAccountHasRefreshToken ||
@@ -157,6 +157,19 @@ func TestNormalizeSupplyConfigKeepsNvtokensPlatformType(t *testing.T) {
 	}
 	if err := ValidateSupplyConfig(store.ManagerSupplyConfig{Enabled: &enabled, Platforms: next.Platforms}); err != nil {
 		t.Fatalf("validate nvtokens platform: %v", err)
+	}
+}
+
+func TestValidateSupplyConfigAcceptsNvtokensNativeProducts(t *testing.T) {
+	enabled := true
+	for _, product := range []string{"plus", "pro", "team", "bugteam", "k12", "grokfree", "grokpro", "free"} {
+		cfg := store.ManagerSupplyConfig{Enabled: &enabled, Platforms: []store.ManagerSupplyPlatformConfig{{
+			ID: "nvtokens-main", Type: SupplyPlatformNvtokens, Enabled: &enabled,
+			BaseURL: "https://nvtokens.com", Username: "buyer", Password: "secret", Product: product,
+		}}}
+		if err := ValidateSupplyConfig(cfg); err != nil {
+			t.Fatalf("native product %s: %v", product, err)
+		}
 	}
 }
 

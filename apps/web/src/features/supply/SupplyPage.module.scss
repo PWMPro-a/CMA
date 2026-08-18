@@ -1111,6 +1111,22 @@
   font-weight: 650;
 }
 
+.fieldLabelRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.fieldLabelRow label {
+  min-width: 0;
+}
+
+.fieldError {
+  color: var(--failure-badge-text) !important;
+  overflow-wrap: anywhere;
+}
+
 .smartToggles {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(180px, 0.6fr);

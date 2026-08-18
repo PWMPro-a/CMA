@@ -129,6 +129,36 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 		result, err := h.App.SupplyService.Check(r.Context())
 		h.writeResult(w, result, err)
+	case "/v0/management/supply/platform-catalog":
+		if r.Method != http.MethodPost {
+			response.MethodNotAllowed(w)
+			return
+		}
+		var req struct {
+			Platform store.ManagerSupplyPlatformConfig `json:"platform"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			response.Error(w, http.StatusBadRequest, err)
+			return
+		}
+		result, err := h.App.SupplyService.GetPlatformProductCatalog(r.Context(), req.Platform)
+		h.writeResult(w, result, err)
+	case "/v0/management/supply/quote":
+		if r.Method != http.MethodPost {
+			response.MethodNotAllowed(w)
+			return
+		}
+		var req struct {
+			Quantity   int    `json:"quantity"`
+			SupplierID string `json:"supplierId"`
+			Product    string `json:"product"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			response.Error(w, http.StatusBadRequest, err)
+			return
+		}
+		result, err := h.App.SupplyService.QuotePlatformProduct(r.Context(), req.Quantity, req.SupplierID, req.Product)
+		h.writeResult(w, result, err)
 	case "/v0/management/supply/recoveries":
 		if r.Method != http.MethodGet {
 			response.MethodNotAllowed(w)
@@ -218,12 +248,13 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Quantity   int    `json:"quantity"`
 			SupplierID string `json:"supplierId"`
+			Product    string `json:"product"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			response.Error(w, http.StatusBadRequest, err)
 			return
 		}
-		result, err := h.App.SupplyService.Replenish(r.Context(), req.Quantity, req.SupplierID)
+		result, err := h.App.SupplyService.ReplenishProduct(r.Context(), req.Quantity, req.SupplierID, req.Product)
 		h.writeResult(w, result, err)
 	default:
 		response.MethodNotAllowed(w)
