@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
@@ -222,5 +223,50 @@ func TestCancelledPurchaseTaskReleasesReversibleChildOrder(t *testing.T) {
 	order, _, err = st.GetSupplyOrder(ctx, "cancel-child")
 	if err != nil || order.Status != "released" || order.RemoteStatus != "task_cancelled" {
 		t.Fatalf("released child order = %#v err=%v", order, err)
+	}
+}
+
+func TestAutomaticPurchaseTaskKeepsActiveOrderUntilTakeDecision(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-active-order.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	cfg := store.ManagerConfig{Supply: store.ManagerSupplyConfig{
+		Enabled: &enabled, SmartEnabled: &enabled, Product: "oauth_7d",
+	}}
+	if err := st.SaveManagerConfig(ctx, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	task, err := st.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
+		TaskID: "purchase-active", Source: "automatic", Product: "oauth_7d",
+		TargetQuantity: 26, Status: "running", MaxConcurrentOrders: 1,
+		CreatedAtMS: time.Now().Add(-time.Minute).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "ready-26", TaskID: task.TaskID, Product: "oauth_7d",
+		RequestedQuantity: 26, ReadyQuantity: 26, Automatic: true, Status: "ready",
+	}); err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil))
+	service.setSmartResource(SmartResource{
+		GeneratedAtMS: time.Now().UnixMilli(), Enabled: true, SnapshotFresh: true,
+		HealthLevel: smartHealthHealthy, DecisionReason: "capacity_healthy",
+	})
+	if err := service.reconcileAutomaticPurchaseTaskCancellation(ctx); err != nil {
+		t.Fatalf("reconcile automatic task: %v", err)
+	}
+	task, _, err = st.GetSupplyPurchaseTask(ctx, task.TaskID)
+	if err != nil {
+		t.Fatalf("load task: %v", err)
+	}
+	if task.Status != purchaseTaskStatusRunning {
+		t.Fatalf("active task status = %q, want running", task.Status)
 	}
 }

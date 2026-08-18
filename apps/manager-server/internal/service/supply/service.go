@@ -3052,8 +3052,15 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 		if err != nil {
 			return false, err
 		}
-		if release, reason, err := s.shouldReleaseOversizedOpenOrder(ctx, cfg.Supply, resource, order); err != nil {
+		if release, accepted, reason, err := s.shouldReleaseOversizedOpenOrder(ctx, cfg.Supply, resource, order); err != nil {
 			return false, err
+		} else if accepted {
+			resource.LockedOrderID = order.OrderID
+			resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
+			resource.SuggestedAction = smartActionTakeLocked
+			resource.DecisionReason = reason
+			s.setSmartResource(resource)
+			return false, nil
 		} else if release {
 			resource.LockedOrderID = order.OrderID
 			resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
@@ -3157,9 +3164,9 @@ func (s *Service) shouldReleaseOversizedOpenOrder(
 	cfg store.ManagerSupplyConfig,
 	resource SmartResource,
 	order *store.SupplyOrder,
-) (bool, string, error) {
+) (bool, bool, string, error) {
 	if s == nil || order == nil || !order.Automatic {
-		return false, "", nil
+		return false, false, "", nil
 	}
 	if order.ReadyQuantity <= 0 && !isReadyForTake(order.RemoteStatus) &&
 		!isReadyForTake(order.Status) {
@@ -3167,30 +3174,43 @@ func (s *Service) shouldReleaseOversizedOpenOrder(
 		// supplier inventory. The aggregate cap is enforced when an order is
 		// actually ready to take, where the total ready/in-flight capacity is
 		// known and a surplus reservation can be left to expire.
-		return false, "", nil
+		return false, false, "", nil
 	}
 	orders, err := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
 	if err != nil {
-		return false, "", err
+		return false, false, "", err
 	}
-	need := math.Max(0, resource.CapacityGapRCU)
+	if resource.ConsumeRCUPerMinute <= 0 || resource.HealthLevel == smartHealthHealthy {
+		// Idle traffic and genuinely healthy verified capacity retain the existing
+		// release behavior. Overage tolerance protects an active shortage, not a
+		// minimum account floor that has no current demand behind it.
+		return false, false, "", nil
+	}
+	// CapacityGapRCU already subtracts prelocked orders. Use the live shortage
+	// before reservations here, otherwise an order can erase its own deficit as
+	// soon as stock becomes ready and then be released instead of taken.
+	need := math.Max(0, resource.TargetCapacityRCU-resource.CurrentCapacityRCU)
+	need = math.Max(need, math.Max(0, resource.CapacityGapRCU))
 	unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
-	accountDeficit := max(0, resource.AccountQuantityDeficit)
+	accountFloor := max(resource.TargetAvailableAccounts, resource.HealthyAvailableAccounts)
+	accountDeficit := max(0, accountFloor-resource.AvailableAccounts)
+	accountDeficit = max(accountDeficit, max(0, resource.AccountQuantityDeficit))
 	accountDeficit = max(accountDeficit, max(0, resource.ConcurrencyAccountDeficit))
 	if unit > 0 && accountDeficit > 0 {
 		need = math.Max(need, float64(accountDeficit)*unit)
 	}
 	if need <= 0 {
-		return false, "", nil
+		return false, false, "", nil
 	}
 	// One account-equivalent or 15% of the required capacity is a small
-	// tolerance for parallel抢货. Anything beyond that is held as an avoidable
-	// reservation and should be allowed to expire locally before taking.
+	// tolerance for live deficit drift while an order is competing for stock.
+	// A ready order inside this range is taken immediately; releasing it would
+	// discard scarce inventory only to recreate nearly the same order later.
 	allowance := math.Max(unit, need*0.15)
 	if readySupplyOrderAccepted(cfg, resource, orders, order, need, allowance) {
-		return false, "", nil
+		return false, true, "low_water_take_ready", nil
 	}
-	return true, "parallel_capacity_overage", nil
+	return true, false, "parallel_capacity_overage", nil
 }
 
 func (s *Service) markAutomaticOrderReleasedLocally(ctx context.Context, order *store.SupplyOrder) error {
@@ -7726,6 +7746,13 @@ func readySupplyOrderAccepted(
 		ready = ready[:maxTrackedOpenSupplyOrders]
 	}
 	capWithAllowance := need + math.Max(0, allowance)
+	// When the first secured order alone covers the current shortage within the
+	// overage allowance, take it instead of releasing scarce stock in favor of a
+	// slightly closer combination that may disappear before the next worker run.
+	// Later ready orders are reconsidered after this one becomes irreversible.
+	if firstTotal := fixedCapacity + supplyOrderCapacityRCU(cfg, resource, ready[0]); firstTotal >= need && firstTotal <= capWithAllowance {
+		return ready[0].OrderID == current.OrderID
+	}
 	bestMask := 0
 	bestCategory := 3
 	bestTotal := 0.0

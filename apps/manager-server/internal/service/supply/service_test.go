@@ -3852,6 +3852,59 @@ func TestReadySupplyOrderTakeBudgetReleasesLaterOrderWhenFirstAlreadyCoversTarge
 	}
 }
 
+func TestReadySupplyOrderTakeBudgetKeepsFirstScarceOrderWithinOverageAllowance(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{Product: "oauth_7d", NewAccountConfidence: 1}
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	orders := []store.SupplyOrder{
+		{ID: 1, OrderID: "ready-26", RequestedQuantity: 26, ReadyQuantity: 26, Automatic: true, Status: "ready", CreatedAtMS: 1},
+		{ID: 2, OrderID: "ready-15", RequestedQuantity: 15, ReadyQuantity: 15, Automatic: true, Status: "ready", CreatedAtMS: 2},
+		{ID: 3, OrderID: "ready-10", RequestedQuantity: 10, ReadyQuantity: 10, Automatic: true, Status: "ready", CreatedAtMS: 3},
+	}
+	need := 24 * unit
+	allowance := need * 0.15
+	if !readySupplyOrderAccepted(cfg, SmartResource{}, orders, &orders[0], need, allowance) {
+		t.Fatal("the first quantity-26 order should be taken for a live quantity-24 shortage")
+	}
+	if readySupplyOrderAccepted(cfg, SmartResource{}, orders, &orders[1], need, allowance) ||
+		readySupplyOrderAccepted(cfg, SmartResource{}, orders, &orders[2], need, allowance) {
+		t.Fatal("later ready orders should wait until the accepted scarce order becomes irreversible")
+	}
+}
+
+func TestReadyOrderUsesLiveDeficitBeforeItsOwnPrelockedCapacity(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "ready-live-deficit.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := store.ManagerSupplyConfig{Product: "oauth_7d", NewAccountConfidence: 1}
+	unit := smartEstimatedNewAccountCapacityRCU(cfg)
+	order, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "ready-26", Product: cfg.Product, RequestedQuantity: 26, ReadyQuantity: 26,
+		Automatic: true, Status: "ready", CreatedAtMS: 1,
+	})
+	if err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil))
+	resource := SmartResource{
+		HealthLevel:          smartHealthCritical,
+		ConsumeRCUPerMinute:  unit,
+		TargetCapacityRCU:    24 * unit,
+		CurrentCapacityRCU:   0,
+		PrelockedCapacityRCU: 26 * unit,
+		CapacityGapRCU:       0,
+	}
+	release, accepted, reason, err := service.shouldReleaseOversizedOpenOrder(ctx, cfg, resource, &order)
+	if err != nil {
+		t.Fatalf("evaluate ready order: %v", err)
+	}
+	if release || !accepted || reason != "low_water_take_ready" {
+		t.Fatalf("ready order decision release=%v accepted=%v reason=%q", release, accepted, reason)
+	}
+}
+
 func TestReadySupplyOrderTakeBudgetChoosesClosestCapacityCombination(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{Product: "oauth_7d", NewAccountConfidence: 1}
 	unit := smartEstimatedNewAccountCapacityRCU(cfg)

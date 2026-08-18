@@ -500,6 +500,17 @@ func (s *Service) reconcileAutomaticPurchaseTaskCancellation(ctx context.Context
 	if time.Since(time.UnixMilli(task.CreatedAtMS)) < 10*time.Second {
 		return nil
 	}
+	orders, err := s.store.ListSupplyOrdersByTaskID(ctx, task.TaskID)
+	if err != nil {
+		return err
+	}
+	if summarizePurchaseTaskOrders(orders).activeOrderCount > 0 {
+		// The smart snapshot counts ready/in-flight child orders as prelocked
+		// capacity. Let processOrder apply the live-deficit overage budget before
+		// cancelling the task; otherwise the order can cancel its own shortage and
+		// be released at the exact moment supplier stock becomes available.
+		return nil
+	}
 	resource := s.currentSmartResource(cfg.Supply)
 	shouldCancel := resource.Enabled && resource.SnapshotFresh && !smartResourceEmergency(resource) &&
 		resource.CapacityGapRCU <= 0 && resource.AccountQuantityDeficit <= 0 && resource.SuggestedQuantity <= 0
