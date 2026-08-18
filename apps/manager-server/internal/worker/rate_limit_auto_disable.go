@@ -24,6 +24,7 @@ import (
 const (
 	quotaAutoDisableQueueSize      = 256
 	quotaAutoDisableDefaultTick    = 15 * time.Second
+	quotaAutoDisableInvariantTick  = 5 * time.Minute
 	quotaAutoDisableActionTimeout  = 30 * time.Second
 	quotaAutoDisableReconcileLimit = 2000
 	quotaCooldownDueLimit          = 100
@@ -51,11 +52,13 @@ type RateLimitAutoDisableWorker struct {
 	reconciledEventOrder  []string
 
 	operationMu         sync.Mutex
+	invariantMu         sync.Mutex
 	mu                  sync.RWMutex
 	enabled             bool
 	baseURL             string
 	managementKey       string
 	enableCheckInterval time.Duration
+	nextInvariantCheck  time.Time
 }
 
 type quotaAutoDisableCandidate struct {
@@ -187,6 +190,7 @@ func (w *RateLimitAutoDisableWorker) run(ctx context.Context) {
 	defer ticker.Stop()
 
 	w.enableDue(ctx, time.Now())
+	w.reconcileActiveCooldowns(ctx, time.Now())
 	if w.isEnabled() {
 		w.reconcileRecentUsageEvents(ctx, time.Now())
 	}
@@ -202,6 +206,7 @@ func (w *RateLimitAutoDisableWorker) run(ctx context.Context) {
 			}
 		case <-ticker.C:
 			w.enableDue(ctx, time.Now())
+			w.reconcileActiveCooldowns(ctx, time.Now())
 			if w.isEnabled() {
 				w.reconcileRecentUsageEvents(ctx, time.Now())
 			}
@@ -240,14 +245,15 @@ func (w *RateLimitAutoDisableWorker) reconcileRecentUsageEvents(ctx context.Cont
 			if _, seen := w.reconciledEventHashes[eventHash]; seen {
 				continue
 			}
-			w.reconciledEventHashes[eventHash] = struct{}{}
-			w.reconciledEventOrder = append(w.reconciledEventOrder, eventHash)
 		}
 		candidate, ok := quotaAutoDisableCandidateFromEvent(event, baseURL, managementKey, now)
 		if !ok {
 			continue
 		}
-		w.handleCandidate(ctx, candidate)
+		if w.handleCandidate(ctx, candidate) && eventHash != "" {
+			w.reconciledEventHashes[eventHash] = struct{}{}
+			w.reconciledEventOrder = append(w.reconciledEventOrder, eventHash)
+		}
 	}
 	w.compactReconciledEventHashes()
 }
@@ -283,36 +289,36 @@ func (w *RateLimitAutoDisableWorker) runtimeConfig() (string, string) {
 	return w.baseURL, w.managementKey
 }
 
-func (w *RateLimitAutoDisableWorker) handleCandidate(ctx context.Context, candidate quotaAutoDisableCandidate) {
+func (w *RateLimitAutoDisableWorker) handleCandidate(ctx context.Context, candidate quotaAutoDisableCandidate) bool {
 	if w == nil {
-		return
+		return false
 	}
 	w.operationMu.Lock()
 	defer w.operationMu.Unlock()
-	w.handleCandidateLocked(ctx, candidate)
+	return w.handleCandidateLocked(ctx, candidate)
 }
 
-func (w *RateLimitAutoDisableWorker) handleCandidateLocked(ctx context.Context, candidate quotaAutoDisableCandidate) {
+func (w *RateLimitAutoDisableWorker) handleCandidateLocked(ctx context.Context, candidate quotaAutoDisableCandidate) bool {
 	if w.store == nil || w.store.QuotaCooldowns == nil {
 		log.Printf("[quota-auto-disable] store unavailable, skip auth file %q", candidate.FileName)
-		return
+		return false
 	}
 	if candidate.FileName == "" || candidate.BaseURL == "" || candidate.ManagementKey == "" {
-		return
+		return false
 	}
 	now := time.Now()
 	if !candidate.ResetAt.After(now) {
 		log.Printf("[quota-auto-disable] quota event for auth file %q has non-future reset time %s, skip auto disable", candidate.FileName, candidate.ResetAt.Format(time.RFC3339))
-		return
+		return false
 	}
 	if w.authFileMutations == nil {
 		log.Printf("[quota-auto-disable] mutation coordinator unavailable, skip auth file %q", candidate.FileName)
-		return
+		return false
 	}
 	releaseMutation, err := w.authFileMutations.Acquire(ctx, candidate.FileName)
 	if err != nil {
 		log.Printf("[quota-auto-disable] failed to coordinate auth file %q mutation: %v", candidate.FileName, err)
-		return
+		return false
 	}
 	defer releaseMutation()
 
@@ -324,11 +330,11 @@ func (w *RateLimitAutoDisableWorker) handleCandidateLocked(ctx context.Context, 
 	})
 	if err != nil {
 		log.Printf("[quota-auto-disable] failed to verify auth file %q before disable: %v", candidate.FileName, err)
-		return
+		return false
 	}
 	if !ok {
 		log.Printf("[quota-auto-disable] auth file %q authIndex=%q not found/currently mismatched, skip auto disable", candidate.FileName, candidate.AuthIndex)
-		return
+		return false
 	}
 	current := target.File
 	resolvedAuthIndex := firstNonEmpty(candidate.AuthIndex, current.AuthIndex)
@@ -339,21 +345,21 @@ func (w *RateLimitAutoDisableWorker) handleCandidateLocked(ctx context.Context, 
 	resolvedProvider := normalizeQuotaProvider(firstNonEmpty(candidate.Provider, current.Provider))
 	if resolvedAuthIndex == "" && !hasQuotaFallbackIdentity(resolvedProvider, resolvedAccountSnapshot) {
 		log.Printf("[quota-auto-disable] auth file %q has no stable auth index or provider/account snapshot identity; skip auto disable/recovery ownership", candidate.FileName)
-		return
+		return false
 	}
 	preDisabled := current.Disabled
 	if preDisabled {
 		if w.extendExistingCooldown(ctx, candidate, current) {
-			return
+			return true
 		}
 		log.Printf("[quota-auto-disable] auth file %q was already disabled without CPAMP ownership; skip auto disable/recovery", candidate.FileName)
-		return
+		return true
 	}
 
 	log.Printf("[quota-auto-disable] quota limit reached for auth file %q account=%q provider=%q resetAt=%s, disabling", candidate.FileName, candidate.DisplayAccount, candidate.Provider, candidate.ResetAt.Format(time.RFC3339))
 	if err := w.patchAuthFileTarget(ctx, candidate.BaseURL, candidate.ManagementKey, target, true); err != nil {
 		log.Printf("[quota-auto-disable] failed to disable auth file %q: %v", candidate.FileName, err)
-		return
+		return false
 	}
 
 	owner := firstNonEmpty(candidate.Owner, model.QuotaCooldownOwnerUsage429)
@@ -395,9 +401,123 @@ func (w *RateLimitAutoDisableWorker) handleCandidateLocked(ctx context.Context, 
 		if rollbackErr != nil {
 			log.Printf("[quota-auto-disable] failed to roll back auth file %q after cooldown persistence error: %v", candidate.FileName, rollbackErr)
 		}
-		return
+		return false
 	}
 	log.Printf("[quota-auto-disable] disabled auth file %q; persisted CPAMP-owned auto-enable at %s", candidate.FileName, candidate.ResetAt.Format(time.RFC3339))
+	return true
+}
+
+// reconcileActiveCooldowns enforces the invariant that a CPAMP-owned quota
+// cooldown cannot remain enabled before its recovery time. This covers manual
+// toggles, upstream races, and a transient disable request failure after the
+// original usage event was handled.
+func (w *RateLimitAutoDisableWorker) reconcileActiveCooldowns(ctx context.Context, now time.Time) {
+	if w == nil || w.store == nil || w.store.QuotaCooldowns == nil {
+		return
+	}
+	w.invariantMu.Lock()
+	if !w.nextInvariantCheck.IsZero() && now.Before(w.nextInvariantCheck) {
+		w.invariantMu.Unlock()
+		return
+	}
+	active, err := w.store.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		w.invariantMu.Unlock()
+		log.Printf("[quota-auto-disable] failed to list active cooldowns for invariant check: %v", err)
+		return
+	}
+	items := make([]store.QuotaCooldown, 0, len(active))
+	for _, item := range active {
+		if item.PreDisabledState || item.RecoverAtMS <= now.UnixMilli() {
+			continue
+		}
+		if item.Owner != model.QuotaCooldownOwnerUsage429 && item.Owner != model.QuotaCooldownOwnerXAIFreeUsage {
+			continue
+		}
+		items = append(items, item)
+	}
+	if len(items) == 0 {
+		w.nextInvariantCheck = now.Add(quotaAutoDisableInvariantTick)
+		w.invariantMu.Unlock()
+		return
+	}
+	baseURL, managementKey := w.runtimeConfig()
+	if baseURL == "" || managementKey == "" {
+		w.invariantMu.Unlock()
+		return
+	}
+	w.nextInvariantCheck = now.Add(quotaAutoDisableInvariantTick)
+	w.invariantMu.Unlock()
+	files, err := cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).Fetch(ctx, baseURL, managementKey)
+	if err != nil {
+		log.Printf("[quota-auto-disable] failed to fetch auth files for cooldown invariant check: %v", err)
+		return
+	}
+	for _, item := range items {
+		current, ok := findQuotaCooldownAuthFile(files, item)
+		if !ok || current.Disabled {
+			continue
+		}
+		w.enforceActiveCooldown(ctx, baseURL, managementKey, item)
+	}
+}
+
+func findQuotaCooldownAuthFile(files []cpaauthfiles.File, item store.QuotaCooldown) (cpaauthfiles.File, bool) {
+	accountSnapshot := quotaActionAccountSnapshot(item.AuthFileName, item.AccountSnapshot)
+	provider := normalizeQuotaProvider(item.Provider)
+	matches := make([]cpaauthfiles.File, 0, 1)
+	for _, file := range files {
+		if file.Name != item.AuthFileName && file.ID != item.AuthFileName {
+			continue
+		}
+		if item.AuthIndex != "" && file.AuthIndex != item.AuthIndex {
+			continue
+		}
+		if provider != "" && normalizeQuotaProvider(file.Provider) != provider {
+			continue
+		}
+		if accountSnapshot != "" && quotaActionAccountSnapshot(file.Name, file.AccountSnapshot) != accountSnapshot {
+			continue
+		}
+		matches = append(matches, file)
+	}
+	if len(matches) != 1 {
+		return cpaauthfiles.File{}, false
+	}
+	return matches[0], true
+}
+
+func (w *RateLimitAutoDisableWorker) enforceActiveCooldown(ctx context.Context, baseURL string, managementKey string, item store.QuotaCooldown) {
+	if w.authFileMutations == nil {
+		return
+	}
+	releaseMutation, err := w.authFileMutations.Acquire(ctx, item.AuthFileName)
+	if err != nil {
+		_ = w.store.RecordQuotaCooldownFailure(ctx, item.ID, err.Error())
+		log.Printf("[quota-auto-disable] failed to coordinate cooldown invariant disable for %q: %v", item.AuthFileName, err)
+		return
+	}
+	defer releaseMutation()
+	target, ok, err := w.currentAuthFileTarget(ctx, baseURL, managementKey, cpaauthfiles.Identity{
+		AuthFileName:    item.AuthFileName,
+		AuthIndex:       item.AuthIndex,
+		Provider:        item.Provider,
+		AccountSnapshot: quotaActionAccountSnapshot(item.AuthFileName, item.AccountSnapshot),
+	})
+	if err != nil {
+		_ = w.store.RecordQuotaCooldownFailure(ctx, item.ID, err.Error())
+		log.Printf("[quota-auto-disable] failed to verify cooldown invariant target %q: %v", item.AuthFileName, err)
+		return
+	}
+	if !ok || target.File.Disabled {
+		return
+	}
+	if err := w.patchAuthFileTarget(ctx, baseURL, managementKey, target, true); err != nil {
+		_ = w.store.RecordQuotaCooldownFailure(ctx, item.ID, err.Error())
+		log.Printf("[quota-auto-disable] failed to re-disable active cooldown auth file %q: %v", item.AuthFileName, err)
+		return
+	}
+	log.Printf("[quota-auto-disable] re-disabled auth file %q because active cooldown remains until %s", item.AuthFileName, time.UnixMilli(item.RecoverAtMS).Format(time.RFC3339))
 }
 
 func (w *RateLimitAutoDisableWorker) extendExistingCooldown(ctx context.Context, candidate quotaAutoDisableCandidate, current authFile) bool {

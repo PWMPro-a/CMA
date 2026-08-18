@@ -116,6 +116,7 @@ func TestRateLimitAutoDisableWorkerReconcilesPersistedQuotaEventWhenEnabled(t *t
 	var mu sync.Mutex
 	disabled := false
 	patches := 0
+	patchAttempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test-management-key" {
 			http.Error(w, "missing auth", http.StatusUnauthorized)
@@ -143,6 +144,12 @@ func TestRateLimitAutoDisableWorkerReconcilesPersistedQuotaEventWhenEnabled(t *t
 				return
 			}
 			mu.Lock()
+			patchAttempts++
+			if patchAttempts == 1 {
+				mu.Unlock()
+				http.Error(w, "injected transient patch failure", http.StatusServiceUnavailable)
+				return
+			}
 			disabled = item.Disabled
 			patches++
 			mu.Unlock()
@@ -198,7 +205,7 @@ func TestRateLimitAutoDisableWorkerReconcilesPersistedQuotaEventWhenEnabled(t *t
 	waitForWorkerTest(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return disabled && patches == 1
+		return disabled && patches == 1 && patchAttempts >= 2
 	})
 	active, err := st.QuotaCooldowns.ListActive(context.Background())
 	if err != nil {
@@ -206,6 +213,84 @@ func TestRateLimitAutoDisableWorkerReconcilesPersistedQuotaEventWhenEnabled(t *t
 	}
 	if len(active) != 1 || active[0].EventHash != event.EventHash || active[0].Owner != model.QuotaCooldownOwnerUsage429 {
 		t.Fatalf("active cooldowns = %#v", active)
+	}
+}
+
+func TestRateLimitAutoDisableWorkerReDisablesEnabledActiveCooldown(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	var mu sync.Mutex
+	disabled := false
+	patches := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-management-key" {
+			http.Error(w, "missing auth", http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet {
+			mu.Lock()
+			currentDisabled := disabled
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"id":         "runtime-codex-auth-1",
+				"name":       "codex-auth.json",
+				"auth_index": "auth-1",
+				"account":    "user@example.com",
+				"provider":   "codex",
+				"disabled":   currentDisabled,
+			}})
+			return
+		}
+		if r.URL.Path == "/v0/management/auth-files/status" && r.Method == http.MethodPatch {
+			var item struct {
+				Disabled bool `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			disabled = item.Disabled
+			patches++
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	now := time.Now()
+	if _, err := st.UpsertQuotaCooldown(context.Background(), store.QuotaCooldownUpsert{
+		AuthFileName:    "codex-auth.json",
+		AuthIndex:       "auth-1",
+		AccountSnapshot: "user@example.com",
+		Provider:        "codex",
+		ReasonCode:      quotaReasonCodexUsageLimit,
+		WindowKind:      "weekly",
+		RecoverAtMS:     now.Add(time.Hour).UnixMilli(),
+		Owner:           model.QuotaCooldownOwnerUsage429,
+		EventHash:       "evt-active-cooldown",
+		DisabledAtMS:    now.Add(-time.Minute).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("seed active cooldown: %v", err)
+	}
+
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "test-management-key",
+	})
+	worker.reconcileActiveCooldowns(context.Background(), now)
+
+	mu.Lock()
+	gotDisabled, gotPatches := disabled, patches
+	mu.Unlock()
+	if !gotDisabled || gotPatches != 1 {
+		t.Fatalf("cooldown invariant state disabled=%t patches=%d, want disabled=true patches=1", gotDisabled, gotPatches)
 	}
 }
 
