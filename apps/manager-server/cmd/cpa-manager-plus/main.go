@@ -186,6 +186,8 @@ func runServer() {
 	collectorWorker.Start(ctx)
 	supplyReplenishmentWorker := worker.NewSupplyReplenishmentWorker(serverApp.AppContext().SupplyService)
 	supplyReplenishmentWorker.Start(ctx)
+	supplyPurchaseTaskWorker := worker.NewSupplyPurchaseTaskWorker(serverApp.AppContext().SupplyService)
+	supplyPurchaseTaskWorker.Start(ctx)
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,

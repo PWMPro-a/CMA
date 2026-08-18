@@ -1221,6 +1221,36 @@
   gap: 12px;
 }
 
+.purchaseTaskProgress {
+  display: grid;
+  min-width: 190px;
+  gap: 6px;
+}
+
+.purchaseTaskProgressLabel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.purchaseTaskProgressLabel small {
+  color: var(--text-secondary);
+  font-family: inherit;
+}
+
+.purchaseTaskError {
+  display: block;
+  max-width: 320px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .orderTopline {
   justify-content: space-between;
 }

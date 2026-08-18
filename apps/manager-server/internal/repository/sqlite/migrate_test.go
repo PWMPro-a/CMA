@@ -46,6 +46,54 @@ func TestSupplyRecoveryUpgradeAddsOwnershipColumns(t *testing.T) {
 	}
 }
 
+func TestEnsureSupplyOrderColumnsAddsPurchaseTaskLinkAndIndex(t *testing.T) {
+	db, err := sql.Open("sqlite", dataSourceName(filepath.Join(t.TempDir(), "legacy-supply-order.sqlite")))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`create table supply_orders (
+		id integer primary key autoincrement,
+		order_id text not null unique,
+		created_at_ms integer not null
+	)`); err != nil {
+		t.Fatalf("create legacy supply order table: %v", err)
+	}
+	if err := ensureSupplyOrderColumns(db); err != nil {
+		t.Fatalf("ensure supply order columns: %v", err)
+	}
+	columns := migrationTableColumns(t, db, "supply_orders")
+	if !columns["task_id"] {
+		t.Fatalf("supply order columns = %#v, missing task_id", columns)
+	}
+	var indexCount int
+	if err := db.QueryRow(`select count(*) from sqlite_master where type = 'index' and name = 'idx_supply_orders_task_created'`).Scan(&indexCount); err != nil {
+		t.Fatalf("read purchase task order index: %v", err)
+	}
+	if indexCount != 1 {
+		t.Fatalf("purchase task order index count = %d, want 1", indexCount)
+	}
+}
+
+func TestMigrateCreatesSupplyPurchaseTaskSchema(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "supply-purchase-task.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	columns := migrationTableColumns(t, db, "supply_purchase_tasks")
+	for _, column := range []string{
+		"task_id", "source", "supplier_id", "product", "target_quantity",
+		"fulfilled_quantity", "status", "strategy", "trigger_reason",
+		"max_concurrent_orders", "attempt_count", "next_attempt_at_ms",
+		"last_error", "cancelled_at_ms", "completed_at_ms", "created_at_ms", "updated_at_ms",
+	} {
+		if !columns[column] {
+			t.Fatalf("supply purchase task columns = %#v, missing %s", columns, column)
+		}
+	}
+}
+
 func TestEnsureSupplyImportItemColumnsBackfillsExistingEmptyLeases(t *testing.T) {
 	db, err := sql.Open("sqlite", dataSourceName(filepath.Join(t.TempDir(), "supply-import-lease.sqlite")))
 	if err != nil {

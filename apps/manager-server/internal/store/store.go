@@ -24,6 +24,7 @@ import (
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/supplyorder"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/supplyrecovery"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/supplytask"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaggregate"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageevent"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagemonitoring"
@@ -46,6 +47,7 @@ type ManagerSupplyConfig = model.ManagerSupplyConfig
 type ManagerSupplyPlatformConfig = model.ManagerSupplyPlatformConfig
 type ManagerSupplyQuotaEstimationPolicy = model.ManagerSupplyQuotaEstimationPolicy
 type SupplyOrder = model.SupplyOrder
+type SupplyPurchaseTask = model.SupplyPurchaseTask
 type SupplyImportItem = model.SupplyImportItem
 type SupplyRecovery = model.SupplyRecovery
 type SupplyRecoveryImportItem = model.SupplyRecoveryImportItem
@@ -163,6 +165,7 @@ type Store struct {
 	ContainerOpsAudits   containeropsaudit.Repository
 	ContainerOpsUpgrades containeropsupgrade.Repository
 	SupplyOrders         supplyorder.Repository
+	SupplyTasks          supplytask.Repository
 	SupplyRecoveries     supplyrecovery.Repository
 }
 
@@ -195,6 +198,7 @@ func New(db *sql.DB, protector ...*security.Protector) *Store {
 		ContainerOpsAudits:   containeropsaudit.New(db),
 		ContainerOpsUpgrades: containeropsupgrade.New(db),
 		SupplyOrders:         supplyorder.New(db, protector...),
+		SupplyTasks:          supplytask.New(db),
 		SupplyRecoveries:     supplyrecovery.New(db, protector...),
 	}
 }
@@ -455,6 +459,34 @@ func (s *Store) CreateSupplyOrder(ctx context.Context, order SupplyOrder) (Suppl
 	return s.SupplyOrders.Create(ctx, order)
 }
 
+func (s *Store) CreateSupplyPurchaseTask(ctx context.Context, task SupplyPurchaseTask) (SupplyPurchaseTask, error) {
+	return s.SupplyTasks.Create(ctx, task)
+}
+
+func (s *Store) GetSupplyPurchaseTask(ctx context.Context, taskID string) (SupplyPurchaseTask, bool, error) {
+	return s.SupplyTasks.Get(ctx, taskID)
+}
+
+func (s *Store) GetActiveAutomaticSupplyPurchaseTask(ctx context.Context) (SupplyPurchaseTask, bool, error) {
+	return s.SupplyTasks.GetActiveAutomatic(ctx)
+}
+
+func (s *Store) UpdateSupplyPurchaseTask(ctx context.Context, task SupplyPurchaseTask) error {
+	return s.SupplyTasks.Update(ctx, task)
+}
+
+func (s *Store) CancelSupplyPurchaseTask(ctx context.Context, taskID string, nowMS int64) (SupplyPurchaseTask, bool, error) {
+	return s.SupplyTasks.Cancel(ctx, taskID, nowMS)
+}
+
+func (s *Store) ListSupplyPurchaseTasks(ctx context.Context, limit int) ([]SupplyPurchaseTask, error) {
+	return s.SupplyTasks.List(ctx, limit)
+}
+
+func (s *Store) ListActiveSupplyPurchaseTasks(ctx context.Context, limit int) ([]SupplyPurchaseTask, error) {
+	return s.SupplyTasks.ListActive(ctx, limit)
+}
+
 func (s *Store) GetSupplyOrder(ctx context.Context, orderID string) (SupplyOrder, bool, error) {
 	return s.SupplyOrders.Get(ctx, orderID)
 }
@@ -497,6 +529,14 @@ func (s *Store) UpdateSupplyOrder(ctx context.Context, order SupplyOrder) error 
 
 func (s *Store) ListSupplyOrders(ctx context.Context, limit int) ([]SupplyOrder, error) {
 	return s.SupplyOrders.List(ctx, limit)
+}
+
+func (s *Store) ListSupplyOrdersByTaskID(ctx context.Context, taskID string) ([]SupplyOrder, error) {
+	return s.SupplyOrders.ListByTaskID(ctx, taskID)
+}
+
+func (s *Store) ListSupplyOrdersByTaskIDs(ctx context.Context, taskIDs []string) ([]SupplyOrder, error) {
+	return s.SupplyOrders.ListByTaskIDs(ctx, taskIDs)
 }
 
 func (s *Store) ListSupplyOrdersByIDs(ctx context.Context, orderIDs []string) ([]SupplyOrder, error) {

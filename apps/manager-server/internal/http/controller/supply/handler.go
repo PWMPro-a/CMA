@@ -25,6 +25,15 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := strings.TrimRight(r.URL.Path, "/")
+	if taskID, ok := cancelPurchaseTaskID(path); ok {
+		if r.Method != http.MethodPost {
+			response.MethodNotAllowed(w)
+			return
+		}
+		result, err := h.App.SupplyService.CancelPurchaseTask(r.Context(), taskID)
+		h.writeResult(w, result, err)
+		return
+	}
 	if orderID, ok := dismissUncertainOrderID(path); ok {
 		if r.Method != http.MethodPost {
 			response.MethodNotAllowed(w)
@@ -85,6 +94,19 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result, err := h.App.SupplyService.GetActiveOrderStatus(r.Context())
+		h.writeResult(w, result, err)
+	case "/v0/management/supply/tasks":
+		if r.Method != http.MethodGet {
+			response.MethodNotAllowed(w)
+			return
+		}
+		limit := 50
+		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+		result, err := h.App.SupplyService.ListPurchaseTasks(r.Context(), limit)
 		h.writeResult(w, result, err)
 	case "/v0/management/supply/config":
 		if r.Method != http.MethodPut {
@@ -226,6 +248,8 @@ func (h *Handler) writeResult(w http.ResponseWriter, result any, err error) {
 		status = http.StatusConflict
 	case errors.Is(err, supplysvc.ErrOrderNotFound):
 		status = http.StatusNotFound
+	case errors.Is(err, supplysvc.ErrPurchaseTaskNotFound):
+		status = http.StatusNotFound
 	case errors.Is(err, supplysvc.ErrNotCreateUncertain):
 		status = http.StatusConflict
 	case errors.Is(err, supplysvc.ErrRecoveryImportNotReady):
@@ -245,6 +269,16 @@ func (h *Handler) writeResult(w http.ResponseWriter, result any, err error) {
 		}
 	}
 	response.Error(w, status, err)
+}
+
+func cancelPurchaseTaskID(path string) (string, bool) {
+	const prefix = "/v0/management/supply/tasks/"
+	const suffix = "/cancel"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", false
+	}
+	taskID := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix))
+	return taskID, taskID != "" && !strings.Contains(taskID, "/")
 }
 
 func dismissUncertainOrderID(path string) (string, bool) {

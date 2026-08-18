@@ -23,6 +23,7 @@ import {
   type SupplyConfig,
   type SupplyOrder,
   type SupplyPlatformConfig,
+  type SupplyPurchaseTask,
   type SupplyQuotaEstimationPolicy,
   type SupplyReport,
   type SupplyReportDimensionStat,
@@ -335,6 +336,12 @@ const shortOrderId = (value?: string) => {
   return value.length > 10 ? `…${value.slice(-8)}` : value;
 };
 
+const purchaseTaskRemaining = (task: SupplyPurchaseTask) =>
+  Math.max(0, task.targetQuantity - task.fulfilledQuantity);
+
+const purchaseTaskActive = (task: SupplyPurchaseTask) =>
+  task.status === 'pending' || task.status === 'running';
+
 const orderTone = (status: string) => {
   if (status === 'completed' || status === 'released' || status === 'imported')
     return styles.success;
@@ -426,6 +433,7 @@ export function SupplyPage() {
   const [reportLoading, setReportLoading] = useState(false);
   const [manualQuantity, setManualQuantity] = useState(10);
   const [manualSupplierId, setManualSupplierId] = useState('');
+  const [cancellingTaskId, setCancellingTaskId] = useState('');
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<SupplyWorkspaceTab>('overview');
   const [reportRangePreset, setReportRangePreset] = useState<ReportRangePreset>('today');
@@ -930,6 +938,32 @@ export function SupplyPage() {
     });
   };
 
+  const cancelPurchaseTask = (task: SupplyPurchaseTask) => {
+    showConfirmation({
+      title: t('supply.purchase_task_cancel_title'),
+      message: t('supply.purchase_task_cancel_confirm', {
+        remaining: purchaseTaskRemaining(task),
+      }),
+      variant: 'danger',
+      confirmText: t('supply.purchase_task_cancel_action'),
+      onConfirm: async () => {
+        setCancellingTaskId(task.taskId);
+        try {
+          const next = await supplyApi.cancelPurchaseTask(task.taskId);
+          applyStatus(next);
+          showNotification(t('supply.purchase_task_cancel_success'), 'success');
+        } catch (error) {
+          showNotification(
+            error instanceof Error ? error.message : t('common.unknown_error'),
+            'error'
+          );
+        } finally {
+          setCancellingTaskId('');
+        }
+      },
+    });
+  };
+
   const overview = status?.overview;
   const inventory = overview?.inventory;
   const balance = overview?.balance;
@@ -981,8 +1015,13 @@ export function SupplyPage() {
   const smartModeEnabled = smart?.enabled ?? draft.smartEnabled !== false;
   const activeOrder = status?.activeOrder;
   const activeOrders = status?.activeOrders ?? (activeOrder ? [activeOrder] : []);
-  const manualOrderLimit = Math.max(1, Math.min(3, status?.config?.maxConcurrentOrders ?? 3));
-  const manualOrderLimitReached = activeOrders.length >= manualOrderLimit;
+  const purchaseTasks = status?.purchaseTasks ?? [];
+  const activePurchaseTasks = purchaseTasks.filter(purchaseTaskActive);
+  const activeTaskIDs = new Set(activePurchaseTasks.map((task) => task.taskId));
+  const unlinkedActiveOrderCount = activeOrders.filter(
+    (order) => !order.taskId || !activeTaskIDs.has(order.taskId)
+  ).length;
+  const orderTabCount = activePurchaseTasks.length + unlinkedActiveOrderCount;
   const latestAutomaticOrder = status?.orders?.find(
     (order) => order.automatic && order.strategy !== 'recovery'
   );
@@ -1615,8 +1654,8 @@ export function SupplyPage() {
         label: (
           <span className={styles.tabLabel}>
             {t('supply.tabs_orders')}
-            {activeOrders.length > 0 ? (
-              <span className={styles.tabBadge}>{activeOrders.length}</span>
+            {orderTabCount > 0 ? (
+              <span className={styles.tabBadge}>{orderTabCount}</span>
             ) : null}
           </span>
         ),
@@ -1652,7 +1691,7 @@ export function SupplyPage() {
         ),
       },
     ],
-    [accounts?.summary?.total, activeOrders.length, orderCount, recoveryCount, t]
+    [accounts?.summary?.total, orderCount, orderTabCount, recoveryCount, t]
   );
   const reportRangeItems = useMemo<SegmentedTabItem<ReportRangePreset>[]>(
     () =>
@@ -3136,7 +3175,7 @@ export function SupplyPage() {
                     value={manualSupplierId}
                     options={manualPlatformOptions}
                     onChange={setManualSupplierId}
-                    disabled={manualPlatformOptions.length === 0 || manualOrderLimitReached}
+                    disabled={manualPlatformOptions.length === 0}
                     ariaLabel={t('supply.manual_platform')}
                   />
                   <small>
@@ -3150,7 +3189,7 @@ export function SupplyPage() {
                     label={t('supply.quantity')}
                     type="number"
                     min={1}
-                    max={100}
+                    max={10000}
                     value={manualQuantity}
                     onChange={(event) => setManualQuantity(Number(event.target.value))}
                   />
@@ -3165,12 +3204,10 @@ export function SupplyPage() {
                 <Button
                   fullWidth
                   loading={action === 'replenish'}
-                  disabled={manualOrderLimitReached || !manualSupplierId}
+                  disabled={!manualSupplierId || manualQuantity < 1 || manualQuantity > 10000}
                   onClick={() => void replenish()}
                 >
-                  {manualOrderLimitReached
-                    ? t('supply.order_limit_reached', { count: manualOrderLimit })
-                    : t('supply.replenish_now')}
+                  {t('supply.replenish_now')}
                 </Button>
               </article>
 
@@ -3197,6 +3234,119 @@ export function SupplyPage() {
                 ) : (
                   <div className={styles.empty}>{t('supply.no_active_order')}</div>
                 )}
+              </article>
+
+              <article className={`${styles.panel} ${styles.fullSpan}`}>
+                <div className={styles.panelHeader}>
+                  <div>
+                    <h2>{t('supply.purchase_tasks_title')}</h2>
+                    <p>{t('supply.purchase_tasks_hint')}</p>
+                  </div>
+                  <span className={styles.statusPill}>{purchaseTasks.length}</span>
+                </div>
+                <div className={styles.tableWrap}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t('supply.purchase_task_id')}</th>
+                        <th>{t('supply.purchase_task_source')}</th>
+                        <th>{t('supply.purchase_platform')}</th>
+                        <th>{t('supply.purchase_task_progress')}</th>
+                        <th>{t('supply.purchase_task_attempts')}</th>
+                        <th>{t('supply.purchase_task_orders')}</th>
+                        <th>{t('common.status')}</th>
+                        <th>{t('supply.purchase_task_next_attempt')}</th>
+                        <th>{t('supply.order_result_detail')}</th>
+                        <th>{t('common.action')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {purchaseTasks.map((task) => {
+                        const remaining = purchaseTaskRemaining(task);
+                        const progress = clampPercent(
+                          (task.fulfilledQuantity / Math.max(1, task.targetQuantity)) * 100
+                        );
+                        return (
+                          <tr key={task.taskId}>
+                            <td>
+                              <div className={styles.accountPrimary}>
+                                <strong className={styles.mono}>{shortOrderId(task.taskId)}</strong>
+                                <small>{formatTime(task.createdAtMs)}</small>
+                              </div>
+                            </td>
+                            <td>
+                              {t(`supply.purchase_task_source_${task.source}`, {
+                                defaultValue: task.source,
+                              })}
+                            </td>
+                            <td>{task.supplierId || '-'}</td>
+                            <td>
+                              <div className={styles.purchaseTaskProgress}>
+                                <div className={styles.purchaseTaskProgressLabel}>
+                                  <span>
+                                    {task.fulfilledQuantity}/{task.targetQuantity}
+                                  </span>
+                                  <small>
+                                    {t('supply.purchase_task_remaining_value', { value: remaining })}
+                                  </small>
+                                </div>
+                                <div className={styles.progressTrack}>
+                                  <span style={{ width: `${progress}%` }} />
+                                </div>
+                              </div>
+                            </td>
+                            <td>{task.attemptCount}</td>
+                            <td>
+                              {task.orderCount}
+                              {task.activeOrderCount > 0
+                                ? ` · ${t('supply.purchase_task_active_orders_value', {
+                                    value: task.activeOrderCount,
+                                  })}`
+                                : ''}
+                            </td>
+                            <td>
+                              <span className={`${styles.statusPill} ${orderTone(task.status)}`}>
+                                {t(`supply.purchase_task_status_${task.status}`, {
+                                  defaultValue: task.status,
+                                })}
+                              </span>
+                            </td>
+                            <td>
+                              {task.nextAttemptAtMs && purchaseTaskActive(task)
+                                ? formatCountdown(task.nextAttemptAtMs, nowMs)
+                                : '-'}
+                            </td>
+                            <td>
+                              <span className={styles.purchaseTaskError}>{task.lastError || '-'}</span>
+                            </td>
+                            <td>
+                              {purchaseTaskActive(task) ? (
+                                <Button
+                                  size="xs"
+                                  variant="danger"
+                                  loading={cancellingTaskId === task.taskId}
+                                  disabled={Boolean(cancellingTaskId)}
+                                  onClick={() => cancelPurchaseTask(task)}
+                                >
+                                  <IconX size={13} /> {t('supply.purchase_task_cancel_action')}
+                                </Button>
+                              ) : (
+                                '-'
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {purchaseTasks.length === 0 ? (
+                        <tr>
+                          <td colSpan={10} className={styles.emptyCell}>
+                            {t('supply.purchase_tasks_empty')}
+                          </td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
               </article>
             </section>
           ) : null}

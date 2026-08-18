@@ -840,9 +840,34 @@ func Migrate(db *sql.DB) error {
 		)`,
 		`create index if not exists idx_quota_cooldowns_due on quota_cooldowns(status, recover_at_ms)`,
 		`create unique index if not exists idx_quota_cooldowns_active_owner on quota_cooldowns(auth_file_name, owner) where status = 'active'`,
+		`create table if not exists supply_purchase_tasks (
+			id integer primary key autoincrement,
+			task_id text not null unique,
+			source text not null,
+			supplier_id text,
+			product text,
+			target_quantity integer not null,
+			fulfilled_quantity integer not null default 0,
+			status text not null,
+			strategy text,
+			trigger_reason text,
+			max_concurrent_orders integer not null default 1,
+			attempt_count integer not null default 0,
+			next_attempt_at_ms integer,
+			last_error text,
+			cancelled_at_ms integer,
+			completed_at_ms integer,
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		)`,
+		`create index if not exists idx_supply_purchase_tasks_status_due
+			on supply_purchase_tasks(status, next_attempt_at_ms, created_at_ms)`,
+		`create index if not exists idx_supply_purchase_tasks_source_status
+			on supply_purchase_tasks(source, status, created_at_ms)`,
 		`create table if not exists supply_orders (
 			id integer primary key autoincrement,
 			order_id text not null unique,
+			task_id text,
 			supplier_id text not null default '',
 			product text not null,
 			requested_quantity integer not null,
@@ -1210,6 +1235,7 @@ func ensureSupplyOrderColumns(db *sql.DB) error {
 		{name: "strategy", definition: "text"},
 		{name: "trigger_reason", definition: "text"},
 		{name: "supplier_id", definition: "text not null default ''"},
+		{name: "task_id", definition: "text"},
 	} {
 		if _, ok := existing[column.name]; ok {
 			continue
@@ -1218,7 +1244,8 @@ func ensureSupplyOrderColumns(db *sql.DB) error {
 			return err
 		}
 	}
-	return nil
+	_, err = db.Exec(`create index if not exists idx_supply_orders_task_created on supply_orders(task_id, created_at_ms)`)
+	return err
 }
 
 func ensureSupplyImportItemColumns(db *sql.DB) error {

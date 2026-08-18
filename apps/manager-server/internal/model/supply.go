@@ -3,6 +3,7 @@ package model
 type SupplyOrder struct {
 	ID                int64  `json:"id"`
 	OrderID           string `json:"orderId"`
+	TaskID            string `json:"taskId,omitempty"`
 	SupplierID        string `json:"supplierId,omitempty"`
 	Product           string `json:"product"`
 	RequestedQuantity int    `json:"requestedQuantity"`
@@ -27,6 +28,33 @@ type SupplyOrder struct {
 	CompletedAtMS        int64 `json:"completedAtMs,omitempty"`
 	CreatedAtMS          int64 `json:"createdAtMs"`
 	UpdatedAtMS          int64 `json:"updatedAtMs"`
+}
+
+// SupplyPurchaseTask is the durable intent to acquire a target number of
+// usable accounts. Manual and automatic planners only create/update this
+// intent; the dedicated purchase-task worker owns supplier order creation,
+// retries and completion accounting.
+type SupplyPurchaseTask struct {
+	ID                  int64  `json:"id"`
+	TaskID              string `json:"taskId"`
+	Source              string `json:"source"`
+	SupplierID          string `json:"supplierId,omitempty"`
+	Product             string `json:"product,omitempty"`
+	TargetQuantity      int    `json:"targetQuantity"`
+	FulfilledQuantity   int    `json:"fulfilledQuantity"`
+	Status              string `json:"status"`
+	Strategy            string `json:"strategy,omitempty"`
+	TriggerReason       string `json:"triggerReason,omitempty"`
+	MaxConcurrentOrders int    `json:"maxConcurrentOrders"`
+	AttemptCount        int    `json:"attemptCount"`
+	OrderCount          int    `json:"orderCount"`
+	ActiveOrderCount    int    `json:"activeOrderCount"`
+	NextAttemptAtMS     int64  `json:"nextAttemptAtMs,omitempty"`
+	LastError           string `json:"lastError,omitempty"`
+	CancelledAtMS       int64  `json:"cancelledAtMs,omitempty"`
+	CompletedAtMS       int64  `json:"completedAtMs,omitempty"`
+	CreatedAtMS         int64  `json:"createdAtMs"`
+	UpdatedAtMS         int64  `json:"updatedAtMs"`
 }
 
 type SupplyImportItem struct {

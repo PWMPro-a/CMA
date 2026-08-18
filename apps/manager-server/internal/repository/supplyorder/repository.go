@@ -25,6 +25,8 @@ type Repository interface {
 	ClaimTaking(ctx context.Context, orderID string, nowMS int64, leaseUntilMS int64) (bool, error)
 	Update(ctx context.Context, order model.SupplyOrder) error
 	List(ctx context.Context, limit int) ([]model.SupplyOrder, error)
+	ListByTaskID(ctx context.Context, taskID string) ([]model.SupplyOrder, error)
+	ListByTaskIDs(ctx context.Context, taskIDs []string) ([]model.SupplyOrder, error)
 	ListByOrderIDs(ctx context.Context, orderIDs []string) ([]model.SupplyOrder, error)
 	ListBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyOrder, error)
 	InsertItems(ctx context.Context, orderID string, items []model.SupplyImportItem) (int, error)
@@ -82,18 +84,18 @@ func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model
 	}
 	order.UpdatedAtMS = now
 	statement := `insert into supply_orders (
-		order_id, supplier_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
+		order_id, task_id, supplier_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
 		ready_quantity, progress, status_url, take_url, charged_fen, released_fen,
 		item_count, imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms,
 		created_at_ms, updated_at_ms
-	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	if isOpenOrderStatus(order.Status) && isPurchaseOrder(order) && !isParallelPurchaseOrder(order) {
 		statement = `insert into supply_orders (
-			order_id, supplier_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
+			order_id, task_id, supplier_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
 			ready_quantity, progress, status_url, take_url, charged_fen, released_fen,
 			item_count, imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms,
 			created_at_ms, updated_at_ms
-		) select ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		) select ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		where not exists (select 1 from supply_orders where status in (` + openOrderStatusClause + `)
 			and ` + supplyPurchaseOrderPredicate + `)`
 	}
@@ -101,7 +103,7 @@ func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model
 	err := sqliterepo.WithBusyRetry(ctx, func() error {
 		var execErr error
 		result, execErr = r.db.ExecContext(ctx, statement,
-			order.OrderID, strings.TrimSpace(order.SupplierID), order.Product, order.RequestedQuantity, boolInt(order.Automatic),
+			order.OrderID, nullString(order.TaskID), strings.TrimSpace(order.SupplierID), order.Product, order.RequestedQuantity, boolInt(order.Automatic),
 			nullString(order.Strategy), nullString(order.TriggerReason), order.Status,
 			nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress, nullString(order.StatusURL),
 			nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen, order.ItemCount,
@@ -362,16 +364,76 @@ func (r *repository) Update(ctx context.Context, order model.SupplyOrder) error 
 	order.UpdatedAtMS = time.Now().UnixMilli()
 	return sqliterepo.WithBusyRetry(ctx, func() error {
 		_, err := r.db.ExecContext(ctx, `update supply_orders set
-			supplier_id = ?, strategy = ?, trigger_reason = ?, status = ?, remote_status = ?, ready_quantity = ?, progress = ?, status_url = ?,
+			task_id = ?, supplier_id = ?, strategy = ?, trigger_reason = ?, status = ?, remote_status = ?, ready_quantity = ?, progress = ?, status_url = ?,
 			take_url = ?, charged_fen = ?, released_fen = ?, item_count = ?, imported_count = ?,
 			last_error = ?, next_poll_at_ms = ?, supplier_retry_until_ms = ?, completed_at_ms = ?, updated_at_ms = ? where order_id = ?`,
-			strings.TrimSpace(order.SupplierID), nullString(order.Strategy), nullString(order.TriggerReason), order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
+			nullString(order.TaskID), strings.TrimSpace(order.SupplierID), nullString(order.Strategy), nullString(order.TriggerReason), order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
 			nullString(order.StatusURL), nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen,
 			order.ItemCount, order.ImportedCount, nullString(order.LastError), nullPositive(order.NextPollAtMS),
 			nullPositive(order.SupplierRetryUntilMS), nullPositive(order.CompletedAtMS), order.UpdatedAtMS, order.OrderID,
 		)
 		return err
 	})
+}
+
+func (r *repository) ListByTaskID(ctx context.Context, taskID string) ([]model.SupplyOrder, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return []model.SupplyOrder{}, nil
+	}
+	rows, err := r.db.QueryContext(ctx, orderSelect+` where task_id = ? order by created_at_ms asc, id asc`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	orders := make([]model.SupplyOrder, 0)
+	for rows.Next() {
+		order, scanErr := scanOrder(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		orders = append(orders, order)
+	}
+	return orders, rows.Err()
+}
+
+func (r *repository) ListByTaskIDs(ctx context.Context, taskIDs []string) ([]model.SupplyOrder, error) {
+	unique := make([]string, 0, len(taskIDs))
+	seen := make(map[string]struct{}, len(taskIDs))
+	for _, taskID := range taskIDs {
+		taskID = strings.TrimSpace(taskID)
+		if taskID == "" {
+			continue
+		}
+		if _, ok := seen[taskID]; ok {
+			continue
+		}
+		seen[taskID] = struct{}{}
+		unique = append(unique, taskID)
+	}
+	if len(unique) == 0 {
+		return []model.SupplyOrder{}, nil
+	}
+	placeholders := make([]string, len(unique))
+	args := make([]any, len(unique))
+	for index, taskID := range unique {
+		placeholders[index], args[index] = "?", taskID
+	}
+	rows, err := r.db.QueryContext(ctx, orderSelect+` where task_id in (`+strings.Join(placeholders, ",")+
+		`) order by created_at_ms asc, id asc`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	orders := make([]model.SupplyOrder, 0)
+	for rows.Next() {
+		order, scanErr := scanOrder(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		orders = append(orders, order)
+	}
+	return orders, rows.Err()
 }
 
 func (r *repository) List(ctx context.Context, limit int) ([]model.SupplyOrder, error) {
@@ -831,7 +893,7 @@ func (r *repository) Counts(ctx context.Context, orderID string) (int, int, erro
 	return total, imported, err
 }
 
-const orderSelect = `select id, order_id, supplier_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
+const orderSelect = `select id, order_id, task_id, supplier_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
 	ready_quantity, progress, status_url, take_url, charged_fen, released_fen, item_count,
 	imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms, created_at_ms, updated_at_ms
 	from supply_orders`
@@ -846,9 +908,9 @@ type scanner interface{ Scan(...any) error }
 func scanOrder(row scanner) (model.SupplyOrder, error) {
 	var order model.SupplyOrder
 	var automatic int
-	var strategy, triggerReason, remoteStatus, statusURL, takeURL, lastError sql.NullString
+	var taskID, strategy, triggerReason, remoteStatus, statusURL, takeURL, lastError sql.NullString
 	var nextPollAtMS, supplierRetryUntilMS, completedAtMS sql.NullInt64
-	err := row.Scan(&order.ID, &order.OrderID, &order.SupplierID, &order.Product, &order.RequestedQuantity, &automatic,
+	err := row.Scan(&order.ID, &order.OrderID, &taskID, &order.SupplierID, &order.Product, &order.RequestedQuantity, &automatic,
 		&strategy, &triggerReason, &order.Status, &remoteStatus, &order.ReadyQuantity, &order.Progress, &statusURL, &takeURL,
 		&order.ChargedFen, &order.ReleasedFen, &order.ItemCount,
 		&order.ImportedCount, &lastError, &nextPollAtMS, &supplierRetryUntilMS, &completedAtMS, &order.CreatedAtMS, &order.UpdatedAtMS)
@@ -856,6 +918,7 @@ func scanOrder(row scanner) (model.SupplyOrder, error) {
 		return model.SupplyOrder{}, err
 	}
 	order.Automatic = automatic != 0
+	order.TaskID = taskID.String
 	order.Strategy = strategy.String
 	order.TriggerReason = triggerReason.String
 	order.RemoteStatus = remoteStatus.String
@@ -879,7 +942,8 @@ func isPurchaseOrder(order model.SupplyOrder) bool {
 // manual competitors; this repository-level marker only permits that bounded
 // create to coexist with the anchor order.
 func isParallelPurchaseOrder(order model.SupplyOrder) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.TriggerReason)), "parallel_")
+	return strings.TrimSpace(order.TaskID) != "" ||
+		strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.TriggerReason)), "parallel_")
 }
 
 func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {

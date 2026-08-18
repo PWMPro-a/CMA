@@ -35,10 +35,11 @@ import (
 var (
 	ErrNotConfigured               = errors.New("account supply is not configured")
 	ErrOrderInProgress             = errors.New("a supply order is already in progress")
-	ErrInvalidQuantity             = errors.New("replenishment quantity must be between 1 and 100")
+	ErrInvalidQuantity             = errors.New("replenishment quantity must be between 1 and 10000")
 	ErrInsufficientBalance         = errors.New("supply account available balance is insufficient")
 	ErrCreateUncertain             = errors.New("supply order creation result is uncertain")
 	ErrOrderNotFound               = errors.New("supply order was not found")
+	ErrPurchaseTaskNotFound        = errors.New("supply purchase task was not found")
 	ErrNotCreateUncertain          = errors.New("supply order is not waiting for create-result confirmation")
 	ErrRecoveryImportNotReady      = errors.New("recovery has no local CPA import task to retry")
 	ErrCapacitySnapshotUnavailable = errors.New("quota inspection snapshot is unavailable")
@@ -110,16 +111,17 @@ type Overview struct {
 }
 
 type Status struct {
-	Config        store.ManagerSupplyConfig `json:"config"`
-	Running       bool                      `json:"running"`
-	Overview      Overview                  `json:"overview"`
-	AccountPool   *AccountPoolSummary       `json:"accountPool,omitempty"`
-	SmartResource SmartResource             `json:"smartResource"`
-	Automation    AutomationExecution       `json:"automation"`
-	Recovery      RecoverySummary           `json:"recovery"`
-	ActiveOrder   *store.SupplyOrder        `json:"activeOrder,omitempty"`
-	ActiveOrders  []store.SupplyOrder       `json:"activeOrders,omitempty"`
-	Orders        []store.SupplyOrder       `json:"orders"`
+	Config        store.ManagerSupplyConfig  `json:"config"`
+	Running       bool                       `json:"running"`
+	Overview      Overview                   `json:"overview"`
+	AccountPool   *AccountPoolSummary        `json:"accountPool,omitempty"`
+	SmartResource SmartResource              `json:"smartResource"`
+	Automation    AutomationExecution        `json:"automation"`
+	Recovery      RecoverySummary            `json:"recovery"`
+	ActiveOrder   *store.SupplyOrder         `json:"activeOrder,omitempty"`
+	ActiveOrders  []store.SupplyOrder        `json:"activeOrders,omitempty"`
+	PurchaseTasks []store.SupplyPurchaseTask `json:"purchaseTasks,omitempty"`
+	Orders        []store.SupplyOrder        `json:"orders"`
 }
 
 // AccountPoolSummary is the lightweight, operator-facing account split shared
@@ -613,6 +615,7 @@ type Service struct {
 	accountListCache        supplyAccountListCache
 	supplyOrdersCacheMu     sync.Mutex
 	supplyOrdersCache       supplyOrdersCache
+	purchaseTaskWake        chan struct{}
 }
 
 type supplyAccountListCache struct {
@@ -672,6 +675,7 @@ func New(st *store.Store, managerConfig *managerconfigsvc.Service, httpClient ..
 		smartBuckets:          make(map[int64]*smartUsageBucket),
 		smartQuotaState:       newSmartQuotaCalibrationState(),
 		criticalConfirmRounds: make(map[string]int),
+		purchaseTaskWake:      make(chan struct{}, 1),
 	}
 }
 
@@ -852,6 +856,10 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
+	purchaseTasks, err := s.listPurchaseTasks(ctx, limit)
+	if err != nil {
+		return Status{}, err
+	}
 	activeOrders, err := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
 	if err != nil {
 		return Status{}, err
@@ -910,6 +918,7 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 		SmartResource: resource,
 		Automation:    s.currentAutomationExecution(managerconfigsvc.SupplyEnabled(cfg.Supply)),
 		Recovery:      s.currentRecoverySummary(ctx, cfg.Supply),
+		PurchaseTasks: purchaseTasks,
 		Orders:        orders,
 	}
 	if len(activeOrders) > 0 {
@@ -1236,17 +1245,18 @@ func (s *Service) Check(ctx context.Context) (Status, error) {
 }
 
 func (s *Service) Replenish(ctx context.Context, quantity int, supplierID ...string) (Status, error) {
-	if quantity <= 0 || quantity > 100 {
+	if quantity <= 0 || quantity > 10000 {
 		return Status{}, ErrInvalidQuantity
 	}
 	requestedSupplierID := ""
 	if len(supplierID) > 0 {
 		requestedSupplierID = strings.TrimSpace(supplierID[0])
 	}
-	if err := s.run(ctx, true, quantity, true, requestedSupplierID); err != nil {
+	if _, err := s.createManualPurchaseTask(ctx, quantity, requestedSupplierID); err != nil {
 		s.recordError(err)
 		return Status{}, err
 	}
+	s.signalPurchaseTaskWorker()
 	return s.GetStatus(ctx, 50)
 }
 
@@ -1276,6 +1286,17 @@ func (s *Service) DismissCreateUncertain(ctx context.Context, orderID string) (S
 
 func (s *Service) RunAutomatic(ctx context.Context) error {
 	err := s.run(ctx, true, 0, false)
+	if err == nil {
+		if reconcileErr := s.reconcileAutomaticPurchaseTaskCancellation(ctx); reconcileErr != nil {
+			err = reconcileErr
+		}
+	}
+	if err == nil {
+		// Execute one durable task step immediately so an urgent decision does not
+		// wait for the next worker tick. Supplier creation still lives entirely in
+		// RunPurchaseTasks and is equally used by manual and automatic requests.
+		err = s.RunPurchaseTasks(ctx)
+	}
 	if err != nil {
 		s.recordError(err)
 	}
@@ -2659,63 +2680,24 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	if len(openOrders) > 0 && maxConcurrentSupplyOrders(supplyCfg) > 1 {
 		triggerReason = parallelSupplyTriggerReason(triggerReason)
 	}
-	attempt := store.SupplyOrder{
-		OrderID:           newCreateAttemptID(),
-		SupplierID:        platform.ID,
-		Product:           platform.Product,
-		RequestedQuantity: quantity,
-		Automatic:         manualQuantity == 0,
-		Strategy:          supplyOrderStrategy(supplyCfg, manualQuantity == 0),
-		TriggerReason:     triggerReason,
-		Status:            "creating",
+	timing.next("task-enqueue")
+	maxConcurrent := 1
+	if manualQuantity == 0 && smartResourceEmergency(resource) {
+		maxConcurrent = maxConcurrentSupplyOrders(supplyCfg)
 	}
-	timing.next("order-create")
-	attempt, err = s.store.CreateSupplyOrder(ctx, attempt)
-	if err != nil {
-		return err
+	_, err = s.upsertAutomaticPurchaseTask(ctx, store.SupplyPurchaseTask{
+		Source:              "automatic",
+		Product:             platform.Product,
+		TargetQuantity:      quantity,
+		Status:              "pending",
+		Strategy:            supplyOrderStrategy(supplyCfg, true),
+		TriggerReason:       triggerReason,
+		MaxConcurrentOrders: maxConcurrent,
+	})
+	if err == nil {
+		s.signalPurchaseTaskWorker()
 	}
-	s.invalidateSupplyOrdersCache()
-	// A concurrent dashboard read may repopulate the cache while the remote
-	// create call is in flight. Invalidate again after the attempt reaches its
-	// final local state (created, uncertain or failed).
-	defer s.invalidateSupplyOrdersCache()
-	if attempt.Automatic {
-		s.markAutomaticCreate()
-	}
-
-	credentials := supplyPlatformCredentials(platform)
-	remote, err := s.supplyClient.CreateOrder(ctx, credentials, platform.Product, quantity, attempt.OrderID)
-	if err != nil {
-		if isDefiniteCreateFailure(err) {
-			attempt.Status = "failed"
-			attempt.LastError = safeError(err)
-			attempt.CompletedAtMS = time.Now().UnixMilli()
-			if updateErr := s.store.UpdateSupplyOrder(ctx, attempt); updateErr != nil {
-				return updateErr
-			}
-			return err
-		}
-		attempt.Status = "create_uncertain"
-		attempt.LastError = safeError(err)
-		if updateErr := s.store.UpdateSupplyOrder(ctx, attempt); updateErr != nil {
-			return updateErr
-		}
-		return fmt.Errorf("%w: %v", ErrCreateUncertain, err)
-	}
-	order := supplyOrderFromCreateResponse(attempt, remote, supplyCfg)
-	if err := s.store.PromoteSupplyCreateAttempt(ctx, attempt.OrderID, order); err != nil {
-		attempt.Status = "create_uncertain"
-		attempt.RemoteStatus = remote.Status
-		attempt.StatusURL = remote.StatusURL
-		attempt.TakeURL = remote.TakeURL
-		attempt.LastError = safeError(fmt.Errorf("remote order %s was created but local persistence failed: %w", remote.ID, err))
-		_ = s.store.UpdateSupplyOrder(ctx, attempt)
-		return err
-	}
-	if order.Status == "ready" || order.Status == "taking" {
-		return s.processOrder(ctx, cfg, order)
-	}
-	return nil
+	return err
 }
 
 func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, order store.SupplyOrder) error {
@@ -2723,6 +2705,9 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	// the short history cache once on exit rather than relying on each status
 	// branch to remember the invalidation.
 	defer s.invalidateSupplyOrdersCache()
+	if stopped, err := s.stopPurchaseTaskOrderIfNeeded(ctx, &order); stopped || err != nil {
+		return err
+	}
 	if order.Status == "taking" && order.NextPollAtMS > time.Now().UnixMilli() {
 		return nil
 	}
@@ -3014,6 +2999,7 @@ func supplyOrderFromCreateResponse(attempt store.SupplyOrder, remote supplyclien
 	order := store.SupplyOrder{
 		ID:                   attempt.ID,
 		OrderID:              remote.ID,
+		TaskID:               attempt.TaskID,
 		SupplierID:           attempt.SupplierID,
 		Product:              attempt.Product,
 		RequestedQuantity:    attempt.RequestedQuantity,

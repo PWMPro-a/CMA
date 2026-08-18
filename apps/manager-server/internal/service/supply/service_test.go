@@ -3333,7 +3333,7 @@ func TestAutomaticCancelledOrderImmediatelyCreatesNextLadderRung(t *testing.T) {
 	}
 }
 
-func TestManualReplenishmentSupportsConfiguredConcurrentOrders(t *testing.T) {
+func TestManualReplenishmentQueuesTasksWhenConcurrentOrderSlotsAreFull(t *testing.T) {
 	var creates atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -3378,23 +3378,33 @@ func TestManualReplenishmentSupportsConfiguredConcurrentOrders(t *testing.T) {
 	managerConfig := managerconfigsvc.New(config.Config{}, st, nil)
 	service := New(st, managerConfig, server.Client())
 	if _, err = service.Replenish(context.Background(), 2); err != nil {
-		t.Fatalf("create second manual order: %v", err)
+		t.Fatalf("queue first manual task: %v", err)
+	}
+	if err := service.RunPurchaseTasks(context.Background()); err != nil {
+		t.Fatalf("execute first manual task: %v", err)
 	}
 	if _, err = service.Replenish(context.Background(), 2); err != nil {
-		t.Fatalf("create third manual order: %v", err)
+		t.Fatalf("queue second manual task: %v", err)
 	}
-	_, err = service.Replenish(context.Background(), 2)
-	if err != ErrOrderInProgress {
-		t.Fatalf("fourth replenish error = %v, want %v", err, ErrOrderInProgress)
+	if err := service.RunPurchaseTasks(context.Background()); err != nil {
+		t.Fatalf("execute second manual task: %v", err)
+	}
+	if _, err = service.Replenish(context.Background(), 2); err != nil {
+		t.Fatalf("queue third manual task while slots are full: %v", err)
+	}
+	if err := service.RunPurchaseTasks(context.Background()); err != nil {
+		t.Fatalf("full-slot task scan: %v", err)
 	}
 	orders, listErr := st.ListOpenSupplyOrders(context.Background(), 10)
 	if listErr != nil || len(orders) != 3 || creates.Load() != 2 {
 		t.Fatalf("manual open orders=%#v creates=%d err=%v", orders, creates.Load(), listErr)
 	}
-	for _, order := range orders[1:] {
-		if order.Automatic || order.TriggerReason != "parallel_manual" {
-			t.Fatalf("parallel manual order = %#v", order)
-		}
+	tasks, taskErr := st.ListSupplyPurchaseTasks(context.Background(), 10)
+	if taskErr != nil || len(tasks) != 3 {
+		t.Fatalf("manual tasks=%#v err=%v", tasks, taskErr)
+	}
+	if tasks[0].Status != "pending" || tasks[1].Status != "running" || tasks[2].Status != "running" {
+		t.Fatalf("manual task statuses = %#v", tasks)
 	}
 }
 
@@ -3477,6 +3487,9 @@ func TestManualReplenishmentUsesExplicitSupplyPlatform(t *testing.T) {
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), bugTeamServer.Client())
 	if _, err := service.Replenish(ctx, 2, "bugteam"); err != nil {
 		t.Fatalf("manual BugTeam replenishment: %v", err)
+	}
+	if err := service.RunPurchaseTasks(ctx); err != nil {
+		t.Fatalf("execute manual BugTeam task: %v", err)
 	}
 	if bugTeamCreates.Load() != 1 || legacyCreates.Load() != 0 {
 		t.Fatalf("create calls: BugTeam=%d legacy=%d", bugTeamCreates.Load(), legacyCreates.Load())

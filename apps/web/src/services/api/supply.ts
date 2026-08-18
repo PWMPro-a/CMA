@@ -102,6 +102,7 @@ export interface SupplyBalance {
 export interface SupplyOrder {
   id: number;
   orderId: string;
+  taskId?: string;
   supplierId?: string;
   product: string;
   requestedQuantity: number;
@@ -121,6 +122,29 @@ export interface SupplyOrder {
   lastError?: string;
   nextPollAtMs?: number;
   supplierRetryUntilMs?: number;
+  completedAtMs?: number;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface SupplyPurchaseTask {
+  id: number;
+  taskId: string;
+  source: 'manual' | 'automatic' | string;
+  supplierId?: string;
+  product?: string;
+  targetQuantity: number;
+  fulfilledQuantity: number;
+  status: 'pending' | 'running' | 'completed' | 'cancelled' | string;
+  strategy?: string;
+  triggerReason?: string;
+  maxConcurrentOrders: number;
+  attemptCount: number;
+  orderCount: number;
+  activeOrderCount: number;
+  nextAttemptAtMs?: number;
+  lastError?: string;
+  cancelledAtMs?: number;
   completedAtMs?: number;
   createdAtMs: number;
   updatedAtMs: number;
@@ -852,6 +876,7 @@ export interface SupplyStatus {
   recovery?: SupplyRecoverySummary;
   activeOrder?: SupplyOrder;
   activeOrders?: SupplyOrder[];
+  purchaseTasks?: SupplyPurchaseTask[];
   orders: SupplyOrder[];
 }
 
@@ -862,6 +887,9 @@ export const supplyApi = {
     apiClient.get('/supply/account-pool'),
 
   getActiveOrder: (): Promise<SupplyActiveOrderStatus> => apiClient.get('/supply/active'),
+
+  listPurchaseTasks: (limit = 50): Promise<SupplyPurchaseTask[]> =>
+    apiClient.get('/supply/tasks', { params: { limit } }),
 
   saveConfig: (config: SupplyConfig): Promise<SupplyStatus> =>
     apiClient.put('/supply/config', { config }),
@@ -900,4 +928,7 @@ export const supplyApi = {
 
   dismissCreateUncertain: (orderId: string): Promise<SupplyStatus> =>
     apiClient.post(`/supply/orders/${encodeURIComponent(orderId)}/dismiss-uncertain`),
+
+  cancelPurchaseTask: (taskId: string): Promise<SupplyStatus> =>
+    apiClient.post(`/supply/tasks/${encodeURIComponent(taskId)}/cancel`),
 };
