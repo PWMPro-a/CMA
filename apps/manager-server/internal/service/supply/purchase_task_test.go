@@ -443,7 +443,7 @@ func TestPurchaseTaskReplacesStaleWaitingReservationOnAnotherPlatform(t *testing
 		t.Fatalf("replacement platform = %q, want bugteam", got)
 	}
 	stale, found, err := st.GetSupplyOrder(ctx, "stale-order")
-	if err != nil || !found || stale.Status != "waiting_inventory" {
+	if err != nil || !found || stale.Status != "released" || stale.CompletedAtMS == 0 {
 		t.Fatalf("stale order after poll = %#v found=%v err=%v", stale, found, err)
 	}
 	orders, err := st.ListSupplyOrdersByTaskID(ctx, task.TaskID)

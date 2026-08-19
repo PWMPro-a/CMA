@@ -29,13 +29,11 @@ type purchaseTaskOrderStats struct {
 }
 
 // A supplier can leave a zero-delivery automatic reservation in
-// waiting_inventory for much longer than the normal fulfillment window.  Keep
-// the row open so its remote reservation can still be observed, but stop
-// counting it as a task reservation after this bound.  This lets a durable
-// task create a replacement on another configured platform instead of waiting
-// forever behind a stale child order.  Manual tasks deliberately keep counting
-// every waiting order because their explicit platform choice is an operator
-// contract.
+// waiting_inventory for much longer than the normal fulfillment window. Stop
+// treating it as an active local order after this bound so the task keeps only
+// its configured number of meaningful live reservations. Manual tasks
+// deliberately keep every waiting order because their explicit platform choice
+// is an operator contract.
 const purchaseTaskStaleAutomaticWaitingAge = 5 * time.Minute
 
 func purchaseTaskAdmissionOrderCount(orders []store.SupplyOrder, now time.Time) int {
@@ -299,13 +297,14 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 			return nil
 		}
 		switch strings.ToLower(strings.TrimSpace(processed.Status)) {
-		case "created", "waiting_inventory":
+		case "created", "waiting_inventory", "released":
 			openOrders, err = s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
 			if err != nil {
 				return err
 			}
-			// Continue into task admission below. Only one supplier order was polled,
-			// and at most one new reservation is still created in this worker turn.
+			// Continue into task admission below. One supplier order was either polled
+			// or expired locally, and at most one new reservation is still created in
+			// this worker turn.
 		case "creating", "create_uncertain", "taking", "importing", "partial":
 			return nil
 		default:
@@ -758,15 +757,6 @@ func (s *Service) stopPurchaseTaskOrderIfNeeded(ctx context.Context, order *stor
 	if err != nil || !found {
 		return false, err
 	}
-	if task.Status != purchaseTaskStatusCompleted && task.Status != purchaseTaskStatusCancelled {
-		return false, nil
-	}
-	if task.Status == purchaseTaskStatusCancelled {
-		if !cancelReversiblePurchaseTaskOrder(order, time.Now().UnixMilli()) {
-			return false, nil
-		}
-		return true, s.store.UpdateSupplyOrder(ctx, *order)
-	}
 	if purchaseTaskOrderReservationStale(*order, time.Now()) {
 		order.Status = "released"
 		order.RemoteStatus = remoteStatusAutomaticReleasePending
@@ -774,6 +764,15 @@ func (s *Service) stopPurchaseTaskOrderIfNeeded(ctx context.Context, order *stor
 		order.NextPollAtMS = 0
 		order.SupplierRetryUntilMS = 0
 		order.CompletedAtMS = time.Now().UnixMilli()
+		return true, s.store.UpdateSupplyOrder(ctx, *order)
+	}
+	if task.Status != purchaseTaskStatusCompleted && task.Status != purchaseTaskStatusCancelled {
+		return false, nil
+	}
+	if task.Status == purchaseTaskStatusCancelled {
+		if !cancelReversiblePurchaseTaskOrder(order, time.Now().UnixMilli()) {
+			return false, nil
+		}
 		return true, s.store.UpdateSupplyOrder(ctx, *order)
 	}
 	status := strings.ToLower(strings.TrimSpace(order.Status))
