@@ -72,6 +72,17 @@ func TestLatencyPercentilesUseNearestRankAcrossSummaryAndBuckets(t *testing.T) {
 	if points[1].P95LatencyMS.Float64 != 119 || points[1].P95TTFTMS.Float64 != 238 {
 		t.Fatalf("second bucket = %#v", points[1])
 	}
+
+	combinedPoints, combinedSummary, err := repo.LatencyAnalyticsWithFilter(context.Background(), filter, "hour", time.UTC)
+	if err != nil {
+		t.Fatalf("combined latency analytics: %v", err)
+	}
+	if !reflect.DeepEqual(combinedPoints, points) {
+		t.Fatalf("combined points = %#v, want %#v", combinedPoints, points)
+	}
+	if !reflect.DeepEqual(combinedSummary, summary) {
+		t.Fatalf("combined summary = %#v, want %#v", combinedSummary, summary)
+	}
 }
 
 func TestLatencySummaryReturnsInvalidPercentilesWithoutSamples(t *testing.T) {
@@ -94,6 +105,24 @@ func TestLatencySummaryReturnsInvalidPercentilesWithoutSamples(t *testing.T) {
 	}
 	if len(points) != 0 {
 		t.Fatalf("points = %#v", points)
+	}
+}
+
+func TestBuildLatencySampleIDsBoundsWorkAndCentersSamples(t *testing.T) {
+	ids := buildLatencySampleIDs(1, 1_000, 100)
+	if len(ids) != 100 {
+		t.Fatalf("sample count = %d, want 100", len(ids))
+	}
+	if ids[0] != 6 || ids[len(ids)-1] != 996 {
+		t.Fatalf("sample bounds = %d..%d, want 6..996", ids[0], ids[len(ids)-1])
+	}
+	for index := 1; index < len(ids); index++ {
+		if ids[index]-ids[index-1] != 10 {
+			t.Fatalf("sample step at %d = %d", index, ids[index]-ids[index-1])
+		}
+	}
+	if got := buildLatencySampleIDs(10, 9, 100); got != nil {
+		t.Fatalf("invalid range samples = %#v", got)
 	}
 }
 

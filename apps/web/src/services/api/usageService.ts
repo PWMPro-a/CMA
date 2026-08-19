@@ -801,6 +801,8 @@ export interface MonitoringAnalyticsDrilldownPreviewRequest {
 export interface MonitoringAnalyticsInclude {
   summary?: boolean;
   summary_profile?: 'full' | 'compact';
+  entity_profile?: 'full' | 'compact';
+  filter_selector_profile?: 'full' | 'compact';
   summary_percentiles?: boolean;
   summary_comparison?: boolean;
   timeline?: boolean;
@@ -1901,6 +1903,7 @@ export interface MonitoringAnalyticsResponse {
 }
 
 const USAGE_SERVICE_TIMEOUT_MS = 30 * 1000;
+const USAGE_ANALYTICS_TIMEOUT_MS = 120 * 1000;
 const USAGE_SERVICE_TRANSFER_TIMEOUT_MS = 60 * 1000;
 const USAGE_IMPORT_CHUNK_TIMEOUT_MS = 5 * 60 * 1000;
 const CODEX_INSPECTION_RUN_TIMEOUT_MS = 10 * 60 * 1000;
@@ -3500,7 +3503,7 @@ export const monitoringAnalyticsApi = {
         buildUrl(base, '/v0/management/monitoring/analytics'),
         request,
         {
-          timeout: USAGE_SERVICE_TIMEOUT_MS,
+          timeout: USAGE_ANALYTICS_TIMEOUT_MS,
           headers: authHeaders(managementKey),
           signal,
         }

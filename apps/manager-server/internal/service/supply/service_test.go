@@ -3381,6 +3381,49 @@ func TestOrderConflictIsPersistedAsCancelled(t *testing.T) {
 	}
 }
 
+func TestActiveOrderStatusClosesMissingPickupOrder(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case "/api/customer/pickup/orders/order-not-found":
+			http.Error(w, `{"message":"pickup order not found"}`, http.StatusNotFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply-missing-order.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{Supply: store.ManagerSupplyConfig{
+		Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_30d",
+	}}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "order-not-found", Product: "oauth_30d", RequestedQuantity: 1, Status: "waiting_inventory",
+	}); err != nil {
+		t.Fatalf("create local order: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	status, err := service.GetActiveOrderStatus(context.Background())
+	if err != nil {
+		t.Fatalf("refresh active order status: %v", err)
+	}
+	if status.PollError != "" || status.ActiveOrder != nil || len(status.ActiveOrders) != 0 {
+		t.Fatalf("active order status = %#v", status)
+	}
+	order, found, err := st.GetSupplyOrder(context.Background(), "order-not-found")
+	if err != nil || !found || order.Status != "cancelled" || order.CompletedAtMS == 0 {
+		t.Fatalf("order=%#v found=%v err=%v", order, found, err)
+	}
+}
+
 func TestAutomaticCancelledOrderImmediatelyCreatesNextLadderRung(t *testing.T) {
 	var createQuantity atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

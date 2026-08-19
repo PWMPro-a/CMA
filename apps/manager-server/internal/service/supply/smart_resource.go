@@ -1621,13 +1621,16 @@ func applySmartEmergencyAvailability(cfg store.ManagerSupplyConfig, resource *Sm
 		return
 	}
 	startup := smartStartupAvailableAccounts(cfg)
+	startupFloorEmergency := smartStartupAccountFloorEmergency(cfg, *resource)
 	if !smartAvailableCapacityEmergency(cfg, *resource) {
 		return
 	}
-	// The startup account floor is independent of traffic. When the last usable
+	// The startup account floor protects an idle pool. When the last usable
 	// credential disappears, successful traffic also becomes zero; relying only
 	// on burn-rate demand would therefore stop buying at exactly the moment the
-	// pool needs credentials to start serving again.
+	// pool needs credentials to start serving again. Once live demand is flowing,
+	// the available runway and critical account line decide whether the pool is
+	// actually in an emergency.
 	//
 	// A pool outage is different from genuine idleness: once the last account
 	// disappears, the current success rate immediately becomes zero even while
@@ -1649,7 +1652,7 @@ func applySmartEmergencyAvailability(cfg store.ManagerSupplyConfig, resource *Sm
 		}
 	}
 	reason := "available_capacity_critical"
-	if !demandObserved && cfg.StartupAvailableAccounts != nil && resource.AvailableAccounts < startup {
+	if startupFloorEmergency && cfg.StartupAvailableAccounts != nil {
 		reason = "startup_account_floor"
 	}
 	if resource.AvailableAccounts <= 0 {
@@ -1704,8 +1707,18 @@ func smartAvailableCapacity(resource SmartResource) float64 {
 	return math.Max(0, resource.CurrentCapacityRCU)
 }
 
+// smartStartupAccountFloorEmergency keeps a small pool ready while there is no
+// live traffic. Once demand is flowing, the capacity runway and the critical
+// account waterline own the purchase decision; treating the higher startup
+// floor as an emergency would bypass just-in-time timing even when the pool has
+// more than enough available runway.
+func smartStartupAccountFloorEmergency(cfg store.ManagerSupplyConfig, resource SmartResource) bool {
+	return resource.ConsumeRCUPerMinute <= 0 &&
+		resource.AvailableAccounts < smartStartupAvailableAccounts(cfg)
+}
+
 func smartAvailableCapacityEmergency(cfg store.ManagerSupplyConfig, resource SmartResource) bool {
-	if resource.AvailableAccounts < smartStartupAvailableAccounts(cfg) {
+	if smartStartupAccountFloorEmergency(cfg, resource) {
 		return true
 	}
 	criticalAccounts := smartCriticalAvailableAccounts(cfg)

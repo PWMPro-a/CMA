@@ -297,9 +297,12 @@ export function useUsageAnalytics() {
       }),
     [bounds, debouncedSearchQuery]
   );
+  const filterSelectorsReady = Boolean(
+    analytics.error || (!analytics.loading && analytics.data && !analytics.dataStale)
+  );
   const filterSelectorsAnalytics = useMonitoringAnalytics({
-    fromMs: bounds?.fromMs,
-    toMs: bounds?.toMs,
+    fromMs: filterSelectorsReady ? bounds?.fromMs : undefined,
+    toMs: filterSelectorsReady ? bounds?.toMs : undefined,
     nowMs,
     dataScopeKey: filterSelectorsDataScopeKey,
     searchQuery: debouncedSearchQuery,
@@ -717,7 +720,6 @@ export function useUsageAnalytics() {
     void loadApiKeyAliases();
     void loadMonitoringMeta();
     void analytics.refresh({ force: true });
-    void filterSelectorsAnalytics.refresh({ force: true });
     if (selectedApiKeyTimelineAnalytics.enabled) {
       void selectedApiKeyTimelineAnalytics.refresh({ force: true });
     }
@@ -733,7 +735,6 @@ export function useUsageAnalytics() {
   }, [
     analytics,
     apiKeyTrendAnalytics,
-    filterSelectorsAnalytics,
     heatmapDateAnalytics,
     loadApiKeyAliases,
     loadMonitoringMeta,

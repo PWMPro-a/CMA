@@ -2,6 +2,7 @@ package monitoring
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,86 @@ import (
 func TestBuildRoutingDiagnosticsOmitsEmptySample(t *testing.T) {
 	if got := buildRoutingDiagnostics(store.RoutingDiagnostics{}); got != nil {
 		t.Fatalf("buildRoutingDiagnostics(empty) = %#v, want nil", got)
+	}
+}
+
+func TestCompactAPIKeyStatsAndProviderSharePreserveAggregates(t *testing.T) {
+	stats := []store.APIKeyModelStat{
+		{
+			APIKeyHash:           "key-a",
+			AuthProviderSnapshot: "codex",
+			AuthIndex:            "auth-a",
+			Source:               "source-a",
+			SourceHash:           "source-hash-a",
+			Model:                "gpt-a",
+			BillingModel:         "gpt-a",
+			Calls:                3,
+			SuccessCalls:         2,
+			FailureCalls:         1,
+			InputTokens:          30,
+			OutputTokens:         15,
+			TotalTokens:          45,
+			LastSeenMS:           300,
+			AvgLatencyMS:         sql.NullFloat64{Float64: 100, Valid: true},
+			LatencySamples:       2,
+		},
+		{
+			APIKeyHash:           "key-a",
+			AuthProviderSnapshot: "codex",
+			AuthIndex:            "auth-b",
+			Source:               "source-b",
+			SourceHash:           "source-hash-b",
+			Model:                "gpt-b",
+			BillingModel:         "gpt-b",
+			Calls:                2,
+			SuccessCalls:         2,
+			InputTokens:          20,
+			OutputTokens:         10,
+			TotalTokens:          30,
+			LastSeenMS:           200,
+			AvgLatencyMS:         sql.NullFloat64{Float64: 400, Valid: true},
+			LatencySamples:       1,
+		},
+		{
+			APIKeyHash:           "key-b",
+			AuthProviderSnapshot: "gemini",
+			AuthIndex:            "auth-c",
+			Source:               "source-c",
+			SourceHash:           "source-hash-c",
+			Model:                "gemini-a",
+			BillingModel:         "gemini-a",
+			Calls:                4,
+			SuccessCalls:         4,
+			InputTokens:          40,
+			OutputTokens:         20,
+			TotalTokens:          60,
+			LastSeenMS:           100,
+			AvgLatencyMS:         sql.NullFloat64{Float64: 250, Valid: true},
+			LatencySamples:       4,
+		},
+	}
+
+	full := buildAPIKeyStats(stats, nil)
+	compact := buildAPIKeyStatsWithProfile(stats, nil, true)
+	if len(full) != 2 || len(compact) != 2 {
+		t.Fatalf("api key rows full=%#v compact=%#v", full, compact)
+	}
+	if compact[0].Calls != full[0].Calls || compact[0].TotalTokens != full[0].TotalTokens || !reflect.DeepEqual(compact[0].Models, full[0].Models) {
+		t.Fatalf("compact aggregate mismatch: full=%#v compact=%#v", full[0], compact[0])
+	}
+	if len(full[0].Contexts) == 0 || len(full[0].AuthIndices) == 0 {
+		t.Fatalf("full row lacks detailed fixture data: %#v", full[0])
+	}
+	if compact[0].Contexts != nil || compact[0].AuthIndices != nil || compact[0].Sources != nil || compact[0].SourceHashes != nil {
+		t.Fatalf("compact row contains detailed arrays: %#v", compact[0])
+	}
+
+	providers := buildProviderShareFromAPIKeyStats(stats, nil)
+	if len(providers) != 2 || providers[0].AuthProviderSnapshot != "codex" || providers[0].Calls != 5 || providers[0].Tokens != 75 {
+		t.Fatalf("provider rows = %#v", providers)
+	}
+	if providers[0].AvgLatencyMS == nil || math.Abs(*providers[0].AvgLatencyMS-200) > 0.0001 {
+		t.Fatalf("codex weighted latency = %#v, want 200", providers[0].AvgLatencyMS)
 	}
 }
 
@@ -1824,6 +1905,31 @@ func TestAnalyticsFilterSelectorsReturnLightweightOptions(t *testing.T) {
 	}
 	if len(resp.FilterOptions.APIKeyStats) != 0 || len(resp.FilterOptions.ChannelShare) != 0 || len(resp.FilterOptions.ModelStats) != 0 {
 		t.Fatalf("filter selectors returned full stats: %#v", resp.FilterOptions)
+	}
+
+	compactResp, err := New(db).Analytics(ctx, Request{
+		FromMS: fromMS,
+		ToMS:   toMS,
+		Include: Include{
+			FilterOptions:         true,
+			FilterSelectors:       true,
+			FilterSelectorProfile: "compact",
+		},
+	})
+	if err != nil {
+		t.Fatalf("compact analytics selectors: %v", err)
+	}
+	if compactResp.FilterOptions == nil {
+		t.Fatal("compact filter selectors are nil")
+	}
+	if len(compactResp.FilterOptions.Accounts) != 0 || len(compactResp.FilterOptions.AccountStats) != 0 || compactResp.FilterOptions.AccountCount != 0 {
+		t.Fatalf("compact selectors contain account details: %#v", compactResp.FilterOptions)
+	}
+	if !slices.Equal(compactResp.FilterOptions.Models, []string{"gpt-a", "gpt-b"}) ||
+		!slices.Equal(compactResp.FilterOptions.APIKeyHashes, []string{"key-alice", "key-bob"}) ||
+		!slices.Equal(compactResp.FilterOptions.Providers, []string{"codex", "gemini", "openai"}) ||
+		!slices.Equal(compactResp.FilterOptions.AuthFiles, []string{"alice.json", "bob.json"}) {
+		t.Fatalf("compact selectors lost required options: %#v", compactResp.FilterOptions)
 	}
 }
 

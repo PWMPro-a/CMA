@@ -101,6 +101,7 @@ describe('usage analytics request model', () => {
     expect(buildUsageAnalyticsInclude('overview', 'day')).toEqual({
       summary: true,
       summary_profile: 'compact',
+      entity_profile: 'compact',
       summary_percentiles: true,
       summary_comparison: true,
       timeline: true,
@@ -120,6 +121,7 @@ describe('usage analytics request model', () => {
     ).toEqual({
       summary: true,
       summary_profile: 'compact',
+      entity_profile: 'compact',
       summary_comparison: true,
       timeline: true,
       model_stats: true,
@@ -131,6 +133,7 @@ describe('usage analytics request model', () => {
     expect(buildUsageAnalyticsInclude('models', 'day')).toEqual({
       summary: true,
       summary_profile: 'compact',
+      entity_profile: 'compact',
       timeline: true,
       model_stats: true,
       api_key_stats: true,
@@ -162,6 +165,7 @@ describe('usage analytics request model', () => {
     expect(buildUsageAnalyticsFilterSelectorsInclude()).toEqual({
       filter_options: true,
       filter_selectors: true,
+      filter_selector_profile: 'compact',
     });
   });
 });

@@ -38,6 +38,7 @@ describe('useUsageAnalytics request orchestration', () => {
   let renderer: ReactTestRenderer | null = null;
   let latestResult: ReturnType<typeof useUsageAnalytics> | null = null;
   let selectorError = '';
+  let mainLoading = false;
   let credentialTimelineError = '';
   let credentialTimelineLoading = false;
   const mainRefresh = vi.fn();
@@ -116,10 +117,10 @@ describe('useUsageAnalytics request orchestration', () => {
         : emptyAnalyticsResponse;
     return {
       enabled: Boolean(params.fromMs && params.toMs),
-      loading: credentialTimeline ? credentialTimelineLoading : false,
+      loading: main ? mainLoading : credentialTimeline ? credentialTimelineLoading : false,
       error: selectors ? selectorError : credentialTimeline ? credentialTimelineError : '',
       data: selectors
-        ? selectorError
+        ? selectorError || !params.fromMs || !params.toMs
           ? null
           : {
               ...emptyAnalyticsResponse,
@@ -131,7 +132,9 @@ describe('useUsageAnalytics request orchestration', () => {
               },
             }
         : main
-          ? mainData
+          ? mainLoading
+            ? null
+            : mainData
           : apiKeyTimeline
             ? {
                 ...emptyAnalyticsResponse,
@@ -193,6 +196,7 @@ describe('useUsageAnalytics request orchestration', () => {
 
   beforeEach(() => {
     selectorError = '';
+    mainLoading = false;
     credentialTimelineError = '';
     credentialTimelineLoading = false;
     latestResult = null;
@@ -227,6 +231,7 @@ describe('useUsageAnalytics request orchestration', () => {
     expect(overview?.include).toEqual({
       summary: true,
       summary_profile: 'compact',
+      entity_profile: 'compact',
       summary_percentiles: true,
       summary_comparison: true,
       timeline: true,
@@ -238,7 +243,11 @@ describe('useUsageAnalytics request orchestration', () => {
       granularity: 'hour',
     });
     expect(JSON.parse(overview?.dataScopeKey ?? '{}')).toMatchObject({ activeTab: 'overview' });
-    expect(selectors?.include).toEqual({ filter_options: true, filter_selectors: true });
+    expect(selectors?.include).toEqual({
+      filter_options: true,
+      filter_selectors: true,
+      filter_selector_profile: 'compact',
+    });
     expect(JSON.parse(selectors?.dataScopeKey ?? '{}')).not.toHaveProperty('activeTab');
     expect(latestResult?.filterOptions).toMatchObject({
       models: ['gpt-a'],
@@ -286,6 +295,25 @@ describe('useUsageAnalytics request orchestration', () => {
     });
   });
 
+  it('waits for the main analytics request before enabling filter selectors', async () => {
+    mainLoading = true;
+    await renderHook();
+
+    const loadingSelectors = lastParams((params) => Boolean(params.include?.filter_selectors));
+    expect(loadingSelectors?.fromMs).toBeUndefined();
+    expect(loadingSelectors?.toMs).toBeUndefined();
+
+    mainLoading = false;
+    await act(async () => {
+      latestResult?.setActiveTab('trends');
+      await Promise.resolve();
+    });
+
+    const readySelectors = lastParams((params) => Boolean(params.include?.filter_selectors));
+    expect(readySelectors?.fromMs).toBeTypeOf('number');
+    expect(readySelectors?.toMs).toBeTypeOf('number');
+  });
+
   it('does not couple selector failures to the main page error and refreshes both requests', async () => {
     selectorError = 'selector failed';
     await renderHook();
@@ -297,7 +325,7 @@ describe('useUsageAnalytics request orchestration', () => {
       latestResult?.refresh();
     });
     expect(mainRefresh).toHaveBeenCalledTimes(1);
-    expect(selectorRefresh).toHaveBeenCalledTimes(1);
+    expect(selectorRefresh).not.toHaveBeenCalled();
   });
 
   it('loads only the selected credential timeline after the credential ranking', async () => {

@@ -44,6 +44,58 @@ func TestCredentialTimelineHourlyPreaggregationMatchesRaw(t *testing.T) {
 	}
 }
 
+func TestHeatmapPreaggregationFallsBackForSubHourTimezoneTransition(t *testing.T) {
+	repo := newAnalyticsPreaggregationRepo(t)
+	ctx := context.Background()
+	location, err := time.LoadLocation("Australia/Lord_Howe")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	base := time.Date(2024, time.October, 5, 15, 0, 0, 0, time.UTC)
+	filter := AnalyticsFilter{
+		FromMS:        base.UnixMilli(),
+		ToMS:          base.Add(time.Hour).UnixMilli(),
+		IncludeFailed: true,
+	}
+	if !heatmapHasSubHourOffsetTransition(filter, location) {
+		t.Fatal("expected Lord Howe half-hour DST transition to disable UTC-hour preaggregation")
+	}
+	if heatmapHasSubHourOffsetTransition(filter, time.UTC) {
+		t.Fatal("UTC unexpectedly reported a sub-hour offset transition")
+	}
+
+	events := []usage.Event{
+		{
+			EventHash:   "heatmap-before-transition",
+			TimestampMS: base.Add(15 * time.Minute).UnixMilli(),
+			Timestamp:   base.Add(15 * time.Minute).Format(time.RFC3339Nano),
+			Model:       "gpt-test",
+			InputTokens: 10,
+			TotalTokens: 10,
+			CreatedAtMS: base.Add(15 * time.Minute).UnixMilli(),
+		},
+		{
+			EventHash:   "heatmap-after-transition",
+			TimestampMS: base.Add(45 * time.Minute).UnixMilli(),
+			Timestamp:   base.Add(45 * time.Minute).Format(time.RFC3339Nano),
+			Model:       "gpt-test",
+			InputTokens: 20,
+			TotalTokens: 20,
+			CreatedAtMS: base.Add(45 * time.Minute).UnixMilli(),
+		},
+	}
+	if _, err := repo.InsertBatch(ctx, events); err != nil {
+		t.Fatalf("insert heatmap events: %v", err)
+	}
+	points, err := repo.HeatmapWithFilter(ctx, filter, location)
+	if err != nil {
+		t.Fatalf("heatmap: %v", err)
+	}
+	if len(points) != 2 || points[0].Hour == points[1].Hour {
+		t.Fatalf("heatmap transition buckets = %#v", points)
+	}
+}
+
 func TestCredentialTimelinePreaggregationFallsBackForFractionalOffset(t *testing.T) {
 	repo := newAnalyticsPreaggregationRepo(t)
 	ctx := context.Background()

@@ -31,9 +31,10 @@ const (
 	accountHistoryCatchUpLimit = 5000
 	accountRecentRequestLimit  = 10
 	recentWindowMS             = 30 * 60 * 1000
-	// analyticsPrefetchConcurrency limits background analytics reads. The
-	// foreground summary/task path may hold one additional SQLite connection.
-	analyticsPrefetchConcurrency = 2
+	// analyticsPrefetchConcurrency deliberately serializes the expensive
+	// background reads. Large SQLite databases become slower when two wide
+	// analytical scans compete for the same disk pages.
+	analyticsPrefetchConcurrency = 1
 )
 
 type Service struct {
@@ -144,31 +145,33 @@ type Filters struct {
 }
 
 type Include struct {
-	Summary            bool              `json:"summary"`
-	SummaryProfile     string            `json:"summary_profile"`
-	SummaryPercentiles bool              `json:"summary_percentiles"`
-	SummaryComparison  bool              `json:"summary_comparison"`
-	Timeline           bool              `json:"timeline"`
-	HourlyDistribution bool              `json:"hourly_distribution"`
-	ModelShare         bool              `json:"model_share"`
-	ChannelShare       bool              `json:"channel_share"`
-	ModelStats         bool              `json:"model_stats"`
-	FailureSources     bool              `json:"failure_sources"`
-	AccountStats       bool              `json:"account_stats"`
-	CredentialStats    bool              `json:"credential_stats"`
-	CredentialTimeline bool              `json:"credential_timeline"`
-	APIKeyTimeline     bool              `json:"api_key_timeline"`
-	APIKeyStats        bool              `json:"api_key_stats"`
-	FilterOptions      bool              `json:"filter_options"`
-	FilterSelectors    bool              `json:"filter_selectors"`
-	Heatmap            bool              `json:"heatmap"`
-	AnomalyPoints      bool              `json:"anomaly_points"`
-	TaskBuckets        bool              `json:"task_buckets"`
-	RecentFailures     int               `json:"recent_failures"`
-	EventsPage         *EventsPage       `json:"events_page"`
-	DrilldownPreview   *DrilldownPreview `json:"drilldown_preview"`
-	RoutingDiagnostics bool              `json:"routing_diagnostics"`
-	Granularity        string            `json:"granularity"`
+	Summary               bool              `json:"summary"`
+	SummaryProfile        string            `json:"summary_profile"`
+	EntityProfile         string            `json:"entity_profile"`
+	FilterSelectorProfile string            `json:"filter_selector_profile"`
+	SummaryPercentiles    bool              `json:"summary_percentiles"`
+	SummaryComparison     bool              `json:"summary_comparison"`
+	Timeline              bool              `json:"timeline"`
+	HourlyDistribution    bool              `json:"hourly_distribution"`
+	ModelShare            bool              `json:"model_share"`
+	ChannelShare          bool              `json:"channel_share"`
+	ModelStats            bool              `json:"model_stats"`
+	FailureSources        bool              `json:"failure_sources"`
+	AccountStats          bool              `json:"account_stats"`
+	CredentialStats       bool              `json:"credential_stats"`
+	CredentialTimeline    bool              `json:"credential_timeline"`
+	APIKeyTimeline        bool              `json:"api_key_timeline"`
+	APIKeyStats           bool              `json:"api_key_stats"`
+	FilterOptions         bool              `json:"filter_options"`
+	FilterSelectors       bool              `json:"filter_selectors"`
+	Heatmap               bool              `json:"heatmap"`
+	AnomalyPoints         bool              `json:"anomaly_points"`
+	TaskBuckets           bool              `json:"task_buckets"`
+	RecentFailures        int               `json:"recent_failures"`
+	EventsPage            *EventsPage       `json:"events_page"`
+	DrilldownPreview      *DrilldownPreview `json:"drilldown_preview"`
+	RoutingDiagnostics    bool              `json:"routing_diagnostics"`
+	Granularity           string            `json:"granularity"`
 }
 
 type EventsPage struct {
@@ -866,6 +869,8 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 	var summaryTotalCalls int64
 	summaryComputed := false
 	compactSummary := req.Include.Summary && req.Include.SummaryProfile == "compact"
+	compactEntities := req.Include.EntityProfile == "compact"
+	compactFilterSelectors := req.Include.FilterSelectorProfile == "compact"
 	rollupEligible := analyticsHourlyRollupEligible(filter)
 	needsHourlyAggregates := req.Include.Summary || req.Include.ModelShare || req.Include.ModelStats
 	needsHourlyTimeline := req.Include.Timeline || req.Include.AnomalyPoints
@@ -908,11 +913,23 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 		}
 	}
 
+	var latencyPercentiles []store.LatencyPercentiles
+	var prefetchedLatencySummary store.LatencySummary
+	latencySummaryPrefetched := false
+	needsLatencyBuckets := req.Include.Timeline || req.Include.AnomalyPoints
+	needsLatencySummary := req.Include.Summary && (!compactSummary || req.Include.SummaryPercentiles)
+	if needsLatencyBuckets && needsLatencySummary {
+		latencyPercentiles, prefetchedLatencySummary, err = s.store.LatencyAnalyticsWithFilter(ctx, filter, granularity, location)
+		if err != nil {
+			return Response{}, err
+		}
+		latencySummaryPrefetched = true
+	}
+
 	queries := newAnalyticsQueryGroup(ctx, analyticsPrefetchConcurrency)
 	defer queries.Close()
 
-	var latencyPercentiles []store.LatencyPercentiles
-	if req.Include.Timeline || req.Include.AnomalyPoints {
+	if needsLatencyBuckets && !latencySummaryPrefetched {
 		queries.Go(func(queryCtx context.Context) error {
 			var queryErr error
 			latencyPercentiles, queryErr = s.store.LatencyPercentilesWithFilter(queryCtx, filter, granularity, location)
@@ -938,7 +955,8 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 		})
 	}
 
-	if req.Include.ChannelShare && !deriveChannelStatsFromAccounts {
+	deriveCompactChannelStatsFromAPIKeys := compactEntities && req.Include.ChannelShare && req.Include.APIKeyStats
+	if req.Include.ChannelShare && !deriveChannelStatsFromAccounts && !deriveCompactChannelStatsFromAPIKeys {
 		queries.Go(func(queryCtx context.Context) error {
 			var queryErr error
 			channelStats, queryErr = s.channelModelStats(queryCtx, filter)
@@ -1005,7 +1023,7 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 	if req.Include.FilterSelectors {
 		queries.Go(func(queryCtx context.Context) error {
 			var queryErr error
-			selectorOptions, queryErr = s.filterSelectors(queryCtx, filter)
+			selectorOptions, queryErr = s.filterSelectors(queryCtx, filter, compactFilterSelectors)
 			return queryErr
 		})
 	} else if req.Include.FilterOptions {
@@ -1085,8 +1103,8 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 				return Response{}, err
 			}
 		}
-		var latencySummary store.LatencySummary
-		if !compactSummary || req.Include.SummaryPercentiles {
+		latencySummary := prefetchedLatencySummary
+		if needsLatencySummary && !latencySummaryPrefetched {
 			latencySummary, err = s.store.LatencySummaryWithFilter(ctx, filter)
 			if err != nil {
 				return Response{}, err
@@ -1214,7 +1232,11 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 		response.ModelStats = buildModelStats(modelStats, prices)
 	}
 	if req.Include.ChannelShare {
-		response.ChannelShare = buildChannelShare(channelStats, prices)
+		if deriveCompactChannelStatsFromAPIKeys {
+			response.ChannelShare = buildProviderShareFromAPIKeyStats(apiKeyStats, prices)
+		} else {
+			response.ChannelShare = buildChannelShare(channelStats, prices)
+		}
 	}
 	if req.Include.FailureSources {
 		response.FailureSources = buildFailureSources(failureSourceStats)
@@ -1232,7 +1254,7 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 		response.APIKeyTimeline = buildAPIKeyTimeline(apiKeyTimelinePoints, granularity, location, prices)
 	}
 	if req.Include.APIKeyStats {
-		response.APIKeyStats = buildAPIKeyStats(apiKeyStats, prices)
+		response.APIKeyStats = buildAPIKeyStatsWithProfile(apiKeyStats, prices, compactEntities)
 	}
 	if req.Include.FilterSelectors {
 		response.FilterOptions = selectorOptions
@@ -1815,7 +1837,7 @@ func filterOptionsMatchMainScope(filter store.AnalyticsFilter) bool {
 		strings.TrimSpace(filter.CacheStatus) == ""
 }
 
-func (s *Service) filterSelectors(ctx context.Context, filter store.AnalyticsFilter) (*FilterOptions, error) {
+func (s *Service) filterSelectors(ctx context.Context, filter store.AnalyticsFilter, compact bool) (*FilterOptions, error) {
 	optionFilter := filterOptionsBaseFilter(filter)
 	values, available := s.monitoringReader.FilterSelectors(ctx, optionFilter)
 	if !available {
@@ -1824,6 +1846,15 @@ func (s *Service) filterSelectors(ctx context.Context, filter store.AnalyticsFil
 		if err != nil {
 			return nil, err
 		}
+	}
+	if compact {
+		return &FilterOptions{
+			Models:       values.Models,
+			APIKeyHashes: values.APIKeyHashes,
+			Providers:    values.Providers,
+			AuthFiles:    values.AuthFiles,
+			APIKeyCount:  countAPIKeySelectors(values),
+		}, nil
 	}
 	accountStats := buildAccountSelectorStats(values)
 	return &FilterOptions{
@@ -2598,6 +2629,56 @@ func buildChannelShare(stats []store.ChannelModelStat, prices map[string]store.M
 	return result
 }
 
+// buildProviderShareFromAPIKeyStats reuses the API-key aggregation already
+// requested by the usage analytics overview. That page only renders provider
+// totals, so running the similarly expensive channel aggregation would scan
+// the same usage-event range a second time without adding useful detail.
+func buildProviderShareFromAPIKeyStats(stats []store.APIKeyModelStat, prices map[string]store.ModelPrice) []ChannelShareRow {
+	type accumulator struct {
+		row        ChannelShareRow
+		latencySum float64
+		latencyN   int64
+	}
+	grouped := make(map[string]*accumulator)
+	for _, stat := range stats {
+		provider := strings.TrimSpace(stat.AuthProviderSnapshot)
+		if provider == "" {
+			provider = "-"
+		}
+		key := strings.ToLower(provider)
+		entry := grouped[key]
+		if entry == nil {
+			entry = &accumulator{row: ChannelShareRow{
+				AuthIndex:            key,
+				AuthProviderSnapshot: provider,
+			}}
+			grouped[key] = entry
+		}
+		entry.row.Calls += stat.Calls
+		entry.row.Success += stat.SuccessCalls
+		entry.row.Failure += stat.FailureCalls
+		entry.row.Tokens += stat.TotalTokens
+		entry.row.Cost += costForAPIKeyModelStat(stat, prices)
+		if stat.AvgLatencyMS.Valid && stat.LatencySamples > 0 {
+			entry.latencySum += stat.AvgLatencyMS.Float64 * float64(stat.LatencySamples)
+			entry.latencyN += stat.LatencySamples
+		}
+	}
+	result := make([]ChannelShareRow, 0, len(grouped))
+	for _, entry := range grouped {
+		if entry.latencyN > 0 {
+			value := entry.latencySum / float64(entry.latencyN)
+			entry.row.AvgLatencyMS = &value
+		}
+		result = append(result, entry.row)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		return result[i].Calls > result[j].Calls ||
+			(result[i].Calls == result[j].Calls && result[i].AuthProviderSnapshot < result[j].AuthProviderSnapshot)
+	})
+	return result
+}
+
 func buildFailureSources(stats []store.FailureSourceStat) []FailureSourceRow {
 	result := make([]FailureSourceRow, 0, len(stats))
 	for _, stat := range stats {
@@ -2937,6 +3018,10 @@ func buildAPIKeyTimeline(points []store.APIKeyTimelinePoint, granularity string,
 }
 
 func buildAPIKeyStats(stats []store.APIKeyModelStat, prices map[string]store.ModelPrice) []APIKeyStatRow {
+	return buildAPIKeyStatsWithProfile(stats, prices, false)
+}
+
+func buildAPIKeyStatsWithProfile(stats []store.APIKeyModelStat, prices map[string]store.ModelPrice, compact bool) []APIKeyStatRow {
 	grouped := map[string]*apiKeyStatAccumulator{}
 	for _, stat := range stats {
 		id := apiKeyGroupKey(stat.APIKeyHash, stat.SourceHash, stat.AuthIndex, stat.Source, stat.AuthProviderSnapshot)
@@ -2950,18 +3035,22 @@ func buildAPIKeyStats(stats []store.APIKeyModelStat, prices map[string]store.Mod
 					AuthLabelSnapshot:    stat.AuthLabelSnapshot,
 					AuthProviderSnapshot: stat.AuthProviderSnapshot,
 				},
-				authIndices:  map[string]struct{}{},
-				sources:      map[string]struct{}{},
-				sourceHashes: map[string]struct{}{},
-				models:       map[string]*AccountModelStatRow{},
-				contexts:     map[string]*apiKeyContextAccumulator{},
+				models: map[string]*AccountModelStatRow{},
+			}
+			if !compact {
+				entry.authIndices = map[string]struct{}{}
+				entry.sources = map[string]struct{}{}
+				entry.sourceHashes = map[string]struct{}{}
+				entry.contexts = map[string]*apiKeyContextAccumulator{}
 			}
 			grouped[id] = entry
 		}
 		fillAPIKeyStatSnapshots(&entry.row, stat.APIKeyHash, stat.AccountSnapshot, stat.AuthLabelSnapshot, stat.AuthProviderSnapshot)
-		addSetValue(entry.authIndices, stat.AuthIndex)
-		addSetValue(entry.sources, stat.Source)
-		addSetValue(entry.sourceHashes, stat.SourceHash)
+		if !compact {
+			addSetValue(entry.authIndices, stat.AuthIndex)
+			addSetValue(entry.sources, stat.Source)
+			addSetValue(entry.sourceHashes, stat.SourceHash)
+		}
 		cost := costForAPIKeyModelStat(stat, prices)
 		addAccountTotals(
 			&entry.row.Calls,
@@ -2992,18 +3081,22 @@ func buildAPIKeyStats(stats []store.APIKeyModelStat, prices map[string]store.Mod
 			entry.latencySum += stat.AvgLatencyMS.Float64 * float64(stat.LatencySamples)
 			entry.latencySamples += stat.LatencySamples
 		}
-		addAPIKeyContextStat(entry.contexts, stat, cost)
+		if !compact {
+			addAPIKeyContextStat(entry.contexts, stat, cost)
+		}
 		addAccountModelStat(entry.models, stat.Model, stat.BillingModel, stat.Calls, stat.SuccessCalls, stat.FailureCalls, stat.InputTokens, stat.OutputTokens, stat.CachedTokens, stat.CacheReadTokens, stat.CacheCreationTokens, stat.TotalTokens, cost, stat.LastSeenMS)
 	}
 
 	result := make([]APIKeyStatRow, 0, len(grouped))
 	for _, entry := range grouped {
 		entry.row.SuccessRate = ratio(entry.row.SuccessCalls, entry.row.Calls)
-		entry.row.AuthIndices = sortedSetValues(entry.authIndices)
-		entry.row.Sources = sortedSetValues(entry.sources)
-		entry.row.SourceHashes = sortedSetValues(entry.sourceHashes)
 		entry.row.Models = sortedAccountModelStats(entry.models)
-		entry.row.Contexts = sortedAPIKeyContextStats(entry.contexts)
+		if !compact {
+			entry.row.AuthIndices = sortedSetValues(entry.authIndices)
+			entry.row.Sources = sortedSetValues(entry.sources)
+			entry.row.SourceHashes = sortedSetValues(entry.sourceHashes)
+			entry.row.Contexts = sortedAPIKeyContextStats(entry.contexts)
+		}
 		if entry.latencySamples > 0 {
 			value := entry.latencySum / float64(entry.latencySamples)
 			entry.row.AvgLatencyMS = &value

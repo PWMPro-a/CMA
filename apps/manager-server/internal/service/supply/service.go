@@ -1458,7 +1458,7 @@ func (s *Service) refreshActiveOrderRemoteStatus(ctx context.Context, cfg store.
 	credentials := supplyPlatformCredentials(platform)
 	remote, err := s.supplyClient.GetOrder(ctx, credentials, order.OrderID, order.StatusURL)
 	if err != nil {
-		if isHTTPStatus(err, http.StatusConflict) {
+		if isHTTPStatus(err, http.StatusConflict) || isHTTPStatus(err, http.StatusNotFound) {
 			return s.cancelOrder(ctx, order, err)
 		}
 		return s.updateOrderError(ctx, order, err, cfg.Supply)
@@ -3087,7 +3087,7 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	credentials := supplyPlatformCredentials(platform)
 	remote, err := s.supplyClient.GetOrder(ctx, credentials, order.OrderID, order.StatusURL)
 	if err != nil {
-		if isHTTPStatus(err, http.StatusConflict) {
+		if isHTTPStatus(err, http.StatusConflict) || isHTTPStatus(err, http.StatusNotFound) {
 			return s.cancelOrder(ctx, &order, err)
 		}
 		return s.updateOrderError(ctx, &order, err, cfg.Supply)

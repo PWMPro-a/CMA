@@ -1518,6 +1518,55 @@ func TestStartupAccountFloorKeepsPurchasingWithoutTraffic(t *testing.T) {
 	}
 }
 
+func TestStartupAccountFloorDoesNotOverrideActivePurchaseTiming(t *testing.T) {
+	startupAccounts := 15
+	cfg := store.ManagerSupplyConfig{
+		Strategy:                  managerconfigsvc.SupplyStrategyStrongSupply,
+		StartupAvailableAccounts:  &startupAccounts,
+		CriticalAvailableAccounts: 2,
+		HealthyAvailableAccounts:  10,
+		PollIntervalSeconds:       2,
+	}
+	resource := SmartResource{
+		AvailableAccounts:              10,
+		ConsumeRCUPerMinute:            10,
+		DemandPlanningRCUPerMinute:     10,
+		AvailableCapacityRCU:           267,
+		CurrentCapacityRCU:             410,
+		TotalCapacityRCU:               410,
+		EstimatedSustainMinutes:        41,
+		AvailableSustainMinutes:        26.7,
+		EffectiveHealthyMinutes:        40,
+		WarningMinutes:                 25,
+		CriticalMinutes:                20,
+		TokenCapacityMode:              smartTokenCapacityMode,
+		EstimatedNewAccountCapacityRCU: 22,
+		SuggestedQuantity:              0,
+	}
+
+	if smartAvailableCapacityEmergency(cfg, resource) {
+		t.Fatalf("active pool above the critical runway must not use the startup floor: %#v", resource)
+	}
+	applySmartEmergencyAvailability(cfg, &resource, time.Now())
+	if resource.EmergencyShortage || resource.SuggestedAction == smartActionEmergencyReplenish ||
+		resource.SuggestedQuantity != 0 {
+		t.Fatalf("startup floor overrode active purchase timing: %#v", resource)
+	}
+
+	pressure := smartSupplyPressure{
+		level:                       smartSupplyPressurePlenty,
+		reliablyAvailable:           true,
+		shortWindowOrders:           3,
+		recentSuccessStreak:         3,
+		shortWindowFulfillmentRate:  100,
+		shortWindowAvgFulfillSecond: 5,
+	}
+	timing := smartJustInTimePurchase(cfg, resource, pressure, resource.SuggestedQuantity)
+	if timing.triggerMinutes != 24.8 || timing.waitMinutes != 16.2 || timing.eligibleQuantity != 0 {
+		t.Fatalf("active purchase timing = %#v, want trigger 24.8m and wait 16.2m", timing)
+	}
+}
+
 func TestVirtualDemandSizesEmptyPoolEmergencyWithoutFixedBatchWaste(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		Strategy:                    managerconfigsvc.SupplyStrategyStrongSupply,

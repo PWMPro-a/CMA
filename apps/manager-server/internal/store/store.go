@@ -1109,6 +1109,10 @@ func (s *Store) TimelineWithFilter(ctx context.Context, filter AnalyticsFilter, 
 	return s.UsageEvents.TimelineWithFilter(ctx, filter, granularity, location)
 }
 
+func (s *Store) LatencyAnalyticsWithFilter(ctx context.Context, filter AnalyticsFilter, granularity string, location *time.Location) ([]LatencyPercentiles, LatencySummary, error) {
+	return s.UsageEvents.LatencyAnalyticsWithFilter(ctx, filter, granularity, location)
+}
+
 func (s *Store) LatencyPercentilesWithFilter(ctx context.Context, filter AnalyticsFilter, granularity string, location *time.Location) ([]LatencyPercentiles, error) {
 	return s.UsageEvents.LatencyPercentilesWithFilter(ctx, filter, granularity, location)
 }

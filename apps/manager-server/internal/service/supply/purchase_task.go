@@ -155,18 +155,80 @@ func (s *Service) listPurchaseTasks(ctx context.Context, limit int) ([]store.Sup
 }
 
 func (s *Service) CancelPurchaseTask(ctx context.Context, taskID string) (Status, error) {
-	_, _, err := s.store.CancelSupplyPurchaseTask(ctx, taskID, time.Now().UnixMilli())
+	_, found, err := s.cancelPurchaseTaskAndChildren(ctx, taskID, time.Now().UnixMilli())
 	if err != nil {
 		return Status{}, err
 	}
-	if _, found, getErr := s.store.GetSupplyPurchaseTask(ctx, taskID); getErr != nil {
-		return Status{}, getErr
-	} else if !found {
+	if !found {
 		return Status{}, ErrPurchaseTaskNotFound
 	}
 	s.invalidateStatusCache()
 	s.signalPurchaseTaskWorker()
 	return s.GetStatus(ctx, 50)
+}
+
+func (s *Service) cancelPurchaseTaskAndChildren(ctx context.Context, taskID string, nowMS int64) (store.SupplyPurchaseTask, bool, error) {
+	if s == nil || s.store == nil {
+		return store.SupplyPurchaseTask{}, false, nil
+	}
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+
+	task, _, err := s.store.CancelSupplyPurchaseTask(ctx, taskID, nowMS)
+	if err != nil {
+		return store.SupplyPurchaseTask{}, false, err
+	}
+	if strings.TrimSpace(task.TaskID) == "" {
+		return store.SupplyPurchaseTask{}, false, nil
+	}
+	if task.Status == purchaseTaskStatusCancelled {
+		if err := s.cancelReversiblePurchaseTaskOrders(ctx, task.TaskID, nowMS); err != nil {
+			return store.SupplyPurchaseTask{}, true, err
+		}
+	}
+	return task, true, nil
+}
+
+func (s *Service) cancelReversiblePurchaseTaskOrders(ctx context.Context, taskID string, nowMS int64) error {
+	orders, err := s.store.ListSupplyOrdersByTaskID(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	changed := false
+	for _, order := range orders {
+		if !cancelReversiblePurchaseTaskOrder(&order, nowMS) {
+			continue
+		}
+		if err := s.store.UpdateSupplyOrder(ctx, order); err != nil {
+			return err
+		}
+		changed = true
+	}
+	if changed {
+		s.invalidateSupplyOrdersCache()
+	}
+	return nil
+}
+
+func cancelReversiblePurchaseTaskOrder(order *store.SupplyOrder, nowMS int64) bool {
+	if order == nil || !reportOpenOrderStatus(order.Status) {
+		return false
+	}
+	status := strings.ToLower(strings.TrimSpace(order.Status))
+	if status == "taking" || status == "importing" || status == "partial" ||
+		order.ItemCount > order.ImportedCount || order.ChargedFen > 0 {
+		return false
+	}
+	if nowMS <= 0 {
+		nowMS = time.Now().UnixMilli()
+	}
+	order.Status = "cancelled"
+	order.RemoteStatus = "task_cancelled"
+	order.LastError = "purchase task cancelled; supplier reservation left to expire"
+	order.NextPollAtMS = 0
+	order.SupplierRetryUntilMS = 0
+	order.CompletedAtMS = nowMS
+	return true
 }
 
 func (s *Service) RunPurchaseTasks(ctx context.Context) error {
@@ -656,6 +718,12 @@ func (s *Service) stopPurchaseTaskOrderIfNeeded(ctx context.Context, order *stor
 	if task.Status != purchaseTaskStatusCompleted && task.Status != purchaseTaskStatusCancelled {
 		return false, nil
 	}
+	if task.Status == purchaseTaskStatusCancelled {
+		if !cancelReversiblePurchaseTaskOrder(order, time.Now().UnixMilli()) {
+			return false, nil
+		}
+		return true, s.store.UpdateSupplyOrder(ctx, *order)
+	}
 	status := strings.ToLower(strings.TrimSpace(order.Status))
 	if task.Source == "automatic" || order.Automatic {
 		// Automatic reservations must reach the live-deficit decision in
@@ -696,7 +764,7 @@ func (s *Service) reconcileAutomaticPurchaseTaskCancellation(ctx context.Context
 		return err
 	}
 	if !managerconfigsvc.SupplyEnabled(cfg.Supply) {
-		_, _, err = s.store.CancelSupplyPurchaseTask(ctx, task.TaskID, time.Now().UnixMilli())
+		_, _, err = s.cancelPurchaseTaskAndChildren(ctx, task.TaskID, time.Now().UnixMilli())
 		return err
 	}
 	// Give a freshly planned task enough time for its first worker step. This
@@ -726,7 +794,7 @@ func (s *Service) reconcileAutomaticPurchaseTaskCancellation(ctx context.Context
 		shouldCancel = overview.CPATarget > 0 && overview.CPAAvailable >= overview.CPATarget
 	}
 	if shouldCancel {
-		_, _, err = s.store.CancelSupplyPurchaseTask(ctx, task.TaskID, time.Now().UnixMilli())
+		_, _, err = s.cancelPurchaseTaskAndChildren(ctx, task.TaskID, time.Now().UnixMilli())
 	}
 	return err
 }

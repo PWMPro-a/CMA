@@ -157,6 +157,62 @@ func TestUnavailablePlatformOrdersAreTerminatedAndTasksAreReplanned(t *testing.T
 	}
 }
 
+func TestMissingPickupOrderDoesNotKeepCancelledTaskSlotOpen(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case "/api/customer/pickup/orders/missing-order":
+			http.Error(w, `{"message":"pickup order not found"}`, http.StatusNotFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-missing-order.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{Supply: store.ManagerSupplyConfig{
+		Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_7d",
+	}}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	task, err := st.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
+		TaskID: "cancelled-task-with-missing-order", Source: "automatic", SupplierID: "legacy", Product: "oauth_7d",
+		TargetQuantity: 7, Status: purchaseTaskStatusCancelled, MaxConcurrentOrders: 1, CancelledAtMS: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "missing-order", TaskID: task.TaskID, SupplierID: "legacy", Product: "oauth_7d",
+		RequestedQuantity: 7, Automatic: true, Status: "waiting_inventory",
+	}); err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	if err := service.RunPurchaseTasks(ctx); err != nil {
+		t.Fatalf("run purchase tasks: %v", err)
+	}
+	order, found, err := st.GetSupplyOrder(ctx, "missing-order")
+	if err != nil || !found {
+		t.Fatalf("load order found=%v err=%v", found, err)
+	}
+	if order.Status != "cancelled" || order.CompletedAtMS == 0 || order.NextPollAtMS != 0 {
+		t.Fatalf("missing pickup order = %#v", order)
+	}
+	openOrders, err := st.ListOpenSupplyOrders(ctx, 10)
+	if err != nil || len(openOrders) != 0 {
+		t.Fatalf("open orders = %#v err=%v", openOrders, err)
+	}
+}
+
 func TestPurchaseTaskParallelSlotsCreateSmallOrdersWithinTarget(t *testing.T) {
 	var createCalls atomic.Int32
 	quantities := make([]int, 0, 3)
@@ -496,12 +552,12 @@ func TestCancelledPurchaseTaskReleasesReversibleChildOrder(t *testing.T) {
 		t.Fatalf("stop child order stopped=%v err=%v", stopped, err)
 	}
 	order, _, err = st.GetSupplyOrder(ctx, "cancel-child")
-	if err != nil || order.Status != "released" || order.RemoteStatus != "task_cancelled" {
-		t.Fatalf("released child order = %#v err=%v", order, err)
+	if err != nil || order.Status != "cancelled" || order.RemoteStatus != "task_cancelled" {
+		t.Fatalf("cancelled child order = %#v err=%v", order, err)
 	}
 }
 
-func TestCancelledAutomaticPurchaseTaskDefersChildOrderToLiveTakeDecision(t *testing.T) {
+func TestCancelledAutomaticPurchaseTaskCancelsReversibleChildOrder(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-auto-cancel.sqlite"))
 	if err != nil {
@@ -530,12 +586,59 @@ func TestCancelledAutomaticPurchaseTaskDefersChildOrderToLiveTakeDecision(t *tes
 		t.Fatalf("load child order: %v", err)
 	}
 	stopped, err := service.stopPurchaseTaskOrderIfNeeded(ctx, &order)
-	if err != nil || stopped {
-		t.Fatalf("automatic child must reach live take decision: stopped=%v err=%v", stopped, err)
+	if err != nil || !stopped {
+		t.Fatalf("automatic child cancellation stopped=%v err=%v", stopped, err)
 	}
 	order, _, err = st.GetSupplyOrder(ctx, "auto-cancel-child")
-	if err != nil || order.Status != "waiting_inventory" {
+	if err != nil || order.Status != "cancelled" || order.RemoteStatus != "task_cancelled" {
 		t.Fatalf("automatic child order = %#v err=%v", order, err)
+	}
+}
+
+func TestCancelPurchaseTaskImmediatelyCancelsAllReversibleChildren(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-eager-cancel.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	task, err := st.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
+		TaskID: "purchase-eager-cancel", Source: "automatic", Product: "team_1h",
+		TargetQuantity: 3, Status: purchaseTaskStatusRunning, MaxConcurrentOrders: 3,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	for index, status := range []string{"creating", "waiting_inventory", "ready"} {
+		if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+			OrderID: fmt.Sprintf("cancel-child-%d", index+1), TaskID: task.TaskID,
+			SupplierID: "bugteam", Product: "team_1h", RequestedQuantity: 1,
+			Automatic: true, Status: status,
+		}); err != nil {
+			t.Fatalf("create child %d: %v", index+1, err)
+		}
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil))
+	if _, found, err := service.cancelPurchaseTaskAndChildren(ctx, task.TaskID, time.Now().UnixMilli()); err != nil || !found {
+		t.Fatalf("cancel task found=%v err=%v", found, err)
+	}
+	orders, err := st.ListSupplyOrdersByTaskID(ctx, task.TaskID)
+	if err != nil || len(orders) != 3 {
+		t.Fatalf("child orders = %#v err=%v", orders, err)
+	}
+	for _, order := range orders {
+		if order.Status != "cancelled" || order.RemoteStatus != "task_cancelled" || order.CompletedAtMS == 0 {
+			t.Fatalf("child order not cancelled = %#v", order)
+		}
+	}
+}
+
+func TestCancelPurchaseTaskPreservesCommittedChildImport(t *testing.T) {
+	order := store.SupplyOrder{
+		Status: "importing", RequestedQuantity: 2, ItemCount: 2, ImportedCount: 1, ChargedFen: 300,
+	}
+	if cancelReversiblePurchaseTaskOrder(&order, time.Now().UnixMilli()) {
+		t.Fatalf("committed child must continue importing: %#v", order)
 	}
 }
 

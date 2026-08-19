@@ -740,6 +740,7 @@ export const buildUsageAnalyticsInclude = (
   switch (activeTab) {
     case 'overview':
       Object.assign(include, {
+        entity_profile: 'compact',
         summary_percentiles: true,
         summary_comparison: true,
         timeline: true,
@@ -752,6 +753,7 @@ export const buildUsageAnalyticsInclude = (
       break;
     case 'trends':
       Object.assign(include, {
+        entity_profile: 'compact',
         summary_comparison: true,
         timeline: true,
         model_stats: true,
@@ -761,6 +763,7 @@ export const buildUsageAnalyticsInclude = (
       break;
     case 'models':
       Object.assign(include, {
+        entity_profile: 'compact',
         timeline: true,
         model_stats: true,
         api_key_stats: true,
@@ -790,6 +793,7 @@ export const buildUsageAnalyticsInclude = (
 export const buildUsageAnalyticsFilterSelectorsInclude = (): MonitoringAnalyticsInclude => ({
   filter_options: true,
   filter_selectors: true,
+  filter_selector_profile: 'compact',
 });
 
 export const buildUsageSummary = (
