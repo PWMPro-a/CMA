@@ -29,6 +29,51 @@ func TestSummarizePurchaseTaskOrdersCountsDeliveredBeforeCommitted(t *testing.T)
 	}
 }
 
+func TestPurchaseTaskReadyTakeAllowedWhilePlannerSnapshotIsStale(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-ready-take.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	task, err := st.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
+		TaskID: "task-stale-ready", Source: "automatic", SupplierID: "legacy", Product: "oauth_7d",
+		TargetQuantity: 48, Status: purchaseTaskStatusRunning, MaxConcurrentOrders: 3,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "task-stale-delivered", TaskID: task.TaskID, SupplierID: "legacy", Product: "oauth_7d",
+		RequestedQuantity: 18, Automatic: true, Status: "completed", ItemCount: 18, ImportedCount: 18,
+	}); err != nil {
+		t.Fatalf("create delivered order: %v", err)
+	}
+	ready, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "task-stale-ready-order", TaskID: task.TaskID, SupplierID: "legacy", Product: "oauth_7d",
+		RequestedQuantity: 30, Automatic: true, Status: "ready", RemoteStatus: "completed", ChargedFen: 6720,
+	})
+	if err != nil {
+		t.Fatalf("create ready order: %v", err)
+	}
+	service := New(st, nil)
+	allowed, err := service.purchaseTaskReadyTakeAllowed(ctx, ready)
+	if err != nil || !allowed {
+		t.Fatalf("ready take allowed=%v err=%v", allowed, err)
+	}
+	task, found, err := st.GetSupplyPurchaseTask(ctx, task.TaskID)
+	if err != nil || !found || task.FulfilledQuantity != 18 || task.Status != purchaseTaskStatusRunning {
+		t.Fatalf("reconciled task=%#v found=%v err=%v", task, found, err)
+	}
+	service.setSmartResource(SmartResource{
+		Enabled: true, GeneratedAtMS: time.Now().UnixMilli(), SnapshotFresh: false, SuggestedAction: smartActionTakeLocked,
+		DecisionReason: "purchase_task_ready_stale_snapshot",
+	})
+	if !service.smartTakeAllowed(store.ManagerSupplyConfig{}, ready.OrderID) {
+		t.Fatal("task-backed ready order must pass the stale-snapshot take gate")
+	}
+}
+
 func TestPurchaseTaskNextOrderQuantityShardsRemainingTarget(t *testing.T) {
 	tests := []struct {
 		remaining int

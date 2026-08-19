@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -577,6 +578,43 @@ func purchaseTaskOrderReservedQuantity(order store.SupplyOrder) int {
 	default:
 		return delivered
 	}
+}
+
+// purchaseTaskReadyTakeAllowed keeps the executor moving when quota inspection
+// evidence is temporarily stale. The task target was persisted before the
+// supplier order was created, so a ready child order that still fits the
+// remaining target can be taken without consulting the stale capacity planner.
+// A small overage allowance matches the ready-order combination policy and
+// absorbs live quantity drift while the supplier is preparing stock.
+func (s *Service) purchaseTaskReadyTakeAllowed(ctx context.Context, order store.SupplyOrder) (bool, error) {
+	if s == nil || s.store == nil || strings.TrimSpace(order.TaskID) == "" ||
+		!isReadyForTake(order.Status) && !isReadyForTake(order.RemoteStatus) {
+		return false, nil
+	}
+	task, found, err := s.store.GetSupplyPurchaseTask(ctx, order.TaskID)
+	if err != nil || !found {
+		return false, err
+	}
+	task, err = s.reconcilePurchaseTask(ctx, task)
+	if err != nil {
+		return false, err
+	}
+	if task.Status != purchaseTaskStatusPending && task.Status != purchaseTaskStatusRunning {
+		return false, nil
+	}
+	remaining := max(0, task.TargetQuantity-task.FulfilledQuantity)
+	if remaining <= 0 {
+		return false, nil
+	}
+	quantity := max(order.ReadyQuantity, order.ItemCount)
+	if quantity <= 0 {
+		quantity = max(0, order.RequestedQuantity)
+	}
+	if quantity <= 0 {
+		return false, nil
+	}
+	allowance := max(1, int(math.Ceil(float64(remaining)*0.15)))
+	return quantity <= remaining+allowance, nil
 }
 
 func (s *Service) purchaseTaskOrderPollDue(cfg store.ManagerSupplyConfig, order store.SupplyOrder, nowMS int64) bool {

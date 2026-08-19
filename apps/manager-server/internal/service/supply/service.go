@@ -3192,6 +3192,23 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 	if smartSupplyEnabled(cfg.Supply) {
 		resource, err := s.smartResource(ctx, cfg, forceSmartRefresh)
 		if err != nil || !resource.SnapshotFresh {
+			// A durable purchase task is the source of truth for an order that has
+			// already secured supplier stock. A long-running inspection refresh must
+			// not strand a paid ready order when its quantity still fits the task's
+			// unfulfilled target. This path never creates another order; it only lets
+			// the existing idempotent Take continue.
+			allowed, taskErr := s.purchaseTaskReadyTakeAllowed(ctx, *order)
+			if taskErr != nil {
+				return false, taskErr
+			}
+			if allowed {
+				resource.LockedOrderID = order.OrderID
+				resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
+				resource.SuggestedAction = smartActionTakeLocked
+				resource.DecisionReason = "purchase_task_ready_stale_snapshot"
+				s.setSmartResource(resource)
+				return false, nil
+			}
 			// A stale/unknown snapshot is not enough evidence to abandon a paid
 			// reservation. Continue the normal status polling path instead.
 			return false, nil
@@ -8724,7 +8741,7 @@ func (s *Service) smartTakeAllowed(cfg store.ManagerSupplyConfig, orderID string
 	}
 	if resource.SuggestedAction == smartActionTakeLocked {
 		switch resource.DecisionReason {
-		case "critical_take_confirmed", "critical_take_confirmed_stale_lower_bound", "supply_plenty_small_take", "low_water_take_ready", "low_water_take_ready_stale_lower_bound":
+		case "critical_take_confirmed", "critical_take_confirmed_stale_lower_bound", "supply_plenty_small_take", "low_water_take_ready", "low_water_take_ready_stale_lower_bound", "purchase_task_ready_stale_snapshot":
 			return true
 		}
 	}
