@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/pricing"
@@ -628,6 +629,7 @@ type Service struct {
 	accountListCache        supplyAccountListCache
 	supplyOrdersCacheMu     sync.Mutex
 	supplyOrdersCache       supplyOrdersCache
+	statusCache             supplyStatusCache
 	purchaseTaskWake        chan struct{}
 }
 
@@ -640,6 +642,35 @@ type supplyAccountListCache struct {
 type supplyOrdersCache struct {
 	generated time.Time
 	orders    []store.SupplyOrder
+}
+
+type supplyStatusCacheKey struct {
+	limit      int
+	generation uint64
+}
+
+type supplyStatusCacheEntry struct {
+	generated  time.Time
+	generation uint64
+	payload    []byte
+}
+
+type supplyStatusRefresh struct {
+	done    chan struct{}
+	payload []byte
+	err     error
+}
+
+// supplyStatusCache coalesces the expensive supply-dashboard read model. The
+// cached representation is JSON rather than a shared Status value so every
+// caller receives its own slices, maps and pointers and cannot race with the
+// next response encoder or another request.
+type supplyStatusCache struct {
+	mu         sync.Mutex
+	generation uint64
+	entries    map[int]supplyStatusCacheEntry
+	refreshes  map[supplyStatusCacheKey]*supplyStatusRefresh
+	retryAfter map[supplyStatusCacheKey]time.Time
 }
 
 type operatorHeaderSnapshotCache struct {
@@ -656,10 +687,14 @@ type operatorAccountPoolCache struct {
 }
 
 const (
-	supplyAccountListCacheTTL = 15 * time.Second
-	supplyOrdersCacheTTL      = 5 * time.Second
-	operatorHeaderCacheTTL    = 15 * time.Second
-	operatorAccountPoolTTL    = 15 * time.Second
+	supplyAccountListCacheTTL  = 15 * time.Second
+	supplyOrdersCacheTTL       = 5 * time.Second
+	supplyStatusCacheTTL       = 5 * time.Second
+	supplyStatusStaleTTL       = 30 * time.Minute
+	supplyStatusRetryCooldown  = 5 * time.Second
+	supplyStatusRefreshTimeout = 8 * time.Second
+	operatorHeaderCacheTTL     = 15 * time.Second
+	operatorAccountPoolTTL     = 15 * time.Second
 )
 
 const (
@@ -754,15 +789,16 @@ func (s *Service) requestInspectionSnapshotRefresh(cooldown time.Duration) {
 		err := refresh(refreshCtx)
 		cancel()
 
-		// A completed inspection is durable in the store. Drop the previous
-		// in-memory snapshot so the following 10-second UI poll reads the new
-		// quota result immediately instead of waiting for its cache TTL.
-		if err == nil {
-			s.invalidateInspectionQuotaSnapshot()
-		}
 		s.inspectionSnapshotRefreshMu.Lock()
 		s.inspectionSnapshotRefresh.running = false
 		s.inspectionSnapshotRefreshMu.Unlock()
+		// A completed inspection is durable in the store. Publish the completed
+		// runtime state before dropping read caches so the next status rebuild
+		// cannot preserve a short-lived "refresh in progress" snapshot.
+		if err == nil {
+			s.invalidateInspectionQuotaSnapshot()
+			s.invalidateStatusCache()
+		}
 	}()
 }
 
@@ -789,9 +825,152 @@ func (s *Service) invalidateInspectionQuotaSnapshot() {
 }
 
 func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
+	if s == nil {
+		return Status{}, ErrNotConfigured
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	return s.statusCache.get(ctx, limit, s.buildStatus)
+}
+
+func (c *supplyStatusCache) get(
+	ctx context.Context,
+	limit int,
+	build func(context.Context, int) (Status, error),
+) (Status, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	now := time.Now()
+	c.mu.Lock()
+	if c.entries == nil {
+		c.entries = make(map[int]supplyStatusCacheEntry)
+	}
+	if c.refreshes == nil {
+		c.refreshes = make(map[supplyStatusCacheKey]*supplyStatusRefresh)
+	}
+	if c.retryAfter == nil {
+		c.retryAfter = make(map[supplyStatusCacheKey]time.Time)
+	}
+	generation := c.generation
+	key := supplyStatusCacheKey{limit: limit, generation: generation}
+	entry, cached := c.entries[limit]
+	if cached && entry.generation == generation && now.Sub(entry.generated) <= supplyStatusCacheTTL {
+		payload := append([]byte(nil), entry.payload...)
+		c.mu.Unlock()
+		return decodeSupplyStatus(payload)
+	}
+	stalePayload, hasStale := staleSupplyStatusPayload(entry, cached, now)
+	if retryAt := c.retryAfter[key]; hasStale && now.Before(retryAt) {
+		c.mu.Unlock()
+		return decodeSupplyStatus(stalePayload)
+	}
+	if refresh := c.refreshes[key]; refresh != nil {
+		c.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return Status{}, ctx.Err()
+		case <-refresh.done:
+		}
+		if refresh.err != nil {
+			if hasStale && transientSupplyStatusError(refresh.err) {
+				return decodeSupplyStatus(stalePayload)
+			}
+			return Status{}, refresh.err
+		}
+		return decodeSupplyStatus(refresh.payload)
+	}
+	refresh := &supplyStatusRefresh{done: make(chan struct{})}
+	c.refreshes[key] = refresh
+	c.mu.Unlock()
+
+	buildCtx := ctx
+	cancel := func() {}
+	if hasStale {
+		buildCtx, cancel = context.WithTimeout(ctx, supplyStatusRefreshTimeout)
+	}
+	status, buildErr := build(buildCtx, limit)
+	cancel()
+	var payload []byte
+	if buildErr == nil {
+		payload, buildErr = json.Marshal(status)
+		if buildErr != nil {
+			buildErr = fmt.Errorf("encode supply status cache: %w", buildErr)
+		}
+	}
+
+	c.mu.Lock()
+	if buildErr == nil {
+		generated := time.Now()
+		_, exists := c.entries[limit]
+		if c.generation == generation || !exists {
+			c.entries[limit] = supplyStatusCacheEntry{
+				generated:  generated,
+				generation: generation,
+				payload:    append([]byte(nil), payload...),
+			}
+		}
+		delete(c.retryAfter, key)
+	} else if c.generation == generation && hasStale && transientSupplyStatusError(buildErr) {
+		c.retryAfter[key] = time.Now().Add(supplyStatusRetryCooldown)
+	}
+	refresh.payload = append([]byte(nil), payload...)
+	refresh.err = buildErr
+	delete(c.refreshes, key)
+	close(refresh.done)
+	c.mu.Unlock()
+
+	if buildErr != nil {
+		if hasStale && transientSupplyStatusError(buildErr) {
+			log.Printf("[supply] serving last good status after transient refresh failure: %v", buildErr)
+			return decodeSupplyStatus(stalePayload)
+		}
+		return Status{}, buildErr
+	}
+	return status, nil
+}
+
+func staleSupplyStatusPayload(entry supplyStatusCacheEntry, cached bool, now time.Time) ([]byte, bool) {
+	if !cached || entry.generated.IsZero() || now.Sub(entry.generated) > supplyStatusStaleTTL || len(entry.payload) == 0 {
+		return nil, false
+	}
+	return append([]byte(nil), entry.payload...), true
+}
+
+func decodeSupplyStatus(payload []byte) (Status, error) {
+	var status Status
+	if err := json.Unmarshal(payload, &status); err != nil {
+		return Status{}, fmt.Errorf("decode supply status cache: %w", err)
+	}
+	return status, nil
+}
+
+func transientSupplyStatusError(err error) bool {
+	return sqliterepo.IsBusyError(err) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func (c *supplyStatusCache) invalidate() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.generation++
+	clear(c.retryAfter)
+	c.mu.Unlock()
+}
+
+func (s *Service) invalidateStatusCache() {
+	if s == nil {
+		return
+	}
+	s.statusCache.invalidate()
+}
+
+func (s *Service) buildStatus(ctx context.Context, limit int) (Status, error) {
 	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
 	if err != nil {
-		return Status{}, err
+		return Status{}, fmt.Errorf("build supply status config: %w", err)
 	}
 	resource := s.currentSmartResource(cfg.Supply)
 	if resource.Enabled && s.newerCompletedSmartInspectionAvailable(ctx, resource.CapacitySnapshotRunID) {
@@ -842,12 +1021,12 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	}
 	retryPlan, err := s.applySmartEmergencyRetryPlan(ctx, cfg.Supply, &resource)
 	if err != nil {
-		return Status{}, err
+		return Status{}, fmt.Errorf("build supply status emergency retry: %w", err)
 	}
 	if retryPlan.active {
 		cooldownActive, cooldownErr := s.automaticCreateCooldownActive(ctx, cfg.Supply, resource)
 		if cooldownErr != nil {
-			return Status{}, cooldownErr
+			return Status{}, fmt.Errorf("build supply status create cooldown: %w", cooldownErr)
 		}
 		if cooldownActive {
 			resource.SuggestedAction = smartActionObserveDemand
@@ -868,15 +1047,15 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	s.hydrateOverviewIfNeeded(ctx, cfg.Supply)
 	orders, err := s.store.ListSupplyOrders(ctx, limit)
 	if err != nil {
-		return Status{}, err
+		return Status{}, fmt.Errorf("build supply status orders: %w", err)
 	}
 	purchaseTasks, err := s.listPurchaseTasks(ctx, limit)
 	if err != nil {
-		return Status{}, err
+		return Status{}, fmt.Errorf("build supply status purchase tasks: %w", err)
 	}
 	activeOrders, err := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
 	if err != nil {
-		return Status{}, err
+		return Status{}, fmt.Errorf("build supply status open orders: %w", err)
 	}
 	if len(activeOrders) > 0 {
 		resource.PrelockedCapacityRCU = totalSupplyOrderCapacityRCU(cfg.Supply, resource, activeOrders)
@@ -1327,6 +1506,7 @@ func (s *Service) UpdateConfig(ctx context.Context, config store.ManagerSupplyCo
 	if err != nil {
 		return Status{}, err
 	}
+	s.invalidateStatusCache()
 	wasEnabled := managerconfigsvc.SupplyEnabled(current.Supply)
 	isEnabled := managerconfigsvc.SupplyEnabled(updated)
 	if isEnabled && !wasEnabled {
@@ -1360,6 +1540,7 @@ func (s *Service) Check(ctx context.Context) (Status, error) {
 		s.recordError(err)
 		return Status{}, err
 	}
+	s.invalidateStatusCache()
 	return s.GetStatus(ctx, 50)
 }
 
@@ -1379,6 +1560,7 @@ func (s *Service) ReplenishProduct(ctx context.Context, quantity int, supplierID
 		s.recordError(err)
 		return Status{}, err
 	}
+	s.invalidateStatusCache()
 	s.signalPurchaseTaskWorker()
 	return s.GetStatus(ctx, 50)
 }
@@ -1504,10 +1686,12 @@ func (s *Service) SyncRecoveries(ctx context.Context, req RecoverySyncRequest) (
 	}
 	s.recoveryState.Running = true
 	s.recoveryMu.Unlock()
+	s.invalidateStatusCache()
 	defer func() {
 		s.recoveryMu.Lock()
 		s.recoveryState.Running = false
 		s.recoveryMu.Unlock()
+		s.invalidateStatusCache()
 	}()
 
 	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
@@ -1560,8 +1744,13 @@ func (s *Service) SyncRecoveries(ctx context.Context, req RecoverySyncRequest) (
 	summary.LastSyncAtMS = now.UnixMilli()
 	summary.NextSyncAtMS = now.Add(recoveryNextSyncInterval(cfg.Supply, err, autoClaim && recoveryID == "", remainingClaimable)).UnixMilli()
 	if err != nil {
-		summary.LastResult = "failed"
-		summary.LastError = safeError(err)
+		if sqliterepo.IsBusyError(err) {
+			summary.LastResult = "scheduled"
+			summary.LastError = ""
+		} else {
+			summary.LastResult = "failed"
+			summary.LastError = safeError(err)
+		}
 	} else {
 		summary.LastResult = "completed"
 		summary.LastError = ""
@@ -1569,6 +1758,7 @@ func (s *Service) SyncRecoveries(ctx context.Context, req RecoverySyncRequest) (
 	s.recoveryMu.Lock()
 	s.recoveryState = summary
 	s.recoveryMu.Unlock()
+	s.invalidateStatusCache()
 	return summary, err
 }
 
@@ -1695,6 +1885,7 @@ func (s *Service) RetryRecoveryImport(ctx context.Context, recoveryID string) (s
 	if getErr != nil {
 		return recovery, getErr
 	}
+	s.invalidateStatusCache()
 	return latest, processErr
 }
 
@@ -7131,6 +7322,7 @@ func (s *Service) invalidateAuthAndCapacityCaches() {
 	}
 	s.invalidateAuthFilesCache()
 	s.invalidateInspectionQuotaSnapshot()
+	s.invalidateStatusCache()
 }
 
 type smartSupplyPressure struct {
@@ -7200,6 +7392,7 @@ func (s *Service) invalidateSupplyOrdersCache() {
 	s.supplyOrdersCacheMu.Lock()
 	s.supplyOrdersCache = supplyOrdersCache{}
 	s.supplyOrdersCacheMu.Unlock()
+	s.invalidateStatusCache()
 }
 
 func (s *Service) smartSupplyPressure(ctx context.Context, cfg store.ManagerSupplyConfig, inventory supplyclient.Inventory, requestedQuantity int) smartSupplyPressure {
@@ -8813,6 +9006,7 @@ func (s *Service) ScheduleAutomaticExecution(at time.Time) {
 		s.automation.LastResult = "scheduled"
 	}
 	s.stateMu.Unlock()
+	s.invalidateStatusCache()
 }
 
 // RecordAutomaticExecution saves the result of a completed automatic cycle
@@ -8823,7 +9017,6 @@ func (s *Service) RecordAutomaticExecution(startedAt, finishedAt, nextAt time.Ti
 		return
 	}
 	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
 	s.automation.LastStartedAtMS = startedAt.UnixMilli()
 	s.automation.LastFinishedAtMS = finishedAt.UnixMilli()
 	s.automation.NextExecutionAtMS = nextAt.UnixMilli()
@@ -8831,12 +9024,23 @@ func (s *Service) RecordAutomaticExecution(startedAt, finishedAt, nextAt time.Ti
 	s.automation.LastAction = s.smartResourceState.SuggestedAction
 	s.automation.LastReason = s.smartResourceState.DecisionReason
 	if err != nil {
+		if sqliterepo.IsBusyError(err) {
+			s.automation.LastResult = "scheduled"
+			s.automation.LastError = ""
+			s.stateMu.Unlock()
+			s.invalidateStatusCache()
+			return
+		}
 		s.automation.LastResult = "failed"
 		s.automation.LastError = safeError(err)
+		s.stateMu.Unlock()
+		s.invalidateStatusCache()
 		return
 	}
 	s.automation.LastResult = "completed"
 	s.automation.LastError = ""
+	s.stateMu.Unlock()
+	s.invalidateStatusCache()
 }
 
 func (s *Service) currentAutomationExecution(enabled bool) AutomationExecution {
@@ -8889,11 +9093,17 @@ func (s *Service) recordRecoveryError(ctx context.Context, cfg store.ManagerSupp
 	now := time.Now()
 	summary.LastSyncAtMS = now.UnixMilli()
 	summary.NextSyncAtMS = now.Add(recoverySyncInterval(cfg, err)).UnixMilli()
-	summary.LastResult = "failed"
-	summary.LastError = safeError(err)
+	if sqliterepo.IsBusyError(err) {
+		summary.LastResult = "scheduled"
+		summary.LastError = ""
+	} else {
+		summary.LastResult = "failed"
+		summary.LastError = safeError(err)
+	}
 	s.recoveryMu.Lock()
 	s.recoveryState = summary
 	s.recoveryMu.Unlock()
+	s.invalidateStatusCache()
 }
 
 func (s *Service) setOverview(overview Overview) {
@@ -9462,9 +9672,14 @@ func (s *Service) recordError(err error) {
 	if err == nil {
 		return
 	}
+	if sqliterepo.IsBusyError(err) {
+		log.Printf("[supply] automatic check deferred while SQLite writer is busy")
+		return
+	}
 	s.stateMu.Lock()
 	s.overview.LastError = safeError(err)
 	s.stateMu.Unlock()
+	s.invalidateStatusCache()
 }
 
 func sanitizeConfig(cfg store.ManagerSupplyConfig) store.ManagerSupplyConfig {

@@ -55,9 +55,26 @@ func TestAutomationExecutionTracksScheduledAndCompletedCycles(t *testing.T) {
 		t.Fatalf("failed automation = %#v", failed)
 	}
 
+	service.RecordAutomaticExecution(now, finishedAt, nextAt, errors.New("database is locked (5) (SQLITE_BUSY)"))
+	deferred := service.currentAutomationExecution(true)
+	if deferred.LastResult != "scheduled" || deferred.LastError != "" {
+		t.Fatalf("busy automation should be deferred without an operator error: %#v", deferred)
+	}
+
 	disabled := service.currentAutomationExecution(false)
 	if disabled.Enabled || disabled.NextExecutionAtMS != 0 || disabled.IntervalSeconds != 0 {
 		t.Fatalf("disabled automation must not expose a future execution: %#v", disabled)
+	}
+}
+
+func TestRecordErrorDoesNotExposeTransientSQLiteContention(t *testing.T) {
+	service := New(nil, nil)
+	service.setOverview(Overview{LastError: "supplier credentials expired"})
+	service.recordError(errors.New("database is locked (5) (SQLITE_BUSY)"))
+	service.stateMu.RLock()
+	defer service.stateMu.RUnlock()
+	if service.overview.LastError != "supplier credentials expired" {
+		t.Fatalf("transient SQLite error replaced actionable operator error: %#v", service.overview)
 	}
 }
 

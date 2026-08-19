@@ -866,7 +866,13 @@ export function SupplyPage() {
 
     const schedule = () => {
       timer = window.setTimeout(async () => {
-        await load(true);
+        // Hidden tabs used to keep rebuilding the heaviest supply snapshot
+        // every ten seconds. Resume through the visibility/focus handler
+        // instead, so multiple parked management tabs do not amplify SQLite
+        // read pressure while the page is not being observed.
+        if (document.visibilityState !== 'hidden') {
+          await load(true);
+        }
         if (!disposed) schedule();
       }, SUPPLY_AUTO_REFRESH_MS);
     };

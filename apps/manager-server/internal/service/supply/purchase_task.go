@@ -50,7 +50,7 @@ func (s *Service) createManualPurchaseTask(ctx context.Context, quantity int, su
 			return store.SupplyPurchaseTask{}, fmt.Errorf("product %s is not supported by supply platform %s", product, platform.ID)
 		}
 	}
-	return s.store.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
+	task, err := s.store.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
 		TaskID:              "purchase-" + uuid.NewString(),
 		Source:              "manual",
 		SupplierID:          platform.ID,
@@ -61,6 +61,10 @@ func (s *Service) createManualPurchaseTask(ctx context.Context, quantity int, su
 		TriggerReason:       "manual",
 		MaxConcurrentOrders: 1,
 	})
+	if err == nil {
+		s.invalidateStatusCache()
+	}
+	return task, err
 }
 
 // upsertAutomaticPurchaseTask keeps one durable automatic intent. The planner's
@@ -78,7 +82,11 @@ func (s *Service) upsertAutomaticPurchaseTask(ctx context.Context, planned store
 		if planned.Status == "" {
 			planned.Status = purchaseTaskStatusPending
 		}
-		return s.store.CreateSupplyPurchaseTask(ctx, planned)
+		created, createErr := s.store.CreateSupplyPurchaseTask(ctx, planned)
+		if createErr == nil {
+			s.invalidateStatusCache()
+		}
+		return created, createErr
 	}
 	existing, err = s.reconcilePurchaseTask(ctx, existing)
 	if err != nil {
@@ -88,7 +96,11 @@ func (s *Service) upsertAutomaticPurchaseTask(ctx context.Context, planned store
 		planned.TaskID = "purchase-" + uuid.NewString()
 		planned.Source = "automatic"
 		planned.SupplierID = ""
-		return s.store.CreateSupplyPurchaseTask(ctx, planned)
+		created, createErr := s.store.CreateSupplyPurchaseTask(ctx, planned)
+		if createErr == nil {
+			s.invalidateStatusCache()
+		}
+		return created, createErr
 	}
 	desiredTarget := existing.FulfilledQuantity + max(1, planned.TargetQuantity)
 	if desiredTarget > existing.TargetQuantity {
@@ -108,6 +120,7 @@ func (s *Service) upsertAutomaticPurchaseTask(ctx context.Context, planned store
 	if err := s.store.UpdateSupplyPurchaseTask(ctx, existing); err != nil {
 		return store.SupplyPurchaseTask{}, err
 	}
+	s.invalidateStatusCache()
 	return existing, nil
 }
 
@@ -151,6 +164,7 @@ func (s *Service) CancelPurchaseTask(ctx context.Context, taskID string) (Status
 	} else if !found {
 		return Status{}, ErrPurchaseTaskNotFound
 	}
+	s.invalidateStatusCache()
 	s.signalPurchaseTaskWorker()
 	return s.GetStatus(ctx, 50)
 }

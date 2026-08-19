@@ -1790,6 +1790,10 @@ func TestGetStatusRefreshesSmartSnapshotWhenAutomaticSupplyDisabled(t *testing.T
 		t.Fatalf("cached status should not refetch or create supply orders: status=%#v auth=%d supply=%d", status.SmartResource, authFileRequests.Load(), supplyRequests.Load())
 	}
 	seedCompletedQuotaInspection(t, st, quotaInspectionResult(25), quotaInspectionResult(50))
+	// Completed inspections normally invalidate the status snapshot through the
+	// inspection refresher. This test writes the repository directly, so mirror
+	// that service-level notification before reading the new run.
+	service.invalidateStatusCache()
 	status, err = service.GetStatus(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("status after newer inspection: %v", err)
