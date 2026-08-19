@@ -3744,6 +3744,8 @@
           "cache_affinity_enabled_desc": "启用独立亲和协调器；关闭影子模式后，亲和结果会参与实际账号调度。",
           "cache_affinity_shadow": "影子观察模式",
           "cache_affinity_shadow_desc": "只计算并记录亲和决策，不改变实际账号调度；用于上线前观察效果。",
+          "cache_affinity_max_concurrency": "缓存亲和新会话并发上限",
+          "cache_affinity_max_concurrency_hint": "限制每个账号接收冷请求和新亲和绑定的并发数；已有热亲和会话继续使用原账号，不受此软上限影响。",
           "cache_affinity_max_entries": "最大亲和记录数",
           "cache_affinity_max_entries_hint": "本地会话亲和缓存的容量上限；默认 65536。",
           "cache_affinity_max_retry_credentials": "最大重试账号数",
@@ -3760,8 +3762,6 @@
           "cache_affinity_hard_stop_percent_hint": "账号使用率达到此值后，已预热会话也会迁移；必须高于避让阈值且不超过 100。",
           "tail_burst_expiry_window": "临期入场窗口",
           "tail_burst_expiry_window_hint": "距离供应过期时间小于此时长时进入大并发，例如 10m。",
-          "tail_burst_normal_max_concurrency": "日常并发上限",
-          "tail_burst_normal_max_concurrency_hint": "普通状态下只限制冷请求和新亲和绑定，不打断已有缓存亲和；进入触发状态后改用入场账号最大并发。",
           "tail_burst_max_concurrency": "入场账号最大并发",
           "tail_burst_max_concurrency_hint": "临期或尾量账号的并发上限；账号自身配置的更高并发仍会保留。"
         },

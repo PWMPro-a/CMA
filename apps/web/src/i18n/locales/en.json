@@ -3744,6 +3744,8 @@
           "cache_affinity_enabled_desc": "Enables the independent affinity coordinator. With shadow mode off, affinity decisions affect credential routing.",
           "cache_affinity_shadow": "Shadow observation mode",
           "cache_affinity_shadow_desc": "Computes and records affinity decisions without changing actual credential routing; useful before activation.",
+          "cache_affinity_max_concurrency": "Cache-affinity new-session concurrency limit",
+          "cache_affinity_max_concurrency_hint": "Limits cold requests and new affinity bindings per credential; established warm sessions stay on their current credential and bypass this soft limit.",
           "cache_affinity_max_entries": "Maximum affinity entries",
           "cache_affinity_max_entries_hint": "Capacity of the local session-affinity cache; default 65536.",
           "cache_affinity_max_retry_credentials": "Maximum retry credentials",
@@ -3760,8 +3762,6 @@
           "cache_affinity_hard_stop_percent_hint": "At this usage level, warm sessions are moved too. Must exceed the preemption threshold and be at most 100.",
           "tail_burst_expiry_window": "Expiry entry window",
           "tail_burst_expiry_window_hint": "Enter the burst lane when supplier expiry is within this duration, for example 10m.",
-          "tail_burst_normal_max_concurrency": "Normal concurrency limit",
-          "tail_burst_normal_max_concurrency_hint": "Soft limit for cold requests and new affinity bindings during normal operation; existing cache-affinity bindings stay warm, and triggered accounts use the burst limit.",
           "tail_burst_max_concurrency": "Burst account max concurrency",
           "tail_burst_max_concurrency_hint": "Concurrency ceiling for expiring or low-quota accounts; a higher per-account setting is preserved."
         },

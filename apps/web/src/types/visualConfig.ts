@@ -21,9 +21,9 @@ export type VisualConfigFieldPath =
   | 'authAutoRefreshWorkers'
   | 'codexTailBurstTriggerRemainingPercent'
   | 'codexTailBurstExpiryWindow'
-  | 'codexTailBurstNormalMaxConcurrency'
   | 'codexTailBurstMaxConcurrency'
   | 'codexTailBurstCollectorMaxConcurrency'
+  | 'codexCacheAffinityMaxConcurrency'
   | 'codexCacheAffinityMaxEntries'
   | 'codexCacheAffinityMaxRetryCredentials'
   | 'codexCacheAffinityWebsocketPoolSlots'
@@ -197,6 +197,7 @@ export type VisualConfigValues = {
   codexClientFingerprintSignals: CodexEngineFingerprintSignal[];
   codexCacheAffinityEnabled: boolean;
   codexCacheAffinityShadow: boolean;
+  codexCacheAffinityMaxConcurrency: string;
   codexCacheAffinityMaxEntries: string;
   codexCacheAffinityMaxRetryCredentials: string;
   codexCacheAffinityWebsocketPoolSlots: string;
@@ -208,7 +209,6 @@ export type VisualConfigValues = {
   codexTailBurstTriggerRemainingPercent: string;
   codexTailBurstSnapshotTtl: string;
   codexTailBurstExpiryWindow: string;
-  codexTailBurstNormalMaxConcurrency: string;
   codexTailBurstMaxConcurrency: string;
   codexTailBurstCollectorInterval: string;
   codexTailBurstCollectorMaxConcurrency: string;
@@ -323,6 +323,7 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   ],
   codexCacheAffinityEnabled: false,
   codexCacheAffinityShadow: false,
+  codexCacheAffinityMaxConcurrency: '8',
   codexCacheAffinityMaxEntries: '65536',
   codexCacheAffinityMaxRetryCredentials: '2',
   codexCacheAffinityWebsocketPoolSlots: '8',
@@ -334,7 +335,6 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   codexTailBurstTriggerRemainingPercent: '2',
   codexTailBurstSnapshotTtl: '90s',
   codexTailBurstExpiryWindow: '10m',
-  codexTailBurstNormalMaxConcurrency: '8',
   codexTailBurstMaxConcurrency: '32',
   codexTailBurstCollectorInterval: '45s',
   codexTailBurstCollectorMaxConcurrency: '4',

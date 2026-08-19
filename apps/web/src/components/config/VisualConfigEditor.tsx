@@ -244,10 +244,6 @@ export function VisualConfigEditor({
     t,
     validationErrors?.codexTailBurstExpiryWindow
   );
-  const codexTailBurstNormalMaxConcurrencyError = getValidationMessage(
-    t,
-    validationErrors?.codexTailBurstNormalMaxConcurrency
-  );
   const codexTailBurstMaxConcurrencyError = getValidationMessage(
     t,
     validationErrors?.codexTailBurstMaxConcurrency
@@ -255,6 +251,10 @@ export function VisualConfigEditor({
   const codexTailBurstCollectorConcurrencyError = getValidationMessage(
     t,
     validationErrors?.codexTailBurstCollectorMaxConcurrency
+  );
+  const codexCacheAffinityMaxConcurrencyError = getValidationMessage(
+    t,
+    validationErrors?.codexCacheAffinityMaxConcurrency
   );
   const codexCacheAffinityMaxEntriesError = getValidationMessage(
     t,
@@ -393,6 +393,7 @@ export function VisualConfigEditor({
         description: t('config_management.visual.sections.quota.description'),
         icon: IconTimer,
         errorCount: countErrors([
+          'codexCacheAffinityMaxConcurrency',
           'codexCacheAffinityMaxEntries',
           'codexCacheAffinityMaxRetryCredentials',
           'codexCacheAffinityWebsocketPoolSlots',
@@ -402,7 +403,6 @@ export function VisualConfigEditor({
           'codexCacheAffinityQuotaHardStopPercent',
           'codexTailBurstTriggerRemainingPercent',
           'codexTailBurstExpiryWindow',
-          'codexTailBurstNormalMaxConcurrency',
           'codexTailBurstMaxConcurrency',
           'codexTailBurstCollectorMaxConcurrency',
         ]),
@@ -1509,6 +1509,23 @@ export function VisualConfigEditor({
                   <SectionGrid>
                     <Input
                       label={t(
+                        'config_management.visual.sections.quota.cache_affinity_max_concurrency'
+                      )}
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={values.codexCacheAffinityMaxConcurrency}
+                      onChange={(event) =>
+                        onChange({ codexCacheAffinityMaxConcurrency: event.target.value })
+                      }
+                      disabled={disabled || !values.codexCacheAffinityEnabled}
+                      hint={t(
+                        'config_management.visual.sections.quota.cache_affinity_max_concurrency_hint'
+                      )}
+                      error={codexCacheAffinityMaxConcurrencyError}
+                    />
+                    <Input
+                      label={t(
                         'config_management.visual.sections.quota.cache_affinity_max_entries'
                       )}
                       type="number"
@@ -1682,23 +1699,6 @@ export function VisualConfigEditor({
                       'config_management.visual.sections.quota.tail_burst_expiry_window_hint'
                     )}
                     error={codexTailBurstExpiryWindowError}
-                  />
-                  <Input
-                    label={t(
-                      'config_management.visual.sections.quota.tail_burst_normal_max_concurrency'
-                    )}
-                    type="number"
-                    min="1"
-                    max="512"
-                    value={values.codexTailBurstNormalMaxConcurrency}
-                    onChange={(event) =>
-                      onChange({ codexTailBurstNormalMaxConcurrency: event.target.value })
-                    }
-                    disabled={disabled || !values.codexTailBurstEnabled}
-                    hint={t(
-                      'config_management.visual.sections.quota.tail_burst_normal_max_concurrency_hint'
-                    )}
-                    error={codexTailBurstNormalMaxConcurrencyError}
                   />
                   <Input
                     label={t('config_management.visual.sections.quota.tail_burst_max_concurrency')}

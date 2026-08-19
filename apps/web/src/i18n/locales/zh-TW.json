@@ -3744,6 +3744,8 @@
           "cache_affinity_enabled_desc": "啟用獨立親和協調器；關閉影子模式後，親和結果會參與實際帳號排程。",
           "cache_affinity_shadow": "影子觀察模式",
           "cache_affinity_shadow_desc": "只計算並記錄親和決策，不改變實際帳號排程；適合上線前觀察效果。",
+          "cache_affinity_max_concurrency": "快取親和新工作階段併發上限",
+          "cache_affinity_max_concurrency_hint": "限制每個帳號接收冷請求和新親和綁定的併發數；既有熱親和工作階段繼續使用原帳號，不受此軟上限影響。",
           "cache_affinity_max_entries": "最大親和記錄數",
           "cache_affinity_max_entries_hint": "本機工作階段親和快取的容量上限；預設 65536。",
           "cache_affinity_max_retry_credentials": "最大重試帳號數",
@@ -3760,8 +3762,6 @@
           "cache_affinity_hard_stop_percent_hint": "帳號使用率達到此值後，已預熱工作階段也會遷移；必須高於避讓門檻且不超過 100。",
           "tail_burst_expiry_window": "臨期進場視窗",
           "tail_burst_expiry_window_hint": "距離供應到期時間小於此時長時進入大併發，例如 10m。",
-          "tail_burst_normal_max_concurrency": "日常併發上限",
-          "tail_burst_normal_max_concurrency_hint": "普通狀態下只限制冷請求和新親和綁定，不中斷既有快取親和；進入觸發狀態後改用進場帳號最大併發。",
           "tail_burst_max_concurrency": "進場帳號最大併發",
           "tail_burst_max_concurrency_hint": "臨期或尾量帳號的併發上限；帳號自身設定的更高併發仍會保留。"
         },

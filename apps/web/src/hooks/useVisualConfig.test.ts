@@ -478,7 +478,6 @@ describe('useVisualConfig', () => {
     expect(harness.getCurrent().visualValues.quotaSwitchProject).toBe(false);
     expect(harness.getCurrent().visualValues.quotaSwitchPreviewModel).toBe(false);
     expect(harness.getCurrent().visualValues.codexTailBurstEnabled).toBe(false);
-    expect(harness.getCurrent().visualValues.codexTailBurstNormalMaxConcurrency).toBe('8');
     expect(harness.getCurrent().visualValues.codexTailBurstToolInjectionEnabled).toBe(false);
     expect(harness.getCurrent().visualValues.wsAuth).toBe(true);
 
@@ -683,7 +682,7 @@ describe('useVisualConfig', () => {
     harness.unmount();
   });
 
-  it('reads and writes Codex tail-burst controls without changing unrelated Codex config', () => {
+  it('reads and writes Codex tail-burst controls while removing the obsolete normal limit', () => {
     const harness = mountUseVisualConfig();
     const yaml = [
       'codex:',
@@ -693,6 +692,7 @@ describe('useVisualConfig', () => {
       '    enabled: true',
       '    trigger-used-ratio: 0.98',
       '    snapshot-ttl: 90s',
+      '    normal-max-concurrency: 7',
       '    quota-collector:',
       '      interval: 45s',
       '      max-concurrency: 4',
@@ -714,7 +714,6 @@ describe('useVisualConfig', () => {
         codexTailBurstTriggerRemainingPercent: '2',
         codexTailBurstSnapshotTtl: '90s',
         codexTailBurstExpiryWindow: '10m',
-        codexTailBurstNormalMaxConcurrency: '8',
         codexTailBurstMaxConcurrency: '32',
         codexTailBurstCollectorInterval: '45s',
         codexTailBurstCollectorMaxConcurrency: '4',
@@ -728,7 +727,6 @@ describe('useVisualConfig', () => {
         codexTailBurstTriggerRemainingPercent: '1.5',
         codexTailBurstSnapshotTtl: '2m',
         codexTailBurstExpiryWindow: '12m',
-        codexTailBurstNormalMaxConcurrency: '7',
         codexTailBurstMaxConcurrency: '48',
         codexTailBurstCollectorInterval: '30s',
         codexTailBurstCollectorMaxConcurrency: '6',
@@ -767,11 +765,11 @@ describe('useVisualConfig', () => {
         'trigger-remaining-ratio': 0.015,
         'snapshot-ttl': '2m',
         'expiry-window': '12m',
-        'normal-max-concurrency': 7,
         'max-concurrency': 48,
         'tool-injection': { enabled: false },
       })
     );
+    expect(parsed.codex?.['tail-burst']?.['normal-max-concurrency']).toBeUndefined();
     expect(parsed.codex?.['tail-burst']?.['trigger-used-ratio']).toBeUndefined();
     expect(parsed.codex?.['tail-burst']?.['quota-collector']).toEqual({
       interval: '30s',
@@ -792,6 +790,7 @@ describe('useVisualConfig', () => {
       '  cacheAffinity:',
       '    enabled: true',
       '    shadow: true',
+      '    maxConcurrency: 6',
       '    maxEntries: 4096',
       '    maxRetryCredentials: 3',
       '    websocketPoolSlots: 12',
@@ -811,6 +810,7 @@ describe('useVisualConfig', () => {
       expect.objectContaining({
         codexCacheAffinityEnabled: true,
         codexCacheAffinityShadow: true,
+        codexCacheAffinityMaxConcurrency: '6',
         codexCacheAffinityMaxEntries: '4096',
         codexCacheAffinityMaxRetryCredentials: '3',
         codexCacheAffinityWebsocketPoolSlots: '12',
@@ -824,6 +824,7 @@ describe('useVisualConfig', () => {
     act(() => {
       harness.getCurrent().setVisualValues({
         codexCacheAffinityShadow: false,
+        codexCacheAffinityMaxConcurrency: '4',
         codexCacheAffinityMaxEntries: '65536',
         codexCacheAffinityMaxRetryCredentials: '2',
         codexCacheAffinityWebsocketPoolSlots: '8',
@@ -846,6 +847,7 @@ describe('useVisualConfig', () => {
     expect(parsed.codex?.['cache-affinity']).toEqual({
       enabled: true,
       shadow: false,
+      'max-concurrency': 4,
       'max-entries': 65536,
       'max-retry-credentials': 2,
       'websocket-pool-slots': 8,
@@ -863,6 +865,7 @@ describe('useVisualConfig', () => {
     const errors = getVisualConfigValidationErrors({
       ...DEFAULT_VISUAL_VALUES,
       codexCacheAffinityEnabled: true,
+      codexCacheAffinityMaxConcurrency: '0',
       codexCacheAffinityMaxEntries: '0',
       codexCacheAffinityMaxRetryCredentials: '-1',
       codexCacheAffinityWebsocketPoolSlots: '31',
@@ -873,6 +876,7 @@ describe('useVisualConfig', () => {
     });
 
     expect(errors).toMatchObject({
+      codexCacheAffinityMaxConcurrency: 'positive_integer',
       codexCacheAffinityMaxEntries: 'positive_integer',
       codexCacheAffinityMaxRetryCredentials: 'positive_integer',
       codexCacheAffinityWebsocketPoolSlots: 'cache_affinity_websocket_slots_range',
@@ -890,7 +894,6 @@ describe('useVisualConfig', () => {
         codexTailBurstEnabled: true,
         codexTailBurstTriggerRemainingPercent: '100',
         codexTailBurstExpiryWindow: 'soon',
-        codexTailBurstNormalMaxConcurrency: '0',
         codexTailBurstMaxConcurrency: '0',
         codexTailBurstCollectorMaxConcurrency: '17',
       });
@@ -899,7 +902,6 @@ describe('useVisualConfig', () => {
     expect(harness.getCurrent().visualValidationErrors).toMatchObject({
       codexTailBurstTriggerRemainingPercent: 'tail_burst_trigger_percent_range',
       codexTailBurstExpiryWindow: 'positive_duration',
-      codexTailBurstNormalMaxConcurrency: 'positive_integer',
       codexTailBurstMaxConcurrency: 'positive_integer',
       codexTailBurstCollectorMaxConcurrency: 'tail_burst_collector_concurrency_range',
     });

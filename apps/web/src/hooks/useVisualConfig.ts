@@ -294,6 +294,7 @@ function migrateLegacyCodexCacheAffinity(doc: YamlDocument): void {
   if (!legacy && !canonical) return;
 
   const keyAliases: Record<string, string> = {
+    maxConcurrency: 'max-concurrency',
     maxEntries: 'max-entries',
     maxRetryCredentials: 'max-retry-credentials',
     websocketPoolSlots: 'websocket-pool-slots',
@@ -705,6 +706,9 @@ export function getVisualConfigValidationErrors(
     authAutoRefreshWorkers: getNonNegativeIntegerError(values.authAutoRefreshWorkers),
     codexClientMinVersion: minVersionError,
     codexClientMaxVersion: maxVersionError ?? versionRangeError,
+    codexCacheAffinityMaxConcurrency: values.codexCacheAffinityEnabled
+      ? getPositiveIntegerError(values.codexCacheAffinityMaxConcurrency)
+      : undefined,
     codexCacheAffinityMaxEntries: values.codexCacheAffinityEnabled
       ? getPositiveIntegerError(values.codexCacheAffinityMaxEntries)
       : undefined,
@@ -734,9 +738,6 @@ export function getVisualConfigValidationErrors(
       : undefined,
     codexTailBurstExpiryWindow: values.codexTailBurstEnabled
       ? getPositiveDurationError(values.codexTailBurstExpiryWindow)
-      : undefined,
-    codexTailBurstNormalMaxConcurrency: values.codexTailBurstEnabled
-      ? getPositiveIntegerError(values.codexTailBurstNormalMaxConcurrency)
       : undefined,
     codexTailBurstMaxConcurrency: values.codexTailBurstEnabled
       ? getPositiveIntegerError(values.codexTailBurstMaxConcurrency)
@@ -867,6 +868,7 @@ function getNextDirtyFields(
       'codexClientAllowAppServer',
       'codexCacheAffinityEnabled',
       'codexCacheAffinityShadow',
+      'codexCacheAffinityMaxConcurrency',
       'codexCacheAffinityMaxEntries',
       'codexCacheAffinityMaxRetryCredentials',
       'codexCacheAffinityWebsocketPoolSlots',
@@ -878,7 +880,6 @@ function getNextDirtyFields(
       'codexTailBurstTriggerRemainingPercent',
       'codexTailBurstSnapshotTtl',
       'codexTailBurstExpiryWindow',
-      'codexTailBurstNormalMaxConcurrency',
       'codexTailBurstMaxConcurrency',
       'codexTailBurstCollectorInterval',
       'codexTailBurstCollectorMaxConcurrency',
@@ -1341,6 +1342,11 @@ export function useVisualConfig() {
           ) ?? deepClone(DEFAULT_VISUAL_VALUES.codexClientFingerprintSignals),
         codexCacheAffinityEnabled: Boolean(codexCacheAffinity?.enabled),
         codexCacheAffinityShadow: Boolean(codexCacheAffinity?.shadow),
+        codexCacheAffinityMaxConcurrency: String(
+          codexCacheAffinity?.['max-concurrency'] ??
+            codexCacheAffinity?.maxConcurrency ??
+            8
+        ),
         codexCacheAffinityMaxEntries: String(
           codexCacheAffinity?.['max-entries'] ?? codexCacheAffinity?.maxEntries ?? 65536
         ),
@@ -1387,9 +1393,6 @@ export function useVisualConfig() {
         codexTailBurstExpiryWindow: readTailBurstDuration(
           codexTailBurst?.['expiry-window'] ?? codexTailBurst?.expiryWindow,
           '10m'
-        ),
-        codexTailBurstNormalMaxConcurrency: String(
-          codexTailBurst?.['normal-max-concurrency'] ?? codexTailBurst?.normalMaxConcurrency ?? 8
         ),
         codexTailBurstMaxConcurrency: String(
           codexTailBurst?.['max-concurrency'] ?? codexTailBurst?.maxConcurrency ?? 32
@@ -1461,6 +1464,18 @@ export function useVisualConfig() {
         }
         const values = visualValues;
         const isDirty = (key: string) => dirtyFields.has(key);
+
+        [
+          ['codex', 'tail-burst', 'normal-max-concurrency'],
+          ['codex', 'tail-burst', 'normalMaxConcurrency'],
+          ['codex', 'tailBurst', 'normal-max-concurrency'],
+          ['codex', 'tailBurst', 'normalMaxConcurrency'],
+        ].forEach((path) => {
+          if (docHas(doc, path)) doc.deleteIn(path);
+        });
+        deleteIfMapEmpty(doc, ['codex', 'tail-burst']);
+        deleteIfMapEmpty(doc, ['codex', 'tailBurst']);
+        deleteIfMapEmpty(doc, ['codex']);
 
         if (isDirty('host')) setStringInDoc(doc, ['host'], values.host);
         if (isDirty('port')) setIntFromStringInDoc(doc, ['port'], values.port);
@@ -1835,6 +1850,7 @@ export function useVisualConfig() {
         const codexCacheAffinityDirty =
           isDirty('codexCacheAffinityEnabled') ||
           isDirty('codexCacheAffinityShadow') ||
+          isDirty('codexCacheAffinityMaxConcurrency') ||
           isDirty('codexCacheAffinityMaxEntries') ||
           isDirty('codexCacheAffinityMaxRetryCredentials') ||
           isDirty('codexCacheAffinityWebsocketPoolSlots') ||
@@ -1851,6 +1867,13 @@ export function useVisualConfig() {
           }
           if (isDirty('codexCacheAffinityShadow')) {
             doc.setIn(['codex', 'cache-affinity', 'shadow'], values.codexCacheAffinityShadow);
+          }
+          if (isDirty('codexCacheAffinityMaxConcurrency')) {
+            setIntFromStringInDoc(
+              doc,
+              ['codex', 'cache-affinity', 'max-concurrency'],
+              values.codexCacheAffinityMaxConcurrency
+            );
           }
           if (isDirty('codexCacheAffinityMaxEntries')) {
             setIntFromStringInDoc(
@@ -1910,7 +1933,6 @@ export function useVisualConfig() {
           isDirty('codexTailBurstTriggerRemainingPercent') ||
           isDirty('codexTailBurstSnapshotTtl') ||
           isDirty('codexTailBurstExpiryWindow') ||
-          isDirty('codexTailBurstNormalMaxConcurrency') ||
           isDirty('codexTailBurstMaxConcurrency') ||
           isDirty('codexTailBurstCollectorInterval') ||
           isDirty('codexTailBurstCollectorMaxConcurrency') ||
@@ -1944,13 +1966,6 @@ export function useVisualConfig() {
               doc,
               ['codex', 'tail-burst', 'expiry-window'],
               values.codexTailBurstExpiryWindow
-            );
-          }
-          if (isDirty('codexTailBurstNormalMaxConcurrency')) {
-            setIntFromStringInDoc(
-              doc,
-              ['codex', 'tail-burst', 'normal-max-concurrency'],
-              values.codexTailBurstNormalMaxConcurrency
             );
           }
           if (isDirty('codexTailBurstMaxConcurrency')) {
