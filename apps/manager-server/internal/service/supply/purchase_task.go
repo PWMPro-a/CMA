@@ -357,7 +357,13 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 		}
 		availableTaskSlots := max(1, task.MaxConcurrentOrders) - stats.activeOrderCount
 		availableGlobalSlots := maxConcurrentSupplyOrders(cfg.Supply) - admissionOrderCount
-		quantity := purchaseTaskNextOrderQuantity(remaining, min(availableTaskSlots, availableGlobalSlots))
+		availableSlots := min(availableTaskSlots, availableGlobalSlots)
+		quantity := purchaseTaskAdaptiveOrderQuantity(
+			remaining,
+			availableSlots,
+			task.Source == "automatic",
+			s.currentSmartResource(cfg.Supply),
+		)
 		return s.createPurchaseTaskOrder(ctx, cfg, &task, quantity, openOrders, stats.activeOrderCount)
 	}
 	return nil
@@ -437,6 +443,44 @@ func purchaseTaskNextOrderQuantity(remaining int, availableSlots int) int {
 	}
 	availableSlots = min(availableSlots, remaining)
 	return min(100, (remaining+availableSlots-1)/availableSlots)
+}
+
+// purchaseTaskAdaptiveOrderQuantity keeps normal procurement evenly sharded,
+// but widens the aggregate capture window when the current supplier is both
+// inventory-scarce and historically slow. The widened quantity is still split
+// across the available child-order slots, so a partial delivery can advance
+// the task without submitting one oversized reservation. Reserved quantities
+// remain bounded by the task's next remaining amount plus this single-order
+// overage; the next worker turn recalculates from actual delivery/reservation
+// state.
+func purchaseTaskAdaptiveOrderQuantity(
+	remaining int,
+	availableSlots int,
+	automatic bool,
+	resource SmartResource,
+) int {
+	base := purchaseTaskNextOrderQuantity(remaining, availableSlots)
+	if base <= 0 || !automatic {
+		return base
+	}
+	scarce := resource.SupplyPressureLevel == smartSupplyPressureScarce ||
+		resource.SupplyNeedsProduction ||
+		resource.SupplyInventoryAvailable <= 0 ||
+		resource.SupplyInventoryMissing > 0
+	slow := resource.SupplyAvgFulfillSeconds >= 120 ||
+		resource.SupplyRecentWaiting >= 2 ||
+		resource.PurchaseLeadMinutes >= 10
+	if !scarce || !slow {
+		return base
+	}
+	overagePercent := 20
+	if (resource.SupplyFulfillmentRate > 0 && resource.SupplyFulfillmentRate < 85) ||
+		resource.SupplyRecentZeroDelivery >= 2 || resource.SupplyRecentCancelled >= 2 {
+		overagePercent = 35
+	}
+	extra := max(1, (remaining*overagePercent+99)/100)
+	boosted := remaining + extra
+	return min(100, (boosted+availableSlots-1)/availableSlots)
 }
 
 func (s *Service) createPurchaseTaskOrder(

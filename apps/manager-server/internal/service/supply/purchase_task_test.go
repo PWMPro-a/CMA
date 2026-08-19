@@ -107,6 +107,27 @@ func TestPurchaseTaskNextOrderQuantityShardsRemainingTarget(t *testing.T) {
 	}
 }
 
+func TestPurchaseTaskAdaptiveOrderQuantityWidensSlowScarceCaptureWindow(t *testing.T) {
+	resource := SmartResource{
+		SupplyPressureLevel:      smartSupplyPressureScarce,
+		SupplyNeedsProduction:    true,
+		SupplyAvgFulfillSeconds:  180,
+		SupplyRecentWaiting:      3,
+		SupplyRecentOrders:       6,
+		SupplyFulfillmentRate:    70,
+		SupplyRecentZeroDelivery: 2,
+	}
+	if got := purchaseTaskAdaptiveOrderQuantity(20, 3, true, resource); got != 9 {
+		t.Fatalf("slow scarce adaptive quantity = %d, want 9", got)
+	}
+	if got := purchaseTaskAdaptiveOrderQuantity(20, 3, false, resource); got != 7 {
+		t.Fatalf("manual quantity = %d, want normal shard 7", got)
+	}
+	if got := purchaseTaskAdaptiveOrderQuantity(20, 3, true, SmartResource{}); got != 7 {
+		t.Fatalf("normal quantity = %d, want normal shard 7", got)
+	}
+}
+
 func TestUnavailablePlatformOrdersAreTerminatedAndTasksAreReplanned(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-platform-retired.sqlite"))
