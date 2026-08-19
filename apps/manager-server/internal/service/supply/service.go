@@ -2439,10 +2439,17 @@ func selectSupplyOrderToProcess(orders []store.SupplyOrder, nowMS int64) store.S
 }
 
 func openOrdersAllowParallelCreate(orders []store.SupplyOrder) bool {
+	return openOrdersAllowParallelCreateAt(orders, time.Now())
+}
+
+func openOrdersAllowParallelCreateAt(orders []store.SupplyOrder, now time.Time) bool {
 	if len(orders) == 0 {
 		return false
 	}
 	for _, order := range orders {
+		if purchaseTaskOrderReservationStale(order, now) {
+			continue
+		}
 		if isSupplyOrderCapacityCommitted(order) {
 			// Stock has already been secured for this order. Stop expanding the
 			// competition window and let the aggregate take budget settle it first.
@@ -2539,8 +2546,9 @@ func (s *Service) automaticParallelCreateEligible(
 	cfg store.ManagerSupplyConfig,
 	orders []store.SupplyOrder,
 ) (bool, error) {
-	if len(orders) == 0 || len(orders) >= maxConcurrentSupplyOrders(cfg) ||
-		!openOrdersAllowParallelCreate(orders) || !smartSupplyEnabled(cfg) {
+	admissionOrderCount := purchaseTaskAdmissionOrderCount(orders, time.Now())
+	if len(orders) == 0 || admissionOrderCount >= maxConcurrentSupplyOrders(cfg) ||
+		!openOrdersAllowParallelCreateAt(orders, time.Now()) || !smartSupplyEnabled(cfg) {
 		return false, nil
 	}
 	if eligible, err := s.activePurchaseTaskParallelContinuationEligible(ctx, cfg, orders); err != nil {
@@ -2576,7 +2584,7 @@ func (s *Service) activePurchaseTaskParallelContinuationEligible(
 	orders []store.SupplyOrder,
 ) (bool, error) {
 	if s == nil || s.store == nil || maxConcurrentSupplyOrders(cfg) <= 1 ||
-		len(orders) == 0 || len(orders) >= maxConcurrentSupplyOrders(cfg) {
+		len(orders) == 0 || purchaseTaskAdmissionOrderCount(orders, time.Now()) >= maxConcurrentSupplyOrders(cfg) {
 		return false, nil
 	}
 	task, found, err := s.store.GetActiveAutomaticSupplyPurchaseTask(ctx)

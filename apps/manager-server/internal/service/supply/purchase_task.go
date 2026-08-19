@@ -28,6 +28,27 @@ type purchaseTaskOrderStats struct {
 	activeOrderCount int
 }
 
+// A supplier can leave a zero-delivery automatic reservation in
+// waiting_inventory for much longer than the normal fulfillment window.  Keep
+// the row open so its remote reservation can still be observed, but stop
+// counting it as a task reservation after this bound.  This lets a durable
+// task create a replacement on another configured platform instead of waiting
+// forever behind a stale child order.  Manual tasks deliberately keep counting
+// every waiting order because their explicit platform choice is an operator
+// contract.
+const purchaseTaskStaleAutomaticWaitingAge = 5 * time.Minute
+
+func purchaseTaskAdmissionOrderCount(orders []store.SupplyOrder, now time.Time) int {
+	count := 0
+	for _, order := range orders {
+		if purchaseTaskOrderReservationStale(order, now) {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
 func (s *Service) createManualPurchaseTask(ctx context.Context, quantity int, supplierID string, requestedProduct ...string) (store.SupplyPurchaseTask, error) {
 	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
 	if err != nil {
@@ -323,7 +344,8 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if len(openOrders) >= maxConcurrentSupplyOrders(cfg.Supply) {
+		admissionOrderCount := purchaseTaskAdmissionOrderCount(openOrders, time.UnixMilli(nowMS))
+		if admissionOrderCount >= maxConcurrentSupplyOrders(cfg.Supply) {
 			continue
 		}
 		// An active supplier reservation already occupies part of the task target,
@@ -335,7 +357,7 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 			continue
 		}
 		availableTaskSlots := max(1, task.MaxConcurrentOrders) - stats.activeOrderCount
-		availableGlobalSlots := maxConcurrentSupplyOrders(cfg.Supply) - len(openOrders)
+		availableGlobalSlots := maxConcurrentSupplyOrders(cfg.Supply) - admissionOrderCount
 		quantity := purchaseTaskNextOrderQuantity(remaining, min(availableTaskSlots, availableGlobalSlots))
 		return s.createPurchaseTaskOrder(ctx, cfg, &task, quantity, openOrders, stats.activeOrderCount)
 	}
@@ -596,17 +618,38 @@ func summarizePurchaseTaskOrders(orders []store.SupplyOrder) purchaseTaskOrderSt
 		if !reportOpenOrderStatus(order.Status) {
 			continue
 		}
-		stats.activeOrderCount++
+		staleReservation := purchaseTaskOrderReservationStale(order, time.Now())
+		if !staleReservation {
+			stats.activeOrderCount++
+		}
 		committed := purchaseTaskOrderCommittedQuantity(order)
-		if committed > delivered {
+		if !staleReservation && committed > delivered {
 			stats.committedPending += committed - delivered
 		}
 		reserved := purchaseTaskOrderReservedQuantity(order)
+		if staleReservation {
+			reserved = delivered
+		}
 		if reserved > delivered {
 			stats.reservedPending += reserved - delivered
 		}
 	}
 	return stats
+}
+
+func purchaseTaskOrderReservationStale(order store.SupplyOrder, now time.Time) bool {
+	if !order.Automatic || !reportOpenOrderStatus(order.Status) ||
+		order.ImportedCount > 0 || order.ItemCount > 0 || order.ReadyQuantity > 0 {
+		return false
+	}
+	status := strings.ToLower(strings.TrimSpace(order.Status))
+	if status != "created" && status != "waiting_inventory" {
+		return false
+	}
+	if order.CreatedAtMS <= 0 || now.IsZero() {
+		return false
+	}
+	return now.Sub(time.UnixMilli(order.CreatedAtMS)) >= purchaseTaskStaleAutomaticWaitingAge
 }
 
 func purchaseTaskOrderDeliveredQuantity(order store.SupplyOrder) int {
@@ -722,6 +765,15 @@ func (s *Service) stopPurchaseTaskOrderIfNeeded(ctx context.Context, order *stor
 		if !cancelReversiblePurchaseTaskOrder(order, time.Now().UnixMilli()) {
 			return false, nil
 		}
+		return true, s.store.UpdateSupplyOrder(ctx, *order)
+	}
+	if purchaseTaskOrderReservationStale(*order, time.Now()) {
+		order.Status = "released"
+		order.RemoteStatus = remoteStatusAutomaticReleasePending
+		order.LastError = "automatic waiting reservation expired locally; replacement will be scheduled"
+		order.NextPollAtMS = 0
+		order.SupplierRetryUntilMS = 0
+		order.CompletedAtMS = time.Now().UnixMilli()
 		return true, s.store.UpdateSupplyOrder(ctx, *order)
 	}
 	status := strings.ToLower(strings.TrimSpace(order.Status))

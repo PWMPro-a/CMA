@@ -29,6 +29,20 @@ func TestSummarizePurchaseTaskOrdersCountsDeliveredBeforeCommitted(t *testing.T)
 	}
 }
 
+func TestSummarizePurchaseTaskOrdersStopsCountingStaleAutomaticWaitingReservation(t *testing.T) {
+	staleAt := time.Now().Add(-purchaseTaskStaleAutomaticWaitingAge - time.Second).UnixMilli()
+	stats := summarizePurchaseTaskOrders([]store.SupplyOrder{
+		{TaskID: "task", Automatic: true, Status: "waiting_inventory", RequestedQuantity: 7, CreatedAtMS: staleAt},
+		{TaskID: "task", Automatic: true, Status: "waiting_inventory", RequestedQuantity: 2, CreatedAtMS: time.Now().UnixMilli()},
+	})
+	if stats.activeOrderCount != 1 {
+		t.Fatalf("active order count = %d, want only fresh reservation 1", stats.activeOrderCount)
+	}
+	if stats.reservedPending != 2 {
+		t.Fatalf("reserved pending = %d, want only fresh reservation 2", stats.reservedPending)
+	}
+}
+
 func TestPurchaseTaskReadyTakeAllowedWhilePlannerSnapshotIsStale(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-ready-take.sqlite"))
@@ -357,6 +371,84 @@ func TestPurchaseTaskPollsOldWaitingOrderAndUsesRemainingSlotsSameTurn(t *testin
 	orders, err := st.ListOpenSupplyOrders(ctx, 10)
 	if err != nil || len(orders) != 2 {
 		t.Fatalf("open orders after same-turn admission = %#v err=%v", orders, err)
+	}
+}
+
+func TestPurchaseTaskReplacesStaleWaitingReservationOnAnotherPlatform(t *testing.T) {
+	var createPlatform atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		platform := r.Header.Get("X-Customer-Token")
+		switch {
+		case r.URL.Path == "/api/customer/pickup/orders/stale-order" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"id":"stale-order","status":"waiting_inventory","quantity":1}`))
+		case r.URL.Path == "/api/customer/inventory":
+			if platform == "bugteam" {
+				_, _ = w.Write([]byte(`{"available":10,"missing":0,"estimated_total_fen":100,"estimated_unit_price_fen":10}`))
+			} else {
+				_, _ = w.Write([]byte(`{"available":0,"missing":1,"needs_production":true,"estimated_total_fen":100,"estimated_unit_price_fen":10}`))
+			}
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":10000,"balance_fen":10000}`))
+		case r.URL.Path == "/api/customer/pickup/orders" && r.Method == http.MethodPost:
+			createPlatform.Store(platform)
+			_, _ = w.Write([]byte(`{"order":{"id":"replacement-order","status":"waiting_inventory","quantity":1}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-stale-failover.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{Supply: store.ManagerSupplyConfig{
+		Enabled: &enabled, MaxConcurrentOrders: 3,
+		Platforms: []store.ManagerSupplyPlatformConfig{
+			{ID: "legacy", Type: managerconfigsvc.SupplyPlatformLegacy, Enabled: &enabled, BaseURL: server.URL, Token: "legacy", Product: "oauth_7d"},
+			{ID: "bugteam", Type: managerconfigsvc.SupplyPlatformBugTeam, Enabled: &enabled, BaseURL: server.URL, Token: "bugteam", Product: "team_1h"},
+		},
+	}}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	task, err := st.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
+		TaskID: "purchase-stale-failover", Source: "automatic", Product: "team_1h",
+		TargetQuantity: 2, Status: purchaseTaskStatusRunning, MaxConcurrentOrders: 3,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "completed-prefix", TaskID: task.TaskID, SupplierID: "bugteam", Product: "team_1h",
+		RequestedQuantity: 1, Automatic: true, Status: "completed", ItemCount: 1, ImportedCount: 1,
+	}); err != nil {
+		t.Fatalf("create completed prefix: %v", err)
+	}
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "stale-order", TaskID: task.TaskID, SupplierID: "legacy", Product: "oauth_7d",
+		RequestedQuantity: 1, Automatic: true, Status: "waiting_inventory",
+		StatusURL:   "/api/customer/pickup/orders/stale-order",
+		CreatedAtMS: time.Now().Add(-purchaseTaskStaleAutomaticWaitingAge - time.Second).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("create stale order: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	if err := service.RunPurchaseTasks(ctx); err != nil {
+		t.Fatalf("run purchase task: %v", err)
+	}
+	if got, _ := createPlatform.Load().(string); got != "bugteam" {
+		t.Fatalf("replacement platform = %q, want bugteam", got)
+	}
+	stale, found, err := st.GetSupplyOrder(ctx, "stale-order")
+	if err != nil || !found || stale.Status != "waiting_inventory" {
+		t.Fatalf("stale order after poll = %#v found=%v err=%v", stale, found, err)
+	}
+	orders, err := st.ListSupplyOrdersByTaskID(ctx, task.TaskID)
+	if err != nil || len(orders) != 3 {
+		t.Fatalf("task orders = %#v err=%v", orders, err)
 	}
 }
 
