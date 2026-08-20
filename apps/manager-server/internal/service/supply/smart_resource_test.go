@@ -1410,6 +1410,94 @@ func TestSmartAutomaticPausesWithoutInspectionSnapshotAfterPoolCheck(t *testing.
 	}
 }
 
+func TestSmartAutomaticCreatesFromRecentPartialInspectionAfterRestart(t *testing.T) {
+	var createCalls atomic.Int32
+	var createQuantity atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"files":[
+				{"name":"verified.json","provider":"codex","status":"active"},
+				{"name":"quota-pending.json","provider":"codex","status":"active"}
+			]}`))
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":70,"missing":0,"needs_production":false,"estimated_total_fen":100}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
+		case r.URL.Path == "/api/customer/pickup/orders" && r.Method == http.MethodPost:
+			createCalls.Add(1)
+			var payload struct {
+				Quantity int `json:"quantity"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode create payload: %v", err)
+			}
+			createQuantity.Store(int32(payload.Quantity))
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"order":{"id":"partial-snapshot-order","status":"waiting_inventory","quantity":1,"retry_after_seconds":60}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "smart-partial-restart.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, SmartEnabled: &enabled,
+			BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_30d",
+			TargetAvailableAccounts: 45, ReplenishBatchSize: 1,
+			PrelockMinQuantity: 1, PrelockMaxQuantity: 1,
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	verified := quotaInspectionResult(50)
+	verified.AccountKey = "verified"
+	verified.FileName = "verified.json"
+	verified.PlanType = "team"
+	pending := store.CodexInspectionResult{
+		AccountKey: "quota-pending", FileName: "quota-pending.json", Provider: "codex", Action: "keep", PlanType: "team",
+	}
+	seedCompletedQuotaInspection(t, st, verified, pending)
+
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	now := time.Now()
+	events := make([]usage.Event, 0, 30)
+	for minute := 0; minute < 30; minute++ {
+		events = append(events, usage.Event{
+			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+			Provider:    "codex",
+			AuthIndex:   "load-source",
+			TotalTokens: 10_000_000,
+		})
+	}
+	service.recordSmartUsageEvents(events, now)
+
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("run automatic: %v", err)
+	}
+	if createCalls.Load() != 1 || createQuantity.Load() != 1 {
+		t.Fatalf("partial snapshot create calls/quantity = %d/%d, want 1/1", createCalls.Load(), createQuantity.Load())
+	}
+	tasks, err := st.ListSupplyPurchaseTasks(context.Background(), 10)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("partial snapshot purchase tasks=%#v err=%v", tasks, err)
+	}
+	orders, err := st.ListSupplyOrders(context.Background(), 10)
+	if err != nil || len(orders) != 1 || orders[0].RequestedQuantity != 1 {
+		t.Fatalf("partial snapshot orders=%#v err=%v", orders, err)
+	}
+}
+
 func TestSmartResourceDoesNotFallbackToAccountCountWithoutUsageRate(t *testing.T) {
 	service := New(nil, nil)
 	now := time.Now()

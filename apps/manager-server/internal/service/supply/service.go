@@ -608,6 +608,8 @@ type Service struct {
 	operatorPool         operatorAccountPoolCache
 	smartResourceState   SmartResource
 	automation           AutomationExecution
+	automaticDecisionSet bool
+	automaticDecision    SmartResource
 	recoveryMu           sync.Mutex
 	recoveryState        RecoverySummary
 	recoveryAsyncMu      sync.Mutex
@@ -1601,6 +1603,7 @@ func (s *Service) DismissCreateUncertain(ctx context.Context, orderID string) (S
 }
 
 func (s *Service) RunAutomatic(ctx context.Context) error {
+	s.beginAutomaticRunDecision()
 	err := s.run(ctx, true, 0, false)
 	if err == nil {
 		if reconcileErr := s.reconcileAutomaticPurchaseTaskCancellation(ctx); reconcileErr != nil {
@@ -2618,6 +2621,13 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	timing.next("config")
 	s.setRunning(true)
 	defer s.setRunning(false)
+	var resource SmartResource
+	useSmart := false
+	defer func() {
+		if useSmart && resource.GeneratedAtMS > 0 {
+			s.recordAutomaticRunDecision(resource)
+		}
+	}()
 
 	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
 	if err != nil {
@@ -2734,8 +2744,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	}
 
 	available := 0
-	var resource SmartResource
-	useSmart := manualQuantity == 0 && smartSupplyEnabled(supplyCfg)
+	useSmart = manualQuantity == 0 && smartSupplyEnabled(supplyCfg)
 	accountSnapshotLoaded := !useSmart
 	if useSmart {
 		timing.next("capacity-snapshot")
@@ -9017,6 +9026,15 @@ func (s *Service) automaticBaselineBlockReason(resource SmartResource) string {
 	// inspection guard below.
 	if !resource.SnapshotFresh || resource.CapacitySnapshotAtMS <= 0 {
 		s.requestStaleInspectionSnapshotRefresh()
+		// A recent incomplete inspection still provides a verified capacity lower
+		// bound. Do not strand a live deficit merely because the remainder of the
+		// pool is still being inspected after a Manager restart. The partial path
+		// stays bounded by smartAutomaticOrderQuantityLimit, while a genuine live
+		// account emergency is sized by the independently refreshed account pool.
+		if smartPartialInspectionCapacityDeficitAllowed(resource) ||
+			smartResourceEmergency(resource) || smartAccountAvailabilityEmergency(resource) {
+			return ""
+		}
 		return "initial_capacity_snapshot_pending"
 	}
 	return ""
@@ -9166,6 +9184,26 @@ func (s *Service) ScheduleAutomaticExecution(at time.Time) {
 	s.invalidateStatusCache()
 }
 
+func (s *Service) beginAutomaticRunDecision() {
+	if s == nil {
+		return
+	}
+	s.stateMu.Lock()
+	s.automaticDecisionSet = false
+	s.automaticDecision = SmartResource{}
+	s.stateMu.Unlock()
+}
+
+func (s *Service) recordAutomaticRunDecision(resource SmartResource) {
+	if s == nil {
+		return
+	}
+	s.stateMu.Lock()
+	s.automaticDecisionSet = true
+	s.automaticDecision = resource
+	s.stateMu.Unlock()
+}
+
 // RecordAutomaticExecution saves the result of a completed automatic cycle
 // and the next scheduled worker wake-up. This is a compact runtime snapshot,
 // so it has no database writes on the automatic replenishment hot path.
@@ -9178,8 +9216,16 @@ func (s *Service) RecordAutomaticExecution(startedAt, finishedAt, nextAt time.Ti
 	s.automation.LastFinishedAtMS = finishedAt.UnixMilli()
 	s.automation.NextExecutionAtMS = nextAt.UnixMilli()
 	s.automation.IntervalSeconds = max(0, int(math.Ceil(nextAt.Sub(finishedAt).Seconds())))
-	s.automation.LastAction = s.smartResourceState.SuggestedAction
-	s.automation.LastReason = s.smartResourceState.DecisionReason
+	// Dashboard/status refreshes rebuild smartResourceState asynchronously. Use
+	// the decision captured from this exact automatic run so a later read-only
+	// refresh cannot make a blocked cycle look like it created an order (or hide
+	// an order that the cycle actually enqueued).
+	decision := s.smartResourceState
+	if s.automaticDecisionSet {
+		decision = s.automaticDecision
+	}
+	s.automation.LastAction = decision.SuggestedAction
+	s.automation.LastReason = decision.DecisionReason
 	if err != nil {
 		if sqliterepo.IsBusyError(err) {
 			s.automation.LastResult = "scheduled"

@@ -39,6 +39,18 @@ func TestAutomationExecutionTracksScheduledAndCompletedCycles(t *testing.T) {
 		SuggestedAction: smartActionTakeLocked,
 		DecisionReason:  "critical_take_confirmed",
 	})
+	service.beginAutomaticRunDecision()
+	service.recordAutomaticRunDecision(SmartResource{
+		SuggestedAction: smartActionTakeLocked,
+		DecisionReason:  "critical_take_confirmed",
+	})
+	// A dashboard refresh may publish a newer capacity recommendation before the
+	// worker records its timeline. The execution card must keep this run's exact
+	// decision rather than borrowing the refresh result.
+	service.setSmartResource(SmartResource{
+		SuggestedAction: smartActionEmergencyReplenish,
+		DecisionReason:  "available_capacity_critical",
+	})
 	finishedAt := now.Add(300 * time.Millisecond)
 	nextAt := finishedAt.Add(15 * time.Second)
 	service.RecordAutomaticExecution(now, finishedAt, nextAt, nil)
@@ -1113,6 +1125,30 @@ func TestAutomaticSupplyGuardRequiresFreshBaselineAndSettledImports(t *testing.T
 	if reason := service.automaticSupplyGuardReason(resource); reason != "initial_capacity_snapshot_pending" {
 		t.Fatalf("stale capacity baseline reason = %q", reason)
 	}
+	resource.CurrentCapacityRCU = 34
+	resource.CapacityGapRCU = 108
+	resource.CapacitySnapshotAtMS = nowMS - int64((2*time.Minute)/time.Millisecond)
+	resource.CapacitySnapshotAgeSeconds = 120
+	resource.DecisionReason = "inspection_quota_incomplete_capacity_deficit"
+	if reason := service.automaticSupplyGuardReason(resource); reason != "" {
+		t.Fatalf("recent verified partial capacity deficit must remain orderable, reason = %q", reason)
+	}
+	resource.CapacityGapRCU = 0
+	if reason := service.automaticSupplyGuardReason(resource); reason != "initial_capacity_snapshot_pending" {
+		t.Fatalf("partial snapshot without a capacity deficit must remain blocked, reason = %q", reason)
+	}
+	resource.CurrentCapacityRCU = 0
+	resource.CapacitySnapshotAtMS = 0
+	resource.DecisionReason = "snapshot_not_ready"
+	resource.EmergencyShortage = true
+	resource.EmergencyReason = "available_capacity_critical"
+	resource.SuggestedAction = smartActionEmergencyReplenish
+	if reason := service.automaticSupplyGuardReason(resource); reason != "" {
+		t.Fatalf("live account emergency must bypass the missing quota baseline, reason = %q", reason)
+	}
+	resource.EmergencyShortage = false
+	resource.EmergencyReason = ""
+	resource.SuggestedAction = smartActionSnapshotStale
 	resource.SnapshotFresh = true
 	resource.SnapshotRefreshInProgress = false
 	resource.CapacitySnapshotAtMS = nowMS
