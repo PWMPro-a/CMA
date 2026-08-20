@@ -10260,6 +10260,12 @@ func normalizeSupplyAccountValue(value any, inheritedExportedAt any) ([]normaliz
 		return []normalizedSupplyAccount{account}, nil
 	case []any:
 		return normalizeSupplyAccountList(typed, inheritedExportedAt)
+	case string:
+		decoded, err := decodeSupplyAccountPayload(json.RawMessage(strconv.Quote(strings.TrimSpace(typed))))
+		if err != nil {
+			return nil, err
+		}
+		return normalizeSupplyAccountValue(decoded, inheritedExportedAt)
 	default:
 		return nil, errors.New("supply account payload must be a JSON object or account array")
 	}
@@ -10272,11 +10278,25 @@ func nestedSupplyAccountList(object map[string]any, inheritedExportedAt any) ([]
 			return list, exportedAt, true
 		}
 	}
-	for _, key := range []string{"payload", "data", "result"} {
+	for _, key := range []string{
+		"account_json", "accountJson",
+		"sub2api_account", "sub2apiAccount",
+		"codex_account", "codexAccount",
+	} {
+		if child, exists := object[key]; exists && child != nil {
+			return []any{child}, exportedAt, true
+		}
+	}
+	for _, key := range []string{"card_payload", "cardPayload", "payload", "data", "result"} {
 		if child, ok := object[key].(map[string]any); ok {
 			if list, childExportedAt, found := nestedSupplyAccountList(child, exportedAt); found {
 				return list, childExportedAt, true
 			}
+			if key == "card_payload" || key == "cardPayload" {
+				return []any{child}, exportedAt, true
+			}
+		} else if child, exists := object[key]; exists && child != nil && (key == "card_payload" || key == "cardPayload") {
+			return []any{child}, exportedAt, true
 		}
 	}
 	return nil, exportedAt, false

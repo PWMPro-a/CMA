@@ -711,9 +711,8 @@ func (c *Client) nvtokensCreateOrder(ctx context.Context, credentials Credential
 	if order.Quantity == 0 {
 		order.Quantity = quantity
 	}
-	if order.ReadyQuantity == 0 {
-		order.ReadyQuantity = len(nvtokensResultAccounts(value))
-	}
+	accounts := nvtokensResultAccounts(value)
+	order.ReadyQuantity = len(accounts)
 	if order.Progress == 0 && (status >= http.StatusOK && status < http.StatusMultipleChoices) {
 		order.Progress = 100
 	}
@@ -728,17 +727,37 @@ func (c *Client) nvtokensCreateOrder(ctx context.Context, credentials Credential
 		order.ChargedFen,
 		findInt64(value, "charged_fen", "chargedFen", "total_cost_cents", "totalCostCents", "cost_cents", "costCents"),
 	)
-	result := TakeResult{Order: order, Accounts: nvtokensResultAccounts(value), Pending: status == http.StatusAccepted}
+	result := TakeResult{Order: order, Accounts: accounts, Pending: status == http.StatusAccepted}
 	if len(result.Accounts) > 0 {
 		order.Status = "completed"
 		result.Pending = false
 		result.Order.Status = "completed"
 		result.Order.ReadyQuantity = len(result.Accounts)
 		result.Order.Progress = 100
+	} else if status == http.StatusAccepted {
+		// NV occasionally reports a completed quantity while its preferred bundle
+		// is empty. Do not expose a phantom ready account: keep polling the same
+		// extraction only when the supplier explicitly accepted asynchronous work.
+		order.Status = "processing"
+		order.ReadyQuantity = 0
+		order.Progress = 0
+		result.Order = order
+		result.Pending = true
+	} else if nvtokensSuccessfulStatusWithoutAccounts(order.Status) {
+		// A synchronous successful-looking response without credentials is a
+		// terminal empty extraction, not a completed account. Mark it failed so the
+		// purchase task can immediately schedule the remaining quantity again.
+		order.Status = "failed"
+		order.ReadyQuantity = 0
+		order.Progress = 0
+		result.Order = order
+		result.Pending = false
 	}
-	c.mu.Lock()
-	c.nvtokensResults[credentialKey(credentials)+"|"+order.ID] = result
-	c.mu.Unlock()
+	if len(result.Accounts) > 0 {
+		c.mu.Lock()
+		c.nvtokensResults[credentialKey(credentials)+"|"+order.ID] = result
+		c.mu.Unlock()
+	}
 	return order, nil
 }
 
@@ -772,10 +791,22 @@ func (c *Client) nvtokensGetOrder(ctx context.Context, credentials Credentials, 
 	if len(accounts) > 0 {
 		order.Status = "completed"
 		order.ReadyQuantity = len(accounts)
+		order.Progress = 100
+	} else {
+		order.ReadyQuantity = 0
+		if status == http.StatusAccepted {
+			order.Status = "processing"
+			order.Progress = 0
+		} else if nvtokensSuccessfulStatusWithoutAccounts(order.Status) {
+			order.Status = "failed"
+			order.Progress = 0
+		}
 	}
-	c.mu.Lock()
-	c.nvtokensResults[key] = TakeResult{Order: order, Accounts: accounts, Pending: status == http.StatusAccepted}
-	c.mu.Unlock()
+	if len(accounts) > 0 {
+		c.mu.Lock()
+		c.nvtokensResults[key] = TakeResult{Order: order, Accounts: accounts}
+		c.mu.Unlock()
+	}
 	return order, nil
 }
 
@@ -791,7 +822,7 @@ func (c *Client) nvtokensTake(ctx context.Context, credentials Credentials, orde
 	if len(takeURL) > 0 && strings.TrimSpace(takeURL[0]) != "" {
 		endpoint = strings.TrimSpace(takeURL[0])
 	}
-	value, status, err := c.doAuthenticatedWithTimeout(ctx, credentials, http.MethodGet, endpoint, nil, nvtokensBatchTimeout)
+	value, _, err := c.doAuthenticatedWithTimeout(ctx, credentials, http.MethodGet, endpoint, nil, nvtokensBatchTimeout)
 	if err != nil {
 		return TakeResult{}, err
 	}
@@ -808,7 +839,8 @@ func (c *Client) nvtokensTake(ctx context.Context, credentials Credentials, orde
 	}
 	order.Status = "completed"
 	order.ReadyQuantity = len(accounts)
-	result := TakeResult{Order: order, Accounts: accounts, Pending: status == http.StatusAccepted}
+	order.Progress = 100
+	result := TakeResult{Order: order, Accounts: accounts}
 	c.mu.Lock()
 	c.nvtokensResults[key] = result
 	c.mu.Unlock()
@@ -816,62 +848,243 @@ func (c *Client) nvtokensTake(ctx context.Context, credentials Credentials, orde
 }
 
 func nvtokensResultAccounts(value any) []json.RawMessage {
-	root, _ := value.(map[string]any)
-	if root == nil {
-		return nil
+	collector := nvtokensAccountCollector{seen: make(map[string]struct{})}
+	collectNvtokensResultEntries(value, &collector)
+	if len(collector.accounts) > 0 {
+		return collector.accounts
 	}
-	for _, key := range []string{"cpa_bundle", "cpaBundle", "sub2api_bundle", "sub2apiBundle", "cockpit_bundle", "cockpitBundle"} {
-		if bundle, ok := root[key]; ok && bundle != nil {
-			if data, err := json.Marshal(bundle); err == nil && len(data) > 0 {
-				return []json.RawMessage{data}
+	collectNvtokensBundles(value, &collector)
+	return collector.accounts
+}
+
+func nvtokensSuccessfulStatusWithoutAccounts(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "", "complete", "completed", "ready", "success", "succeeded":
+		return true
+	default:
+		return false
+	}
+}
+
+type nvtokensAccountCollector struct {
+	accounts []json.RawMessage
+	seen     map[string]struct{}
+}
+
+func collectNvtokensResultEntries(value any, collector *nvtokensAccountCollector) {
+	root, ok := nvtokensObject(value)
+	if !ok {
+		return
+	}
+	collectNvtokensResultObject(root, collector)
+	for _, key := range []string{"results", "items"} {
+		list, ok := root[key].([]any)
+		if !ok {
+			continue
+		}
+		for _, item := range list {
+			object, ok := nvtokensObject(item)
+			if !ok || nvtokensResultFailed(object) {
+				continue
 			}
+			collectNvtokensResultObject(object, collector)
 		}
 	}
 	for _, key := range []string{"data", "payload", "result"} {
-		if child, ok := root[key].(map[string]any); ok {
-			if accounts := nvtokensResultAccounts(child); len(accounts) > 0 {
-				return accounts
-			}
+		if child, exists := root[key]; exists && child != nil {
+			collectNvtokensResultEntries(child, collector)
 		}
 	}
-	for _, key := range []string{"results", "items"} {
-		if list, ok := root[key].([]any); ok {
-			accounts := make([]json.RawMessage, 0, len(list))
-			for _, item := range list {
-				object, ok := item.(map[string]any)
-				if !ok || (hasBoolField(object, "success", "ok", "failed") &&
-					(!boolValue(object, "success", "ok") || boolValue(object, "failed"))) {
-					continue
-				}
-				if stringValue(object, "error", "error_message", "errorMessage") != "" {
-					continue
-				}
-				candidate := item
-				for _, field := range []string{"account_json", "accountJson", "account", "credential", "data"} {
-					if nested, exists := object[field]; exists && nested != nil {
-						candidate = nested
-						break
-					}
-				}
-				if data, ok := nvtokensAccountBytes(candidate); ok && looksLikeCPAAccount(data) {
-					accounts = append(accounts, data)
-				}
-			}
-			if len(accounts) > 0 {
-				return accounts
-			}
-		}
-	}
-	return rawAccounts(value)
 }
 
-func nvtokensAccountBytes(value any) ([]byte, bool) {
-	if text, ok := value.(string); ok {
-		data := bytes.TrimSpace([]byte(text))
-		return data, len(data) > 0 && json.Valid(data)
+func collectNvtokensResultObject(object map[string]any, collector *nvtokensAccountCollector) {
+	if nvtokensResultFailed(object) {
+		return
 	}
-	data, err := json.Marshal(value)
-	return data, err == nil && len(data) > 0
+	for _, key := range []string{
+		"account_json", "accountJson",
+		"card_payload", "cardPayload",
+		"account", "credential",
+	} {
+		if candidate, exists := object[key]; exists && candidate != nil {
+			collector.addCandidate(candidate)
+		}
+	}
+}
+
+func collectNvtokensBundles(value any, collector *nvtokensAccountCollector) {
+	root, ok := nvtokensObject(value)
+	if !ok {
+		return
+	}
+	for _, key := range []string{
+		"sub2api_bundle", "sub2apiBundle",
+		"cpa_bundle", "cpaBundle",
+		"cockpit_bundle", "cockpitBundle",
+	} {
+		if bundle, exists := root[key]; exists && bundle != nil {
+			collector.addDeepCandidate(bundle)
+		}
+	}
+	for _, key := range []string{"data", "payload", "result"} {
+		if child, exists := root[key]; exists && child != nil {
+			collectNvtokensBundles(child, collector)
+		}
+	}
+}
+
+func nvtokensResultFailed(object map[string]any) bool {
+	if hasBoolField(object, "failed") && boolValue(object, "failed") {
+		return true
+	}
+	for _, key := range []string{"success", "ok"} {
+		if hasBoolField(object, key) && !boolValue(object, key) {
+			return true
+		}
+	}
+	return stringValue(object, "error", "error_message", "errorMessage") != ""
+}
+
+func (collector *nvtokensAccountCollector) addCandidate(value any) {
+	value, ok := nvtokensDecodedValue(value)
+	if !ok {
+		return
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		if nvtokensOAuthAccount(typed) {
+			collector.appendAccount(typed)
+			return
+		}
+		for _, key := range []string{
+			"account_json", "accountJson",
+			"sub2api_account", "sub2apiAccount",
+			"codex_account", "codexAccount",
+			"card_payload", "cardPayload",
+			"account", "credential",
+		} {
+			if child, exists := typed[key]; exists && child != nil {
+				collector.addCandidate(child)
+			}
+		}
+		for _, key := range []string{"accounts", "items"} {
+			if list, ok := typed[key].([]any); ok {
+				for _, child := range list {
+					collector.addCandidate(child)
+				}
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			collector.addCandidate(child)
+		}
+	}
+}
+
+func (collector *nvtokensAccountCollector) addDeepCandidate(value any) {
+	value, ok := nvtokensDecodedValue(value)
+	if !ok {
+		return
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		if nvtokensOAuthAccount(typed) {
+			collector.appendAccount(typed)
+			return
+		}
+		for _, child := range typed {
+			collector.addDeepCandidate(child)
+		}
+	case []any:
+		for _, child := range typed {
+			collector.addDeepCandidate(child)
+		}
+	}
+}
+
+func (collector *nvtokensAccountCollector) appendAccount(account map[string]any) {
+	identities := nvtokensAccountIdentities(account)
+	if len(identities) == 0 {
+		return
+	}
+	for _, identity := range identities {
+		if _, exists := collector.seen[identity]; exists {
+			return
+		}
+	}
+	data, err := json.Marshal(account)
+	if err != nil || len(data) == 0 {
+		return
+	}
+	for _, identity := range identities {
+		collector.seen[identity] = struct{}{}
+	}
+	collector.accounts = append(collector.accounts, data)
+}
+
+func nvtokensDecodedValue(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok {
+		return value, value != nil
+	}
+	data := bytes.TrimSpace([]byte(text))
+	if len(data) == 0 || !json.Valid(data) {
+		return nil, false
+	}
+	var decoded any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return nil, false
+	}
+	return decoded, true
+}
+
+func nvtokensObject(value any) (map[string]any, bool) {
+	decoded, ok := nvtokensDecodedValue(value)
+	if !ok {
+		return nil, false
+	}
+	object, ok := decoded.(map[string]any)
+	return object, ok
+}
+
+func nvtokensOAuthAccount(account map[string]any) bool {
+	credentials := account
+	if child, ok := account["credentials"].(map[string]any); ok {
+		credentials = child
+	}
+	platform := strings.ToLower(strings.TrimSpace(stringValue(account, "platform", "provider")))
+	typeName := strings.ToLower(strings.TrimSpace(stringValue(account, "type")))
+	credentialType := strings.ToLower(strings.TrimSpace(stringValue(credentials, "type")))
+	if platform != "" && platform != "openai" && platform != "codex" {
+		return false
+	}
+	if typeName != "" && typeName != "oauth" && typeName != "codex" {
+		return false
+	}
+	if credentialType != "" && credentialType != "oauth" && credentialType != "codex" && credentialType != "openai" {
+		return false
+	}
+	return len(nvtokensAccountIdentities(account)) > 0
+}
+
+func nvtokensAccountIdentities(account map[string]any) []string {
+	credentials := account
+	if child, ok := account["credentials"].(map[string]any); ok {
+		credentials = child
+	}
+	identities := make([]string, 0, 5)
+	for _, field := range []string{
+		"refresh_token", "refreshToken",
+		"access_token", "accessToken",
+		"session_access_token", "sessionAccessToken",
+		"id_token", "idToken",
+		"session_token", "sessionToken",
+	} {
+		if token := strings.TrimSpace(stringValue(credentials, field)); token != "" {
+			identities = append(identities, fmt.Sprintf("%x", sha256.Sum256([]byte("token\x00"+token))))
+		}
+	}
+	return identities
 }
 
 func (c *Client) downloadCPA(ctx context.Context, credentials Credentials, orderID string) (TakeResult, error) {

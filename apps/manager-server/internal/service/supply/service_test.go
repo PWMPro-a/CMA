@@ -4687,6 +4687,53 @@ func TestNormalizeSub2BundlePayloadForCPA(t *testing.T) {
 	}
 }
 
+func TestNormalizeNvtokensWrappedPayloadsForCPA(t *testing.T) {
+	tests := []struct {
+		name   string
+		raw    string
+		access string
+	}{
+		{
+			name:   "account json",
+			raw:    `{"account_json":{"type":"oauth","platform":"openai","credentials":{"access_token":"access-json","refresh_token":"refresh-json","account_id":"account-json"}}}`,
+			access: "access-json",
+		},
+		{
+			name:   "card payload sub2api account",
+			raw:    `{"card_payload":{"sub2api_account":{"type":"oauth","platform":"openai","credentials":{"access_token":"access-sub2","refresh_token":"refresh-sub2","account_id":"account-sub2"}}}}`,
+			access: "access-sub2",
+		},
+		{
+			name:   "card payload codex account",
+			raw:    `{"card_payload":{"codex_account":{"type":"codex","access_token":"access-codex","refresh_token":"refresh-codex","account_id":"account-codex"}}}`,
+			access: "access-codex",
+		},
+		{
+			name:   "string account json",
+			raw:    `{"account_json":"{\"type\":\"codex\",\"access_token\":\"access-string\",\"refresh_token\":\"refresh-string\",\"account_id\":\"account-string\"}"}`,
+			access: "access-string",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			accounts, err := normalizeAccountPayloads([]byte(test.raw))
+			if err != nil {
+				t.Fatalf("normalize payload: %v", err)
+			}
+			if len(accounts) != 1 {
+				t.Fatalf("accounts = %d, want 1", len(accounts))
+			}
+			var account map[string]any
+			if err := json.Unmarshal(accounts[0].payload, &account); err != nil {
+				t.Fatalf("decode normalized account: %v", err)
+			}
+			if account["access_token"] != test.access {
+				t.Fatalf("normalized account = %#v", account)
+			}
+		})
+	}
+}
+
 func TestSupplyDeliveryLeaseUsesRemainingValidityInsteadOfOAuthExpiry(t *testing.T) {
 	now := time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC)
 	shortLease := supplyDeliveryLeaseExpiresAtMS(map[string]any{

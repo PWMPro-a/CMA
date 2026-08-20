@@ -136,6 +136,109 @@ func TestNvtokensUsesSessionCookieAndImportsCPABundle(t *testing.T) {
 	}
 }
 
+func TestNvtokensResultAccountsPrefersResultsWhenCPABundleIsEmpty(t *testing.T) {
+	var value any
+	if err := json.Unmarshal([]byte(`{
+		"status":"completed",
+		"ready_quantity":1,
+		"cpa_bundle":{"type":"sub2api-data","accounts":[]},
+		"results":[{"success":true,"account_json":{"type":"oauth","platform":"openai","credentials":{"access_token":"access-result","refresh_token":"refresh-result","account_id":"account-result"}}}]
+	}`), &value); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	accounts := nvtokensResultAccounts(value)
+	if len(accounts) != 1 {
+		t.Fatalf("accounts = %d, want 1", len(accounts))
+	}
+	var account map[string]any
+	if err := json.Unmarshal(accounts[0], &account); err != nil {
+		t.Fatalf("decode account: %v", err)
+	}
+	credentials, _ := account["credentials"].(map[string]any)
+	if credentials["access_token"] != "access-result" || credentials["refresh_token"] != "refresh-result" {
+		t.Fatalf("account = %#v", account)
+	}
+}
+
+func TestNvtokensResultAccountsSupportsNativeBundlesAndCardPayloads(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{
+			name: "sub2api bundle",
+			raw:  `{"sub2api_bundle":{"type":"sub2api-data","accounts":[{"type":"oauth","platform":"openai","credentials":{"access_token":"access-one","refresh_token":"refresh-one"}},{"type":"oauth","platform":"openai","credentials":{"access_token":"access-two","refresh_token":"refresh-two"}}]}}`,
+			want: 2,
+		},
+		{
+			name: "card payload sub2api account",
+			raw:  `{"results":[{"card_payload":{"sub2api_account":{"type":"oauth","platform":"openai","credentials":{"access_token":"access-sub2","refresh_token":"refresh-sub2"}}}}]}`,
+			want: 1,
+		},
+		{
+			name: "card payload codex account",
+			raw:  `{"results":[{"card_payload":{"codex_account":{"type":"codex","access_token":"access-codex","refresh_token":"refresh-codex","account_id":"account-codex"}}}]}`,
+			want: 1,
+		},
+		{
+			name: "JSON string account",
+			raw:  `{"results":[{"account_json":"{\"type\":\"codex\",\"access_token\":\"access-string\",\"refresh_token\":\"refresh-string\"}"}]}`,
+			want: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var value any
+			if err := json.Unmarshal([]byte(test.raw), &value); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if accounts := nvtokensResultAccounts(value); len(accounts) != test.want {
+				t.Fatalf("accounts = %d, want %d: %s", len(accounts), test.want, test.raw)
+			}
+		})
+	}
+}
+
+func TestNvtokensResultAccountsDeduplicatesRepeatedRepresentations(t *testing.T) {
+	var value any
+	if err := json.Unmarshal([]byte(`{
+		"results":[{
+			"account_json":{"type":"oauth","platform":"openai","credentials":{"access_token":"same-access","refresh_token":"same-refresh","account_id":"same-account"}},
+			"card_payload":{"codex_account":{"type":"codex","access_token":"same-access","refresh_token":"same-refresh","account_id":"same-account"}}
+		}],
+		"sub2api_bundle":{"accounts":[{"type":"codex","access_token":"same-access","refresh_token":"same-refresh","account_id":"same-account"}]}
+	}`), &value); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if accounts := nvtokensResultAccounts(value); len(accounts) != 1 {
+		t.Fatalf("accounts = %d, want 1", len(accounts))
+	}
+}
+
+func TestNvtokensCreateOrderDoesNotExposePhantomCompletedQuantity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/workspace/extractions/batch" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"completed","ready_quantity":1,"progress":100,"cpa_bundle":{"accounts":[]},"results":[]}`))
+	}))
+	defer server.Close()
+
+	order, err := New(server.Client()).CreateOrder(context.Background(), Credentials{
+		PlatformType: "nvtokens",
+		BaseURL:      server.URL,
+		Token:        "session-token",
+	}, "plus", 1, "empty-extraction")
+	if err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	if order.Status != "failed" || order.ReadyQuantity != 0 || order.Progress != 0 {
+		t.Fatalf("order = %#v, want failed 0/1 without phantom progress", order)
+	}
+}
+
 func TestNvtokensTokenSkipsCaptchaLoginAndUsesSessionCookie(t *testing.T) {
 	var loginCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
