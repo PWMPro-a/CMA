@@ -160,6 +160,33 @@ func TestNormalizeSupplyConfigKeepsNvtokensPlatformType(t *testing.T) {
 	}
 }
 
+func TestNormalizeSupplyConfigPreservesNvtokensSessionRefreshSecret(t *testing.T) {
+	enabled := true
+	current := store.ManagerSupplyConfig{Platforms: []store.ManagerSupplyPlatformConfig{{
+		ID: "nvtokens-main", Type: SupplyPlatformNvtokens, Enabled: &enabled,
+		BaseURL: "https://nvtokens.com", Username: "buyer", Password: "secret", Token: "session",
+		Product: "plus", SessionRefreshEnabled: &enabled, ChallengeProvider: SupplyChallengeProviderCapSolver,
+		ChallengeAPIBase: "https://api.capsolver.com", ChallengeAPIKey: "solver-secret", RefreshCooldownSeconds: 300,
+	}}}
+	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{Platforms: []store.ManagerSupplyPlatformConfig{{
+		ID: "nvtokens-main", Type: SupplyPlatformNvtokens, Enabled: &enabled,
+		BaseURL: "https://nvtokens.com", Username: "buyer", Product: "plus",
+		SessionRefreshEnabled: &enabled, ChallengeProvider: SupplyChallengeProviderCapSolver,
+		ChallengeAPIBase: "https://api.capsolver.com", RefreshCooldownSeconds: 120,
+	}}}, current)
+	platform := next.Platforms[0]
+	if platform.ChallengeAPIKey != "solver-secret" || platform.RefreshCooldownSeconds != 120 || !nvtokensSessionRefreshEnabledForTest(platform) {
+		t.Fatalf("normalized platform = %#v", platform)
+	}
+	if err := ValidateSupplyConfig(store.ManagerSupplyConfig{Enabled: &enabled, Platforms: next.Platforms}); err != nil {
+		t.Fatalf("validate session refresh config: %v", err)
+	}
+}
+
+func nvtokensSessionRefreshEnabledForTest(platform store.ManagerSupplyPlatformConfig) bool {
+	return platform.SessionRefreshEnabled != nil && *platform.SessionRefreshEnabled
+}
+
 func TestValidateSupplyConfigAcceptsNvtokensNativeProducts(t *testing.T) {
 	enabled := true
 	for _, product := range []string{"plus", "pro", "team", "bugteam", "k12", "grokfree", "grokpro", "free"} {

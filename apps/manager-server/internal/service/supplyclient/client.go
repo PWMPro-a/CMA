@@ -32,6 +32,17 @@ const (
 	nvtokensBatchTimeout  = 10 * time.Minute
 )
 
+var ErrNvtokensSessionRefreshUnavailable = errors.New("nvtokens automatic session refresh is unavailable")
+
+type NvtokensSessionRefresher func(ctx context.Context, credentials Credentials) (string, error)
+
+type NvtokensChallengeConfig struct {
+	Provider                  string
+	SiteKey                   string
+	TestBypass                bool
+	EmailVerificationRequired bool
+}
+
 type HTTPError struct {
 	StatusCode        int
 	Message           string
@@ -187,9 +198,12 @@ type Client struct {
 	timeout         time.Duration
 	takeTimeout     time.Duration
 	mu              sync.Mutex
+	loginMu         sync.Mutex
 	token           tokenState
 	tokens          map[string]tokenState
 	nvtokensResults map[string]TakeResult
+	refresherMu     sync.RWMutex
+	refresher       NvtokensSessionRefresher
 }
 
 func New(httpClient *http.Client, timeout ...time.Duration) *Client {
@@ -221,6 +235,15 @@ func New(httpClient *http.Client, timeout ...time.Duration) *Client {
 		tokens:          make(map[string]tokenState),
 		nvtokensResults: make(map[string]TakeResult),
 	}
+}
+
+func (c *Client) SetNvtokensSessionRefresher(refresher NvtokensSessionRefresher) {
+	if c == nil {
+		return
+	}
+	c.refresherMu.Lock()
+	c.refresher = refresher
+	c.refresherMu.Unlock()
 }
 
 // DefaultTakeTimeout is intentionally longer than the normal API timeout.
@@ -1213,6 +1236,118 @@ func (c *Client) ClaimRecovery(ctx context.Context, credentials Credentials, rec
 	}, nil
 }
 
+func (c *Client) NvtokensChallenge(ctx context.Context, credentials Credentials) (NvtokensChallengeConfig, error) {
+	if c == nil || !isNvtokens(credentials) {
+		return NvtokensChallengeConfig{}, errors.New("supply platform is not nvtokens")
+	}
+	client, err := c.newIsolatedClient()
+	if err != nil {
+		return NvtokensChallengeConfig{}, err
+	}
+	value, _, err := client.request(ctx, credentials.BaseURL, http.MethodGet, "/api/auth/challenge-config", nil, tokenState{})
+	if err != nil {
+		return NvtokensChallengeConfig{}, err
+	}
+	root := primaryObject(value)
+	return NvtokensChallengeConfig{
+		Provider:                  stringValue(root, "provider"),
+		SiteKey:                   stringValue(root, "site_key", "siteKey"),
+		TestBypass:                boolValue(root, "test_bypass", "testBypass"),
+		EmailVerificationRequired: boolValue(root, "email_verification_required", "emailVerificationRequired"),
+	}, nil
+}
+
+func (c *Client) LoginNvtokensWithChallenge(ctx context.Context, credentials Credentials, challengeToken string) (string, error) {
+	if c == nil || !isNvtokens(credentials) {
+		return "", errors.New("supply platform is not nvtokens")
+	}
+	challengeToken = strings.TrimSpace(challengeToken)
+	if challengeToken == "" {
+		return "", errors.New("nvtokens challenge token is empty")
+	}
+	client, err := c.newIsolatedClient()
+	if err != nil {
+		return "", err
+	}
+	payload := map[string]any{
+		"username":              strings.TrimSpace(credentials.Username),
+		"password":              credentials.Password,
+		"cf-turnstile-response": challengeToken,
+	}
+	value, _, err := client.request(ctx, credentials.BaseURL, http.MethodPost, "/api/login", payload, tokenState{})
+	if err != nil {
+		return "", normalizeNvtokensLoginError(err)
+	}
+	session := client.nvtokensSessionCookie(credentials.BaseURL)
+	if session == "" {
+		session = findString(value, "session", "token", "access_token", "accessToken")
+	}
+	if session == "" {
+		return "", errors.New("nvtokens login response did not set a session cookie")
+	}
+	if err := client.ValidateNvtokensSession(ctx, credentials, session); err != nil {
+		return "", fmt.Errorf("validate refreshed nvtokens session: %w", err)
+	}
+	return normalizeNvtokensSession(session), nil
+}
+
+func (c *Client) ValidateNvtokensSession(ctx context.Context, credentials Credentials, session string) error {
+	if c == nil || !isNvtokens(credentials) {
+		return errors.New("supply platform is not nvtokens")
+	}
+	session = normalizeNvtokensSession(session)
+	if session == "" {
+		return errors.New("nvtokens session is empty")
+	}
+	client, err := c.newIsolatedClient()
+	if err != nil {
+		return err
+	}
+	auth := tokenState{
+		token:      session,
+		header:     customerTokenHeader,
+		cookie:     (&http.Cookie{Name: "session", Value: session}).String(),
+		cookieAuth: true,
+	}
+	_, _, err = client.request(ctx, credentials.BaseURL, http.MethodGet, "/api/me", nil, auth)
+	return err
+}
+
+func (c *Client) newIsolatedClient() (*Client, error) {
+	if c == nil || c.httpClient == nil {
+		return nil, errors.New("supply HTTP client is unavailable")
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, err
+	}
+	clientCopy := *c.httpClient
+	clientCopy.Jar = jar
+	return &Client{
+		httpClient:      &clientCopy,
+		timeout:         c.timeout,
+		takeTimeout:     c.takeTimeout,
+		tokens:          make(map[string]tokenState),
+		nvtokensResults: make(map[string]TakeResult),
+	}, nil
+}
+
+func (c *Client) nvtokensSessionCookie(baseURL string) string {
+	if c == nil || c.httpClient == nil || c.httpClient.Jar == nil {
+		return ""
+	}
+	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(baseURL), "/") + "/")
+	if err != nil {
+		return ""
+	}
+	for _, cookie := range c.httpClient.Jar.Cookies(parsed) {
+		if strings.EqualFold(cookie.Name, "session") {
+			return strings.TrimSpace(cookie.Value)
+		}
+	}
+	return ""
+}
+
 func recoveryClaimIdempotencyKey(recoveryID string) string {
 	recoveryID = strings.TrimSpace(recoveryID)
 	if recoveryID == "" {
@@ -1232,12 +1367,29 @@ func (c *Client) doAuthenticatedWithTimeout(ctx context.Context, credentials Cre
 func (c *Client) doAuthenticatedWithHeaders(ctx context.Context, credentials Credentials, method string, path string, body any, headers http.Header, requestTimeout time.Duration) (any, int, error) {
 	auth, err := c.login(ctx, credentials, false)
 	if err != nil {
-		return nil, 0, err
+		refreshedCredentials, refreshedAuth, refreshErr := c.refreshNvtokensAuthentication(ctx, credentials)
+		if refreshErr != nil {
+			if errors.Is(refreshErr, ErrNvtokensSessionRefreshUnavailable) {
+				return nil, 0, err
+			}
+			return nil, 0, refreshErr
+		}
+		credentials = refreshedCredentials
+		auth = refreshedAuth
 	}
 	value, status, err := c.requestWithHeaders(ctx, credentials.BaseURL, method, path, body, auth, headers, requestTimeout)
 	var httpErr *HTTPError
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized {
 		return value, status, err
+	}
+	if isNvtokens(credentials) {
+		refreshedCredentials, refreshedAuth, refreshErr := c.refreshNvtokensAuthentication(ctx, credentials)
+		if refreshErr == nil {
+			return c.requestWithHeaders(ctx, refreshedCredentials.BaseURL, method, path, body, refreshedAuth, headers, requestTimeout)
+		}
+		if !errors.Is(refreshErr, ErrNvtokensSessionRefreshUnavailable) {
+			return nil, 0, refreshErr
+		}
 	}
 	if !canRefreshAuthentication(credentials) {
 		return value, status, err
@@ -1250,14 +1402,41 @@ func (c *Client) doAuthenticatedWithHeaders(ctx context.Context, credentials Cre
 	return c.requestWithHeaders(ctx, credentials.BaseURL, method, path, body, auth, headers, requestTimeout)
 }
 
+func (c *Client) refreshNvtokensAuthentication(ctx context.Context, credentials Credentials) (Credentials, tokenState, error) {
+	if c == nil || !isNvtokens(credentials) {
+		return credentials, tokenState{}, ErrNvtokensSessionRefreshUnavailable
+	}
+	c.refresherMu.RLock()
+	refresher := c.refresher
+	c.refresherMu.RUnlock()
+	if refresher == nil {
+		return credentials, tokenState{}, ErrNvtokensSessionRefreshUnavailable
+	}
+	session, err := refresher(ctx, credentials)
+	if err != nil {
+		return credentials, tokenState{}, err
+	}
+	session = normalizeNvtokensSession(session)
+	if session == "" {
+		return credentials, tokenState{}, errors.New("nvtokens automatic session refresh returned an empty session")
+	}
+	c.invalidate(credentials)
+	credentials.Token = session
+	auth, err := c.login(ctx, credentials, false)
+	return credentials, auth, err
+}
+
 func (c *Client) login(ctx context.Context, credentials Credentials, force bool) (tokenState, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.loginMu.Lock()
+	defer c.loginMu.Unlock()
 	key := credentialKey(credentials)
+	c.mu.Lock()
 	if state, ok := c.tokens[key]; !force && ok && (state.token != "" || state.cookieAuth) && time.Now().Before(state.expiresAt) {
 		c.token = state
+		c.mu.Unlock()
 		return state, nil
 	}
+	c.mu.Unlock()
 	if isNvtokens(credentials) {
 		// A configured nvtokens token is a browser session snapshot. Prefer it on
 		// the first request so deployments that only provide a session keep
@@ -1277,8 +1456,10 @@ func (c *Client) login(ctx context.Context, credentials Credentials, force bool)
 				cookieAuth: true,
 				expiresAt:  time.Now().Add(12 * time.Hour),
 			}
+			c.mu.Lock()
 			c.tokens[key] = state
 			c.token = state
+			c.mu.Unlock()
 			return state, nil
 		}
 		payload := map[string]any{
@@ -1300,8 +1481,10 @@ func (c *Client) login(ctx context.Context, credentials Credentials, force bool)
 			cookieAuth: true,
 			expiresAt:  time.Now().Add(12 * time.Hour),
 		}
+		c.mu.Lock()
 		c.tokens[key] = state
 		c.token = state
+		c.mu.Unlock()
 		return state, nil
 	}
 	if token := strings.TrimSpace(credentials.Token); token != "" && (!force || !canPasswordLogin(credentials)) {
@@ -1327,8 +1510,10 @@ func (c *Client) login(ctx context.Context, credentials Credentials, force bool)
 		return tokenState{}, errors.New("supply login response did not include token or session")
 	}
 	state := tokenState{key: key, token: token, header: header, expiresAt: time.Now().Add(29 * 24 * time.Hour)}
+	c.mu.Lock()
 	c.tokens[key] = state
 	c.token = state
+	c.mu.Unlock()
 	return state, nil
 }
 
@@ -1340,6 +1525,21 @@ func (c *Client) invalidate(credentials Credentials) {
 	if c.token.key == key {
 		c.token = tokenState{}
 	}
+}
+
+func (c *Client) Invalidate(credentials Credentials) {
+	if c == nil {
+		return
+	}
+	c.invalidate(credentials)
+}
+
+func normalizeNvtokensSession(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(strings.ToLower(value), "session=") {
+		value = strings.TrimSpace(strings.SplitN(value, "=", 2)[1])
+	}
+	return value
 }
 
 func canPasswordLogin(credentials Credentials) bool {

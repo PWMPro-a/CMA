@@ -33,6 +33,19 @@ export interface SupplyPlatformConfig {
   product: SupplyProduct | string;
   purchaseAccountType?: SupplyPurchaseAccountType;
   maxUnitPriceFen?: number;
+  sessionRefreshEnabled?: boolean;
+  challengeProvider?:
+    | 'capsolver'
+    | 'capmonster'
+    | '2captcha'
+    | 'custom'
+    | 'session_sidecar'
+    | string;
+  challengeApiBase?: string;
+  challengeApiKey?: string;
+  challengeApiKeyConfigured?: boolean;
+  clearChallengeApiKey?: boolean;
+  refreshCooldownSeconds?: number;
   priority?: number;
   emergencyOnly?: boolean;
   quotaEstimationPolicies?: Record<string, SupplyQuotaEstimationPolicy>;
@@ -909,7 +922,16 @@ export interface SupplyStatus {
   activeOrder?: SupplyOrder;
   activeOrders?: SupplyOrder[];
   purchaseTasks?: SupplyPurchaseTask[];
+  sessionRefresh?: NvtokensSessionRefreshStatus[];
   orders: SupplyOrder[];
+}
+
+export interface NvtokensSessionRefreshStatus {
+  platformId: string;
+  state: 'disabled' | 'healthy' | 'refreshing' | 'waiting_challenge' | 'cooldown' | string;
+  lastRefreshAtMs?: number;
+  nextRetryAtMs?: number;
+  lastError?: string;
 }
 
 export const supplyApi = {
@@ -930,6 +952,9 @@ export const supplyApi = {
 
   getPlatformCatalog: (platform: SupplyPlatformConfig): Promise<SupplyPlatformProductCatalog> =>
     apiClient.post('/supply/platform-catalog', { platform }),
+
+  refreshPlatformSession: (platformId: string): Promise<NvtokensSessionRefreshStatus> =>
+    apiClient.post(`/supply/platforms/${encodeURIComponent(platformId)}/refresh-session`),
 
   quote: (quantity: number, supplierId: string, product: string): Promise<SupplyPlatformOverview> =>
     apiClient.post('/supply/quote', { quantity, supplierId, product }),

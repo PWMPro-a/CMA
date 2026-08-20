@@ -70,6 +70,13 @@ const newSupplyPlatform = (
   product: type === 'bugteam' ? 'team_1h' : type === 'nvtokens' ? 'plus' : 'oauth_30d',
   purchaseAccountType: type === 'nvtokens' ? 'all' : undefined,
   maxUnitPriceFen: type === 'nvtokens' ? 0 : undefined,
+  sessionRefreshEnabled: type === 'nvtokens' ? false : undefined,
+  challengeProvider: type === 'nvtokens' ? 'capsolver' : undefined,
+  challengeApiBase: type === 'nvtokens' ? 'https://api.capsolver.com' : undefined,
+  challengeApiKey: '',
+  challengeApiKeyConfigured: false,
+  clearChallengeApiKey: false,
+  refreshCooldownSeconds: type === 'nvtokens' ? 300 : undefined,
   priority: index + 1,
   emergencyOnly: type === 'bugteam',
   quotaEstimationPolicies: {},
@@ -84,6 +91,8 @@ const normalizeSupplyConfigForEditor = (config: SupplyConfig): SupplyConfig => {
           clearUsername: false,
           password: '',
           token: '',
+          challengeApiKey: '',
+          clearChallengeApiKey: false,
           purchaseAccountType:
             platform.type === 'nvtokens' ? platform.purchaseAccountType || 'all' : undefined,
         }))
@@ -457,6 +466,7 @@ export function SupplyPage() {
     Record<string, { loading: boolean; error?: string; catalog?: SupplyPlatformProductCatalog }>
   >({});
   const [cancellingTaskId, setCancellingTaskId] = useState('');
+  const [refreshingPlatformId, setRefreshingPlatformId] = useState('');
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<SupplyWorkspaceTab>('overview');
   const [reportRangePreset, setReportRangePreset] = useState<ReportRangePreset>('today');
@@ -550,6 +560,13 @@ export function SupplyPage() {
             tokenConfigured: false,
             purchaseAccountType: undefined,
             maxUnitPriceFen: undefined,
+            sessionRefreshEnabled: undefined,
+            challengeProvider: undefined,
+            challengeApiBase: undefined,
+            challengeApiKey: '',
+            challengeApiKeyConfigured: false,
+            clearChallengeApiKey: false,
+            refreshCooldownSeconds: undefined,
           };
         } else if (patch.type === 'nvtokens') {
           next = {
@@ -567,6 +584,13 @@ export function SupplyPage() {
             tokenConfigured: false,
             purchaseAccountType: 'all',
             maxUnitPriceFen: 0,
+            sessionRefreshEnabled: false,
+            challengeProvider: 'capsolver',
+            challengeApiBase: 'https://api.capsolver.com',
+            challengeApiKey: '',
+            challengeApiKeyConfigured: false,
+            clearChallengeApiKey: false,
+            refreshCooldownSeconds: 300,
           };
         } else if (patch.type === 'legacy') {
           next = {
@@ -584,6 +608,13 @@ export function SupplyPage() {
             tokenConfigured: false,
             purchaseAccountType: undefined,
             maxUnitPriceFen: undefined,
+            sessionRefreshEnabled: undefined,
+            challengeProvider: undefined,
+            challengeApiBase: undefined,
+            challengeApiKey: '',
+            challengeApiKeyConfigured: false,
+            clearChallengeApiKey: false,
+            refreshCooldownSeconds: undefined,
           };
         }
         platforms[index] = next;
@@ -751,6 +782,26 @@ export function SupplyPage() {
       }
     },
     [applyStatus, showNotification, t]
+  );
+
+  const refreshPlatformSession = useCallback(
+    async (platformId: string) => {
+      setRefreshingPlatformId(platformId);
+      try {
+        await supplyApi.refreshPlatformSession(platformId);
+        catalogRequestedRef.current.delete(platformId.trim().toLowerCase());
+        await load(true, true);
+        showNotification(t('supply.session_refresh_success'), 'success');
+      } catch (error) {
+        showNotification(
+          error instanceof Error ? error.message : t('common.unknown_error'),
+          'error'
+        );
+      } finally {
+        setRefreshingPlatformId('');
+      }
+    },
+    [load, showNotification, t]
   );
 
   const applyActiveOrderStatus = useCallback((snapshot: SupplyActiveOrderStatus) => {
@@ -2694,6 +2745,10 @@ export function SupplyPage() {
                 <div className={styles.platformList}>
                   {(draft.platforms ?? []).map((platform, platformIndex) => {
                     const live = platformOverviewById.get(platform.id.trim().toLowerCase());
+                    const sessionRefresh = status?.sessionRefresh?.find(
+                      (item) =>
+                        item.platformId.trim().toLowerCase() === platform.id.trim().toLowerCase()
+                    );
                     const catalogState = platformCatalogs[platform.id.trim().toLowerCase()];
                     const catalogProducts = catalogState?.catalog?.products ?? [];
                     const platformProductOptions = (() => {
@@ -2766,6 +2821,23 @@ export function SupplyPage() {
                               }
                               label={t('supply.platform_emergency_only')}
                             />
+                            {platform.type === 'nvtokens' ? (
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="xs"
+                                loading={refreshingPlatformId === platform.id}
+                                disabled={
+                                  platform.sessionRefreshEnabled !== true ||
+                                  !platform.challengeApiKeyConfigured ||
+                                  !platform.passwordConfigured
+                                }
+                                onClick={() => void refreshPlatformSession(platform.id)}
+                              >
+                                <IconRefreshCw size={13} />
+                                {t('supply.session_refresh_now')}
+                              </Button>
+                            ) : null}
                             <Button
                               variant="ghost"
                               size="xs"
@@ -2912,6 +2984,113 @@ export function SupplyPage() {
                           {platform.type === 'nvtokens' ? (
                             <>
                               <div className={styles.field}>
+                                <label>{t('supply.session_refresh_enabled')}</label>
+                                <ToggleSwitch
+                                  checked={platform.sessionRefreshEnabled === true}
+                                  onChange={(sessionRefreshEnabled) =>
+                                    updateSupplyPlatform(platformIndex, { sessionRefreshEnabled })
+                                  }
+                                  label={
+                                    platform.sessionRefreshEnabled
+                                      ? t('common.enabled')
+                                      : t('common.disabled')
+                                  }
+                                />
+                              </div>
+                              <div className={styles.field}>
+                                <label>{t('supply.challenge_provider')}</label>
+                                <Select
+                                  value={platform.challengeProvider || 'capsolver'}
+                                  options={[
+                                    { value: 'capsolver', label: 'CapSolver' },
+                                    { value: 'capmonster', label: 'CapMonster' },
+                                    { value: '2captcha', label: '2Captcha' },
+                                    {
+                                      value: 'custom',
+                                      label: t('supply.challenge_provider_custom'),
+                                    },
+                                    {
+                                      value: 'session_sidecar',
+                                      label: t('supply.challenge_provider_sidecar'),
+                                    },
+                                  ]}
+                                  onChange={(challengeProvider) => {
+                                    const defaults: Record<string, string> = {
+                                      capsolver: 'https://api.capsolver.com',
+                                      capmonster: 'https://api.capmonster.cloud',
+                                      '2captcha': 'https://api.2captcha.com',
+                                    };
+                                    updateSupplyPlatform(platformIndex, {
+                                      challengeProvider,
+                                      challengeApiBase:
+                                        defaults[challengeProvider] ??
+                                        platform.challengeApiBase ??
+                                        '',
+                                    });
+                                  }}
+                                />
+                              </div>
+                              <Input
+                                label={t('supply.challenge_api_base')}
+                                value={platform.challengeApiBase ?? ''}
+                                onChange={(event) =>
+                                  updateSupplyPlatform(platformIndex, {
+                                    challengeApiBase: event.target.value,
+                                  })
+                                }
+                                placeholder="https://api.capsolver.com"
+                              />
+                              <Input
+                                label={t('supply.challenge_api_key')}
+                                type="password"
+                                value={platform.challengeApiKey ?? ''}
+                                onChange={(event) =>
+                                  updateSupplyPlatform(platformIndex, {
+                                    challengeApiKey: event.target.value,
+                                    clearChallengeApiKey: false,
+                                  })
+                                }
+                                placeholder={
+                                  platform.challengeApiKeyConfigured
+                                    ? t('supply.challenge_api_key_saved')
+                                    : t('supply.challenge_api_key_placeholder')
+                                }
+                                rightElement={
+                                  platform.challengeApiKeyConfigured ? (
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="xs"
+                                      iconOnly
+                                      title={t('common.reset')}
+                                      aria-label={t('common.reset')}
+                                      onClick={() =>
+                                        updateSupplyPlatform(platformIndex, {
+                                          challengeApiKey: '',
+                                          challengeApiKeyConfigured: false,
+                                          clearChallengeApiKey: true,
+                                        })
+                                      }
+                                    >
+                                      <IconX size={14} />
+                                    </Button>
+                                  ) : undefined
+                                }
+                                autoComplete="off"
+                              />
+                              <Input
+                                label={t('supply.session_refresh_cooldown')}
+                                type="number"
+                                min={30}
+                                max={3600}
+                                value={platform.refreshCooldownSeconds ?? 300}
+                                onChange={(event) =>
+                                  updateSupplyPlatform(platformIndex, {
+                                    refreshCooldownSeconds: Number(event.target.value),
+                                  })
+                                }
+                              />
+                              <div className={styles.field}>
                                 <label>{t('supply.purchase_account_type')}</label>
                                 <Select
                                   value={platform.purchaseAccountType || 'all'}
@@ -2975,6 +3154,28 @@ export function SupplyPage() {
                         {platform.type === 'bugteam' ? (
                           <p className={styles.platformHint}>
                             {t('supply.platform_bugteam_auth_hint')}
+                          </p>
+                        ) : null}
+                        {platform.type === 'nvtokens' ? (
+                          <p
+                            className={`${styles.platformHint} ${
+                              sessionRefresh?.lastError ? styles.fieldError : ''
+                            }`}
+                          >
+                            {t('supply.session_refresh_status', {
+                              state: t(
+                                sessionRefresh?.state === 'refreshing'
+                                  ? 'supply.session_refresh_state_refreshing'
+                                  : sessionRefresh?.state === 'waiting_challenge'
+                                    ? 'supply.session_refresh_state_waiting_challenge'
+                                    : sessionRefresh?.state === 'cooldown'
+                                      ? 'supply.session_refresh_state_cooldown'
+                                      : sessionRefresh?.state === 'healthy'
+                                        ? 'supply.session_refresh_state_healthy'
+                                        : 'supply.session_refresh_state_disabled'
+                              ),
+                            })}
+                            {sessionRefresh?.lastError ? ` · ${sessionRefresh.lastError}` : ''}
                           </p>
                         ) : null}
                         {platform.emergencyOnly ? (

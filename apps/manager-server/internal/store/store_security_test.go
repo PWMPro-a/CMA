@@ -55,13 +55,17 @@ func TestStoreEncryptsSetupAndManagerConfigSecrets(t *testing.T) {
 		Supply: ManagerSupplyConfig{
 			Username: "supply-user",
 			Password: "supply-password",
+			Platforms: []ManagerSupplyPlatformConfig{{
+				ID: "nvtokens-main", Type: "nvtokens", BaseURL: "https://nvtokens.com", Product: "plus",
+				ChallengeAPIKey: "challenge-secret",
+			}},
 		},
 	}
 	if err := db.SaveManagerConfig(context.Background(), managerCfg); err != nil {
 		t.Fatalf("save manager config: %v", err)
 	}
 	rawManagerConfig := rawSettingValue(t, db, "manager_config_v1")
-	if strings.Contains(rawManagerConfig, "management-key") || strings.Contains(rawManagerConfig, "supply-password") || !strings.Contains(rawManagerConfig, "enc:v1:") {
+	if strings.Contains(rawManagerConfig, "management-key") || strings.Contains(rawManagerConfig, "supply-password") || strings.Contains(rawManagerConfig, "challenge-secret") || !strings.Contains(rawManagerConfig, "enc:v1:") {
 		t.Fatalf("manager config was not encrypted at rest: %s", rawManagerConfig)
 	}
 	loadedManagerCfg, ok, err := db.LoadManagerConfig(context.Background())
@@ -73,6 +77,9 @@ func TestStoreEncryptsSetupAndManagerConfigSecrets(t *testing.T) {
 	}
 	if loadedManagerCfg.Supply.Password != "supply-password" {
 		t.Fatalf("loaded manager config supply password = %q", loadedManagerCfg.Supply.Password)
+	}
+	if loadedManagerCfg.Supply.Platforms[0].ChallengeAPIKey != "challenge-secret" {
+		t.Fatalf("loaded challenge API key = %q", loadedManagerCfg.Supply.Platforms[0].ChallengeAPIKey)
 	}
 }
 

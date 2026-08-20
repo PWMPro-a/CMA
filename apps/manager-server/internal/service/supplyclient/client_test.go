@@ -333,6 +333,84 @@ func TestNvtokensCaptchaRefreshReturnsActionableAuthenticationError(t *testing.T
 	}
 }
 
+func TestNvtokensAutomaticRefresherRetriesOriginalRequestWithNewSession(t *testing.T) {
+	var refreshCalls atomic.Int32
+	var catalogCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspace/seller-candidates":
+			catalogCalls.Add(1)
+			cookie, _ := r.Cookie("session")
+			if cookie == nil || cookie.Value != "fresh-session" {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"code":"AUTH_REQUIRED"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"sellers":[{"sale_plan_counts":{"plus":2}}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	client.SetNvtokensSessionRefresher(func(ctx context.Context, credentials Credentials) (string, error) {
+		refreshCalls.Add(1)
+		return "fresh-session", nil
+	})
+	catalog, err := client.ProductCatalog(context.Background(), Credentials{
+		ID:           "nvtokens-main",
+		PlatformType: "nvtokens",
+		BaseURL:      server.URL,
+		Token:        "expired-session",
+		Username:     "buyer",
+		Password:     "secret",
+	})
+	if err != nil || len(catalog.Products) != 1 || catalog.Products[0].Available != 2 {
+		t.Fatalf("catalog = %#v err=%v", catalog, err)
+	}
+	if refreshCalls.Load() != 1 || catalogCalls.Load() != 2 {
+		t.Fatalf("refresh=%d catalog=%d, want refresh=1 catalog=2", refreshCalls.Load(), catalogCalls.Load())
+	}
+}
+
+func TestNvtokensChallengeLoginReturnsAndValidatesSession(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth/challenge-config":
+			_, _ = w.Write([]byte(`{"provider":"turnstile","site_key":"site-key"}`))
+		case "/api/login":
+			var payload map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			if payload["username"] != "buyer" || payload["password"] != "secret" || payload["cf-turnstile-response"] != "challenge-token" {
+				t.Fatalf("login payload = %#v", payload)
+			}
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: "renewed-session", Path: "/"})
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/api/me":
+			cookie, _ := r.Cookie("session")
+			if cookie == nil || cookie.Value != "renewed-session" {
+				t.Fatalf("session cookie = %#v", cookie)
+			}
+			_, _ = w.Write([]byte(`{"id":1}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	credentials := Credentials{PlatformType: "nvtokens", BaseURL: server.URL, Username: "buyer", Password: "secret"}
+	challenge, err := client.NvtokensChallenge(context.Background(), credentials)
+	if err != nil || challenge.Provider != "turnstile" || challenge.SiteKey != "site-key" {
+		t.Fatalf("challenge = %#v err=%v", challenge, err)
+	}
+	session, err := client.LoginNvtokensWithChallenge(context.Background(), credentials, "challenge-token")
+	if err != nil || session != "renewed-session" {
+		t.Fatalf("session = %q err=%v", session, err)
+	}
+}
+
 func TestNvtokensProductCatalogAggregatesNativeSalePlans(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

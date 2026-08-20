@@ -25,6 +25,15 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := strings.TrimRight(r.URL.Path, "/")
+	if platformID, ok := refreshNvtokensPlatformID(path); ok {
+		if r.Method != http.MethodPost {
+			response.MethodNotAllowed(w)
+			return
+		}
+		result, err := h.App.SupplyService.RefreshNvtokensSession(r.Context(), platformID)
+		h.writeResult(w, result, err)
+		return
+	}
 	if taskID, ok := cancelPurchaseTaskID(path); ok {
 		if r.Method != http.MethodPost {
 			response.MethodNotAllowed(w)
@@ -340,4 +349,14 @@ func retryRecoveryImportID(path string) (string, bool) {
 	}
 	recoveryID := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix))
 	return recoveryID, recoveryID != "" && !strings.Contains(recoveryID, "/")
+}
+
+func refreshNvtokensPlatformID(path string) (string, bool) {
+	const prefix = "/v0/management/supply/platforms/"
+	const suffix = "/refresh-session"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", false
+	}
+	platformID := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix))
+	return platformID, platformID != "" && !strings.Contains(platformID, "/")
 }

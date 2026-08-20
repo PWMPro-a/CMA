@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
@@ -41,6 +42,12 @@ const (
 
 	SupplyPlatformSelectionBestAvailable = "best_available"
 	SupplyPlatformSelectionPriorityFirst = "priority_first"
+
+	SupplyChallengeProviderCapSolver      = "capsolver"
+	SupplyChallengeProviderCapMonster     = "capmonster"
+	SupplyChallengeProviderTwoCaptcha     = "2captcha"
+	SupplyChallengeProviderCustom         = "custom"
+	SupplyChallengeProviderSessionSidecar = "session_sidecar"
 )
 
 type supplyStrategyPreset struct {
@@ -65,6 +72,7 @@ type Service struct {
 	cfg       config.Config
 	store     *store.Store
 	collector *collectorservice.Service
+	updateMu  sync.Mutex
 }
 
 func New(cfg config.Config, store *store.Store, collector *collectorservice.Service) *Service {
@@ -98,6 +106,8 @@ func (s *Service) Get(ctx context.Context) (Response, error) {
 }
 
 func (s *Service) Update(ctx context.Context, submitted store.ManagerConfig) (Response, error) {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
 	current, source, _, err := s.ResolveManagerConfigWithSource(ctx)
 	if err != nil {
 		return Response{}, err
@@ -173,6 +183,8 @@ func (s *Service) Update(ctx context.Context, submitted store.ManagerConfig) (Re
 }
 
 func (s *Service) UpdateSupply(ctx context.Context, submitted store.ManagerSupplyConfig) (store.ManagerSupplyConfig, error) {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
 	current, _, _, err := s.ResolveManagerConfigWithSource(ctx)
 	if err != nil {
 		return store.ManagerSupplyConfig{}, err
@@ -191,10 +203,61 @@ func (s *Service) UpdateSupply(ctx context.Context, submitted store.ManagerSuppl
 	for index := range result.Platforms {
 		result.Platforms[index].PasswordConfigured = strings.TrimSpace(result.Platforms[index].Password) != ""
 		result.Platforms[index].TokenConfigured = strings.TrimSpace(result.Platforms[index].Token) != ""
+		result.Platforms[index].ChallengeAPIKeyConfigured = strings.TrimSpace(result.Platforms[index].ChallengeAPIKey) != ""
 		result.Platforms[index].Password = ""
 		result.Platforms[index].Token = ""
+		result.Platforms[index].ChallengeAPIKey = ""
+		result.Platforms[index].ClearChallengeAPIKey = false
 	}
 	return result, nil
+}
+
+func (s *Service) UpdateSupplyPlatformSession(
+	ctx context.Context,
+	platformID string,
+	session string,
+) (store.ManagerSupplyPlatformConfig, error) {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+	platformID = strings.TrimSpace(platformID)
+	session = strings.TrimSpace(session)
+	if strings.HasPrefix(strings.ToLower(session), "session=") {
+		session = strings.TrimSpace(strings.SplitN(session, "=", 2)[1])
+	}
+	if platformID == "" || session == "" {
+		return store.ManagerSupplyPlatformConfig{}, errors.New("platformId and session are required")
+	}
+	current, _, _, err := s.ResolveManagerConfigWithSource(ctx)
+	if err != nil {
+		return store.ManagerSupplyPlatformConfig{}, err
+	}
+	updatedIndex := -1
+	for index := range current.Supply.Platforms {
+		platform := &current.Supply.Platforms[index]
+		if !strings.EqualFold(strings.TrimSpace(platform.ID), platformID) {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(platform.Type), SupplyPlatformNvtokens) {
+			return store.ManagerSupplyPlatformConfig{}, errors.New("supply platform is not nvtokens")
+		}
+		platform.Token = session
+		platform.TokenConfigured = true
+		updatedIndex = index
+		break
+	}
+	if updatedIndex < 0 {
+		return store.ManagerSupplyPlatformConfig{}, fmt.Errorf("supply platform %s was not found", platformID)
+	}
+	if primary, ok := primarySupplyPlatform(current.Supply.Platforms); ok {
+		current.Supply.BaseURL = primary.BaseURL
+		current.Supply.Username = primary.Username
+		current.Supply.Password = primary.Password
+		current.Supply.Product = primary.Product
+	}
+	if err := s.store.SaveManagerConfig(ctx, current); err != nil {
+		return store.ManagerSupplyPlatformConfig{}, err
+	}
+	return current.Supply.Platforms[updatedIndex], nil
 }
 
 func (s *Service) ResolveSetup(ctx context.Context) (store.Setup, bool, error) {
@@ -562,9 +625,48 @@ func normalizeSupplyPlatforms(submitted []store.ManagerSupplyPlatformConfig, cur
 			}
 			platform.PurchaseAccountType = normalizeSupplyPurchaseAccountType(purchaseAccountType)
 			platform.MaxUnitPriceFen = normalizeSupplyMaxUnitPriceFen(raw.MaxUnitPriceFen, platform.MaxUnitPriceFen)
+			if raw.SessionRefreshEnabled != nil {
+				platform.SessionRefreshEnabled = BoolPtr(*raw.SessionRefreshEnabled)
+			} else if platform.SessionRefreshEnabled == nil {
+				platform.SessionRefreshEnabled = BoolPtr(false)
+			}
+			providerChanged := false
+			if value := normalizeSupplyChallengeProvider(raw.ChallengeProvider); value != "" {
+				providerChanged = value != normalizeSupplyChallengeProvider(previous.ChallengeProvider)
+				platform.ChallengeProvider = value
+			} else if platform.ChallengeProvider == "" {
+				platform.ChallengeProvider = SupplyChallengeProviderCapSolver
+			}
+			if value := strings.TrimRight(strings.TrimSpace(raw.ChallengeAPIBase), "/"); value != "" {
+				platform.ChallengeAPIBase = value
+			} else if providerChanged || strings.TrimSpace(platform.ChallengeAPIBase) == "" {
+				platform.ChallengeAPIBase = defaultSupplyChallengeAPIBase(platform.ChallengeProvider)
+			}
+			if raw.ClearChallengeAPIKey {
+				platform.ChallengeAPIKey = ""
+			} else if value := strings.TrimSpace(raw.ChallengeAPIKey); value != "" {
+				platform.ChallengeAPIKey = value
+			}
+			platform.ClearChallengeAPIKey = false
+			platform.RefreshCooldownSeconds = BoundedPositiveOrDefault(
+				raw.RefreshCooldownSeconds,
+				platform.RefreshCooldownSeconds,
+				300,
+				3600,
+			)
+			if platform.RefreshCooldownSeconds < 30 {
+				platform.RefreshCooldownSeconds = 30
+			}
 		} else {
 			platform.PurchaseAccountType = ""
 			platform.MaxUnitPriceFen = nil
+			platform.SessionRefreshEnabled = nil
+			platform.ChallengeProvider = ""
+			platform.ChallengeAPIBase = ""
+			platform.ChallengeAPIKey = ""
+			platform.ChallengeAPIKeyConfigured = false
+			platform.ClearChallengeAPIKey = false
+			platform.RefreshCooldownSeconds = 0
 		}
 		if raw.Priority > 0 {
 			platform.Priority = clampInt(raw.Priority, 1, 1000)
@@ -580,6 +682,7 @@ func normalizeSupplyPlatforms(submitted []store.ManagerSupplyPlatformConfig, cur
 		}
 		platform.PasswordConfigured = platform.Password != ""
 		platform.TokenConfigured = platform.Token != ""
+		platform.ChallengeAPIKeyConfigured = platform.ChallengeAPIKey != ""
 		result = append(result, platform)
 	}
 	return result
@@ -606,6 +709,36 @@ func normalizeSupplyPlatformType(value string) string {
 		return SupplyPlatformNvtokens
 	default:
 		return SupplyPlatformLegacy
+	}
+}
+
+func normalizeSupplyChallengeProvider(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case SupplyChallengeProviderCapSolver:
+		return SupplyChallengeProviderCapSolver
+	case SupplyChallengeProviderCapMonster:
+		return SupplyChallengeProviderCapMonster
+	case SupplyChallengeProviderTwoCaptcha, "twocaptcha":
+		return SupplyChallengeProviderTwoCaptcha
+	case SupplyChallengeProviderCustom:
+		return SupplyChallengeProviderCustom
+	case SupplyChallengeProviderSessionSidecar, "sidecar":
+		return SupplyChallengeProviderSessionSidecar
+	default:
+		return ""
+	}
+}
+
+func defaultSupplyChallengeAPIBase(provider string) string {
+	switch normalizeSupplyChallengeProvider(provider) {
+	case SupplyChallengeProviderCapSolver:
+		return "https://api.capsolver.com"
+	case SupplyChallengeProviderCapMonster:
+		return "https://api.capmonster.cloud"
+	case SupplyChallengeProviderTwoCaptcha:
+		return "https://api.2captcha.com"
+	default:
+		return ""
 	}
 }
 
@@ -954,6 +1087,21 @@ func validateSupplyPlatform(platform store.ManagerSupplyPlatformConfig) error {
 		if !supportedNvtokensProduct(platform.Product) {
 			return errors.New("product must be a supported nvtokens sale plan")
 		}
+		if platform.SessionRefreshEnabled != nil && *platform.SessionRefreshEnabled {
+			if strings.TrimSpace(platform.Username) == "" || strings.TrimSpace(platform.Password) == "" {
+				return errors.New("username and password are required when automatic session refresh is enabled")
+			}
+			if normalizeSupplyChallengeProvider(platform.ChallengeProvider) == "" {
+				return errors.New("challengeProvider must be capsolver, capmonster, 2captcha, custom or session_sidecar")
+			}
+			challengeURL, challengeErr := url.Parse(strings.TrimSpace(platform.ChallengeAPIBase))
+			if challengeErr != nil || (challengeURL.Scheme != "http" && challengeURL.Scheme != "https") || challengeURL.Host == "" {
+				return errors.New("challengeApiBase must be a valid HTTP or HTTPS URL")
+			}
+			if strings.TrimSpace(platform.ChallengeAPIKey) == "" {
+				return errors.New("challengeApiKey is required when automatic session refresh is enabled")
+			}
+		}
 	default:
 		switch strings.ToLower(strings.TrimSpace(platform.Product)) {
 		case "oauth_30d", "oauth_7d", "team_1h":
@@ -979,8 +1127,11 @@ func SanitizeManagerConfig(cfg store.ManagerConfig) store.ManagerConfig {
 	for index := range cfg.Supply.Platforms {
 		cfg.Supply.Platforms[index].PasswordConfigured = strings.TrimSpace(cfg.Supply.Platforms[index].Password) != ""
 		cfg.Supply.Platforms[index].TokenConfigured = strings.TrimSpace(cfg.Supply.Platforms[index].Token) != ""
+		cfg.Supply.Platforms[index].ChallengeAPIKeyConfigured = strings.TrimSpace(cfg.Supply.Platforms[index].ChallengeAPIKey) != ""
 		cfg.Supply.Platforms[index].Password = ""
 		cfg.Supply.Platforms[index].Token = ""
+		cfg.Supply.Platforms[index].ChallengeAPIKey = ""
+		cfg.Supply.Platforms[index].ClearChallengeAPIKey = false
 	}
 	return cfg
 }

@@ -112,17 +112,18 @@ type Overview struct {
 }
 
 type Status struct {
-	Config        store.ManagerSupplyConfig  `json:"config"`
-	Running       bool                       `json:"running"`
-	Overview      Overview                   `json:"overview"`
-	AccountPool   *AccountPoolSummary        `json:"accountPool,omitempty"`
-	SmartResource SmartResource              `json:"smartResource"`
-	Automation    AutomationExecution        `json:"automation"`
-	Recovery      RecoverySummary            `json:"recovery"`
-	ActiveOrder   *store.SupplyOrder         `json:"activeOrder,omitempty"`
-	ActiveOrders  []store.SupplyOrder        `json:"activeOrders,omitempty"`
-	PurchaseTasks []store.SupplyPurchaseTask `json:"purchaseTasks,omitempty"`
-	Orders        []store.SupplyOrder        `json:"orders"`
+	Config         store.ManagerSupplyConfig      `json:"config"`
+	Running        bool                           `json:"running"`
+	Overview       Overview                       `json:"overview"`
+	AccountPool    *AccountPoolSummary            `json:"accountPool,omitempty"`
+	SmartResource  SmartResource                  `json:"smartResource"`
+	Automation     AutomationExecution            `json:"automation"`
+	Recovery       RecoverySummary                `json:"recovery"`
+	ActiveOrder    *store.SupplyOrder             `json:"activeOrder,omitempty"`
+	ActiveOrders   []store.SupplyOrder            `json:"activeOrders,omitempty"`
+	PurchaseTasks  []store.SupplyPurchaseTask     `json:"purchaseTasks,omitempty"`
+	SessionRefresh []NvtokensSessionRefreshStatus `json:"sessionRefresh,omitempty"`
+	Orders         []store.SupplyOrder            `json:"orders"`
 }
 
 // AccountPoolSummary is the lightweight, operator-facing account split shared
@@ -631,6 +632,9 @@ type Service struct {
 	supplyOrdersCache       supplyOrdersCache
 	statusCache             supplyStatusCache
 	purchaseTaskWake        chan struct{}
+	challengeClient         *http.Client
+	nvtokensRefreshMu       sync.Mutex
+	nvtokensRefreshState    map[string]*nvtokensRefreshState
 }
 
 type supplyAccountListCache struct {
@@ -715,16 +719,20 @@ func New(st *store.Store, managerConfig *managerconfigsvc.Service, httpClient ..
 	if len(httpClient) > 0 {
 		client = httpClient[0]
 	}
-	return &Service{
+	service := &Service{
 		store:                 st,
 		managerConfig:         managerConfig,
 		supplyClient:          supplyclient.New(client),
+		challengeClient:       client,
 		authFiles:             cpaauthfiles.New(client),
 		smartBuckets:          make(map[int64]*smartUsageBucket),
 		smartQuotaState:       newSmartQuotaCalibrationState(),
 		criticalConfirmRounds: make(map[string]int),
 		purchaseTaskWake:      make(chan struct{}, 1),
+		nvtokensRefreshState:  make(map[string]*nvtokensRefreshState),
 	}
+	service.supplyClient.SetNvtokensSessionRefresher(service.refreshNvtokensSession)
+	return service
 }
 
 // SetInspectionSnapshotRefresher connects smart supply with the Codex
@@ -1104,15 +1112,16 @@ func (s *Service) buildStatus(ctx context.Context, limit int) (Status, error) {
 	}
 	applySmartTokenMetrics(&resource)
 	status := Status{
-		Config:        sanitizeConfig(cfg.Supply),
-		Running:       running,
-		Overview:      overview,
-		AccountPool:   accountPool,
-		SmartResource: resource,
-		Automation:    s.currentAutomationExecution(managerconfigsvc.SupplyEnabled(cfg.Supply)),
-		Recovery:      s.currentRecoverySummary(ctx, cfg.Supply),
-		PurchaseTasks: purchaseTasks,
-		Orders:        orders,
+		Config:         sanitizeConfig(cfg.Supply),
+		Running:        running,
+		Overview:       overview,
+		AccountPool:    accountPool,
+		SmartResource:  resource,
+		Automation:     s.currentAutomationExecution(managerconfigsvc.SupplyEnabled(cfg.Supply)),
+		Recovery:       s.currentRecoverySummary(ctx, cfg.Supply),
+		PurchaseTasks:  purchaseTasks,
+		SessionRefresh: s.nvtokensRefreshStatuses(cfg.Supply),
+		Orders:         orders,
 	}
 	if len(activeOrders) > 0 {
 		status.ActiveOrder = &activeOrders[0]
@@ -1517,6 +1526,7 @@ func (s *Service) UpdateConfig(ctx context.Context, config store.ManagerSupplyCo
 		s.observeAutomaticEnabled(false)
 	}
 	if resolved, _, _, resolveErr := s.managerConfig.ResolveManagerConfigWithSource(ctx); resolveErr == nil {
+		s.resetNvtokensRefreshStates(resolved.Supply)
 		if openOrders, listErr := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders); listErr == nil {
 			_, _ = s.reconcileUnavailableSupplyOrders(ctx, resolved.Supply, openOrders)
 		}
@@ -9696,8 +9706,11 @@ func sanitizeConfig(cfg store.ManagerSupplyConfig) store.ManagerSupplyConfig {
 	for index := range cfg.Platforms {
 		cfg.Platforms[index].PasswordConfigured = strings.TrimSpace(cfg.Platforms[index].Password) != ""
 		cfg.Platforms[index].TokenConfigured = strings.TrimSpace(cfg.Platforms[index].Token) != ""
+		cfg.Platforms[index].ChallengeAPIKeyConfigured = strings.TrimSpace(cfg.Platforms[index].ChallengeAPIKey) != ""
 		cfg.Platforms[index].Password = ""
 		cfg.Platforms[index].Token = ""
+		cfg.Platforms[index].ChallengeAPIKey = ""
+		cfg.Platforms[index].ClearChallengeAPIKey = false
 	}
 	return cfg
 }

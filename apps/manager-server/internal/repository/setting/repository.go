@@ -307,8 +307,14 @@ func (r *repository) protectManagerConfig(cfg model.ManagerConfig) (model.Manage
 			return model.ManagerConfig{}, err
 		}
 		cfg.Supply.Platforms[index].Token = value
+		value, err = r.protector.ProtectString(cfg.Supply.Platforms[index].ChallengeAPIKey)
+		if err != nil {
+			return model.ManagerConfig{}, err
+		}
+		cfg.Supply.Platforms[index].ChallengeAPIKey = value
 		cfg.Supply.Platforms[index].PasswordConfigured = false
 		cfg.Supply.Platforms[index].TokenConfigured = false
+		cfg.Supply.Platforms[index].ChallengeAPIKeyConfigured = false
 	}
 	return cfg, nil
 }
@@ -341,6 +347,12 @@ func (r *repository) unprotectManagerConfig(cfg model.ManagerConfig) (model.Mana
 		}
 		cfg.Supply.Platforms[index].Token = value
 		cfg.Supply.Platforms[index].TokenConfigured = value != ""
+		value, err = r.protector.UnprotectString(cfg.Supply.Platforms[index].ChallengeAPIKey)
+		if err != nil {
+			return model.ManagerConfig{}, err
+		}
+		cfg.Supply.Platforms[index].ChallengeAPIKey = value
+		cfg.Supply.Platforms[index].ChallengeAPIKeyConfigured = value != ""
 	}
 	return cfg, nil
 }
