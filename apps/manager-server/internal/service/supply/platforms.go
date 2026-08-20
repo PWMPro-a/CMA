@@ -243,6 +243,10 @@ func (s *Service) QuotePlatformProduct(
 	}
 	credentials := supplyPlatformCredentials(platform)
 	inventory, err := s.supplyClient.Inventory(ctx, credentials, product, quantity)
+	if errors.Is(err, supplyclient.ErrNvtokensEstimateUnavailable) &&
+		strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformNvtokens) {
+		inventory, err = s.nvtokensCatalogQuoteFallback(ctx, platform, product, quantity)
+	}
 	if err != nil {
 		return PlatformOverview{}, err
 	}
@@ -264,6 +268,34 @@ func (s *Service) QuotePlatformProduct(
 	}
 	applySupplyPlatformEconomics(&status, cfg.Supply, s.currentSmartResource(cfg.Supply), platform, quantity)
 	return status, nil
+}
+
+func (s *Service) nvtokensCatalogQuoteFallback(
+	ctx context.Context,
+	platform store.ManagerSupplyPlatformConfig,
+	product string,
+	quantity int,
+) (supplyclient.Inventory, error) {
+	catalog, err := s.supplyClient.ProductCatalog(ctx, supplyPlatformCredentials(platform))
+	if err != nil {
+		return supplyclient.Inventory{}, err
+	}
+	for _, item := range catalog.Products {
+		if !strings.EqualFold(strings.TrimSpace(item.Code), strings.TrimSpace(product)) {
+			continue
+		}
+		available := max(0, item.Available)
+		quotedQuantity := min(max(1, quantity), available)
+		return supplyclient.Inventory{
+			Product:               product,
+			RequestedQuantity:     max(1, quantity),
+			Available:             available,
+			Missing:               max(0, max(1, quantity)-available),
+			EstimatedTotalFen:     item.MinUnitPriceFen * int64(quotedQuantity),
+			EstimatedUnitPriceFen: item.MinUnitPriceFen,
+		}, nil
+	}
+	return supplyclient.Inventory{}, fmt.Errorf("nvtokens catalog did not include product %s", product)
 }
 
 func resolveSupplyPlatform(cfg store.ManagerSupplyConfig, supplierID string, product string) (store.ManagerSupplyPlatformConfig, error) {
@@ -464,6 +496,142 @@ func (s *Service) selectLowPriceReservePlatform(
 	status := quoted.all[selectedIndex]
 	platform := platformByID[strings.ToLower(strings.TrimSpace(status.ID))]
 	return supplyPlatformSelection{platform: platform, status: status, all: quoted.all}, true, nil
+}
+
+// selectLowPriceReserveCatalogPlatform keeps the high-frequency watcher on
+// the supplier's lightweight catalog endpoint. Exact extraction estimates are
+// intentionally deferred to the durable purchase task, where the hard price
+// ceiling is sent again immediately before order creation. This avoids
+// hammering the heavier estimate endpoint every second and also prevents its
+// occasional HTTP 204 response from hiding an otherwise current catalog price.
+func (s *Service) selectLowPriceReserveCatalogPlatform(
+	ctx context.Context,
+	cfg store.ManagerSupplyConfig,
+	quantity int,
+	requestedProduct ...string,
+) (supplyPlatformSelection, bool, error) {
+	product := ""
+	if len(requestedProduct) > 0 {
+		product = strings.ToLower(strings.TrimSpace(requestedProduct[0]))
+	}
+	ceiling := valueOrZero(cfg.LowPriceReserveMaxUnitPriceFen)
+	if ceiling <= 0 {
+		return supplyPlatformSelection{}, false, nil
+	}
+	platforms := make([]store.ManagerSupplyPlatformConfig, 0, len(supplyPlatforms(cfg)))
+	for _, platform := range supplyPlatforms(cfg) {
+		if !strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformNvtokens) {
+			continue
+		}
+		if product != "" {
+			if !supplyProductSupportedByPlatform(platform, product) {
+				continue
+			}
+			platform.Product = product
+		}
+		platforms = append(platforms, platform)
+	}
+	if len(platforms) == 0 {
+		return supplyPlatformSelection{}, false, nil
+	}
+
+	statuses := make([]PlatformOverview, len(platforms))
+	type result struct {
+		index   int
+		catalog supplyclient.ProductCatalog
+		err     error
+	}
+	results := make(chan result, len(platforms))
+	var wait sync.WaitGroup
+	for index, platform := range platforms {
+		wait.Add(1)
+		go func(index int, platform store.ManagerSupplyPlatformConfig) {
+			defer wait.Done()
+			if !supplyPlatformConfigured(platform) {
+				results <- result{index: index, err: ErrNotConfigured}
+				return
+			}
+			catalog, err := s.supplyClient.ProductCatalog(ctx, supplyPlatformCredentials(platform))
+			results <- result{index: index, catalog: catalog, err: err}
+		}(index, platform)
+	}
+	wait.Wait()
+	close(results)
+
+	checkedAtMS := time.Now().UnixMilli()
+	platformErrors := make([]error, 0, len(platforms))
+	candidates := make([]int, 0, len(platforms))
+	for item := range results {
+		platform := platforms[item.index]
+		status := PlatformOverview{
+			ID:          platform.ID,
+			Name:        platform.Name,
+			Type:        platform.Type,
+			Product:     platform.Product,
+			Priority:    platform.Priority,
+			CheckedAtMS: checkedAtMS,
+		}
+		if item.err != nil {
+			status.LastError = safeError(item.err)
+			platformErrors = append(platformErrors, fmt.Errorf("%s: %w", firstNonEmptyString(platform.Name, platform.ID), item.err))
+			statuses[item.index] = status
+			continue
+		}
+		for _, catalogItem := range item.catalog.Products {
+			if !strings.EqualFold(strings.TrimSpace(catalogItem.Code), strings.TrimSpace(platform.Product)) {
+				continue
+			}
+			available := max(0, catalogItem.Available)
+			quotedQuantity := min(max(1, quantity), available)
+			status.Inventory = &supplyclient.Inventory{
+				Product:               platform.Product,
+				RequestedQuantity:     max(1, quantity),
+				Available:             available,
+				Missing:               max(0, max(1, quantity)-available),
+				EstimatedTotalFen:     catalogItem.MinUnitPriceFen * int64(quotedQuantity),
+				EstimatedUnitPriceFen: catalogItem.MinUnitPriceFen,
+			}
+			if available > 0 && catalogItem.MinUnitPriceFen > 0 && catalogItem.MinUnitPriceFen <= ceiling {
+				candidates = append(candidates, item.index)
+			}
+			break
+		}
+		statuses[item.index] = status
+	}
+	if len(candidates) == 0 {
+		if len(platformErrors) == len(platforms) {
+			return supplyPlatformSelection{all: statuses}, false, errors.Join(platformErrors...)
+		}
+		return supplyPlatformSelection{all: statuses}, false, nil
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left := statuses[candidates[i]]
+		right := statuses[candidates[j]]
+		leftPrice := left.Inventory.EstimatedUnitPriceFen
+		rightPrice := right.Inventory.EstimatedUnitPriceFen
+		if leftPrice != rightPrice {
+			return leftPrice < rightPrice
+		}
+		leftPriority := left.Priority
+		if leftPriority <= 0 {
+			leftPriority = math.MaxInt
+		}
+		rightPriority := right.Priority
+		if rightPriority <= 0 {
+			rightPriority = math.MaxInt
+		}
+		if leftPriority != rightPriority {
+			return leftPriority < rightPriority
+		}
+		return strings.ToLower(left.ID) < strings.ToLower(right.ID)
+	})
+	selectedIndex := candidates[0]
+	statuses[selectedIndex].Selected = true
+	return supplyPlatformSelection{
+		platform: platforms[selectedIndex],
+		status:   statuses[selectedIndex],
+		all:      statuses,
+	}, true, nil
 }
 
 func (s *Service) selectSupplyPlatformProduct(

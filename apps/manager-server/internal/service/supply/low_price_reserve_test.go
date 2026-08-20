@@ -65,10 +65,8 @@ func TestRunLowPriceReserveCreatesOneBoundedLadderTask(t *testing.T) {
 				})
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"files": files})
-		case "/api/workspace/extractions/estimate":
-			_, _ = w.Write([]byte(`{"estimate":{"available_quantity":20,"buyer_total_cents":100,"min_unit_price_cents":50,"max_unit_price_cents":50}}`))
-		case "/api/me":
-			_, _ = w.Write([]byte(`{"available_balance_cents":100000,"balance_cents":100000}`))
+		case "/api/workspace/seller-candidates":
+			_, _ = w.Write([]byte(`{"sellers":[{"sale_plans":["plus"],"sale_plan_counts":{"plus":20},"sale_plan_prices":{"plus":{"min_cents":50,"max_cents":50}}}]}`))
 		default:
 			http.NotFound(w, r)
 		}

@@ -22,19 +22,21 @@ import (
 )
 
 const (
-	defaultTimeout        = 30 * time.Second
-	defaultTakeTimeout    = 3 * time.Minute
-	maxResponseBodyBytes  = 16 * 1024 * 1024
-	maxDownloadBodyBytes  = 64 * 1024 * 1024
-	customerTokenHeader   = "X-Customer-Token"
-	customerSessionHeader = "X-Customer-Session"
-	nvtokensPlatform      = "nvtokens"
-	nvtokensSessionCookie = "scm_session"
-	nvtokensLegacyCookie  = "session"
-	nvtokensBatchTimeout  = 10 * time.Minute
+	defaultTimeout             = 30 * time.Second
+	defaultTakeTimeout         = 3 * time.Minute
+	maxResponseBodyBytes       = 16 * 1024 * 1024
+	maxDownloadBodyBytes       = 64 * 1024 * 1024
+	nvtokensEstimateRetryDelay = 150 * time.Millisecond
+	customerTokenHeader        = "X-Customer-Token"
+	customerSessionHeader      = "X-Customer-Session"
+	nvtokensPlatform           = "nvtokens"
+	nvtokensSessionCookie      = "scm_session"
+	nvtokensLegacyCookie       = "session"
+	nvtokensBatchTimeout       = 10 * time.Minute
 )
 
 var ErrNvtokensSessionRefreshUnavailable = errors.New("nvtokens automatic session refresh is unavailable")
+var ErrNvtokensEstimateUnavailable = errors.New("nvtokens estimate is temporarily unavailable")
 
 type NvtokensSessionRefresher func(ctx context.Context, credentials Credentials) (string, error)
 
@@ -588,32 +590,46 @@ func (c *Client) nvtokensInventory(ctx context.Context, credentials Credentials,
 	if quantity <= 0 {
 		quantity = 1
 	}
-	value, _, err := c.doAuthenticatedWithTimeout(
-		ctx,
-		credentials,
-		http.MethodPost,
-		"/api/workspace/extractions/estimate",
-		nvtokensPurchasePayload(credentials, product, quantity),
-		c.timeout,
-	)
-	if err != nil {
-		return Inventory{}, err
+	var value any
+	var status int
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		value, status, err = c.doAuthenticatedWithTimeout(
+			ctx,
+			credentials,
+			http.MethodPost,
+			"/api/workspace/extractions/estimate",
+			nvtokensPurchasePayload(credentials, product, quantity),
+			c.timeout,
+		)
+		if err != nil {
+			return Inventory{}, err
+		}
+		if status != http.StatusNoContent {
+			break
+		}
+		if attempt == 0 {
+			timer := time.NewTimer(nvtokensEstimateRetryDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return Inventory{}, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	if status == http.StatusNoContent {
+		return Inventory{}, ErrNvtokensEstimateUnavailable
 	}
 	root := primaryObject(value)
 	estimate := nestedObject(root, "estimate", "quote", "pricing")
 	available := intValue(root,
 		"available_quantity", "availableQuantity", "inventory_available", "inventoryAvailable",
-		"max_quantity", "maxQuantity", "available")
+		"max_quantity", "maxQuantity", "available", "matched_quantity", "matchedQuantity")
 	if available == 0 {
 		available = intValue(estimate,
 			"available_quantity", "availableQuantity", "inventory_available", "inventoryAvailable",
-			"max_quantity", "maxQuantity", "available")
-	}
-	// The estimate endpoint may omit inventory counts while still returning a
-	// valid price quote. Treat the requested quantity as available in that case;
-	// the subsequent purchase call remains the authoritative availability check.
-	if available == 0 && quantity > 0 {
-		available = quantity
+			"max_quantity", "maxQuantity", "available", "matched_quantity", "matchedQuantity")
 	}
 	totalFen := int64Value(root, "estimated_total_fen", "estimatedTotalFen", "total_fen", "totalFen")
 	if totalFen == 0 {
@@ -652,6 +668,13 @@ func (c *Client) nvtokensInventory(ctx context.Context, credentials Credentials,
 	}
 	if unitFen == 0 && totalFen > 0 {
 		unitFen = totalFen / int64(maxInt(quantity, 1))
+	}
+	// Some compatible suppliers omit inventory counts while still returning a
+	// valid price quote. Only infer availability after a positive quote is
+	// present. A zero-price response with matched_quantity=0 means the current
+	// filters (especially a hard max-unit-price ceiling) found no inventory.
+	if available == 0 && quantity > 0 && (totalFen > 0 || unitFen > 0) {
+		available = quantity
 	}
 	return Inventory{
 		Product:               strings.TrimSpace(product),

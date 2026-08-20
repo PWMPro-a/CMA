@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/supplyclient"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
@@ -358,6 +360,40 @@ func TestSelectLowPriceReservePlatformDoesNotQuoteOtherPlatformTypes(t *testing.
 	}
 }
 
+func TestSelectLowPriceReserveCatalogPlatformPublishesLatestPriceWithoutEstimate(t *testing.T) {
+	var catalogCalls atomic.Int32
+	var estimateCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspace/seller-candidates":
+			catalogCalls.Add(1)
+			_, _ = w.Write([]byte(`{"sellers":[{"sale_plans":["plus"],"sale_plan_counts":{"plus":200},"sale_plan_prices":{"plus":{"min_cents":1699,"max_cents":99900}}}]}`))
+		case "/api/workspace/extractions/estimate":
+			estimateCalls.Add(1)
+			http.Error(w, "estimate endpoint should not be polled by the watcher", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	enabled := true
+	ceiling := int64(1500)
+	service := New(nil, nil, server.Client())
+	selection, matched, err := service.selectLowPriceReserveCatalogPlatform(context.Background(), store.ManagerSupplyConfig{
+		LowPriceReserveEnabled: &enabled, LowPriceReserveMaxUnitPriceFen: &ceiling,
+		Platforms: []store.ManagerSupplyPlatformConfig{{
+			ID: "nv", Type: "nvtokens", Enabled: &enabled, BaseURL: server.URL, Token: "nv-session", Product: "plus",
+		}},
+	}, 100)
+	if err != nil || matched {
+		t.Fatalf("matched=%v err=%v selection=%#v", matched, err, selection)
+	}
+	if catalogCalls.Load() != 1 || estimateCalls.Load() != 0 || len(selection.all) != 1 || selection.all[0].Inventory == nil || selection.all[0].Inventory.EstimatedUnitPriceFen != 1699 {
+		t.Fatalf("catalog=%d estimate=%d statuses=%#v", catalogCalls.Load(), estimateCalls.Load(), selection.all)
+	}
+}
+
 func TestResolveSupplyPlatformDoesNotFallbackWhenProductIsUnknown(t *testing.T) {
 	enabled := true
 	cfg := store.ManagerSupplyConfig{Platforms: []store.ManagerSupplyPlatformConfig{{
@@ -401,6 +437,47 @@ func TestExplicitNvtokensProductQuoteUsesNativeProduct(t *testing.T) {
 	}
 	if selection.platform.Product != "pro" || selection.status.Product != "pro" || selection.status.Inventory == nil || selection.status.Inventory.Available != 6 {
 		t.Fatalf("selection = %#v status=%#v", selection.platform, selection.status)
+	}
+}
+
+func TestQuotePlatformProductFallsBackToNvtokensCatalogAfterNoContent(t *testing.T) {
+	var estimateCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspace/extractions/estimate":
+			estimateCalls.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case "/api/workspace/seller-candidates":
+			_, _ = w.Write([]byte(`{"sellers":[{"sale_plans":["plus"],"sale_plan_counts":{"plus":75},"sale_plan_prices":{"plus":{"min_cents":1700,"max_cents":2000}}}]}`))
+		case "/api/me":
+			_, _ = w.Write([]byte(`{"available_balance_cents":100000}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "catalog-fallback.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{Supply: store.ManagerSupplyConfig{
+		Platforms: []store.ManagerSupplyPlatformConfig{{
+			ID: "nv", Type: "nvtokens", Enabled: &enabled, BaseURL: server.URL, Token: "session", Product: "plus",
+		}},
+	}}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	quote, err := service.QuotePlatformProduct(ctx, 10, "nv", "plus")
+	if err != nil {
+		t.Fatalf("quote: %v", err)
+	}
+	if estimateCalls.Load() != 2 || quote.Inventory == nil || quote.Inventory.Available != 75 || quote.Inventory.EstimatedUnitPriceFen != 1700 || quote.Inventory.EstimatedTotalFen != 17000 {
+		t.Fatalf("estimate calls=%d quote=%#v", estimateCalls.Load(), quote)
 	}
 }
 

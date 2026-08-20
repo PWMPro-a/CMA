@@ -136,6 +136,72 @@ func TestNvtokensUsesSessionCookieAndImportsCPABundle(t *testing.T) {
 	}
 }
 
+func TestNvtokensInventoryUsesMatchedQuantityForPartialQuote(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/workspace/extractions/estimate" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"estimate":{"requested_quantity":10,"matched_quantity":3,"missing_quantity":7,"buyer_total_cents":4500,"min_unit_price_cents":1500,"max_unit_price_cents":1500}}`))
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	inventory, err := client.Inventory(context.Background(), Credentials{
+		PlatformType: "nvtokens", BaseURL: server.URL, Token: "session-snapshot",
+	}, "plus", 10)
+	if err != nil {
+		t.Fatalf("inventory: %v", err)
+	}
+	if inventory.Available != 3 || inventory.Missing != 7 || inventory.EstimatedTotalFen != 4500 || inventory.EstimatedUnitPriceFen != 1500 {
+		t.Fatalf("inventory = %#v", inventory)
+	}
+}
+
+func TestNvtokensInventoryRetriesTransientNoContent(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/workspace/extractions/estimate" {
+			http.NotFound(w, r)
+			return
+		}
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_, _ = w.Write([]byte(`{"estimate":{"matched_quantity":2,"buyer_total_cents":3200,"min_unit_price_cents":1600,"max_unit_price_cents":1600}}`))
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	inventory, err := client.Inventory(context.Background(), Credentials{
+		PlatformType: "nvtokens", BaseURL: server.URL, Token: "session-snapshot",
+	}, "plus", 2)
+	if err != nil {
+		t.Fatalf("inventory after retry: %v", err)
+	}
+	if calls.Load() != 2 || inventory.Available != 2 || inventory.EstimatedTotalFen != 3200 {
+		t.Fatalf("calls=%d inventory=%#v", calls.Load(), inventory)
+	}
+}
+
+func TestNvtokensInventoryRejectsPersistentNoContent(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	_, err := client.Inventory(context.Background(), Credentials{
+		PlatformType: "nvtokens", BaseURL: server.URL, Token: "session-snapshot",
+	}, "plus", 10)
+	if !errors.Is(err, ErrNvtokensEstimateUnavailable) || calls.Load() != 2 {
+		t.Fatalf("calls=%d err=%v", calls.Load(), err)
+	}
+}
+
 func TestNvtokensBatchResultsCaptureRemoteOrderIDsAndActualPrices(t *testing.T) {
 	var single any
 	if err := json.Unmarshal([]byte(`{

@@ -48,6 +48,7 @@ const DEFAULT_QUOTA_ESTIMATION_POLICIES: Record<string, SupplyQuotaEstimationPol
 };
 
 const PLATFORM_CATALOG_REFRESH_INTERVAL_MS = 10_000;
+const TRANSIENT_QUOTE_RETRY_INTERVAL_MS = 1_000;
 
 const platformCatalogIdentity = (platform: SupplyPlatformConfig) =>
   [
@@ -1337,11 +1338,25 @@ export function SupplyPage() {
         return;
       }
       refreshing = true;
+      let retrySoon = false;
       if (!hasQuote) setManualQuoteLoading(true);
       setManualQuoteError('');
       try {
         const quote = await supplyApi.quote(manualQuantity, manualSupplierId, manualProduct);
         if (!cancelled) {
+          const inventory = quote.inventory;
+          if (
+            !inventory ||
+            inventory.available <= 0 ||
+            inventory.estimatedTotalFen <= 0 ||
+            inventory.estimatedUnitPriceFen <= 0
+          ) {
+            // NV occasionally answers a live estimate with an empty/zero quote
+            // while refreshing its seller pool. Never present that transient
+            // response as ¥0.00; keep the last valid quote and retry quickly.
+            retrySoon = true;
+            return;
+          }
           hasQuote = true;
           setManualQuote(quote);
           const platform = manualPlatformConfigRef.current;
@@ -1358,8 +1373,10 @@ export function SupplyPage() {
       } finally {
         refreshing = false;
         if (!cancelled) {
-          setManualQuoteLoading(false);
-          scheduleRefresh(PLATFORM_CATALOG_REFRESH_INTERVAL_MS);
+          setManualQuoteLoading(retrySoon && !hasQuote);
+          scheduleRefresh(
+            retrySoon ? TRANSIENT_QUOTE_RETRY_INTERVAL_MS : PLATFORM_CATALOG_REFRESH_INTERVAL_MS
+          );
         }
       }
     };

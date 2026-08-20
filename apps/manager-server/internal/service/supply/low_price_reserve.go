@@ -188,11 +188,7 @@ func (s *Service) RunLowPriceReserve(ctx context.Context) (LowPriceReserveExecut
 		return execution, nil
 	}
 
-	openOrders, err := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
-	if err != nil {
-		return execution, err
-	}
-	selection, matched, err := s.selectLowPriceReservePlatform(ctx, cfg.Supply, execution.NextStageQuantity, openOrders)
+	selection, matched, err := s.selectLowPriceReserveCatalogPlatform(ctx, cfg.Supply, execution.NextStageQuantity)
 	if price, platformID, observed := lowPriceReserveQuoteSnapshot(selection.all); observed {
 		execution.LastQuotedUnitPriceFen = price
 		execution.SelectedPlatformID = platformID
