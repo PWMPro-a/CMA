@@ -619,9 +619,21 @@ func (c *Client) nvtokensInventory(ctx context.Context, credentials Credentials,
 	if totalFen == 0 {
 		totalFen = int64Value(estimate, "estimated_total_fen", "estimatedTotalFen", "total_fen", "totalFen")
 	}
+	if totalFen == 0 {
+		totalFen = int64Value(root, "buyer_total_cents", "buyerTotalCents", "amount_cents", "amountCents")
+		if totalFen == 0 {
+			totalFen = int64Value(estimate, "buyer_total_cents", "buyerTotalCents", "amount_cents", "amountCents")
+		}
+	}
 	unitFen := int64Value(root, "estimated_unit_price_fen", "estimatedUnitPriceFen", "unit_fen", "unitFen")
 	if unitFen == 0 {
 		unitFen = int64Value(estimate, "estimated_unit_price_fen", "estimatedUnitPriceFen", "unit_fen", "unitFen")
+	}
+	if unitFen == 0 {
+		unitFen = int64Value(root, "unit_price_cents", "unitPriceCents", "min_unit_price_cents", "minUnitPriceCents")
+		if unitFen == 0 {
+			unitFen = int64Value(estimate, "unit_price_cents", "unitPriceCents", "min_unit_price_cents", "minUnitPriceCents")
+		}
 	}
 	if totalFen == 0 {
 		totalFen = int64Value(root, "total_cost_cents", "totalCostCents", "total_price_cents", "totalPriceCents")
@@ -699,6 +711,7 @@ func (c *Client) nvtokensCreateOrder(ctx context.Context, credentials Credential
 		return Order{}, err
 	}
 	orderID := firstNonEmpty(
+		nvtokensBatchOrderID(value),
 		findString(value, "id", "order_id", "orderId", "extraction_id", "extractionId", "request_id", "requestId"),
 		firstString(idempotencyKey...),
 		fmt.Sprintf("nvtokens-%d", time.Now().UnixNano()),
@@ -725,9 +738,17 @@ func (c *Client) nvtokensCreateOrder(ctx context.Context, credentials Credential
 	}
 	order.ChargedFen = firstInt64(
 		order.ChargedFen,
+		nvtokensBatchChargedFen(value),
 		findInt64(value, "charged_fen", "chargedFen", "total_cost_cents", "totalCostCents", "cost_cents", "costCents"),
 	)
-	result := TakeResult{Order: order, Accounts: accounts, Pending: status == http.StatusAccepted}
+	items := nvtokensResultOrderItems(value, order.ChargedFen, len(accounts))
+	result := TakeResult{
+		Order:                order,
+		Accounts:             accounts,
+		OrderItems:           items,
+		ItemRemainingSeconds: orderItemRemainingSeconds(items),
+		Pending:              status == http.StatusAccepted,
+	}
 	if len(result.Accounts) > 0 {
 		order.Status = "completed"
 		result.Pending = false
@@ -781,6 +802,7 @@ func (c *Client) nvtokensGetOrder(ctx context.Context, credentials Credentials, 
 	if order.ID == "" {
 		order.ID = strings.TrimSpace(orderID)
 	}
+	order.ChargedFen = firstInt64(order.ChargedFen, nvtokensBatchChargedFen(value))
 	if order.Status == "" {
 		order.Status = "completed"
 	}
@@ -803,8 +825,14 @@ func (c *Client) nvtokensGetOrder(ctx context.Context, credentials Credentials, 
 		}
 	}
 	if len(accounts) > 0 {
+		items := nvtokensResultOrderItems(value, order.ChargedFen, len(accounts))
 		c.mu.Lock()
-		c.nvtokensResults[key] = TakeResult{Order: order, Accounts: accounts}
+		c.nvtokensResults[key] = TakeResult{
+			Order:                order,
+			Accounts:             accounts,
+			OrderItems:           items,
+			ItemRemainingSeconds: orderItemRemainingSeconds(items),
+		}
 		c.mu.Unlock()
 	}
 	return order, nil
@@ -830,6 +858,7 @@ func (c *Client) nvtokensTake(ctx context.Context, credentials Credentials, orde
 	if order.ID == "" {
 		order.ID = strings.TrimSpace(orderID)
 	}
+	order.ChargedFen = firstInt64(order.ChargedFen, nvtokensBatchChargedFen(value))
 	if order.Status == "" {
 		order.Status = "completed"
 	}
@@ -840,7 +869,13 @@ func (c *Client) nvtokensTake(ctx context.Context, credentials Credentials, orde
 	order.Status = "completed"
 	order.ReadyQuantity = len(accounts)
 	order.Progress = 100
-	result := TakeResult{Order: order, Accounts: accounts}
+	items := nvtokensResultOrderItems(value, order.ChargedFen, len(accounts))
+	result := TakeResult{
+		Order:                order,
+		Accounts:             accounts,
+		OrderItems:           items,
+		ItemRemainingSeconds: orderItemRemainingSeconds(items),
+	}
 	c.mu.Lock()
 	c.nvtokensResults[key] = result
 	c.mu.Unlock()
@@ -855,6 +890,138 @@ func nvtokensResultAccounts(value any) []json.RawMessage {
 	}
 	collectNvtokensBundles(value, &collector)
 	return collector.accounts
+}
+
+func nvtokensBatchOrderID(value any) string {
+	results := nvtokensResultObjects(value)
+	unique := make(map[string]struct{})
+	for _, result := range results {
+		if nvtokensResultFailed(result) {
+			continue
+		}
+		order := nvtokensResultOrder(result)
+		id := strings.TrimSpace(stringValue(order, "id", "order_id", "orderId", "extraction_id", "extractionId"))
+		if id != "" {
+			unique[id] = struct{}{}
+		}
+	}
+	if len(unique) != 1 {
+		return ""
+	}
+	for id := range unique {
+		return id
+	}
+	return ""
+}
+
+func nvtokensBatchChargedFen(value any) int64 {
+	if root, ok := nvtokensObject(value); ok {
+		for _, key := range []string{"summary", "pricing", "quote"} {
+			if aggregate, ok := nvtokensObject(root[key]); ok {
+				if charged := nvtokensChargedFen(aggregate); charged > 0 {
+					return charged
+				}
+			}
+		}
+		if charged := nvtokensChargedFen(root); charged > 0 {
+			return charged
+		}
+	}
+
+	var total int64
+	for _, result := range nvtokensResultObjects(value) {
+		if nvtokensResultFailed(result) {
+			continue
+		}
+		if charged := nvtokensChargedFen(nvtokensResultOrder(result)); charged > 0 {
+			total += charged
+		}
+	}
+	return total
+}
+
+func nvtokensResultOrderItems(value any, fallbackChargedFen int64, accountCount int) []OrderItem {
+	results := nvtokensResultObjects(value)
+	items := make([]OrderItem, 0, len(results))
+	for _, result := range results {
+		if nvtokensResultFailed(result) {
+			continue
+		}
+		order := nvtokensResultOrder(result)
+		charged := nvtokensChargedFen(order)
+		if charged <= 0 {
+			return nil
+		}
+		remaining, hasRemaining := int64ValueOK(order,
+			"remaining_seconds", "remainingSeconds", "remaining_valid_seconds", "remainingValidSeconds")
+		if !hasRemaining {
+			remaining, hasRemaining = int64ValueOK(result,
+				"remaining_seconds", "remainingSeconds", "remaining_valid_seconds", "remainingValidSeconds")
+		}
+		items = append(items, OrderItem{
+			RemainingSeconds: remaining,
+			HasRemaining:     hasRemaining,
+			BasePriceFen:     charged,
+			ChargedFen:       charged,
+		})
+	}
+	if len(items) > 0 {
+		return items
+	}
+	if accountCount == 1 && fallbackChargedFen > 0 {
+		return []OrderItem{{BasePriceFen: fallbackChargedFen, ChargedFen: fallbackChargedFen}}
+	}
+	return nil
+}
+
+func nvtokensResultObjects(value any) []map[string]any {
+	root, ok := nvtokensObject(value)
+	if !ok {
+		return nil
+	}
+	for _, key := range []string{"results", "items"} {
+		list, ok := root[key].([]any)
+		if !ok {
+			continue
+		}
+		results := make([]map[string]any, 0, len(list))
+		for _, item := range list {
+			if object, ok := nvtokensObject(item); ok {
+				results = append(results, object)
+			}
+		}
+		if len(results) > 0 {
+			return results
+		}
+	}
+	for _, key := range []string{"data", "payload", "result"} {
+		if child, exists := root[key]; exists && child != nil {
+			if results := nvtokensResultObjects(child); len(results) > 0 {
+				return results
+			}
+		}
+	}
+	return nil
+}
+
+func nvtokensResultOrder(result map[string]any) map[string]any {
+	for _, key := range []string{"order", "extraction"} {
+		if order, ok := result[key].(map[string]any); ok {
+			return order
+		}
+	}
+	return result
+}
+
+func nvtokensChargedFen(value map[string]any) int64 {
+	return int64Value(value,
+		"charged_fen", "chargedFen",
+		"buyer_total_cents", "buyerTotalCents",
+		"amount_cents", "amountCents",
+		"total_cost_cents", "totalCostCents",
+		"cost_cents", "costCents",
+		"spent_cents", "spentCents",
+	)
 }
 
 func nvtokensSuccessfulStatusWithoutAccounts(status string) bool {
@@ -941,6 +1108,10 @@ func nvtokensResultFailed(object map[string]any) bool {
 		if hasBoolField(object, key) && !boolValue(object, key) {
 			return true
 		}
+	}
+	switch strings.ToLower(strings.TrimSpace(stringValue(object, "status", "state"))) {
+	case "failed", "error", "cancelled", "canceled", "refunded", "rejected":
+		return true
 	}
 	return stringValue(object, "error", "error_message", "errorMessage") != ""
 }
@@ -1893,7 +2064,7 @@ func parseOrder(root map[string]any) Order {
 		Quantity:          intValue(root, "quantity", "requested_quantity", "requestedQuantity"),
 		ReadyQuantity:     intValue(root, "ready_quantity", "readyQuantity", "delivered_quantity", "deliveredQuantity", "available"),
 		Progress:          intValue(root, "progress", "progress_percent", "progressPercent"),
-		ChargedFen:        int64Value(root, "charged_fen", "chargedFen"),
+		ChargedFen:        int64Value(root, "charged_fen", "chargedFen", "buyer_total_cents", "buyerTotalCents", "amount_cents", "amountCents"),
 		ReleasedFen:       int64Value(root, "released_fen", "releasedFen"),
 		RetryAfterSeconds: intValue(root, "retry_after_seconds", "retryAfterSeconds", "retry_after", "retryAfter"),
 		StatusURL:         stringValue(root, "status_url", "statusUrl"),

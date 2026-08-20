@@ -90,7 +90,7 @@ func TestNvtokensUsesSessionCookieAndImportsCPABundle(t *testing.T) {
 		case "/api/workspace/extractions/estimate":
 			estimateCalls.Add(1)
 			assertNvtokensPurchaseFilters(t, r, "has_refresh_token", 800)
-			_, _ = w.Write([]byte(`{"estimate":{"total_cost_cents":240,"unit_price_cents":120,"available_quantity":9}}`))
+			_, _ = w.Write([]byte(`{"estimate":{"buyer_total_cents":240,"min_unit_price_cents":120,"max_unit_price_cents":120,"available_quantity":9}}`))
 		case "/api/me":
 			_, _ = w.Write([]byte(`{"balance_cents":1000,"frozen_balance_cents":100,"available_balance_cents":900}`))
 		case "/api/workspace/extractions/batch":
@@ -99,7 +99,7 @@ func TestNvtokensUsesSessionCookieAndImportsCPABundle(t *testing.T) {
 			if got := r.Header.Get("Idempotency-Key"); got != "cpam-attempt-1" {
 				t.Fatalf("nvtokens idempotency key = %q", got)
 			}
-			_, _ = w.Write([]byte(`{"summary":{"total_cost_cents":240},"cpa_bundle":{"type":"sub2api-data","version":1,"accounts":[{"type":"codex","access_token":"a","refresh_token":"r"}]}}`))
+			_, _ = w.Write([]byte(`{"summary":{"requested":2,"extracted":1,"buyer_total_cents":240},"cpa_bundle":{"type":"sub2api-data","version":1,"accounts":[{"type":"codex","access_token":"a","refresh_token":"r"}]}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -124,15 +124,61 @@ func TestNvtokensUsesSessionCookieAndImportsCPABundle(t *testing.T) {
 		t.Fatalf("nvtokens balance = %#v err=%v", balance, err)
 	}
 	order, err := client.CreateOrder(context.Background(), credentials, "oauth_30d", 2, "cpam-attempt-1")
-	if err != nil || order.Status != "completed" || order.ReadyQuantity != 1 {
+	if err != nil || order.Status != "completed" || order.ReadyQuantity != 1 || order.ChargedFen != 240 {
 		t.Fatalf("nvtokens order = %#v err=%v", order, err)
 	}
 	taken, err := client.Take(context.Background(), credentials, order.ID)
-	if err != nil || taken.Pending || len(taken.Accounts) != 1 {
+	if err != nil || taken.Pending || len(taken.Accounts) != 1 || len(taken.OrderItems) != 1 || taken.OrderItems[0].ChargedFen != 240 {
 		t.Fatalf("nvtokens take = %#v err=%v", taken, err)
 	}
 	if loginCalls.Load() != 1 || estimateCalls.Load() != 1 || batchCalls.Load() != 1 {
 		t.Fatalf("nvtokens calls login=%d estimate=%d batch=%d", loginCalls.Load(), estimateCalls.Load(), batchCalls.Load())
+	}
+}
+
+func TestNvtokensBatchResultsCaptureRemoteOrderIDsAndActualPrices(t *testing.T) {
+	var single any
+	if err := json.Unmarshal([]byte(`{
+		"summary":{"requested":1,"extracted":1},
+		"results":[{
+			"status":"extracted",
+			"order":{"id":"order-single","buyer_total_cents":1200},
+			"account_json":{"type":"codex","access_token":"access-one","refresh_token":"refresh-one"}
+		}]
+	}`), &single); err != nil {
+		t.Fatalf("decode single result: %v", err)
+	}
+	if got := nvtokensBatchOrderID(single); got != "order-single" {
+		t.Fatalf("single batch order id = %q", got)
+	}
+	if got := nvtokensBatchChargedFen(single); got != 1200 {
+		t.Fatalf("single batch charged = %d", got)
+	}
+	items := nvtokensResultOrderItems(single, 1200, 1)
+	if len(items) != 1 || items[0].BasePriceFen != 1200 || items[0].ChargedFen != 1200 {
+		t.Fatalf("single batch order items = %#v", items)
+	}
+
+	var batch any
+	if err := json.Unmarshal([]byte(`{
+		"summary":{"requested":3,"extracted":2,"failed":1},
+		"results":[
+			{"status":"extracted","order":{"id":"order-a","amount_cents":1680},"account_json":{"type":"codex","access_token":"access-a","refresh_token":"refresh-a"}},
+			{"status":"failed","message":"inventory changed"},
+			{"status":"extracted","order":{"id":"order-b","buyer_total_cents":2250},"account_json":{"type":"codex","access_token":"access-b","refresh_token":"refresh-b"}}
+		]
+	}`), &batch); err != nil {
+		t.Fatalf("decode batch result: %v", err)
+	}
+	if got := nvtokensBatchOrderID(batch); got != "" {
+		t.Fatalf("multi-order batch id = %q, want local idempotency id", got)
+	}
+	if got := nvtokensBatchChargedFen(batch); got != 3930 {
+		t.Fatalf("multi-order batch charged = %d", got)
+	}
+	items = nvtokensResultOrderItems(batch, 3930, 2)
+	if len(items) != 2 || items[0].ChargedFen != 1680 || items[1].ChargedFen != 2250 {
+		t.Fatalf("multi-order batch items = %#v", items)
 	}
 }
 

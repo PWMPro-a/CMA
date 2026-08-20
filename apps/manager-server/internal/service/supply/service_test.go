@@ -4812,6 +4812,13 @@ func TestSupplyOrderItemLeasesRequireExactExpandedAccountMapping(t *testing.T) {
 		accounts[1].basePriceFen != 400 || accounts[1].chargedFen != 200 {
 		t.Fatalf("account costs were not assigned: %#v", accounts)
 	}
+	if got := supplyOrderItemsChargedFen([]supplyclient.OrderItem{
+		{ChargedFen: 100},
+		{ChargedFen: 200},
+		{ChargedFen: 0},
+	}); got != 300 {
+		t.Fatalf("summed order item charge = %d, want 300", got)
+	}
 	original := accounts[0].leaseExpiresAtMS
 	if applySupplyOrderItemLeases(accounts, []int64{300}, now) {
 		t.Fatal("mismatched order items must not be assigned to expanded accounts")

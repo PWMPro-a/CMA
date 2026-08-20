@@ -3240,6 +3240,9 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		return s.updateOrderError(ctx, &order, err, cfg.Supply)
 	}
 	applyRemoteOrder(&order, taken.Order, cfg.Supply)
+	if order.ChargedFen <= 0 {
+		order.ChargedFen = supplyOrderItemsChargedFen(taken.OrderItems)
+	}
 	replacementSyncErr := s.syncTakeReplacementFiles(ctx, cfg, order.OrderID, taken.ReplacementFiles)
 	if taken.Pending {
 		order.Status = "waiting_inventory"
@@ -10587,6 +10590,16 @@ func applySupplyOrderItemDetails(accounts []normalizedSupplyAccount, items []sup
 		accounts[index].chargedFen = items[index].ChargedFen
 	}
 	return true
+}
+
+func supplyOrderItemsChargedFen(items []supplyclient.OrderItem) int64 {
+	var total int64
+	for _, item := range items {
+		if item.ChargedFen > 0 {
+			total += item.ChargedFen
+		}
+	}
+	return total
 }
 
 // applySupplyOrderItemLeases returns true only for an exact, ordered mapping
