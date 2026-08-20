@@ -262,13 +262,13 @@ func TestNvtokensResultAccountsDeduplicatesRepeatedRepresentations(t *testing.T)
 	}
 }
 
-func TestNvtokensCreateOrderDoesNotExposePhantomCompletedQuantity(t *testing.T) {
+func TestNvtokensCreateOrderWithoutParsedAccountsStaysPending(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/workspace/extractions/batch" {
 			http.NotFound(w, r)
 			return
 		}
-		_, _ = w.Write([]byte(`{"status":"completed","ready_quantity":1,"progress":100,"cpa_bundle":{"accounts":[]},"results":[]}`))
+		_, _ = w.Write([]byte(`{"status":"completed","summary":{"requested":1,"extracted":1,"buyer_total_cents":1666},"results":[{"status":"extracted","order":{"id":"paid-order-1","buyer_total_cents":1666}}]}`))
 	}))
 	defer server.Close()
 
@@ -280,8 +280,31 @@ func TestNvtokensCreateOrderDoesNotExposePhantomCompletedQuantity(t *testing.T) 
 	if err != nil {
 		t.Fatalf("create order: %v", err)
 	}
-	if order.Status != "failed" || order.ReadyQuantity != 0 || order.Progress != 0 {
-		t.Fatalf("order = %#v, want failed 0/1 without phantom progress", order)
+	if order.ID != "paid-order-1" || order.Status != "processing" || order.ReadyQuantity != 1 || order.Progress != 0 || order.ChargedFen != 1666 {
+		t.Fatalf("order = %#v, want processing without phantom progress", order)
+	}
+}
+
+func TestNvtokensCreateOrderEmptyUnpaidResultFailsWithBackoff(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/workspace/extractions/batch" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"completed","summary":{"requested":1,"extracted":0,"failed":1},"results":[{"status":"failed","message":"inventory changed"}]}`))
+	}))
+	defer server.Close()
+
+	order, err := New(server.Client()).CreateOrder(context.Background(), Credentials{
+		PlatformType: "nvtokens",
+		BaseURL:      server.URL,
+		Token:        "session-token",
+	}, "plus", 1, "empty-unpaid-extraction")
+	if err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	if order.Status != "failed" || order.ReadyQuantity != 0 || order.RetryAfterSeconds < 30 {
+		t.Fatalf("order = %#v, want failed unpaid result with backoff", order)
 	}
 }
 

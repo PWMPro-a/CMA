@@ -306,6 +306,9 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 		if !found || isSupplyOrderCapacityCommitted(processed) {
 			return nil
 		}
+		if purchaseTaskOrderRequiresOperatorReview(processed) {
+			return nil
+		}
 		switch strings.ToLower(strings.TrimSpace(processed.Status)) {
 		case "created", "waiting_inventory", "released":
 			openOrders, err = s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
@@ -341,6 +344,9 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 		orders, listErr := s.store.ListSupplyOrdersByTaskID(ctx, task.TaskID)
 		if listErr != nil {
 			return listErr
+		}
+		if purchaseTaskOrdersRequireOperatorReview(orders) {
+			continue
 		}
 		stats := summarizePurchaseTaskOrders(orders)
 		if stats.activeOrderCount >= max(1, task.MaxConcurrentOrders) {
@@ -642,6 +648,9 @@ func (s *Service) createPurchaseTaskOrder(
 		_ = s.store.UpdateSupplyOrder(ctx, attempt)
 		return s.recordPurchaseTaskError(ctx, task, err)
 	}
+	if order.Status == "failed" {
+		return s.recordPurchaseTaskError(ctx, task, fmt.Errorf("supplier purchase returned status %q without a delivery", remote.Status))
+	}
 	if order.Status == "ready" || order.Status == "taking" {
 		if err := s.processOrder(ctx, cfg, order); err != nil {
 			_ = s.recordPurchaseTaskError(ctx, task, err)
@@ -753,6 +762,23 @@ func summarizePurchaseTaskOrders(orders []store.SupplyOrder) purchaseTaskOrderSt
 		}
 	}
 	return stats
+}
+
+func purchaseTaskOrdersRequireOperatorReview(orders []store.SupplyOrder) bool {
+	for _, order := range orders {
+		if purchaseTaskOrderRequiresOperatorReview(order) {
+			return true
+		}
+	}
+	return false
+}
+
+func purchaseTaskOrderRequiresOperatorReview(order store.SupplyOrder) bool {
+	remoteStatus := strings.ToLower(strings.TrimSpace(order.RemoteStatus))
+	if remoteStatus == "paid_delivery_unparsed" {
+		return true
+	}
+	return strings.ToLower(strings.TrimSpace(order.Status)) == "failed" && supplyOrderHasPaymentEvidence(order)
 }
 
 func purchaseTaskOrderReservationStale(order store.SupplyOrder, now time.Time) bool {

@@ -3,6 +3,7 @@ package supply
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -615,7 +616,7 @@ func TestPurchaseTaskRetriesCreateFailureUntilTargetIsFulfilled(t *testing.T) {
 	}
 }
 
-func TestUndeliverableTakenAccountReleasesPurchaseTaskSlot(t *testing.T) {
+func TestPaidUndeliverableTakenAccountBlocksPurchaseTaskRetry(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-invalid-delivery.sqlite"))
 	if err != nil {
@@ -631,7 +632,7 @@ func TestUndeliverableTakenAccountReleasesPurchaseTaskSlot(t *testing.T) {
 	}
 	order, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
 		OrderID: "invalid-delivery", TaskID: task.TaskID, SupplierID: "nv", Product: "plus",
-		RequestedQuantity: 1, ReadyQuantity: 1, Automatic: true, Status: "taking",
+		RequestedQuantity: 1, ReadyQuantity: 1, Automatic: true, Status: "taking", RemoteStatus: "completed",
 	})
 	if err != nil {
 		t.Fatalf("create taking order: %v", err)
@@ -646,20 +647,59 @@ func TestUndeliverableTakenAccountReleasesPurchaseTaskSlot(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("load failed delivery found=%v err=%v", found, err)
 	}
-	if stored.Status != "failed" || stored.RemoteStatus != "invalid_payload" || stored.CompletedAtMS <= 0 ||
-		stored.NextPollAtMS != 0 || stored.LastError != deliveryErr.Error() {
-		t.Fatalf("failed delivery = %#v", stored)
+	if stored.Status != "partial" || stored.RemoteStatus != "paid_delivery_unparsed" || stored.CompletedAtMS != 0 ||
+		stored.NextPollAtMS <= time.Now().UnixMilli() || stored.LastError != deliveryErr.Error() {
+		t.Fatalf("held paid delivery = %#v", stored)
 	}
 	openOrders, err := st.ListOpenSupplyOrders(ctx, 10)
-	if err != nil || len(openOrders) != 0 {
-		t.Fatalf("invalid delivery still occupies an order slot: orders=%#v err=%v", openOrders, err)
+	if err != nil || len(openOrders) != 1 || openOrders[0].OrderID != order.OrderID {
+		t.Fatalf("paid delivery must occupy the order slot: orders=%#v err=%v", openOrders, err)
 	}
 	reconciled, err := service.reconcilePurchaseTask(ctx, task)
 	if err != nil {
 		t.Fatalf("reconcile task: %v", err)
 	}
-	if reconciled.Status != purchaseTaskStatusRunning || reconciled.FulfilledQuantity != 0 || reconciled.ActiveOrderCount != 0 {
+	if reconciled.Status != purchaseTaskStatusRunning || reconciled.FulfilledQuantity != 0 || reconciled.ActiveOrderCount != 1 {
 		t.Fatalf("task after invalid delivery = %#v", reconciled)
+	}
+}
+
+func TestDefiniteUnpaidUndeliverableAccountReleasesPurchaseTaskSlot(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-invalid-unpaid-delivery.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	order, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "invalid-unpaid-delivery", SupplierID: "nv", Product: "plus",
+		RequestedQuantity: 1, Automatic: true, Status: "taking",
+	})
+	if err != nil {
+		t.Fatalf("create taking order: %v", err)
+	}
+	service := New(st, nil)
+	deliveryErr := errors.New("empty supplier payload")
+	if err := service.failUndeliverableOrder(ctx, &order, deliveryErr); err == nil {
+		t.Fatal("unpaid invalid delivery should return its parsing error")
+	}
+	stored, _, err := st.GetSupplyOrder(ctx, order.OrderID)
+	if err != nil || stored.Status != "failed" || stored.RemoteStatus != "invalid_payload" || stored.CompletedAtMS <= 0 {
+		t.Fatalf("unpaid invalid delivery = %#v err=%v", stored, err)
+	}
+}
+
+func TestPurchaseTaskAdmissionStopsAfterPaidDeliveryNeedsReview(t *testing.T) {
+	orders := []store.SupplyOrder{{
+		OrderID: "paid-review", Status: "failed", RemoteStatus: "completed",
+		RequestedQuantity: 1, ReadyQuantity: 1, Progress: 100,
+	}}
+	if !purchaseTaskOrdersRequireOperatorReview(orders) {
+		t.Fatal("paid delivery evidence must stop another purchase attempt")
+	}
+	orders[0] = store.SupplyOrder{OrderID: "free-failure", Status: "failed", RemoteStatus: "failed"}
+	if purchaseTaskOrdersRequireOperatorReview(orders) {
+		t.Fatal("definite unpaid failure should remain retryable")
 	}
 }
 

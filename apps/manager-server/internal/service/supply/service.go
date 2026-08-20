@@ -3155,6 +3155,9 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	if stopped, err := s.stopPurchaseTaskOrderIfNeeded(ctx, &order); stopped || err != nil {
 		return err
 	}
+	if purchaseTaskOrderRequiresOperatorReview(order) {
+		return nil
+	}
 	if order.Status == "taking" && order.NextPollAtMS > time.Now().UnixMilli() {
 		return nil
 	}
@@ -10089,15 +10092,25 @@ func (s *Service) cancelOrder(ctx context.Context, order *store.SupplyOrder, err
 	return s.store.UpdateSupplyOrder(ctx, *order)
 }
 
-// failUndeliverableOrder closes a supplier delivery that has already reached
-// the take stage but contains no usable CPA credential. Retrying the same take
-// response only replays the same bad payload and permanently occupies the
-// purchase task's worker slot. A terminal failed child contributes zero
-// fulfilled/reserved quantity, so the durable task can submit a replacement
-// order on its next execution while retaining the supplier error for repair and
-// reporting.
+// failUndeliverableOrder keeps a paid or fulfilled supplier delivery open for
+// operator reconciliation. Once the supplier has returned stock, reported
+// success, or exposed a charge, the safe assumption is that value left the
+// wallet. Releasing the purchase-task slot here would submit another paid order
+// while the original credential merely needs a parser/import repair.
 func (s *Service) failUndeliverableOrder(ctx context.Context, order *store.SupplyOrder, err error) error {
 	if order == nil {
+		return err
+	}
+	if supplyOrderHasPaymentEvidence(*order) {
+		order.Status = "partial"
+		order.RemoteStatus = "paid_delivery_unparsed"
+		order.LastError = safeError(err)
+		order.SupplierRetryUntilMS = 0
+		order.NextPollAtMS = time.Now().Add(24 * time.Hour).UnixMilli()
+		order.CompletedAtMS = 0
+		if updateErr := s.store.UpdateSupplyOrder(ctx, *order); updateErr != nil {
+			return updateErr
+		}
 		return err
 	}
 	order.Status = "failed"
@@ -10110,6 +10123,11 @@ func (s *Service) failUndeliverableOrder(ctx context.Context, order *store.Suppl
 		return updateErr
 	}
 	return err
+}
+
+func supplyOrderHasPaymentEvidence(order store.SupplyOrder) bool {
+	return order.ChargedFen > 0 || order.ReadyQuantity > 0 || order.Progress >= 100 ||
+		order.ItemCount > 0 || isSuccessfulRemoteStatus(order.RemoteStatus) || isReadyForTake(order.RemoteStatus)
 }
 
 func isHTTPStatus(err error, status int) bool {
@@ -11167,7 +11185,7 @@ func isSupportedSupplyOAuth(account map[string]any, credentials map[string]any) 
 	if platform != "" && platform != "openai" && platform != "codex" {
 		return false
 	}
-	if credentialType != "" && credentialType != "codex" && credentialType != "openai" {
+	if credentialType != "" && credentialType != "oauth" && credentialType != "codex" && credentialType != "openai" {
 		return false
 	}
 	if typeName != "" && typeName != "oauth" && typeName != "codex" {

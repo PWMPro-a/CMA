@@ -725,6 +725,7 @@ func (c *Client) nvtokensCreateOrder(ctx context.Context, credentials Credential
 		order.Quantity = quantity
 	}
 	accounts := nvtokensResultAccounts(value)
+	extractedQuantity := nvtokensExtractedQuantity(value)
 	order.ReadyQuantity = len(accounts)
 	if order.Progress == 0 && (status >= http.StatusOK && status < http.StatusMultipleChoices) {
 		order.Progress = 100
@@ -764,13 +765,21 @@ func (c *Client) nvtokensCreateOrder(ctx context.Context, credentials Credential
 		order.Progress = 0
 		result.Order = order
 		result.Pending = true
+	} else if nvtokensSuccessfulStatusWithoutAccounts(order.Status) && nvtokensPurchaseEvidence(value, order) {
+		// A synchronous 2xx can already represent a paid extraction even when a
+		// newly introduced response shape prevents this client from finding the
+		// account payload. Keep the same supplier operation open for reconciliation;
+		// treating it as a free failure would let the purchase task charge again.
+		order.Status = "processing"
+		order.ReadyQuantity = extractedQuantity
+		order.Progress = 0
+		result.Order = order
+		result.Pending = true
 	} else if nvtokensSuccessfulStatusWithoutAccounts(order.Status) {
-		// A synchronous successful-looking response without credentials is a
-		// terminal empty extraction, not a completed account. Mark it failed so the
-		// purchase task can immediately schedule the remaining quantity again.
 		order.Status = "failed"
 		order.ReadyQuantity = 0
 		order.Progress = 0
+		order.RetryAfterSeconds = maxInt(order.RetryAfterSeconds, 30)
 		result.Order = order
 		result.Pending = false
 	}
@@ -820,7 +829,12 @@ func (c *Client) nvtokensGetOrder(ctx context.Context, credentials Credentials, 
 			order.Status = "processing"
 			order.Progress = 0
 		} else if nvtokensSuccessfulStatusWithoutAccounts(order.Status) {
-			order.Status = "failed"
+			if nvtokensPurchaseEvidence(value, order) {
+				order.Status = "processing"
+			} else {
+				order.Status = "failed"
+				order.RetryAfterSeconds = maxInt(order.RetryAfterSeconds, 30)
+			}
 			order.Progress = 0
 		}
 	}
@@ -938,6 +952,34 @@ func nvtokensBatchChargedFen(value any) int64 {
 		}
 	}
 	return total
+}
+
+func nvtokensExtractedQuantity(value any) int {
+	root, ok := nvtokensObject(value)
+	if !ok {
+		return 0
+	}
+	for _, key := range []string{"summary", "pricing", "quote"} {
+		if aggregate, ok := nvtokensObject(root[key]); ok {
+			if quantity := intValue(aggregate, "extracted", "purchased", "succeeded", "success_count", "successCount"); quantity > 0 {
+				return quantity
+			}
+		}
+	}
+	if quantity := intValue(root, "extracted", "purchased", "succeeded", "success_count", "successCount"); quantity > 0 {
+		return quantity
+	}
+	count := 0
+	for _, result := range nvtokensResultObjects(value) {
+		if !nvtokensResultFailed(result) {
+			count++
+		}
+	}
+	return count
+}
+
+func nvtokensPurchaseEvidence(value any, order Order) bool {
+	return order.ChargedFen > 0 || nvtokensExtractedQuantity(value) > 0 || nvtokensBatchOrderID(value) != ""
 }
 
 func nvtokensResultOrderItems(value any, fallbackChargedFen int64, accountCount int) []OrderItem {

@@ -4770,6 +4770,22 @@ func TestNormalizeNvtokensWrappedPayloadsForCPA(t *testing.T) {
 	}
 }
 
+func TestNormalizeNvtokensOAuthCredentialTypeForCPA(t *testing.T) {
+	raw := `{"name":"buyer@example.com","type":"oauth","platform":"openai","credentials":{"name":"Buyer","type":"oauth","email":"buyer@example.com","access_token":"access-real","refresh_token":"refresh-real","account_id":"account-real","chatgpt_plan_type":"plus"}}`
+	accounts, err := normalizeAccountPayloads([]byte(raw))
+	if err != nil || len(accounts) != 1 {
+		t.Fatalf("normalize real nvtokens payload: accounts=%d err=%v", len(accounts), err)
+	}
+	var account map[string]any
+	if err := json.Unmarshal(accounts[0].payload, &account); err != nil {
+		t.Fatalf("decode normalized account: %v", err)
+	}
+	if account["access_token"] != "access-real" || account["refresh_token"] != "refresh-real" ||
+		account["email"] != "buyer@example.com" || account["chatgpt_plan_type"] != "plus" {
+		t.Fatalf("normalized account = %#v", account)
+	}
+}
+
 func TestSupplyDeliveryLeaseUsesRemainingValidityInsteadOfOAuthExpiry(t *testing.T) {
 	now := time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC)
 	shortLease := supplyDeliveryLeaseExpiresAtMS(map[string]any{
