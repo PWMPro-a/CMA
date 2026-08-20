@@ -172,6 +172,129 @@ func TestNvtokensTokenSkipsCaptchaLoginAndUsesSessionCookie(t *testing.T) {
 	}
 }
 
+func TestNvtokensFallsBackFromExpiredSessionToPasswordLogin(t *testing.T) {
+	var loginCalls atomic.Int32
+	var catalogCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/login":
+			loginCalls.Add(1)
+			var payload map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			if payload["username"] != "buyer" || payload["password"] != "secret" {
+				t.Fatalf("nvtokens refresh login payload = %#v", payload)
+			}
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: "fresh-session", Path: "/"})
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/api/workspace/seller-candidates":
+			catalogCalls.Add(1)
+			cookie, _ := r.Cookie("session")
+			if cookie != nil && cookie.Value == "expired-session" {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"code":"AUTH_REQUIRED","message":"登录状态已失效，请重新登录"}`))
+				return
+			}
+			if cookie == nil || cookie.Value != "fresh-session" {
+				t.Fatalf("refreshed nvtokens session cookie = %#v", cookie)
+			}
+			if got := r.Header.Get(customerTokenHeader); got != "" {
+				t.Fatalf("refreshed nvtokens customer token = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"sellers":[{"sale_plan_counts":{"plus":3}}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	catalog, err := New(server.Client()).ProductCatalog(context.Background(), Credentials{
+		ID:           "nvtokens-main",
+		PlatformType: "nvtokens",
+		BaseURL:      server.URL,
+		Token:        "expired-session",
+		Username:     "buyer",
+		Password:     "secret",
+	})
+	if err != nil || len(catalog.Products) != 1 || catalog.Products[0].Code != "plus" {
+		t.Fatalf("catalog = %#v err=%v", catalog, err)
+	}
+	if got := loginCalls.Load(); got != 1 {
+		t.Fatalf("login calls = %d, want 1", got)
+	}
+	if got := catalogCalls.Load(); got != 2 {
+		t.Fatalf("catalog calls = %d, want 2", got)
+	}
+}
+
+func TestNvtokensExpiredSessionWithoutPasswordDoesNotRetry(t *testing.T) {
+	var loginCalls atomic.Int32
+	var catalogCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/login":
+			loginCalls.Add(1)
+			http.Error(w, "unexpected login", http.StatusInternalServerError)
+		case "/api/workspace/seller-candidates":
+			catalogCalls.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":"AUTH_REQUIRED","message":"登录状态已失效，请重新登录"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	_, err := New(server.Client()).ProductCatalog(context.Background(), Credentials{
+		ID:           "nvtokens-main",
+		PlatformType: "nvtokens",
+		BaseURL:      server.URL,
+		Token:        "expired-session",
+	})
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized || httpErr.Code != "AUTH_REQUIRED" {
+		t.Fatalf("error = %#v, want AUTH_REQUIRED HTTP 401", err)
+	}
+	if loginCalls.Load() != 0 || catalogCalls.Load() != 1 {
+		t.Fatalf("login=%d catalog=%d, want login=0 catalog=1", loginCalls.Load(), catalogCalls.Load())
+	}
+}
+
+func TestNvtokensFailedPasswordRefreshRetriesOnlyOnce(t *testing.T) {
+	var loginCalls atomic.Int32
+	var catalogCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/login":
+			loginCalls.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":"AUTH_REQUIRED","message":"账号或密码错误"}`))
+		case "/api/workspace/seller-candidates":
+			catalogCalls.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":"AUTH_REQUIRED","message":"登录状态已失效，请重新登录"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	_, err := New(server.Client()).ProductCatalog(context.Background(), Credentials{
+		ID:           "nvtokens-main",
+		PlatformType: "nvtokens",
+		BaseURL:      server.URL,
+		Token:        "expired-session",
+		Username:     "buyer",
+		Password:     "wrong-secret",
+	})
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized || httpErr.Code != "AUTH_REQUIRED" {
+		t.Fatalf("error = %#v, want password refresh AUTH_REQUIRED HTTP 401", err)
+	}
+	if loginCalls.Load() != 1 || catalogCalls.Load() != 1 {
+		t.Fatalf("login=%d catalog=%d, want login=1 catalog=1", loginCalls.Load(), catalogCalls.Load())
+	}
+}
+
 func TestNvtokensProductCatalogAggregatesNativeSalePlans(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

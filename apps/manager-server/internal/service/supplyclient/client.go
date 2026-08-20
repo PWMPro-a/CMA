@@ -1259,7 +1259,12 @@ func (c *Client) login(ctx context.Context, credentials Credentials, force bool)
 		return state, nil
 	}
 	if isNvtokens(credentials) {
-		if token := strings.TrimSpace(credentials.Token); token != "" {
+		// A configured nvtokens token is a browser session snapshot. Prefer it on
+		// the first request so deployments that only provide a session keep
+		// working, but do not reuse it after the supplier has rejected it. When
+		// password credentials are available, a forced refresh must establish a
+		// fresh HttpOnly session through /api/login.
+		if token := strings.TrimSpace(credentials.Token); token != "" && (!force || !canPasswordLogin(credentials)) {
 			cookieValue := token
 			if strings.HasPrefix(strings.ToLower(cookieValue), "session=") {
 				cookieValue = strings.TrimSpace(strings.SplitN(cookieValue, "=", 2)[1])
@@ -1345,7 +1350,8 @@ func canRefreshAuthentication(credentials Credentials) bool {
 	if strings.TrimSpace(credentials.Token) == "" {
 		return canPasswordLogin(credentials)
 	}
-	return strings.EqualFold(strings.TrimSpace(credentials.PlatformType), "bugteam") && canPasswordLogin(credentials)
+	platformType := strings.TrimSpace(credentials.PlatformType)
+	return (strings.EqualFold(platformType, "bugteam") || isNvtokens(credentials)) && canPasswordLogin(credentials)
 }
 
 func applyAuthentication(headers http.Header, auth tokenState) {
