@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	quotasnapshotrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
@@ -94,7 +93,7 @@ func TestMigrateCreatesSupplyPurchaseTaskSchema(t *testing.T) {
 	}
 }
 
-func TestEnsureSupplyImportItemColumnsBackfillsExistingEmptyLeases(t *testing.T) {
+func TestEnsureSupplyImportItemColumnsPreservesUnknownExpiryAndAddsWarranty(t *testing.T) {
 	db, err := sql.Open("sqlite", dataSourceName(filepath.Join(t.TempDir(), "supply-import-lease.sqlite")))
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
@@ -122,7 +121,7 @@ func TestEnsureSupplyImportItemColumnsBackfillsExistingEmptyLeases(t *testing.T)
 		t.Fatalf("retry supply import lease backfill: %v", err)
 	}
 	columns := migrationTableColumns(t, db, "supply_import_items")
-	for _, column := range []string{"base_price_fen", "charged_fen", "account_name", "name_key", "import_action", "replaced_file_name", "supersedes_item_id", "effective_from_ms", "superseded_at_ms"} {
+	for _, column := range []string{"warranty_expires_at_ms", "base_price_fen", "charged_fen", "account_name", "name_key", "import_action", "replaced_file_name", "supersedes_item_id", "effective_from_ms", "superseded_at_ms"} {
 		if !columns[column] {
 			t.Fatalf("legacy supply import columns = %#v, missing %s", columns, column)
 		}
@@ -133,8 +132,8 @@ func TestEnsureSupplyImportItemColumnsBackfillsExistingEmptyLeases(t *testing.T)
 	}
 	defer rows.Close()
 	want := []sql.NullInt64{
-		{Int64: 1000 + int64(time.Hour/time.Millisecond), Valid: true},
-		{Int64: 2000 + int64(time.Hour/time.Millisecond), Valid: true},
+		{},
+		{Int64: 0, Valid: true},
 		{Int64: 9999, Valid: true},
 		{},
 	}
@@ -187,7 +186,7 @@ func TestMigrateLegacySupplyImportItemsAddsLineageBeforeIndexes(t *testing.T) {
 		t.Fatalf("migrate legacy supply import table: %v", err)
 	}
 	columns := migrationTableColumns(t, db, "supply_import_items")
-	for _, column := range []string{"account_name", "name_key", "import_action", "replaced_file_name", "supersedes_item_id", "effective_from_ms", "superseded_at_ms"} {
+	for _, column := range []string{"warranty_expires_at_ms", "account_name", "name_key", "import_action", "replaced_file_name", "supersedes_item_id", "effective_from_ms", "superseded_at_ms"} {
 		if !columns[column] {
 			t.Fatalf("legacy supply import columns = %#v, missing %s", columns, column)
 		}

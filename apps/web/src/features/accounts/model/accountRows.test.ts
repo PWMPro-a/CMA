@@ -138,14 +138,18 @@ describe('accountRows', () => {
     ).toHaveLength(0);
   });
 
-  it('exposes supplier expiry and runtime current concurrency', () => {
-    const expiresAtMs = Date.now() + 45 * 60_000;
+  it('keeps credential expiry independent from legacy supply lease and warranty metadata', () => {
+    const expiresAtMs = Date.now() + 10 * 24 * 60 * 60_000;
+    const legacyLeaseExpiresAtMs = Date.now() + 45 * 60_000;
+    const warrantyExpiresAtMs = Date.now() + 30 * 60_000;
     const [row] = buildAccountRows(
       [
         {
           name: 'supply.json',
           type: 'codex',
-          supply_lease_expires_at_ms: expiresAtMs,
+          expires_at: new Date(expiresAtMs).toISOString(),
+          supply_lease_expires_at_ms: legacyLeaseExpiresAtMs,
+          supply_warranty_expires_at_ms: warrantyExpiresAtMs,
           runtime_current_concurrency: 3,
           max_concurrency: 8,
         },
@@ -153,6 +157,7 @@ describe('accountRows', () => {
       emptyStores()
     );
     expect(row.expiresAtMs).toBe(expiresAtMs);
+    expect(row.warrantyExpiresAtMs).toBe(warrantyExpiresAtMs);
     expect(row.currentConcurrency).toBe(3);
   });
 
@@ -192,11 +197,19 @@ describe('accountRows', () => {
     ).toHaveLength(1);
   });
 
-  it('restores replacement source and expiry from Manager supply metadata', () => {
+  it('restores replacement source and warranty without overriding credential expiry', () => {
     const importedAtMs = Date.parse('2026-08-16T07:30:45Z');
     const leaseExpiresAtMs = importedAtMs + 60 * 60_000;
+    const warrantyExpiresAtMs = importedAtMs + 45 * 60_000;
+    const expiresAtMs = importedAtMs + 10 * 24 * 60 * 60_000;
     const [row] = buildAccountRows(
-      [{ name: 'replacement.json', type: 'codex' }],
+      [
+        {
+          name: 'replacement.json',
+          type: 'codex',
+          expires_at: new Date(expiresAtMs).toISOString(),
+        },
+      ],
       emptyStores(),
       undefined,
       undefined,
@@ -215,6 +228,7 @@ describe('accountRows', () => {
             recoveryStatus: 'imported',
             importedAtMs,
             leaseExpiresAtMs,
+            warrantyExpiresAtMs,
           },
         ],
       ])
@@ -226,7 +240,8 @@ describe('accountRows', () => {
       platform_name: '平台 A',
       imported_at: '2026-08-16T07:30:45.000Z',
     });
-    expect(row.expiresAtMs).toBe(leaseExpiresAtMs);
+    expect(row.expiresAtMs).toBe(expiresAtMs);
+    expect(row.warrantyExpiresAtMs).toBe(warrantyExpiresAtMs);
     expect(row.supplyMetadata?.replacedFileName).toBe('expired.json');
   });
 

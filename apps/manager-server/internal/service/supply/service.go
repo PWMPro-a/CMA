@@ -324,7 +324,9 @@ type SupplyAccountItem struct {
 	SupplierReleasedFen  int64   `json:"supplierReleasedFen,omitempty"`
 	LastUsedAtMS         int64   `json:"lastUsedAtMs,omitempty"`
 	ImportedAtMS         int64   `json:"importedAtMs,omitempty"`
+	ExpiresAtMS          int64   `json:"expiresAtMs,omitempty"`
 	LeaseExpiresAtMS     int64   `json:"leaseExpiresAtMs,omitempty"`
+	WarrantyExpiresAtMS  int64   `json:"warrantyExpiresAtMs,omitempty"`
 	RemainingSeconds     int64   `json:"remainingSeconds,omitempty"`
 	Auth401AtMS          int64   `json:"auth401AtMs,omitempty"`
 	Auth401BeforeCalls   int64   `json:"auth401BeforeCalls,omitempty"`
@@ -345,19 +347,20 @@ type SupplyAccountList struct {
 }
 
 type SupplyAccountLeaseItem struct {
-	FileName         string `json:"fileName"`
-	OrderID          string `json:"orderId,omitempty"`
-	SupplierID       string `json:"supplierId,omitempty"`
-	PlatformName     string `json:"platformName,omitempty"`
-	Product          string `json:"product,omitempty"`
-	Source           string `json:"source,omitempty"`
-	ImportMethod     string `json:"importMethod,omitempty"`
-	ImportAction     string `json:"importAction,omitempty"`
-	ReplacedFileName string `json:"replacedFileName,omitempty"`
-	RecoveryID       string `json:"recoveryId,omitempty"`
-	RecoveryStatus   string `json:"recoveryStatus,omitempty"`
-	ImportedAtMS     int64  `json:"importedAtMs,omitempty"`
-	LeaseExpiresAtMS int64  `json:"leaseExpiresAtMs,omitempty"`
+	FileName            string `json:"fileName"`
+	OrderID             string `json:"orderId,omitempty"`
+	SupplierID          string `json:"supplierId,omitempty"`
+	PlatformName        string `json:"platformName,omitempty"`
+	Product             string `json:"product,omitempty"`
+	Source              string `json:"source,omitempty"`
+	ImportMethod        string `json:"importMethod,omitempty"`
+	ImportAction        string `json:"importAction,omitempty"`
+	ReplacedFileName    string `json:"replacedFileName,omitempty"`
+	RecoveryID          string `json:"recoveryId,omitempty"`
+	RecoveryStatus      string `json:"recoveryStatus,omitempty"`
+	ImportedAtMS        int64  `json:"importedAtMs,omitempty"`
+	LeaseExpiresAtMS    int64  `json:"leaseExpiresAtMs,omitempty"`
+	WarrantyExpiresAtMS int64  `json:"warrantyExpiresAtMs,omitempty"`
 }
 
 type ReportExecutive struct {
@@ -520,7 +523,9 @@ type ReportAccountLedgerRow struct {
 	Status               string  `json:"status"`
 	AccountStatus        string  `json:"accountStatus"`
 	ImportedAtMS         int64   `json:"importedAtMs,omitempty"`
+	ExpiresAtMS          int64   `json:"expiresAtMs,omitempty"`
 	LeaseExpiresAtMS     int64   `json:"leaseExpiresAtMs,omitempty"`
+	WarrantyExpiresAtMS  int64   `json:"warrantyExpiresAtMs,omitempty"`
 	AllocatedChargedFen  int64   `json:"allocatedChargedFen"`
 	AllocatedReleasedFen int64   `json:"allocatedReleasedFen"`
 	AllocatedNetFen      int64   `json:"allocatedNetFen"`
@@ -592,34 +597,37 @@ type Service struct {
 	// request must not independently log in to the supplier after a restart.
 	overviewRefreshMu sync.Mutex
 
-	smartMu              sync.RWMutex
-	smartBuckets         map[int64]*smartUsageBucket
-	smartQuotaState      smartQuotaCalibrationState
-	quotaPolicyMu        sync.Mutex
-	quotaPolicyState     map[string]smartQuotaPlanAdoptionState
-	authCacheMu          sync.Mutex
-	authRefreshMu        sync.Mutex
-	authCache            authFileSnapshot
-	quotaSnapshotMu      sync.Mutex
-	quotaRefreshMu       sync.Mutex
-	quotaSnapshot        inspectionQuotaSnapshot
-	operatorHeadersMu    sync.Mutex
-	operatorHeaders      operatorHeaderSnapshotCache
-	operatorPoolMu       sync.Mutex
-	operatorPool         operatorAccountPoolCache
-	smartResourceState   SmartResource
-	automation           AutomationExecution
-	lowPriceReserve      LowPriceReserveExecution
-	automaticDecisionSet bool
-	automaticDecision    SmartResource
-	recoveryMu           sync.Mutex
-	recoveryState        RecoverySummary
-	recoveryAsyncMu      sync.Mutex
-	recoveryAsyncRunning bool
-	recoverySyncIfDue    func(context.Context) (RecoverySummary, error)
-	importMu             sync.Mutex
-	poolVacuumMu         sync.Mutex
-	poolVacuumStarted    int64
+	smartMu                  sync.RWMutex
+	smartBuckets             map[int64]*smartUsageBucket
+	smartQuotaState          smartQuotaCalibrationState
+	quotaPolicyMu            sync.Mutex
+	quotaPolicyState         map[string]smartQuotaPlanAdoptionState
+	authCacheMu              sync.Mutex
+	authRefreshMu            sync.Mutex
+	authCache                authFileSnapshot
+	quotaSnapshotMu          sync.Mutex
+	quotaRefreshMu           sync.Mutex
+	quotaSnapshot            inspectionQuotaSnapshot
+	operatorHeadersMu        sync.Mutex
+	operatorHeaders          operatorHeaderSnapshotCache
+	operatorPoolMu           sync.Mutex
+	operatorPool             operatorAccountPoolCache
+	smartResourceState       SmartResource
+	automation               AutomationExecution
+	lowPriceReserve          LowPriceReserveExecution
+	automaticDecisionSet     bool
+	automaticDecision        SmartResource
+	recoveryMu               sync.Mutex
+	recoveryState            RecoverySummary
+	recoveryAsyncMu          sync.Mutex
+	recoveryAsyncRunning     bool
+	recoverySyncIfDue        func(context.Context) (RecoverySummary, error)
+	importMu                 sync.Mutex
+	warrantyMigrationMu      sync.Mutex
+	warrantyMigrationRunning bool
+	warrantyMigrationDone    bool
+	poolVacuumMu             sync.Mutex
+	poolVacuumStarted        int64
 
 	inspectionSnapshotRefreshMu sync.Mutex
 	inspectionSnapshotRefresh   inspectionSnapshotRefreshState
@@ -1691,6 +1699,46 @@ func (s *Service) ScheduleRecoverySyncIfDue(ctx context.Context) bool {
 	return true
 }
 
+// ScheduleWarrantyMetadataMigration separates legacy nvtokens supplier
+// warranty timestamps from credential expiry without delaying replenishment.
+// Failed runs remain retryable on the next worker tick.
+func (s *Service) ScheduleWarrantyMetadataMigration(ctx context.Context) bool {
+	if s == nil || s.store == nil || s.managerConfig == nil {
+		return false
+	}
+	s.warrantyMigrationMu.Lock()
+	if s.warrantyMigrationRunning || s.warrantyMigrationDone {
+		s.warrantyMigrationMu.Unlock()
+		return false
+	}
+	s.warrantyMigrationRunning = true
+	s.warrantyMigrationMu.Unlock()
+
+	go func(parent context.Context) {
+		if parent == nil {
+			parent = context.Background()
+		}
+		migrationCtx, cancel := context.WithTimeout(parent, 10*time.Minute)
+		defer cancel()
+		cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(migrationCtx)
+		if err == nil {
+			var items []store.SupplyImportItem
+			items, err = s.store.ListSupplyImportItems(migrationCtx, 5000, "imported")
+			if err == nil {
+				err = s.migrateNvtokensWarrantyMetadata(migrationCtx, cfg, items)
+			}
+		}
+		s.warrantyMigrationMu.Lock()
+		s.warrantyMigrationRunning = false
+		s.warrantyMigrationDone = err == nil
+		s.warrantyMigrationMu.Unlock()
+		if err != nil {
+			log.Printf("[supply] nvtokens warranty metadata migration failed: %v", err)
+		}
+	}(ctx)
+	return true
+}
+
 func (s *Service) SyncRecoveries(ctx context.Context, req RecoverySyncRequest) (RecoverySummary, error) {
 	if s == nil || s.store == nil || s.managerConfig == nil || s.supplyClient == nil {
 		return RecoverySummary{}, ErrNotConfigured
@@ -2199,19 +2247,20 @@ func (s *Service) ListAccountLeases(ctx context.Context) ([]SupplyAccountLeaseIt
 		}
 		recovery := recoveryByClaimOrder[item.OrderID]
 		result = append(result, SupplyAccountLeaseItem{
-			FileName:         fileName,
-			OrderID:          item.OrderID,
-			SupplierID:       platformID,
-			PlatformName:     platformName,
-			Product:          order.Product,
-			Source:           source,
-			ImportMethod:     method,
-			ImportAction:     item.ImportAction,
-			ReplacedFileName: item.ReplacedFileName,
-			RecoveryID:       recovery.RecoveryID,
-			RecoveryStatus:   recovery.Status,
-			ImportedAtMS:     item.ImportedAtMS,
-			LeaseExpiresAtMS: item.LeaseExpiresAtMS,
+			FileName:            fileName,
+			OrderID:             item.OrderID,
+			SupplierID:          platformID,
+			PlatformName:        platformName,
+			Product:             order.Product,
+			Source:              source,
+			ImportMethod:        method,
+			ImportAction:        item.ImportAction,
+			ReplacedFileName:    item.ReplacedFileName,
+			RecoveryID:          recovery.RecoveryID,
+			RecoveryStatus:      recovery.Status,
+			ImportedAtMS:        item.ImportedAtMS,
+			LeaseExpiresAtMS:    item.LeaseExpiresAtMS,
+			WarrantyExpiresAtMS: item.WarrantyExpiresAtMS,
 		})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].FileName < result[j].FileName })
@@ -3206,11 +3255,17 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		normalized = append(normalized, normalizedAccounts...)
 	}
 	// A supplier item describes delivery validity, whereas a returned payload may
-	// be a Sub2API bundle that expands into several CPA files.  Apply the order
-	// item leases only when that expansion is exactly one-to-one; otherwise keep
-	// the payload lease (or the conservative one-hour default) instead of making
-	// an unverifiable association.
-	applySupplyOrderItemDetails(normalized, taken.OrderItems, time.Now())
+	// be a Sub2API bundle that expands into several CPA files. Apply per-item
+	// timing only when that expansion is exactly one-to-one. nvtokens timing is
+	// supplier warranty, never credential expiry, so clear the normalization
+	// fallback even when a bundled delivery cannot be mapped exactly.
+	isNvtokensDelivery := strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformNvtokens)
+	if isNvtokensDelivery {
+		for index := range normalized {
+			normalized[index].leaseExpiresAtMS = 0
+		}
+	}
+	applySupplyOrderItemDetails(normalized, taken.OrderItems, time.Now(), isNvtokensDelivery)
 	items := make([]store.SupplyImportItem, 0, len(normalized))
 	seenItemKeys := make(map[string]struct{}, len(normalized))
 	for _, account := range normalized {
@@ -3219,15 +3274,16 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		}
 		seenItemKeys[account.itemKey] = struct{}{}
 		items = append(items, store.SupplyImportItem{
-			OrderID:          order.OrderID,
-			ItemKey:          account.itemKey,
-			AccountName:      account.accountName,
-			NameKey:          account.nameKey,
-			FileName:         account.fileName,
-			PayloadJSON:      string(account.payload),
-			LeaseExpiresAtMS: account.leaseExpiresAtMS,
-			BasePriceFen:     account.basePriceFen,
-			ChargedFen:       account.chargedFen,
+			OrderID:             order.OrderID,
+			ItemKey:             account.itemKey,
+			AccountName:         account.accountName,
+			NameKey:             account.nameKey,
+			FileName:            account.fileName,
+			PayloadJSON:         string(account.payload),
+			LeaseExpiresAtMS:    account.leaseExpiresAtMS,
+			WarrantyExpiresAtMS: account.warrantyExpiresAtMS,
+			BasePriceFen:        account.basePriceFen,
+			ChargedFen:          account.chargedFen,
 		})
 	}
 	if len(items) == 0 {
@@ -3713,6 +3769,7 @@ func (s *Service) importItems(ctx context.Context, cfg store.ManagerConfig, orde
 		account, err := normalizeAccountForImport(item.PayloadJSON)
 		if err == nil {
 			account = withSupplyAccountLeaseMetadata(account, item.LeaseExpiresAtMS)
+			account = withSupplyAccountWarrantyMetadata(account, item.WarrantyExpiresAtMS)
 			account = withSupplyAccountImportMetadata(account, cfg.Supply, *order, time.Now())
 		}
 		fileName := item.FileName
@@ -3879,6 +3936,35 @@ func withSupplyAccountLeaseMetadata(account normalizedSupplyAccount, leaseExpire
 		account.payload = normalized
 	}
 	return account
+}
+
+func withSupplyAccountWarrantyMetadata(account normalizedSupplyAccount, warrantyExpiresAtMS int64) normalizedSupplyAccount {
+	if warrantyExpiresAtMS <= 0 || len(account.payload) == 0 {
+		return account
+	}
+	var metadata map[string]any
+	if json.Unmarshal(account.payload, &metadata) != nil {
+		return account
+	}
+	deleteSupplyLeaseMetadata(metadata)
+	metadata["supply_warranty_expires_at_ms"] = warrantyExpiresAtMS
+	metadata["supply_warranty_expires_at"] = time.UnixMilli(warrantyExpiresAtMS).UTC().Format(time.RFC3339)
+	if normalized, err := json.Marshal(metadata); err == nil {
+		account.payload = normalized
+	}
+	return account
+}
+
+func deleteSupplyLeaseMetadata(metadata map[string]any) {
+	if metadata == nil {
+		return
+	}
+	for _, key := range []string{
+		"supply_lease_expires_at_ms", "supplyLeaseExpiresAtMs",
+		"supply_lease_expires_at", "supplyLeaseExpiresAt",
+	} {
+		delete(metadata, key)
+	}
 }
 
 func withSupplyAccountImportMetadata(account normalizedSupplyAccount, cfg store.ManagerSupplyConfig, order store.SupplyOrder, importedAt time.Time) normalizedSupplyAccount {
@@ -4358,9 +4444,10 @@ func supplyAccountItemFromStore(item store.SupplyImportItem, order store.SupplyO
 	} else if strings.HasPrefix(item.OrderID, "recovery-") {
 		source = "recovery"
 	}
+	expiresAtMS := supplyAccountExpiryAtMS(file.Raw, item.PayloadJSON, now)
 	remainingSeconds := int64(0)
-	if item.LeaseExpiresAtMS > 0 {
-		remainingSeconds = max(0, (item.LeaseExpiresAtMS-now.UnixMilli())/1000)
+	if expiresAtMS > 0 {
+		remainingSeconds = max(0, (expiresAtMS-now.UnixMilli())/1000)
 	}
 	accountStatus := supplyAccountStatus(item, file, cpaLookupKnown, cpaFound, now)
 	accountStatusReason := supplyAccountStatusReason(accountStatus, item, file, cpaLookupKnown, cpaFound, now)
@@ -4394,7 +4481,9 @@ func supplyAccountItemFromStore(item store.SupplyImportItem, order store.SupplyO
 		SupplierReleasedFen:  supplyItemReleasedFen(item.BasePriceFen, item.ChargedFen),
 		LastUsedAtMS:         usage.LastUsedAtMS,
 		ImportedAtMS:         item.ImportedAtMS,
+		ExpiresAtMS:          expiresAtMS,
 		LeaseExpiresAtMS:     item.LeaseExpiresAtMS,
+		WarrantyExpiresAtMS:  item.WarrantyExpiresAtMS,
 		RemainingSeconds:     remainingSeconds,
 		Auth401AtMS:          issue.Auth401AtMS,
 		Auth401BeforeCalls:   usage.SuccessCalls,
@@ -4409,12 +4498,42 @@ func supplyAccountItemFromStore(item store.SupplyImportItem, order store.SupplyO
 	}
 }
 
+func supplyAccountExpiryAtMS(raw map[string]any, payloadJSON string, now time.Time) int64 {
+	for _, values := range []map[string]any{raw, supplyAccountPayloadMetadata(payloadJSON)} {
+		if len(values) == 0 {
+			continue
+		}
+		for _, key := range []string{"expired", "expires_at", "expiresAt", "valid_until", "validUntil"} {
+			value, ok := values[key]
+			if !ok || value == nil {
+				continue
+			}
+			if expiry, parsed := parseSmartExpiryTime(value, now); parsed {
+				return expiry.UnixMilli()
+			}
+		}
+	}
+	return 0
+}
+
+func supplyAccountPayloadMetadata(payloadJSON string) map[string]any {
+	payloadJSON = strings.TrimSpace(payloadJSON)
+	if payloadJSON == "" {
+		return nil
+	}
+	var metadata map[string]any
+	if json.Unmarshal([]byte(payloadJSON), &metadata) != nil {
+		return nil
+	}
+	return metadata
+}
+
 func supplyAccountStatus(item store.SupplyImportItem, file cpaauthfiles.File, cpaLookupKnown bool, cpaFound bool, now time.Time) string {
 	status := reportKey(item.Status)
 	if status != "imported" {
 		return status
 	}
-	if item.LeaseExpiresAtMS > 0 && item.LeaseExpiresAtMS <= now.UnixMilli() {
+	if expiresAtMS := supplyAccountExpiryAtMS(file.Raw, item.PayloadJSON, now); expiresAtMS > 0 && expiresAtMS <= now.UnixMilli() {
 		return "expired"
 	}
 	if !cpaLookupKnown {
@@ -4442,8 +4561,8 @@ func supplyAccountStatusReason(accountStatus string, item store.SupplyImportItem
 	case "pending":
 		return "等待导入到 CPA 认证文件"
 	case "expired":
-		if item.LeaseExpiresAtMS > 0 {
-			return fmt.Sprintf("账号有效期已于 %s 过期", time.UnixMilli(item.LeaseExpiresAtMS).In(time.Local).Format("2006-01-02 15:04:05"))
+		if expiresAtMS := supplyAccountExpiryAtMS(file.Raw, item.PayloadJSON, now); expiresAtMS > 0 {
+			return fmt.Sprintf("账号有效期已于 %s 过期", time.UnixMilli(expiresAtMS).In(time.Local).Format("2006-01-02 15:04:05"))
 		}
 		return "账号有效期已过期"
 	case "missing":
@@ -4585,7 +4704,7 @@ func supplyAccountStatusFromItem(item store.SupplyImportItem, now time.Time) str
 	if status != "imported" {
 		return status
 	}
-	if item.LeaseExpiresAtMS > 0 && item.LeaseExpiresAtMS <= now.UnixMilli() {
+	if expiresAtMS := supplyAccountExpiryAtMS(nil, item.PayloadJSON, now); expiresAtMS > 0 && expiresAtMS <= now.UnixMilli() {
 		return "expired"
 	}
 	return "imported"
@@ -4616,8 +4735,8 @@ func supplyAccountSummaryAdd(summary *SupplyAccountSummary, account SupplyAccoun
 	case "unknown":
 		summary.Unknown++
 	}
-	if account.AccountStatus == "active" && account.LeaseExpiresAtMS > 0 &&
-		account.LeaseExpiresAtMS <= now.Add(15*time.Minute).UnixMilli() {
+	if account.AccountStatus == "active" && account.ExpiresAtMS > 0 &&
+		account.ExpiresAtMS <= now.Add(15*time.Minute).UnixMilli() {
 		summary.ExpiringSoon++
 	}
 	summary.UsageCalls += account.UsageCalls
@@ -4922,10 +5041,14 @@ func buildSupplyReport(req ReportRequest, orders []store.SupplyOrder, recoveries
 				importRegistrationTotal += (item.ImportedAtMS - item.CreatedAtMS) / 1000
 				importRegistrationSamples++
 			}
-			if item.LeaseExpiresAtMS > 0 {
-				if item.LeaseExpiresAtMS <= now.UnixMilli() {
+			expiresAtMS := supplyAccountExpiryAtMS(nil, item.PayloadJSON, now)
+			if expiresAtMS <= 0 {
+				expiresAtMS = item.LeaseExpiresAtMS
+			}
+			if expiresAtMS > 0 {
+				if expiresAtMS <= now.UnixMilli() {
 					report.ImportHealth.ExpiredItems++
-				} else if item.LeaseExpiresAtMS <= now.Add(15*time.Minute).UnixMilli() {
+				} else if expiresAtMS <= now.Add(15*time.Minute).UnixMilli() {
 					report.ImportHealth.ExpiringSoonItems++
 				}
 			}
@@ -5124,7 +5247,9 @@ func buildReportReconciliation(req ReportRequest, orders []store.SupplyOrder, re
 			Status:               reportKey(item.Status),
 			AccountStatus:        supplyAccountStatusFromItem(item, now),
 			ImportedAtMS:         item.ImportedAtMS,
+			ExpiresAtMS:          supplyAccountExpiryAtMS(nil, item.PayloadJSON, now),
 			LeaseExpiresAtMS:     item.LeaseExpiresAtMS,
+			WarrantyExpiresAtMS:  item.WarrantyExpiresAtMS,
 			SupplierBasePriceFen: item.BasePriceFen,
 			SupplierChargedFen:   item.ChargedFen,
 			SupplierReleasedFen:  supplyItemReleasedFen(item.BasePriceFen, item.ChargedFen),
@@ -5297,6 +5422,9 @@ func richerSupplyImportItem(current store.SupplyImportItem, candidate store.Supp
 	}
 	if current.LeaseExpiresAtMS <= 0 && candidate.LeaseExpiresAtMS > 0 {
 		current.LeaseExpiresAtMS = candidate.LeaseExpiresAtMS
+	}
+	if current.WarrantyExpiresAtMS <= 0 && candidate.WarrantyExpiresAtMS > 0 {
+		current.WarrantyExpiresAtMS = candidate.WarrantyExpiresAtMS
 	}
 	if current.CreatedAtMS <= 0 && candidate.CreatedAtMS > 0 {
 		current.CreatedAtMS = candidate.CreatedAtMS
@@ -9624,6 +9752,9 @@ func (s *Service) backfillSupplyAccountMetadata(ctx context.Context, cfg store.M
 	if err != nil {
 		return err
 	}
+	if err := s.migrateNvtokensWarrantyMetadata(ctx, cfg, items); err != nil {
+		return err
+	}
 	currentFileUsers := make(map[string]int)
 	for _, item := range items {
 		if item.SupersededAtMS > 0 {
@@ -9688,6 +9819,87 @@ func (s *Service) backfillSupplyAccountMetadata(ctx context.Context, cfg store.M
 		return errors.Join(reconcileErrors...)
 	}
 	return nil
+}
+
+func (s *Service) migrateNvtokensWarrantyMetadata(ctx context.Context, cfg store.ManagerConfig, items []store.SupplyImportItem) error {
+	if s == nil || s.store == nil || len(items) == 0 {
+		return nil
+	}
+	orders, err := s.supplyOrdersForItems(ctx, nil, items)
+	if err != nil {
+		return err
+	}
+	changed := false
+	for index := range items {
+		item := &items[index]
+		if item.SupersededAtMS > 0 || item.LeaseExpiresAtMS <= 0 || item.WarrantyExpiresAtMS > 0 {
+			continue
+		}
+		order := orders[item.OrderID]
+		if !supplyOrderUsesNvtokensPlatform(cfg.Supply, order) {
+			continue
+		}
+		warrantyExpiresAtMS := item.LeaseExpiresAtMS
+		if err := s.rewriteNvtokensWarrantyAuthFile(ctx, cfg, *item, warrantyExpiresAtMS); err != nil {
+			return fmt.Errorf("migrate nvtokens warranty for %q: %w", item.FileName, err)
+		}
+		if err := s.store.UpdateSupplyImportItemWarrantyMetadata(ctx, item.ID, 0, warrantyExpiresAtMS); err != nil {
+			return err
+		}
+		item.LeaseExpiresAtMS = 0
+		item.WarrantyExpiresAtMS = warrantyExpiresAtMS
+		changed = true
+	}
+	if changed {
+		s.invalidateAuthAndCapacityCaches()
+	}
+	return nil
+}
+
+func supplyOrderUsesNvtokensPlatform(cfg store.ManagerSupplyConfig, order store.SupplyOrder) bool {
+	if strings.TrimSpace(order.OrderID) == "" {
+		return false
+	}
+	supplierID := strings.TrimSpace(order.SupplierID)
+	for _, platform := range managerconfigsvc.SupplyPlatforms(cfg) {
+		if strings.EqualFold(strings.TrimSpace(platform.ID), supplierID) {
+			return strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformNvtokens)
+		}
+	}
+	return false
+}
+
+func (s *Service) rewriteNvtokensWarrantyAuthFile(ctx context.Context, cfg store.ManagerConfig, item store.SupplyImportItem, warrantyExpiresAtMS int64) error {
+	fileName := strings.TrimSpace(item.FileName)
+	if warrantyExpiresAtMS <= 0 || !safeSupplyAuthFileName(fileName) ||
+		strings.TrimSpace(cfg.CPAConnection.CPABaseURL) == "" || strings.TrimSpace(cfg.CPAConnection.ManagementKey) == "" {
+		return nil
+	}
+	payload, err := s.authFiles.Download(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName)
+	if errors.Is(err, cpaauthfiles.ErrAuthFileNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var metadata map[string]any
+	if json.Unmarshal(payload, &metadata) != nil {
+		return errors.New("CPA auth file is not a JSON object")
+	}
+	currentWarranty := int64(numberField(metadata, "supply_warranty_expires_at_ms", "supplyWarrantyExpiresAtMs"))
+	currentLease := int64(numberField(metadata, "supply_lease_expires_at_ms", "supplyLeaseExpiresAtMs"))
+	if currentWarranty == warrantyExpiresAtMS && currentLease <= 0 &&
+		stringFromMap(metadata, "supply_lease_expires_at", "supplyLeaseExpiresAt") == "" {
+		return nil
+	}
+	deleteSupplyLeaseMetadata(metadata)
+	metadata["supply_warranty_expires_at_ms"] = warrantyExpiresAtMS
+	metadata["supply_warranty_expires_at"] = time.UnixMilli(warrantyExpiresAtMS).UTC().Format(time.RFC3339)
+	normalized, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	return s.authFiles.Upload(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName, normalized, cfg.Supply.DefaultWebsockets)
 }
 
 // reconcileSupplyAuthFileName migrates a legacy supplier-labelled auth file to
@@ -10219,15 +10431,16 @@ func automaticSettleWindow(cfg store.ManagerSupplyConfig) time.Duration {
 }
 
 type normalizedSupplyAccount struct {
-	payload          []byte
-	itemKey          string
-	accountName      string
-	nameKey          string
-	workspaceKey     string
-	fileName         string
-	leaseExpiresAtMS int64
-	basePriceFen     int64
-	chargedFen       int64
+	payload             []byte
+	itemKey             string
+	accountName         string
+	nameKey             string
+	workspaceKey        string
+	fileName            string
+	leaseExpiresAtMS    int64
+	warrantyExpiresAtMS int64
+	basePriceFen        int64
+	chargedFen          int64
 }
 
 func normalizeAccountPayload(raw json.RawMessage) ([]byte, string, string, error) {
@@ -10540,13 +10753,22 @@ func supplyDeliveryLeaseExpiresAtMSFromSeconds(seconds int64, now time.Time) int
 // between supplier order items and CPA import files. A bundled delivery may
 // expand one supplied payload into many files, so a partial mapping would make
 // a valid account appear expired or receive another account's cost.
-func applySupplyOrderItemDetails(accounts []normalizedSupplyAccount, items []supplyclient.OrderItem, now time.Time) bool {
+func applySupplyOrderItemDetails(accounts []normalizedSupplyAccount, items []supplyclient.OrderItem, now time.Time, nvtokens ...bool) bool {
 	if len(accounts) == 0 || len(accounts) != len(items) {
 		return false
 	}
+	warrantyOnly := len(nvtokens) > 0 && nvtokens[0]
 	for index := range accounts {
+		if warrantyOnly {
+			accounts[index].leaseExpiresAtMS = 0
+		}
 		if items[index].HasRemaining {
-			accounts[index].leaseExpiresAtMS = supplyDeliveryLeaseExpiresAtMSFromSeconds(items[index].RemainingSeconds, now)
+			expiresAtMS := supplyDeliveryLeaseExpiresAtMSFromSeconds(items[index].RemainingSeconds, now)
+			if warrantyOnly {
+				accounts[index].warrantyExpiresAtMS = expiresAtMS
+			} else {
+				accounts[index].leaseExpiresAtMS = expiresAtMS
+			}
 		}
 		accounts[index].basePriceFen = items[index].BasePriceFen
 		accounts[index].chargedFen = items[index].ChargedFen
@@ -10973,12 +11195,32 @@ func preserveCodexSupplyMetadata(payload []byte, existingPayload []byte) []byte 
 			changed = true
 		}
 	}
-	if nextLeaseExpiresAtMS := int64(numberField(next, "supply_lease_expires_at_ms", "supplyLeaseExpiresAtMs")); nextLeaseExpiresAtMS <= 0 {
+	nextWarrantyExpiresAtMS := int64(numberField(next, "supply_warranty_expires_at_ms", "supplyWarrantyExpiresAtMs"))
+	if nextWarrantyExpiresAtMS > 0 {
+		// A supplier warranty is informational only. Never let an older scheduling
+		// lease return while preserving metadata for a freshly imported NV payload.
+		if int64(numberField(next, "supply_lease_expires_at_ms", "supplyLeaseExpiresAtMs")) > 0 ||
+			stringFromMap(next, "supply_lease_expires_at", "supplyLeaseExpiresAt") != "" {
+			deleteSupplyLeaseMetadata(next)
+			changed = true
+		}
+	} else if nextLeaseExpiresAtMS := int64(numberField(next, "supply_lease_expires_at_ms", "supplyLeaseExpiresAtMs")); nextLeaseExpiresAtMS <= 0 {
 		leaseExpiresAtMS := int64(numberField(existing, "supply_lease_expires_at_ms", "supplyLeaseExpiresAtMs"))
 		if leaseExpiresAtMS > 0 {
 			next["supply_lease_expires_at_ms"] = leaseExpiresAtMS
 			if leaseExpiresAt := stringFromMap(existing, "supply_lease_expires_at", "supplyLeaseExpiresAt"); leaseExpiresAt != "" {
 				next["supply_lease_expires_at"] = leaseExpiresAt
+			}
+			changed = true
+		}
+	}
+	if nextWarrantyExpiresAtMS <= 0 {
+		warrantyExpiresAtMS := int64(numberField(existing, "supply_warranty_expires_at_ms", "supplyWarrantyExpiresAtMs"))
+		if warrantyExpiresAtMS > 0 {
+			deleteSupplyLeaseMetadata(next)
+			next["supply_warranty_expires_at_ms"] = warrantyExpiresAtMS
+			if warrantyExpiresAt := stringFromMap(existing, "supply_warranty_expires_at", "supplyWarrantyExpiresAt"); warrantyExpiresAt != "" {
+				next["supply_warranty_expires_at"] = warrantyExpiresAt
 			}
 			changed = true
 		}

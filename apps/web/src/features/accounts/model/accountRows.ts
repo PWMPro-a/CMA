@@ -138,6 +138,7 @@ export interface AccountRow {
   createdAtMs: number | null;
   updatedAtMs: number | null;
   expiresAtMs?: number | null;
+  warrantyExpiresAtMs?: number | null;
   /** Number of requests currently in flight for this account. */
   currentConcurrency?: number | null;
   quota: AccountQuotaSummary;
@@ -227,10 +228,6 @@ const readNumber = (value: unknown): number | null => {
 
 const readAccountExpiryAtMs = (file: AuthFileItem): number | null => {
   const candidates = [
-    file['supply_lease_expires_at_ms'],
-    file['supplyLeaseExpiresAtMs'],
-    file['supply_lease_expires_at'],
-    file['supplyLeaseExpiresAt'],
     file['expired'],
     file.expires_at,
     file['expiresAt'],
@@ -238,6 +235,27 @@ const readAccountExpiryAtMs = (file: AuthFileItem): number | null => {
     file['validUntil'],
   ];
   for (const value of candidates) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return value < 10_000_000_000 ? Math.round(value * 1000) : Math.round(value);
+    }
+    if (typeof value !== 'string' || !value.trim()) continue;
+    const numeric = Number(value.trim());
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return numeric < 10_000_000_000 ? Math.round(numeric * 1000) : Math.round(numeric);
+    }
+    const parsed = Date.parse(value.trim());
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+};
+
+const readAccountWarrantyAtMs = (file: AuthFileItem): number | null => {
+  for (const value of [
+    file['supply_warranty_expires_at_ms'],
+    file['supplyWarrantyExpiresAtMs'],
+    file['supply_warranty_expires_at'],
+    file['supplyWarrantyExpiresAt'],
+  ]) {
     if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
       return value < 10_000_000_000 ? Math.round(value * 1000) : Math.round(value);
     }
@@ -524,13 +542,11 @@ export const buildAccountRows = (
               fallbackImportMetadata.imported_at || persistedImportMetadata?.imported_at || '',
           }
         : (persistedImportMetadata ?? fallbackImportMetadata);
-    const expiryOverride =
-      typeof supplyValue === 'number'
-        ? supplyValue
-        : typeof supplyMetadata?.leaseExpiresAtMs === 'number' &&
-            supplyMetadata.leaseExpiresAtMs > 0
-          ? supplyMetadata.leaseExpiresAtMs
-          : undefined;
+    const warrantyOverride =
+      typeof supplyMetadata?.warrantyExpiresAtMs === 'number' &&
+      supplyMetadata.warrantyExpiresAtMs > 0
+        ? supplyMetadata.warrantyExpiresAtMs
+        : undefined;
     return {
       key: file.name,
       selectionKey,
@@ -552,7 +568,8 @@ export const buildAccountRows = (
       priority: readNumber(file.priority),
       createdAtMs: readAuthFileCreatedAtMs(file),
       updatedAtMs: readAuthFileUpdatedAtMs(file),
-      expiresAtMs: expiryOverride ?? readAccountExpiryAtMs(file),
+      expiresAtMs: readAccountExpiryAtMs(file),
+      warrantyExpiresAtMs: warrantyOverride ?? readAccountWarrantyAtMs(file),
       currentConcurrency: readAccountCurrentConcurrency(file),
       quota,
       usage: buildUsageSummary(file),

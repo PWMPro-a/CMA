@@ -39,6 +39,7 @@ func (w *SupplyReplenishmentWorker) run(ctx context.Context) {
 			startedAt := time.Now()
 			err := w.service.RunAutomatic(ctx)
 			finishedAt := time.Now()
+			w.service.ScheduleWarrantyMetadataMigration(ctx)
 			// Recovery can scan and reconcile hundreds of records. Schedule it
 			// after the replenishment decision so it never extends the dashboard's
 			// "checking" state or delays an urgent order.

@@ -3082,7 +3082,8 @@ func TestSupplyAccountStatusReasonExplainsAbnormalStates(t *testing.T) {
 	expiredAt := now.Add(-time.Minute).UnixMilli()
 	expiredReason := supplyAccountStatusReason("expired", store.SupplyImportItem{
 		Status:           "imported",
-		LeaseExpiresAtMS: expiredAt,
+		LeaseExpiresAtMS: now.Add(-2 * time.Hour).UnixMilli(),
+		PayloadJSON:      fmt.Sprintf(`{"type":"codex","expires_at":%d}`, expiredAt/1000),
 	}, cpaauthfiles.File{}, true, true, now)
 	if !strings.Contains(expiredReason, "过期") || !strings.Contains(expiredReason, "2026-08-09") {
 		t.Fatalf("expired reason = %q", expiredReason)
@@ -4403,6 +4404,32 @@ func TestPreservePinnedSupplyTeamPlanOnTransientFreeReplacement(t *testing.T) {
 	}
 	if !boolField(result, "codex_plan_type_pinned") {
 		t.Fatalf("codex_plan_type_pinned = %#v, want true", result["codex_plan_type_pinned"])
+	}
+	if got := stringFromMap(result, "access_token"); got != "new" {
+		t.Fatalf("access_token = %q, want new", got)
+	}
+}
+
+func TestPreserveCodexSupplyMetadataDoesNotRestoreLeaseWhenNextPayloadHasWarranty(t *testing.T) {
+	warrantyExpiresAtMS := time.Now().Add(45 * time.Minute).UnixMilli()
+	legacyLeaseExpiresAtMS := time.Now().Add(30 * time.Minute).UnixMilli()
+	next := []byte(fmt.Sprintf(`{"type":"codex","access_token":"new","supply_warranty_expires_at_ms":%d,"supply_warranty_expires_at":"%s"}`,
+		warrantyExpiresAtMS, time.UnixMilli(warrantyExpiresAtMS).UTC().Format(time.RFC3339)))
+	existing := []byte(fmt.Sprintf(`{"type":"codex","access_token":"old","supply_lease_expires_at_ms":%d,"supply_lease_expires_at":"%s"}`,
+		legacyLeaseExpiresAtMS, time.UnixMilli(legacyLeaseExpiresAtMS).UTC().Format(time.RFC3339)))
+	preserved := preserveCodexSupplyMetadata(next, existing)
+	var result map[string]any
+	if err := json.Unmarshal(preserved, &result); err != nil {
+		t.Fatalf("decode preserved payload: %v", err)
+	}
+	if got := int64(numberField(result, "supply_warranty_expires_at_ms")); got != warrantyExpiresAtMS {
+		t.Fatalf("warranty expiry = %d, want %d", got, warrantyExpiresAtMS)
+	}
+	if got := int64(numberField(result, "supply_lease_expires_at_ms")); got != 0 {
+		t.Fatalf("scheduling lease returned = %d", got)
+	}
+	if got := stringFromMap(result, "supply_lease_expires_at"); got != "" {
+		t.Fatalf("scheduling lease timestamp returned = %q", got)
 	}
 	if got := stringFromMap(result, "access_token"); got != "new" {
 		t.Fatalf("access_token = %q, want new", got)
@@ -6250,5 +6277,169 @@ func supplyReportEvent(
 		LatencyMS:        latencyMS,
 		Failed:           failed,
 		CreatedAtMS:      timestampMS,
+	}
+}
+
+func TestApplyNvtokensOrderItemsStoresWarrantyWithoutLease(t *testing.T) {
+	now := time.Date(2026, time.August, 21, 6, 0, 0, 0, time.UTC)
+	accounts := []normalizedSupplyAccount{
+		{leaseExpiresAtMS: now.Add(time.Hour).UnixMilli()},
+		{leaseExpiresAtMS: now.Add(time.Hour).UnixMilli()},
+	}
+	if !applySupplyOrderItemDetails(accounts, []supplyclient.OrderItem{
+		{RemainingSeconds: 900, HasRemaining: true, BasePriceFen: 1700, ChargedFen: 1700},
+		{RemainingSeconds: 1800, HasRemaining: true, BasePriceFen: 1749, ChargedFen: 1749},
+	}, now, true) {
+		t.Fatal("exact nvtokens item mapping should be accepted")
+	}
+	for index, expected := range []int64{900, 1800} {
+		if accounts[index].leaseExpiresAtMS != 0 {
+			t.Fatalf("account %d scheduling lease = %d, want 0", index, accounts[index].leaseExpiresAtMS)
+		}
+		if got := (accounts[index].warrantyExpiresAtMS - now.UnixMilli()) / 1000; got != expected {
+			t.Fatalf("account %d warranty seconds = %d, want %d", index, got, expected)
+		}
+	}
+}
+
+func TestMigrateNvtokensLeaseToWarrantyLeavesOtherSuppliersUntouched(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+	leaseExpiresAtMS := now.Add(45 * time.Minute).UnixMilli()
+	legacyExpiresAtMS := now.Add(30 * time.Minute).UnixMilli()
+	payloads := map[string][]byte{
+		"nv.json":     []byte(fmt.Sprintf(`{"type":"codex","access_token":"nv","expires_at":%d,"supply_lease_expires_at_ms":%d,"supply_lease_expires_at":"%s"}`, now.Add(10*24*time.Hour).Unix(), leaseExpiresAtMS, time.UnixMilli(leaseExpiresAtMS).UTC().Format(time.RFC3339))),
+		"legacy.json": []byte(fmt.Sprintf(`{"type":"codex","access_token":"legacy","expires_at":%d,"supply_lease_expires_at_ms":%d}`, now.Add(7*24*time.Hour).Unix(), legacyExpiresAtMS)),
+	}
+	var payloadMu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/management/auth-files/download" && r.Method == http.MethodGet:
+			payloadMu.Lock()
+			payload, ok := payloads[r.URL.Query().Get("name")]
+			payloadMu.Unlock()
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write(payload)
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodPost:
+			reader, err := r.MultipartReader()
+			if err != nil {
+				t.Fatalf("multipart reader: %v", err)
+			}
+			for {
+				part, partErr := reader.NextPart()
+				if partErr == io.EOF {
+					break
+				}
+				if partErr != nil {
+					t.Fatalf("multipart part: %v", partErr)
+				}
+				if part.FormName() != "file" {
+					continue
+				}
+				payload, readErr := io.ReadAll(part)
+				if readErr != nil {
+					t.Fatalf("read upload: %v", readErr)
+				}
+				payloadMu.Lock()
+				payloads[part.FileName()] = payload
+				payloadMu.Unlock()
+			}
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "nvtokens-warranty.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{Platforms: []store.ManagerSupplyPlatformConfig{
+			{ID: "nv", Type: managerconfigsvc.SupplyPlatformNvtokens, BaseURL: "https://nvtokens.test", Product: "plus"},
+			{ID: "legacy", Type: managerconfigsvc.SupplyPlatformLegacy, BaseURL: "https://legacy.test", Product: "oauth_7d"},
+		}},
+	}
+	for _, order := range []store.SupplyOrder{
+		{OrderID: "order-nv", SupplierID: "nv", Product: "plus", RequestedQuantity: 1, Status: "completed"},
+		{OrderID: "order-legacy", SupplierID: "legacy", Product: "oauth_7d", RequestedQuantity: 1, Status: "completed"},
+	} {
+		if _, err := st.CreateSupplyOrder(ctx, order); err != nil {
+			t.Fatalf("create order %s: %v", order.OrderID, err)
+		}
+	}
+	for _, input := range []struct {
+		orderID, itemKey, fileName string
+		leaseExpiresAtMS           int64
+	}{
+		{"order-nv", "nv-item", "nv.json", leaseExpiresAtMS},
+		{"order-legacy", "legacy-item", "legacy.json", legacyExpiresAtMS},
+	} {
+		if _, err := st.InsertSupplyImportItems(ctx, input.orderID, []store.SupplyImportItem{{
+			ItemKey: input.itemKey, FileName: input.fileName, PayloadJSON: string(payloads[input.fileName]), LeaseExpiresAtMS: input.leaseExpiresAtMS,
+		}}); err != nil {
+			t.Fatalf("insert %s: %v", input.itemKey, err)
+		}
+		items, err := st.ListSupplyImportItemsByOrderIDs(ctx, []string{input.orderID})
+		if err != nil || len(items) != 1 {
+			t.Fatalf("list %s items=%#v err=%v", input.orderID, items, err)
+		}
+		if err := st.MarkSupplyImportItemImported(ctx, items[0].ID, now.UnixMilli()); err != nil {
+			t.Fatalf("mark %s imported: %v", input.itemKey, err)
+		}
+	}
+
+	service := New(st, nil, server.Client())
+	items, err := st.ListSupplyImportItems(ctx, 10, "imported")
+	if err != nil {
+		t.Fatalf("list imports: %v", err)
+	}
+	if err := service.migrateNvtokensWarrantyMetadata(ctx, cfg, items); err != nil {
+		t.Fatalf("migrate warranty: %v", err)
+	}
+
+	migrated, err := st.ListSupplyImportItemsByOrderIDs(ctx, []string{"order-nv", "order-legacy"})
+	if err != nil || len(migrated) != 2 {
+		t.Fatalf("migrated items=%#v err=%v", migrated, err)
+	}
+	byOrder := map[string]store.SupplyImportItem{}
+	for _, item := range migrated {
+		byOrder[item.OrderID] = item
+	}
+	if got := byOrder["order-nv"]; got.LeaseExpiresAtMS != 0 || got.WarrantyExpiresAtMS != leaseExpiresAtMS {
+		t.Fatalf("nvtokens item = %#v", got)
+	}
+	if got := byOrder["order-legacy"]; got.LeaseExpiresAtMS != legacyExpiresAtMS || got.WarrantyExpiresAtMS != 0 {
+		t.Fatalf("legacy item = %#v", got)
+	}
+	active, err := st.ListActiveImportedSupplyItems(ctx, now.UnixMilli())
+	if err != nil || len(active) != 1 || active[0].FileName != "legacy.json" {
+		t.Fatalf("scheduling leases after migration = %#v err=%v", active, err)
+	}
+	payloadMu.Lock()
+	nvPayload := append([]byte(nil), payloads["nv.json"]...)
+	legacyPayload := append([]byte(nil), payloads["legacy.json"]...)
+	payloadMu.Unlock()
+	var nvMetadata, legacyMetadata map[string]any
+	if err := json.Unmarshal(nvPayload, &nvMetadata); err != nil {
+		t.Fatalf("decode migrated nv payload: %v", err)
+	}
+	if err := json.Unmarshal(legacyPayload, &legacyMetadata); err != nil {
+		t.Fatalf("decode legacy payload: %v", err)
+	}
+	if int64(numberField(nvMetadata, "supply_warranty_expires_at_ms")) != leaseExpiresAtMS ||
+		int64(numberField(nvMetadata, "supply_lease_expires_at_ms")) != 0 ||
+		stringFromMap(nvMetadata, "supply_lease_expires_at") != "" {
+		t.Fatalf("migrated nv metadata = %#v", nvMetadata)
+	}
+	if int64(numberField(legacyMetadata, "supply_lease_expires_at_ms")) != legacyExpiresAtMS ||
+		int64(numberField(legacyMetadata, "supply_warranty_expires_at_ms")) != 0 {
+		t.Fatalf("legacy metadata changed = %#v", legacyMetadata)
 	}
 }

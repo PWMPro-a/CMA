@@ -1116,7 +1116,13 @@ const buildOverviewCredential = (
         'i18n'
       ),
       field('importedAtMs', 'accounts.imported_at_label', importedAtMs, 'timestamp'),
-      field('leaseExpiresAtMs', 'accounts.account_expires_at', row.expiresAtMs, 'timestamp'),
+      field('expiresAtMs', 'accounts.account_expires_at', row.expiresAtMs, 'timestamp'),
+      field(
+        'warrantyExpiresAtMs',
+        'accounts.account_warranty',
+        row.warrantyExpiresAtMs,
+        'timestamp'
+      ),
       field(
         'replacementRecord',
         'accounts.replacement_record_label',

@@ -681,7 +681,9 @@ export interface SupplyAccountItem {
   supplierReleasedFen?: number;
   lastUsedAtMs?: number;
   importedAtMs?: number;
+  expiresAtMs?: number;
   leaseExpiresAtMs?: number;
+  warrantyExpiresAtMs?: number;
   remainingSeconds?: number;
   auth401AtMs?: number;
   auth401BeforeCalls?: number;
@@ -715,6 +717,7 @@ export interface SupplyAccountLeaseItem {
   recoveryStatus?: string;
   importedAtMs?: number;
   leaseExpiresAtMs?: number;
+  warrantyExpiresAtMs?: number;
 }
 
 export interface SupplyReportExecutive {
@@ -867,7 +870,9 @@ export interface SupplyReportAccountLedgerRow {
   status: string;
   accountStatus: string;
   importedAtMs?: number;
+  expiresAtMs?: number;
   leaseExpiresAtMs?: number;
+  warrantyExpiresAtMs?: number;
   allocatedChargedFen: number;
   allocatedReleasedFen: number;
   allocatedNetFen: number;

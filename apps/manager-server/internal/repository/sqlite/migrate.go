@@ -911,6 +911,7 @@ func Migrate(db *sql.DB) error {
 			effective_from_ms integer,
 			superseded_at_ms integer,
 			lease_expires_at_ms integer,
+			warranty_expires_at_ms integer,
 			base_price_fen integer not null default 0,
 			charged_fen integer not null default 0,
 			created_at_ms integer not null,
@@ -1277,6 +1278,11 @@ func ensureSupplyImportItemColumns(db *sql.DB) error {
 			return err
 		}
 	}
+	if _, ok := existing["warranty_expires_at_ms"]; !ok {
+		if _, err := db.Exec(`alter table supply_import_items add column warranty_expires_at_ms integer`); err != nil {
+			return err
+		}
+	}
 	if _, ok := existing["base_price_fen"]; !ok {
 		if _, err := db.Exec(`alter table supply_import_items add column base_price_fen integer not null default 0`); err != nil {
 			return err
@@ -1307,16 +1313,10 @@ func ensureSupplyImportItemColumns(db *sql.DB) error {
 			return err
 		}
 	}
-	// Older imports predate the explicit delivery lease. The supplier accounts
-	// are valid for one hour, so their original import timestamp is the only
-	// conservative evidence available. Keep this idempotent: a deployment may
-	// create the column and be interrupted before its historical rows are filled.
-	if _, err := db.Exec(`update supply_import_items
-		set lease_expires_at_ms = imported_at_ms + ?
-		where status = 'imported' and imported_at_ms is not null and imported_at_ms > 0
-		and (lease_expires_at_ms is null or lease_expires_at_ms <= 0)`, int64(time.Hour/time.Millisecond)); err != nil {
-		return err
-	}
+	// Imported rows from builds that predate explicit supplier lease metadata
+	// keep an unknown lease. Fabricating a one-hour account expiry from the
+	// import timestamp conflates delivery warranty with credential validity and
+	// would incorrectly influence scheduling.
 	statements := []string{
 		`create index if not exists idx_supply_import_items_active_lease on supply_import_items(status, lease_expires_at_ms)`,
 		`create index if not exists idx_supply_import_items_name_current on supply_import_items(name_key, superseded_at_ms, imported_at_ms)`,

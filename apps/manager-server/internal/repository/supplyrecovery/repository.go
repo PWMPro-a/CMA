@@ -277,11 +277,11 @@ func (r *repository) PersistClaim(ctx context.Context, recovery model.SupplyReco
 			item := protectedItem.item
 			if _, err := tx.ExecContext(ctx, `insert or ignore into supply_import_items (
 				order_id, item_key, account_name, name_key, file_name, import_action, replaced_file_name,
-				status, payload_json, attempt_count, lease_expires_at_ms,
+				status, payload_json, attempt_count, lease_expires_at_ms, warranty_expires_at_ms,
 				base_price_fen, charged_fen, created_at_ms, updated_at_ms
-			) values (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?, ?)`, order.OrderID, item.ItemKey,
+			) values (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?, ?, ?)`, order.OrderID, item.ItemKey,
 				nullString(item.AccountName), nullString(item.NameKey), item.FileName, nullString(item.ImportAction), nullString(item.ReplacedFileName), protectedItem.payload,
-				nullPositive(item.LeaseExpiresAtMS), item.BasePriceFen, item.ChargedFen, claimedAtMS, claimedAtMS); err != nil {
+				nullPositive(item.LeaseExpiresAtMS), nullPositive(item.WarrantyExpiresAtMS), item.BasePriceFen, item.ChargedFen, claimedAtMS, claimedAtMS); err != nil {
 				return err
 			}
 		}

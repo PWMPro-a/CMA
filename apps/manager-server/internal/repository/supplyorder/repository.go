@@ -42,6 +42,7 @@ type Repository interface {
 	UpdateItemFileName(ctx context.Context, id int64, fileName string) error
 	UpdateItemImportPlan(ctx context.Context, id int64, accountName string, nameKey string, fileName string, importAction string, replacedFileName string) error
 	UpdateItemAccountMetadata(ctx context.Context, id int64, accountName string, nameKey string) error
+	UpdateItemWarrantyMetadata(ctx context.Context, id int64, leaseExpiresAtMS int64, warrantyExpiresAtMS int64) error
 	ListItemsMissingAccountMetadata(ctx context.Context, limit int) ([]model.SupplyImportItem, error)
 	ListCurrentItemsByItemKey(ctx context.Context, itemKey string) ([]model.SupplyImportItem, error)
 	ListCurrentItemsByNameKey(ctx context.Context, nameKey string) ([]model.SupplyImportItem, error)
@@ -550,11 +551,11 @@ func (r *repository) InsertItems(ctx context.Context, orderID string, items []mo
 			}
 			result, err := tx.ExecContext(ctx, `insert or ignore into supply_import_items (
 			order_id, item_key, account_name, name_key, file_name, import_action, replaced_file_name,
-			status, payload_json, attempt_count, lease_expires_at_ms,
+			status, payload_json, attempt_count, lease_expires_at_ms, warranty_expires_at_ms,
 			base_price_fen, charged_fen, created_at_ms, updated_at_ms
-		) values (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?, ?)`, orderID, item.ItemKey,
+		) values (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?, ?, ?)`, orderID, item.ItemKey,
 				nullString(item.AccountName), nullString(item.NameKey), item.FileName, nullString(item.ImportAction), nullString(item.ReplacedFileName), payload,
-				nullPositive(item.LeaseExpiresAtMS), item.BasePriceFen, item.ChargedFen, now, now)
+				nullPositive(item.LeaseExpiresAtMS), nullPositive(item.WarrantyExpiresAtMS), item.BasePriceFen, item.ChargedFen, now, now)
 			if err != nil {
 				return err
 			}
@@ -842,6 +843,15 @@ func (r *repository) UpdateItemAccountMetadata(ctx context.Context, id int64, ac
 	})
 }
 
+func (r *repository) UpdateItemWarrantyMetadata(ctx context.Context, id int64, leaseExpiresAtMS int64, warrantyExpiresAtMS int64) error {
+	return sqliterepo.WithBusyRetry(ctx, func() error {
+		_, err := r.db.ExecContext(ctx, `update supply_import_items
+			set lease_expires_at_ms = ?, warranty_expires_at_ms = ?, updated_at_ms = ? where id = ?`,
+			nullPositive(leaseExpiresAtMS), nullPositive(warrantyExpiresAtMS), time.Now().UnixMilli(), id)
+		return err
+	})
+}
+
 func (r *repository) ListItemsMissingAccountMetadata(ctx context.Context, limit int) ([]model.SupplyImportItem, error) {
 	if limit <= 0 || limit > 5000 {
 		limit = 1000
@@ -916,7 +926,7 @@ const orderSelect = `select id, order_id, task_id, supplier_id, product, request
 const importItemSelect = `select id, order_id, item_key, account_name, name_key, file_name,
 	import_action, replaced_file_name, supersedes_item_id, status,
 	payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, effective_from_ms, superseded_at_ms,
-	lease_expires_at_ms, base_price_fen, charged_fen, created_at_ms, updated_at_ms`
+	lease_expires_at_ms, warranty_expires_at_ms, base_price_fen, charged_fen, created_at_ms, updated_at_ms`
 
 type scanner interface{ Scan(...any) error }
 
@@ -966,10 +976,10 @@ func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {
 	var payload string
 	var lastError sql.NullString
 	var accountName, nameKey, importAction, replacedFileName sql.NullString
-	var supersedesItemID, nextRetryAtMS, importedAtMS, effectiveFromMS, supersededAtMS, leaseExpiresAtMS sql.NullInt64
+	var supersedesItemID, nextRetryAtMS, importedAtMS, effectiveFromMS, supersededAtMS, leaseExpiresAtMS, warrantyExpiresAtMS sql.NullInt64
 	if err := row.Scan(&item.ID, &item.OrderID, &item.ItemKey, &accountName, &nameKey, &item.FileName,
 		&importAction, &replacedFileName, &supersedesItemID, &item.Status,
-		&payload, &lastError, &item.AttemptCount, &nextRetryAtMS, &importedAtMS, &effectiveFromMS, &supersededAtMS, &leaseExpiresAtMS,
+		&payload, &lastError, &item.AttemptCount, &nextRetryAtMS, &importedAtMS, &effectiveFromMS, &supersededAtMS, &leaseExpiresAtMS, &warrantyExpiresAtMS,
 		&item.BasePriceFen, &item.ChargedFen, &item.CreatedAtMS, &item.UpdatedAtMS); err != nil {
 		return model.SupplyImportItem{}, err
 	}
@@ -989,6 +999,7 @@ func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {
 	item.EffectiveFromMS = effectiveFromMS.Int64
 	item.SupersededAtMS = supersededAtMS.Int64
 	item.LeaseExpiresAtMS = leaseExpiresAtMS.Int64
+	item.WarrantyExpiresAtMS = warrantyExpiresAtMS.Int64
 	return item, nil
 }
 

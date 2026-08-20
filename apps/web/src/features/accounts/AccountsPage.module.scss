@@ -637,6 +637,39 @@
   }
 }
 
+.accountWarrantyBadge {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 24px;
+  max-width: 100%;
+  padding: 0 9px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accounts-indigo) 38%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accounts-indigo) 12%, var(--accounts-surface));
+  color: var(--accounts-indigo);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 850;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  :global(svg) {
+    flex: 0 0 auto;
+  }
+
+  strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
 .accountExpiryBadgeExpired,
 .accountExpiryBadgeCritical {
   border-color: color-mix(in srgb, var(--accounts-danger) 42%, transparent);

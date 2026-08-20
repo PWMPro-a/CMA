@@ -475,6 +475,33 @@ const AccountExpiryBadge = ({
   );
 };
 
+const AccountWarrantyBadge = ({
+  warrantyExpiresAtMs,
+  locale,
+  t,
+}: {
+  warrantyExpiresAtMs?: number | null;
+  locale: string;
+  t: TFunction;
+}) => {
+  const nowMs = useAccountExpiryClock();
+  if (!warrantyExpiresAtMs || warrantyExpiresAtMs <= 0) return null;
+  const presentation = buildAccountExpiryPresentation(warrantyExpiresAtMs, nowMs);
+  const countdown = getAccountExpiryLabel(presentation, t);
+  const label = `${t('accounts.account_warranty')}: ${countdown}`;
+  return (
+    <span
+      className={styles.accountWarrantyBadge}
+      title={`${label} · ${formatTimestampTitle(warrantyExpiresAtMs, locale) ?? countdown} · ${t('accounts.account_warranty_hint')}`}
+      aria-label={label}
+      data-account-warranty="true"
+    >
+      <IconTimer size={13} />
+      <strong>{label}</strong>
+    </span>
+  );
+};
+
 async function refreshQuotaWithConfig<TState, TData>({
   config,
   file,
@@ -598,7 +625,7 @@ export function AccountsPage() {
   const uploadDragDepthRef = useRef(0);
 
   const [oauthViewMode, setOauthViewMode] = useState<'diagram' | 'list'>('list');
-  const [supplyLeaseExpiryByFile, setSupplyLeaseExpiryByFile] = useState<
+  const [supplyMetadataByFile, setSupplyMetadataByFile] = useState<
     ReadonlyMap<string, SupplyAccountLeaseItem>
   >(() => new Map());
   const [accountPoolSummary, setAccountPoolSummary] = useState<SupplyAccountPoolSummary | null>(
@@ -1156,7 +1183,7 @@ export function AccountsPage() {
     if (!managerStorageAvailable) return;
     try {
       const leases = await supplyApi.listAccountLeases();
-      setSupplyLeaseExpiryByFile(
+      setSupplyMetadataByFile(
         new Map(
           leases.filter((item) => item.fileName).map((item) => [item.fileName, item] as const)
         )
@@ -1441,9 +1468,9 @@ export function AccountsPage() {
         baseQuotaStores,
         inspectionResults,
         accountQuotaOverrides,
-        supplyLeaseExpiryByFile
+        supplyMetadataByFile
       ),
-    [accountQuotaOverrides, baseQuotaStores, files, inspectionResults, supplyLeaseExpiryByFile]
+    [accountQuotaOverrides, baseQuotaStores, files, inspectionResults, supplyMetadataByFile]
   );
   const accountSourceIpContext = useMemo(() => {
     const values = rows.map((row) => row.raw.sourceIp ?? row.raw.source_ip ?? '');
@@ -4545,6 +4572,11 @@ export function AccountsPage() {
                     ) : null}
                     <AccountExpiryBadge
                       expiresAtMs={row.expiresAtMs}
+                      locale={i18n.language}
+                      t={t}
+                    />
+                    <AccountWarrantyBadge
+                      warrantyExpiresAtMs={row.warrantyExpiresAtMs}
                       locale={i18n.language}
                       t={t}
                     />

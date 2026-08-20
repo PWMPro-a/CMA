@@ -4264,7 +4264,8 @@ export function SupplyPage() {
                         <th>{t('supply.account_usage_revenue')}</th>
                         <th>{t('supply.account_supply_cost')}</th>
                         <th>{t('supply.account_last_used_at')}</th>
-                        <th>{t('supply.account_lease_expires_at')}</th>
+                        <th>{t('supply.account_expires_at')}</th>
+                        <th>{t('supply.account_warranty_expires_at')}</th>
                         <th>{t('common.status')}</th>
                       </tr>
                     </thead>
@@ -4371,9 +4372,10 @@ export function SupplyPage() {
                             )}
                           </td>
                           <td>{formatTime(item.lastUsedAtMs)}</td>
+                          <td>{formatTime(item.expiresAtMs)}</td>
                           <td>
-                            {item.leaseExpiresAtMs
-                              ? formatCountdown(item.leaseExpiresAtMs, nowMs)
+                            {item.warrantyExpiresAtMs
+                              ? formatCountdown(item.warrantyExpiresAtMs, nowMs)
                               : '-'}
                           </td>
                           <td>
@@ -4387,7 +4389,7 @@ export function SupplyPage() {
                       ))}
                       {!accounts?.items?.length ? (
                         <tr>
-                          <td colSpan={13} className={styles.emptyCell}>
+                          <td colSpan={14} className={styles.emptyCell}>
                             {accountsLoading ? t('common.loading') : t('supply.no_accounts')}
                           </td>
                         </tr>
@@ -5271,7 +5273,8 @@ function ReportAccountLedgerTable({ rows }: { rows?: SupplyReport['reconciliatio
               <th>{t('supply.report_usage_tokens')}</th>
               <th>{t('supply.report_usage_revenue')}</th>
               <th>{t('supply.account_last_used_at')}</th>
-              <th>{t('supply.account_lease_expires_at')}</th>
+              <th>{t('supply.account_expires_at')}</th>
+              <th>{t('supply.account_warranty_expires_at')}</th>
             </tr>
           </thead>
           <tbody>
@@ -5300,12 +5303,13 @@ function ReportAccountLedgerTable({ rows }: { rows?: SupplyReport['reconciliatio
                 <td>{formatTokens(row.usageTokens)}</td>
                 <td>{formatUsd(row.usageRevenue)}</td>
                 <td>{formatTime(row.lastUsedAtMs)}</td>
-                <td>{formatTime(row.leaseExpiresAtMs)}</td>
+                <td>{formatTime(row.expiresAtMs)}</td>
+                <td>{formatTime(row.warrantyExpiresAtMs)}</td>
               </tr>
             ))}
             {!rows?.length ? (
               <tr>
-                <td colSpan={14} className={styles.emptyCell}>
+                <td colSpan={15} className={styles.emptyCell}>
                   {t('supply.report_no_data')}
                 </td>
               </tr>

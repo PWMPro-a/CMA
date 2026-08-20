@@ -58,28 +58,29 @@ type SupplyPurchaseTask struct {
 }
 
 type SupplyImportItem struct {
-	ID               int64  `json:"id"`
-	OrderID          string `json:"orderId"`
-	ItemKey          string `json:"itemKey"`
-	AccountName      string `json:"accountName,omitempty"`
-	NameKey          string `json:"-"`
-	FileName         string `json:"fileName"`
-	ImportAction     string `json:"importAction,omitempty"`
-	ReplacedFileName string `json:"replacedFileName,omitempty"`
-	SupersedesItemID int64  `json:"supersedesItemId,omitempty"`
-	Status           string `json:"status"`
-	PayloadJSON      string `json:"-"`
-	LastError        string `json:"lastError,omitempty"`
-	AttemptCount     int    `json:"attemptCount"`
-	NextRetryAtMS    int64  `json:"nextRetryAtMs,omitempty"`
-	ImportedAtMS     int64  `json:"importedAtMs,omitempty"`
-	EffectiveFromMS  int64  `json:"effectiveFromMs,omitempty"`
-	SupersededAtMS   int64  `json:"supersededAtMs,omitempty"`
-	LeaseExpiresAtMS int64  `json:"leaseExpiresAtMs,omitempty"`
-	BasePriceFen     int64  `json:"basePriceFen,omitempty"`
-	ChargedFen       int64  `json:"chargedFen,omitempty"`
-	CreatedAtMS      int64  `json:"createdAtMs"`
-	UpdatedAtMS      int64  `json:"updatedAtMs"`
+	ID                  int64  `json:"id"`
+	OrderID             string `json:"orderId"`
+	ItemKey             string `json:"itemKey"`
+	AccountName         string `json:"accountName,omitempty"`
+	NameKey             string `json:"-"`
+	FileName            string `json:"fileName"`
+	ImportAction        string `json:"importAction,omitempty"`
+	ReplacedFileName    string `json:"replacedFileName,omitempty"`
+	SupersedesItemID    int64  `json:"supersedesItemId,omitempty"`
+	Status              string `json:"status"`
+	PayloadJSON         string `json:"-"`
+	LastError           string `json:"lastError,omitempty"`
+	AttemptCount        int    `json:"attemptCount"`
+	NextRetryAtMS       int64  `json:"nextRetryAtMs,omitempty"`
+	ImportedAtMS        int64  `json:"importedAtMs,omitempty"`
+	EffectiveFromMS     int64  `json:"effectiveFromMs,omitempty"`
+	SupersededAtMS      int64  `json:"supersededAtMs,omitempty"`
+	LeaseExpiresAtMS    int64  `json:"leaseExpiresAtMs,omitempty"`
+	WarrantyExpiresAtMS int64  `json:"warrantyExpiresAtMs,omitempty"`
+	BasePriceFen        int64  `json:"basePriceFen,omitempty"`
+	ChargedFen          int64  `json:"chargedFen,omitempty"`
+	CreatedAtMS         int64  `json:"createdAtMs"`
+	UpdatedAtMS         int64  `json:"updatedAtMs"`
 }
 
 type SupplyRecovery struct {

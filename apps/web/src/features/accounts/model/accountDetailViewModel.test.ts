@@ -198,6 +198,7 @@ describe('accountDetailViewModel', () => {
   it('shows import provenance and 401 replacement records in credential details', () => {
     const importedAtMs = Date.parse('2026-08-16T07:30:45Z');
     const expiresAtMs = importedAtMs + 60 * 60_000;
+    const warrantyExpiresAtMs = importedAtMs + 45 * 60_000;
     const viewModel = buildAccountDetailViewModel(
       makeRow({
         importMetadata: {
@@ -217,6 +218,7 @@ describe('accountDetailViewModel', () => {
           recoveryStatus: 'imported',
         },
         expiresAtMs,
+        warrantyExpiresAtMs,
       })
     );
     const fields = new Map(
@@ -226,7 +228,8 @@ describe('accountDetailViewModel', () => {
     expect(fields.get('importPlatform')).toBe('平台 A');
     expect(fields.get('importMethod')).toBe('accounts.import_method_reauth_replacement');
     expect(fields.get('importedAtMs')).toBe(importedAtMs);
-    expect(fields.get('leaseExpiresAtMs')).toBe(expiresAtMs);
+    expect(fields.get('expiresAtMs')).toBe(expiresAtMs);
+    expect(fields.get('warrantyExpiresAtMs')).toBe(warrantyExpiresAtMs);
     expect(fields.get('replacementRecord')).toBe('accounts.replacement_record_401');
     expect(fields.get('replacedFileName')).toBe('expired.json');
     expect(fields.get('recoveryId')).toBe('recovery-1');

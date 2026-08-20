@@ -8,7 +8,11 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { ProviderStatusBar } from '@/components/providers/ProviderStatusBar';
 import { CODEX_CONFIG } from '@/components/quota';
-import { accountQuotaSnapshotApi, type SupplyAccountPoolSummary } from '@/services/api';
+import {
+  accountQuotaSnapshotApi,
+  type SupplyAccountLeaseItem,
+  type SupplyAccountPoolSummary,
+} from '@/services/api';
 import type { AuthFileItem, CodexQuotaState, OAuthModelAliasEntry } from '@/types';
 import type {
   AccountActionCandidatesResponse,
@@ -356,7 +360,7 @@ const { mocks } = vi.hoisted(() => {
       getAccountPoolSummary: vi.fn(async (): Promise<SupplyAccountPoolSummary> => {
         throw new Error('account pool unavailable');
       }),
-      listAccountLeases: vi.fn(async () => []),
+      listAccountLeases: vi.fn(async (): Promise<SupplyAccountLeaseItem[]> => []),
       getAnalytics: vi.fn(
         async (_base: string, _key: string | undefined, _request: unknown): Promise<unknown> => ({
           generated_at_ms: 1,
@@ -1166,6 +1170,36 @@ describe('AccountsPage replacement flows', () => {
 
     expect(badges).toHaveLength(1);
     expect(readText(badges[0])).toBe('accounts.account_concurrency3');
+  });
+
+  it('shows warranty separately on credential cards and keeps the real credential expiry', async () => {
+    const nowMs = Date.now();
+    const expiresAtMs = nowMs + 10 * 24 * 60 * 60_000;
+    const legacyLeaseExpiresAtMs = nowMs + 30 * 60_000;
+    const warrantyExpiresAtMs = nowMs + 45 * 60_000;
+    const file = {
+      ...makeCodexFile('warranty.json', 'auth-warranty', 'warranty@example.com'),
+      expires_at: new Date(expiresAtMs).toISOString(),
+      supply_lease_expires_at_ms: legacyLeaseExpiresAtMs,
+    } as AuthFileItem;
+    mocks.files = [file];
+    mocks.listAccountLeases.mockResolvedValue([
+      {
+        fileName: file.name,
+        leaseExpiresAtMs: legacyLeaseExpiresAtMs,
+        warrantyExpiresAtMs,
+      },
+    ]);
+
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+    const card = findAccountCardByKey(renderer, getAuthFileSelectionKey(file));
+    const expiryBadge = card.findByProps({ 'data-account-expiry-tone': 'normal' });
+    const warrantyBadge = card.findByProps({ 'data-account-warranty': 'true' });
+
+    expect(expiryBadge.props['aria-label']).toContain('accounts.account_expires_at');
+    expect(readText(warrantyBadge)).toContain('accounts.account_warranty');
+    expect(readText(warrantyBadge)).toContain('accounts.account_expires_in_minutes');
   });
 
   it('silently refreshes runtime concurrency while the account list is visible', async () => {
