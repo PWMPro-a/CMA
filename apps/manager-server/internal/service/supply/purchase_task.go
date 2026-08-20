@@ -95,31 +95,27 @@ func (s *Service) upsertAutomaticPurchaseTask(ctx context.Context, planned store
 		return store.SupplyPurchaseTask{}, err
 	}
 	if !found {
-		planned.TaskID = "purchase-" + uuid.NewString()
-		planned.Source = "automatic"
-		planned.SupplierID = ""
-		if planned.Status == "" {
-			planned.Status = purchaseTaskStatusPending
-		}
-		created, createErr := s.store.CreateSupplyPurchaseTask(ctx, planned)
-		if createErr == nil {
-			s.invalidateStatusCache()
-		}
-		return created, createErr
+		return s.createAutomaticPurchaseTask(ctx, planned)
 	}
 	existing, err = s.reconcilePurchaseTask(ctx, existing)
 	if err != nil {
 		return store.SupplyPurchaseTask{}, err
 	}
 	if existing.Status != purchaseTaskStatusPending && existing.Status != purchaseTaskStatusRunning {
-		planned.TaskID = "purchase-" + uuid.NewString()
-		planned.Source = "automatic"
-		planned.SupplierID = ""
-		created, createErr := s.store.CreateSupplyPurchaseTask(ctx, planned)
-		if createErr == nil {
-			s.invalidateStatusCache()
+		return s.createAutomaticPurchaseTask(ctx, planned)
+	}
+	plannedLowPrice := isLowPriceReserveTrigger(planned.TriggerReason)
+	existingLowPrice := isLowPriceReserveTrigger(existing.TriggerReason)
+	if plannedLowPrice != existingLowPrice {
+		if plannedLowPrice {
+			// A normal capacity/emergency task owns the automatic executor until
+			// it finishes. A bargain reserve must never dilute that shortage target.
+			return existing, nil
 		}
-		return created, createErr
+		if err := s.cancelLowPriceReservePurchaseTask(ctx, &existing, "superseded by live replenishment demand"); err != nil {
+			return store.SupplyPurchaseTask{}, err
+		}
+		return s.createAutomaticPurchaseTask(ctx, planned)
 	}
 	desiredTarget := existing.FulfilledQuantity + max(1, planned.TargetQuantity)
 	if desiredTarget > existing.TargetQuantity {
@@ -141,6 +137,20 @@ func (s *Service) upsertAutomaticPurchaseTask(ctx context.Context, planned store
 	}
 	s.invalidateStatusCache()
 	return existing, nil
+}
+
+func (s *Service) createAutomaticPurchaseTask(ctx context.Context, planned store.SupplyPurchaseTask) (store.SupplyPurchaseTask, error) {
+	planned.TaskID = "purchase-" + uuid.NewString()
+	planned.Source = "automatic"
+	planned.SupplierID = ""
+	if planned.Status == "" {
+		planned.Status = purchaseTaskStatusPending
+	}
+	created, err := s.store.CreateSupplyPurchaseTask(ctx, planned)
+	if err == nil {
+		s.invalidateStatusCache()
+	}
+	return created, err
 }
 
 func (s *Service) ListPurchaseTasks(ctx context.Context, limit int) ([]store.SupplyPurchaseTask, error) {
@@ -355,6 +365,20 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 		if remaining <= 0 {
 			continue
 		}
+		if task.Source == "automatic" && isLowPriceReserveTrigger(task.TriggerReason) {
+			if !supplyLowPriceReserveEnabled(cfg.Supply) {
+				return s.cancelLowPriceReservePurchaseTask(ctx, &task, "low-price reserve is disabled")
+			}
+			available, countErr := s.countAvailableAccounts(ctx, cfg)
+			if countErr != nil {
+				return countErr
+			}
+			liveRemaining := cfg.Supply.LowPriceReserveTargetAccounts - available - stats.reservedPending
+			if liveRemaining <= 0 {
+				return s.cancelLowPriceReservePurchaseTask(ctx, &task, "low-price reserve target is already satisfied")
+			}
+			remaining = min(remaining, liveRemaining)
+		}
 		availableTaskSlots := max(1, task.MaxConcurrentOrders) - stats.activeOrderCount
 		availableGlobalSlots := maxConcurrentSupplyOrders(cfg.Supply) - admissionOrderCount
 		availableSlots := min(availableTaskSlots, availableGlobalSlots)
@@ -498,9 +522,40 @@ func (s *Service) createPurchaseTaskOrder(
 	if task.Source == "manual" {
 		requestedSupplierID = task.SupplierID
 	}
-	selection, err := s.selectSupplyPlatformProduct(ctx, cfg.Supply, quantity, openOrders, requestedSupplierID, task.Product)
-	if err != nil {
-		return s.recordPurchaseTaskError(ctx, task, err)
+	lowPriceReserve := task.Source == "automatic" && isLowPriceReserveTrigger(task.TriggerReason)
+	var selection supplyPlatformSelection
+	var err error
+	if lowPriceReserve {
+		if !supplyLowPriceReserveEnabled(cfg.Supply) {
+			return s.cancelLowPriceReservePurchaseTask(ctx, task, "low-price reserve is disabled")
+		}
+		matched := false
+		selection, matched, err = s.selectLowPriceReservePlatform(ctx, cfg.Supply, quantity, openOrders, task.Product)
+		if err != nil {
+			return s.recordPurchaseTaskError(ctx, task, err)
+		}
+		if !matched {
+			return s.cancelLowPriceReservePurchaseTask(ctx, task, "low-price inventory is no longer available")
+		}
+		quantity = min(quantity, selection.status.Inventory.Available)
+		if quantity <= 0 {
+			return s.cancelLowPriceReservePurchaseTask(ctx, task, "low-price inventory is no longer available")
+		}
+		// Re-quote the exact reduced quantity before CreateOrder so a partially
+		// available bargain never inherits the price of a larger stale quote.
+		exact, exactMatched, exactErr := s.selectLowPriceReservePlatform(ctx, cfg.Supply, quantity, openOrders, task.Product)
+		if exactErr != nil {
+			return s.recordPurchaseTaskError(ctx, task, exactErr)
+		}
+		if !exactMatched {
+			return s.cancelLowPriceReservePurchaseTask(ctx, task, "low-price inventory is no longer available")
+		}
+		selection = exact
+	} else {
+		selection, err = s.selectSupplyPlatformProduct(ctx, cfg.Supply, quantity, openOrders, requestedSupplierID, task.Product)
+		if err != nil {
+			return s.recordPurchaseTaskError(ctx, task, err)
+		}
 	}
 	platform := selection.platform
 	inventory := *selection.status.Inventory
@@ -595,6 +650,26 @@ func (s *Service) createPurchaseTaskOrder(
 		_, err = s.reconcilePurchaseTask(ctx, *task)
 		return err
 	}
+	return nil
+}
+
+func (s *Service) cancelLowPriceReservePurchaseTask(
+	ctx context.Context,
+	task *store.SupplyPurchaseTask,
+	reason string,
+) error {
+	if task == nil {
+		return nil
+	}
+	nowMS := time.Now().UnixMilli()
+	task.Status = purchaseTaskStatusCancelled
+	task.CancelledAtMS = nowMS
+	task.NextAttemptAtMS = 0
+	task.LastError = strings.TrimSpace(reason)
+	if err := s.store.UpdateSupplyPurchaseTask(ctx, *task); err != nil {
+		return err
+	}
+	s.invalidateStatusCache()
 	return nil
 }
 
@@ -887,6 +962,15 @@ func (s *Service) reconcileAutomaticPurchaseTaskCancellation(ctx context.Context
 		overview := s.overview
 		s.stateMu.RUnlock()
 		shouldCancel = overview.CPATarget > 0 && overview.CPAAvailable >= overview.CPATarget
+	}
+	if shouldCancel {
+		if isLowPriceReserveTrigger(task.TriggerReason) && supplyLowPriceReserveEnabled(cfg.Supply) {
+			available, countErr := s.countAvailableAccounts(ctx, cfg)
+			if countErr != nil {
+				return countErr
+			}
+			shouldCancel = available >= cfg.Supply.LowPriceReserveTargetAccounts
+		}
 	}
 	if shouldCancel {
 		_, _, err = s.cancelPurchaseTaskAndChildren(ctx, task.TaskID, time.Now().UnixMilli())

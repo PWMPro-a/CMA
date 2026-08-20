@@ -41,6 +41,14 @@ type ManagerSupplyConfig struct {
 	Strategy                string `json:"strategy,omitempty"`
 	TargetAvailableAccounts int    `json:"targetAvailableAccounts"`
 	ReplenishBatchSize      int    `json:"replenishBatchSize"`
+	// LowPriceReserve buys a bounded standby batch when the live available
+	// account count is below the configured waterline and a supplier has real
+	// inventory at or below the configured unit price. It is independent from
+	// the normal capacity planner, but still shares its balance reserve, batch
+	// limit, task executor and final live-pool admission checks.
+	LowPriceReserveEnabled         *bool  `json:"lowPriceReserveEnabled,omitempty"`
+	LowPriceReserveMaxUnitPriceFen *int64 `json:"lowPriceReserveMaxUnitPriceFen,omitempty"`
+	LowPriceReserveTargetAccounts  int    `json:"lowPriceReserveTargetAccounts,omitempty"`
 	// MaxConcurrentOrders bounds parallel automatic reservations. A zero value
 	// keeps the legacy single-order behavior for existing configurations.
 	MaxConcurrentOrders         int                                           `json:"maxConcurrentOrders,omitempty"`

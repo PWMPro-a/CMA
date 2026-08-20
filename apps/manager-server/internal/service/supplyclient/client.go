@@ -29,6 +29,8 @@ const (
 	customerTokenHeader   = "X-Customer-Token"
 	customerSessionHeader = "X-Customer-Session"
 	nvtokensPlatform      = "nvtokens"
+	nvtokensSessionCookie = "scm_session"
+	nvtokensLegacyCookie  = "session"
 	nvtokensBatchTimeout  = 10 * time.Minute
 )
 
@@ -1280,10 +1282,10 @@ func (c *Client) LoginNvtokensWithChallenge(ctx context.Context, credentials Cre
 	}
 	session := client.nvtokensSessionCookie(credentials.BaseURL)
 	if session == "" {
-		session = findString(value, "session", "token", "access_token", "accessToken")
+		session = findString(value, "scm_session", "session", "session_token", "sessionToken", "token", "access_token", "accessToken")
 	}
 	if session == "" {
-		return "", errors.New("nvtokens login response did not set a session cookie")
+		return "", errors.New("nvtokens login response did not set a recognized session cookie")
 	}
 	if err := client.ValidateNvtokensSession(ctx, credentials, session); err != nil {
 		return "", fmt.Errorf("validate refreshed nvtokens session: %w", err)
@@ -1306,7 +1308,7 @@ func (c *Client) ValidateNvtokensSession(ctx context.Context, credentials Creden
 	auth := tokenState{
 		token:      session,
 		header:     customerTokenHeader,
-		cookie:     (&http.Cookie{Name: "session", Value: session}).String(),
+		cookie:     nvtokensSessionCookieHeader(session),
 		cookieAuth: true,
 	}
 	_, _, err = client.request(ctx, credentials.BaseURL, http.MethodGet, "/api/me", nil, auth)
@@ -1336,16 +1338,30 @@ func (c *Client) nvtokensSessionCookie(baseURL string) string {
 	if c == nil || c.httpClient == nil || c.httpClient.Jar == nil {
 		return ""
 	}
-	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(baseURL), "/") + "/")
+	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(baseURL), "/") + "/api/me")
 	if err != nil {
 		return ""
 	}
-	for _, cookie := range c.httpClient.Jar.Cookies(parsed) {
-		if strings.EqualFold(cookie.Name, "session") {
-			return strings.TrimSpace(cookie.Value)
+	cookies := c.httpClient.Jar.Cookies(parsed)
+	for _, candidate := range []string{nvtokensSessionCookie, nvtokensLegacyCookie} {
+		for _, cookie := range cookies {
+			if strings.EqualFold(cookie.Name, candidate) {
+				return strings.TrimSpace(cookie.Value)
+			}
 		}
 	}
 	return ""
+}
+
+func nvtokensSessionCookieHeader(session string) string {
+	session = normalizeNvtokensSession(session)
+	if session == "" {
+		return ""
+	}
+	// Current NexusVault deployments use scm_session. Keep the former session
+	// name alongside it so older NV installations continue to authenticate.
+	return (&http.Cookie{Name: nvtokensSessionCookie, Value: session}).String() + "; " +
+		(&http.Cookie{Name: nvtokensLegacyCookie, Value: session}).String()
 }
 
 func recoveryClaimIdempotencyKey(recoveryID string) string {
@@ -1452,7 +1468,7 @@ func (c *Client) login(ctx context.Context, credentials Credentials, force bool)
 				key:        key,
 				token:      cookieValue,
 				header:     customerTokenHeader,
-				cookie:     (&http.Cookie{Name: "session", Value: cookieValue}).String(),
+				cookie:     nvtokensSessionCookieHeader(cookieValue),
 				cookieAuth: true,
 				expiresAt:  time.Now().Add(12 * time.Hour),
 			}
@@ -1536,7 +1552,8 @@ func (c *Client) Invalidate(credentials Credentials) {
 
 func normalizeNvtokensSession(value string) string {
 	value = strings.TrimSpace(value)
-	if strings.HasPrefix(strings.ToLower(value), "session=") {
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, nvtokensSessionCookie+"=") || strings.HasPrefix(lower, nvtokensLegacyCookie+"=") {
 		value = strings.TrimSpace(strings.SplitN(value, "=", 2)[1])
 	}
 	return value

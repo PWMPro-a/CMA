@@ -26,6 +26,51 @@ func TestNormalizeSupplyConfigKeepsPasswordWhenIdentityUnchanged(t *testing.T) {
 	}
 }
 
+func TestNormalizeSupplyConfigLowPriceReserve(t *testing.T) {
+	enabled := true
+	ceiling := int64(199)
+	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{
+		TargetAvailableAccounts:        50,
+		ReplenishBatchSize:             8,
+		LowPriceReserveEnabled:         &enabled,
+		LowPriceReserveMaxUnitPriceFen: &ceiling,
+		LowPriceReserveTargetAccounts:  80,
+	}, store.ManagerSupplyConfig{})
+	if next.LowPriceReserveEnabled == nil || !*next.LowPriceReserveEnabled ||
+		next.LowPriceReserveMaxUnitPriceFen == nil || *next.LowPriceReserveMaxUnitPriceFen != 199 ||
+		next.LowPriceReserveTargetAccounts != 80 {
+		t.Fatalf("low-price reserve = %#v", next)
+	}
+	cleared := int64(0)
+	next = NormalizeSupplyConfig(store.ManagerSupplyConfig{
+		LowPriceReserveMaxUnitPriceFen: &cleared,
+	}, next)
+	if next.LowPriceReserveMaxUnitPriceFen == nil || *next.LowPriceReserveMaxUnitPriceFen != 0 {
+		t.Fatalf("cleared low-price ceiling = %#v", next.LowPriceReserveMaxUnitPriceFen)
+	}
+}
+
+func TestValidateSupplyConfigRequiresLowPriceReserveCeiling(t *testing.T) {
+	enabled := true
+	cfg := store.ManagerSupplyConfig{
+		Enabled:                       &enabled,
+		LowPriceReserveEnabled:        &enabled,
+		LowPriceReserveTargetAccounts: 20,
+		Platforms: []store.ManagerSupplyPlatformConfig{{
+			ID: "legacy", Type: SupplyPlatformLegacy, Enabled: &enabled,
+			BaseURL: "https://example.com", Token: "token", Product: "oauth_30d",
+		}},
+	}
+	if err := ValidateSupplyConfig(cfg); err == nil {
+		t.Fatal("enabled low-price reserve without a price ceiling should fail validation")
+	}
+	ceiling := int64(100)
+	cfg.LowPriceReserveMaxUnitPriceFen = &ceiling
+	if err := ValidateSupplyConfig(cfg); err != nil {
+		t.Fatalf("valid low-price reserve: %v", err)
+	}
+}
+
 func TestNormalizeSupplyConfigClearsPasswordWhenSupplyIdentityChangesWithoutPassword(t *testing.T) {
 	current := store.ManagerSupplyConfig{
 		BaseURL:  "https://sogouedu.cc",

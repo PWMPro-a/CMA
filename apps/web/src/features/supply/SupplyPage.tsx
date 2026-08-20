@@ -128,6 +128,9 @@ const emptyConfig: SupplyConfig = {
   strategy: 'strong_supply',
   targetAvailableAccounts: 100,
   replenishBatchSize: 10,
+  lowPriceReserveEnabled: false,
+  lowPriceReserveMaxUnitPriceFen: 0,
+  lowPriceReserveTargetAccounts: 100,
   maxConcurrentOrders: 3,
   checkIntervalSeconds: 60,
   pollIntervalSeconds: 3,
@@ -3341,6 +3344,55 @@ export function SupplyPage() {
                     }
                   />
                 </div>
+                <div className={styles.reportSectionHeader}>
+                  <span>{t('supply.low_price_reserve_title')}</span>
+                  <small>{t('supply.low_price_reserve_hint')}</small>
+                </div>
+                <div className={styles.smartToggles}>
+                  <ToggleSwitch
+                    checked={draft.lowPriceReserveEnabled === true}
+                    onChange={(lowPriceReserveEnabled) =>
+                      updateDraft({ lowPriceReserveEnabled })
+                    }
+                    label={t('supply.low_price_reserve_enable')}
+                  />
+                </div>
+                {draft.lowPriceReserveEnabled ? (
+                  <div className={styles.formGrid}>
+                    <Input
+                      label={t('supply.low_price_reserve_max_price')}
+                      hint={t('supply.low_price_reserve_max_price_hint')}
+                      type="number"
+                      min={0.01}
+                      max={1000000}
+                      step={0.01}
+                      value={(draft.lowPriceReserveMaxUnitPriceFen ?? 0) / 100}
+                      onChange={(event) =>
+                        updateDraft({
+                          lowPriceReserveMaxUnitPriceFen: Math.max(
+                            0,
+                            Math.round(Number(event.target.value) * 100)
+                          ),
+                        })
+                      }
+                    />
+                    <Input
+                      label={t('supply.low_price_reserve_target_accounts')}
+                      hint={t('supply.low_price_reserve_target_accounts_hint')}
+                      type="number"
+                      min={1}
+                      max={10000}
+                      value={
+                        draft.lowPriceReserveTargetAccounts ?? draft.targetAvailableAccounts
+                      }
+                      onChange={(event) =>
+                        updateDraft({
+                          lowPriceReserveTargetAccounts: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </div>
+                ) : null}
               </article>
 
               <article className={styles.panel}>

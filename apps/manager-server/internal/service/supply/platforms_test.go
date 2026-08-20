@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -219,6 +220,146 @@ func TestEmergencyOnlySupplyPlatformIsReservedForEmergencyOrExplicitSelection(t 
 	selection, err = service.selectSupplyPlatform(context.Background(), cfg, 2, nil, "bugteam")
 	if err != nil || selection.platform.ID != "bugteam" {
 		t.Fatalf("explicit selection = %q err=%v, want bugteam", selection.platform.ID, err)
+	}
+}
+
+func TestSelectLowPriceReservePlatformUsesOnlyCheapImmediateStock(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie, _ := r.Cookie("scm_session")
+		token := ""
+		if cookie != nil {
+			token = cookie.Value
+		}
+		switch r.URL.Path {
+		case "/api/workspace/extractions/estimate":
+			switch token {
+			case "expensive":
+				_, _ = w.Write([]byte(`{"available_quantity":20,"total_cost_cents":500,"unit_price_cents":250}`))
+			case "cheap":
+				_, _ = w.Write([]byte(`{"available_quantity":3,"total_cost_cents":150,"unit_price_cents":50}`))
+			default:
+				_, _ = w.Write([]byte(`{"available_quantity":20,"total_cost_cents":20,"unit_price_cents":10}`))
+			}
+		case "/api/me":
+			_, _ = w.Write([]byte(`{"user":{"available_balance_cents":100000,"balance_cents":100000}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	enabled := true
+	ceiling := int64(100)
+	cfg := store.ManagerSupplyConfig{
+		LowPriceReserveEnabled: &enabled, LowPriceReserveMaxUnitPriceFen: &ceiling,
+		LowPriceReserveTargetAccounts: 20,
+		Platforms: []store.ManagerSupplyPlatformConfig{
+			{ID: "expensive", Type: "nvtokens", Enabled: &enabled, BaseURL: server.URL, Token: "expensive", Product: "plus", Priority: 1},
+			{ID: "cheap", Type: "nvtokens", Enabled: &enabled, BaseURL: server.URL, Token: "cheap", Product: "plus", Priority: 2},
+			{ID: "emergency", Type: "nvtokens", Enabled: &enabled, BaseURL: server.URL, Token: "emergency", Product: "plus", Priority: 3, EmergencyOnly: true},
+		},
+	}
+	service := New(nil, nil, server.Client())
+	selection, matched, err := service.selectLowPriceReservePlatform(context.Background(), cfg, 5, nil)
+	if err != nil || !matched || selection.platform.ID != "cheap" {
+		t.Fatalf("low-price selection = %q matched=%v err=%v statuses=%#v", selection.platform.ID, matched, err, selection.all)
+	}
+	ceiling = 40
+	cfg.LowPriceReserveMaxUnitPriceFen = &ceiling
+	_, matched, err = service.selectLowPriceReservePlatform(context.Background(), cfg, 5, nil)
+	if err != nil || matched {
+		t.Fatalf("over-ceiling stock matched=%v err=%v", matched, err)
+	}
+}
+
+func TestSelectLowPriceReservePlatformIgnoresPriorityFirstAfterPriceQualification(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspace/extractions/estimate":
+			cookie, _ := r.Cookie("scm_session")
+			if cookie != nil && cookie.Value == "priority" {
+				_, _ = w.Write([]byte(`{"available_quantity":10,"total_cost_cents":180,"unit_price_cents":90}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"available_quantity":10,"total_cost_cents":100,"unit_price_cents":50}`))
+		case "/api/me":
+			_, _ = w.Write([]byte(`{"user":{"available_balance_cents":100000,"balance_cents":100000}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	enabled := true
+	ceiling := int64(100)
+	cfg := store.ManagerSupplyConfig{
+		LowPriceReserveEnabled: &enabled, LowPriceReserveMaxUnitPriceFen: &ceiling,
+		LowPriceReserveTargetAccounts: 20,
+		PlatformSelectionStrategy:     managerconfigsvc.SupplyPlatformSelectionPriorityFirst,
+		Platforms: []store.ManagerSupplyPlatformConfig{
+			{ID: "priority", Type: "nvtokens", Enabled: &enabled, BaseURL: server.URL, Token: "priority", Product: "plus", Priority: 1},
+			{ID: "cheapest", Type: "nvtokens", Enabled: &enabled, BaseURL: server.URL, Token: "cheapest", Product: "plus", Priority: 2},
+		},
+	}
+	service := New(nil, nil, server.Client())
+	selection, matched, err := service.selectLowPriceReservePlatform(context.Background(), cfg, 2, nil)
+	if err != nil || !matched || selection.platform.ID != "cheapest" {
+		t.Fatalf("low-price priority selection = %q matched=%v err=%v", selection.platform.ID, matched, err)
+	}
+}
+
+func TestSelectLowPriceReservePlatformDoesNotQuoteOtherPlatformTypes(t *testing.T) {
+	var legacyCalls atomic.Int32
+	nvServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspace/extractions/estimate":
+			_, _ = w.Write([]byte(`{"available_quantity":5,"total_cost_cents":100,"unit_price_cents":20}`))
+		case "/api/me":
+			_, _ = w.Write([]byte(`{"user":{"available_balance_cents":100000,"balance_cents":100000}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer nvServer.Close()
+	legacyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		legacyCalls.Add(1)
+		http.Error(w, "legacy platform should not be quoted", http.StatusInternalServerError)
+	}))
+	defer legacyServer.Close()
+
+	enabled := true
+	ceiling := int64(100)
+	service := New(nil, nil, nvServer.Client())
+	selection, matched, err := service.selectLowPriceReservePlatform(context.Background(), store.ManagerSupplyConfig{
+		LowPriceReserveEnabled: &enabled, LowPriceReserveMaxUnitPriceFen: &ceiling,
+		LowPriceReserveTargetAccounts: 10,
+		Platforms: []store.ManagerSupplyPlatformConfig{
+			{ID: "legacy", Type: "legacy", Enabled: &enabled, BaseURL: legacyServer.URL, Token: "legacy", Product: "oauth_30d"},
+			{ID: "nv", Type: "nvtokens", Enabled: &enabled, BaseURL: nvServer.URL, Token: "nv-session", Product: "plus"},
+		},
+	}, 2, nil)
+	if err != nil || !matched || selection.platform.ID != "nv" {
+		t.Fatalf("selection=%q matched=%v err=%v", selection.platform.ID, matched, err)
+	}
+	if legacyCalls.Load() != 0 {
+		t.Fatalf("legacy platform quote calls = %d, want 0", legacyCalls.Load())
+	}
+}
+
+func TestSupplyLowPriceReserveQuantityIsBoundedByPoolGapAndBatch(t *testing.T) {
+	enabled := true
+	ceiling := int64(100)
+	cfg := store.ManagerSupplyConfig{
+		LowPriceReserveEnabled: &enabled, LowPriceReserveMaxUnitPriceFen: &ceiling,
+		LowPriceReserveTargetAccounts: 20, ReplenishBatchSize: 6,
+	}
+	if got := supplyLowPriceReserveQuantity(cfg, 11); got != 6 {
+		t.Fatalf("quantity=%d, want batch cap 6", got)
+	}
+	if got := supplyLowPriceReserveQuantity(cfg, 18); got != 2 {
+		t.Fatalf("quantity=%d, want remaining gap 2", got)
+	}
+	if got := supplyLowPriceReserveQuantity(cfg, 20); got != 0 {
+		t.Fatalf("quantity=%d, want 0 at reserve target", got)
 	}
 }
 

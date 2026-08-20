@@ -45,10 +45,10 @@ func TestRefreshNvtokensSessionSolvesChallengePersistsAndRetriesCatalog(t *testi
 			if payload["cf-turnstile-response"] != "turnstile-token" {
 				t.Fatalf("challenge token = %q", payload["cf-turnstile-response"])
 			}
-			http.SetCookie(w, &http.Cookie{Name: "session", Value: "fresh-session", Path: "/"})
+			http.SetCookie(w, &http.Cookie{Name: "scm_session", Value: "fresh-session", Path: "/"})
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/api/me":
-			cookie, _ := r.Cookie("session")
+			cookie, _ := r.Cookie("scm_session")
 			if cookie == nil || cookie.Value != "fresh-session" {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
@@ -56,7 +56,7 @@ func TestRefreshNvtokensSessionSolvesChallengePersistsAndRetriesCatalog(t *testi
 			_, _ = w.Write([]byte(`{"id":1}`))
 		case "/api/workspace/seller-candidates":
 			catalogCalls.Add(1)
-			cookie, _ := r.Cookie("session")
+			cookie, _ := r.Cookie("scm_session")
 			if cookie == nil || cookie.Value != "fresh-session" {
 				w.WriteHeader(http.StatusUnauthorized)
 				_, _ = w.Write([]byte(`{"code":"AUTH_REQUIRED"}`))

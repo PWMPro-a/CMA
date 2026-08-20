@@ -307,7 +307,8 @@ func (s *Service) persistNvtokensSession(ctx context.Context, platformID string,
 
 func normalizeNvtokensSessionValue(value string) string {
 	value = strings.TrimSpace(value)
-	if strings.HasPrefix(strings.ToLower(value), "session=") {
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "session=") || strings.HasPrefix(lower, "scm_session=") {
 		value = strings.TrimSpace(strings.SplitN(value, "=", 2)[1])
 	}
 	return value

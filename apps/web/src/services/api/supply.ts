@@ -78,6 +78,9 @@ export interface SupplyConfig {
   strategy?: SupplyStrategy | string;
   targetAvailableAccounts: number;
   replenishBatchSize: number;
+  lowPriceReserveEnabled?: boolean;
+  lowPriceReserveMaxUnitPriceFen?: number;
+  lowPriceReserveTargetAccounts?: number;
   maxConcurrentOrders?: number;
   checkIntervalSeconds: number;
   pollIntervalSeconds: number;

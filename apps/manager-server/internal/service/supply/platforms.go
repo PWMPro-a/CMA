@@ -366,6 +366,95 @@ func (s *Service) selectSupplyPlatform(
 	return s.selectSupplyPlatformProduct(ctx, cfg, quantity, openOrders, requestedID, "")
 }
 
+// selectLowPriceReservePlatform reuses the regular multi-platform quote pass,
+// then admits only immediately available inventory whose quoted unit price is
+// known and does not exceed the low-price reserve ceiling. Emergency-only
+// suppliers remain reserved for the existing emergency path.
+func (s *Service) selectLowPriceReservePlatform(
+	ctx context.Context,
+	cfg store.ManagerSupplyConfig,
+	quantity int,
+	openOrders []store.SupplyOrder,
+	requestedProduct ...string,
+) (supplyPlatformSelection, bool, error) {
+	product := ""
+	if len(requestedProduct) > 0 {
+		product = strings.TrimSpace(requestedProduct[0])
+	}
+	quoteCfg := cfg
+	nvtokensPlatforms := make([]store.ManagerSupplyPlatformConfig, 0, len(supplyPlatforms(cfg)))
+	for _, platform := range supplyPlatforms(cfg) {
+		if strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformNvtokens) {
+			nvtokensPlatforms = append(nvtokensPlatforms, platform)
+		}
+	}
+	if len(nvtokensPlatforms) == 0 {
+		return supplyPlatformSelection{}, false, nil
+	}
+	quoteCfg.Platforms = nvtokensPlatforms
+	// A normal priority-first strategy is useful for quality-sensitive routine
+	// procurement. The explicit purpose of this path is cost capture, so rank
+	// all price-qualified suppliers by effective cost after deliverability.
+	quoteCfg.PlatformSelectionStrategy = managerconfigsvc.SupplyPlatformSelectionBestAvailable
+	quoted, quoteErr := s.selectSupplyPlatformProduct(ctx, quoteCfg, quantity, openOrders, "", product)
+	if quoteErr != nil && len(quoted.all) == 0 {
+		return supplyPlatformSelection{}, false, quoteErr
+	}
+	ceiling := valueOrZero(cfg.LowPriceReserveMaxUnitPriceFen)
+	if ceiling <= 0 {
+		return supplyPlatformSelection{all: quoted.all}, false, nil
+	}
+	platforms := nvtokensPlatforms
+	platformByID := make(map[string]store.ManagerSupplyPlatformConfig, len(platforms))
+	for _, platform := range platforms {
+		platformByID[strings.ToLower(strings.TrimSpace(platform.ID))] = platform
+	}
+	used := make(map[string]struct{}, len(openOrders))
+	for _, order := range openOrders {
+		if id := strings.ToLower(strings.TrimSpace(order.SupplierID)); id != "" {
+			used[id] = struct{}{}
+		}
+	}
+	candidates := make([]int, 0, len(quoted.all))
+	for index, status := range quoted.all {
+		if status.Inventory == nil || status.Balance == nil || status.EmergencyOnly {
+			continue
+		}
+		unitPrice := status.Inventory.EstimatedUnitPriceFen
+		if unitPrice <= 0 || unitPrice > ceiling || status.Inventory.Available <= 0 {
+			continue
+		}
+		if supplyPlatformAvailabilityTier(status, quantity, cfg.MinBalanceReserveFen) > 1 {
+			continue
+		}
+		if _, found := platformByID[strings.ToLower(strings.TrimSpace(status.ID))]; !found {
+			continue
+		}
+		candidates = append(candidates, index)
+	}
+	if len(candidates) == 0 {
+		return supplyPlatformSelection{all: quoted.all}, false, nil
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return supplyPlatformLessWithPriority(
+			quoted.all[candidates[i]],
+			quoted.all[candidates[j]],
+			quantity,
+			cfg.MinBalanceReserveFen,
+			used,
+			false,
+			false,
+		)
+	})
+	selectedIndex := candidates[0]
+	for index := range quoted.all {
+		quoted.all[index].Selected = index == selectedIndex
+	}
+	status := quoted.all[selectedIndex]
+	platform := platformByID[strings.ToLower(strings.TrimSpace(status.ID))]
+	return supplyPlatformSelection{platform: platform, status: status, all: quoted.all}, true, nil
+}
+
 func (s *Service) selectSupplyPlatformProduct(
 	ctx context.Context,
 	cfg store.ManagerSupplyConfig,

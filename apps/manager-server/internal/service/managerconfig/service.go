@@ -342,44 +342,46 @@ func (s *Service) DefaultManagerConfig() store.ManagerConfig {
 		},
 		CodexInspection: store.DefaultCodexInspectionConfig(),
 		Supply: store.ManagerSupplyConfig{
-			Enabled:                     BoolPtr(false),
-			BaseURL:                     "https://sogouedu.cc",
-			Product:                     "oauth_30d",
-			TargetAvailableAccounts:     100,
-			ReplenishBatchSize:          10,
-			MaxConcurrentOrders:         3,
-			CheckIntervalSeconds:        60,
-			PollIntervalSeconds:         3,
-			SmartEnabled:                BoolPtr(true),
-			HealthyMinutesTarget:        120,
-			WarningMinutes:              60,
-			CriticalMinutes:             30,
-			PrelockEnabled:              BoolPtr(true),
-			PrelockMinQuantity:          1,
-			PrelockMaxQuantity:          10,
-			CriticalTakeConfirmRounds:   2,
-			CreateCooldownSeconds:       120,
-			ReleaseCooldownSeconds:      60,
-			AuthFilesCacheTTLSeconds:    60,
-			MinHoldSeconds:              30,
-			NewAccountConfidence:        0.7,
-			RevenueMultiplier:           0.06,
-			Strategy:                    SupplyStrategyStrongSupply,
-			CriticalAvailableAccounts:   2,
-			HealthyAvailableAccounts:    10,
-			DefaultEmergencyMinAccounts: 5,
-			VirtualDemandTTLMinutes:     60,
-			AccountMaxRequestsBefore401: 30,
-			AccountMaxUsefulSeconds401:  120,
-			EmergencyBypassUsageRate:    BoolPtr(true),
-			RecoveryTriggerOn401:        BoolPtr(true),
-			RecoverySyncEnabled:         BoolPtr(true),
-			RecoveryAutoClaim:           BoolPtr(true),
-			RecoverySyncIntervalSeconds: 60,
-			RecoveryClaimBatchSize:      20,
-			RecoveryDisableOriginal:     BoolPtr(true),
-			QuotaEstimationPolicies:     defaultSupplyQuotaEstimationPolicies(),
-			PlatformSelectionStrategy:   SupplyPlatformSelectionBestAvailable,
+			Enabled:                       BoolPtr(false),
+			BaseURL:                       "https://sogouedu.cc",
+			Product:                       "oauth_30d",
+			TargetAvailableAccounts:       100,
+			ReplenishBatchSize:            10,
+			LowPriceReserveEnabled:        BoolPtr(false),
+			LowPriceReserveTargetAccounts: 100,
+			MaxConcurrentOrders:           3,
+			CheckIntervalSeconds:          60,
+			PollIntervalSeconds:           3,
+			SmartEnabled:                  BoolPtr(true),
+			HealthyMinutesTarget:          120,
+			WarningMinutes:                60,
+			CriticalMinutes:               30,
+			PrelockEnabled:                BoolPtr(true),
+			PrelockMinQuantity:            1,
+			PrelockMaxQuantity:            10,
+			CriticalTakeConfirmRounds:     2,
+			CreateCooldownSeconds:         120,
+			ReleaseCooldownSeconds:        60,
+			AuthFilesCacheTTLSeconds:      60,
+			MinHoldSeconds:                30,
+			NewAccountConfidence:          0.7,
+			RevenueMultiplier:             0.06,
+			Strategy:                      SupplyStrategyStrongSupply,
+			CriticalAvailableAccounts:     2,
+			HealthyAvailableAccounts:      10,
+			DefaultEmergencyMinAccounts:   5,
+			VirtualDemandTTLMinutes:       60,
+			AccountMaxRequestsBefore401:   30,
+			AccountMaxUsefulSeconds401:    120,
+			EmergencyBypassUsageRate:      BoolPtr(true),
+			RecoveryTriggerOn401:          BoolPtr(true),
+			RecoverySyncEnabled:           BoolPtr(true),
+			RecoveryAutoClaim:             BoolPtr(true),
+			RecoverySyncIntervalSeconds:   60,
+			RecoveryClaimBatchSize:        20,
+			RecoveryDisableOriginal:       BoolPtr(true),
+			QuotaEstimationPolicies:       defaultSupplyQuotaEstimationPolicies(),
+			PlatformSelectionStrategy:     SupplyPlatformSelectionBestAvailable,
 		},
 	}
 }
@@ -447,6 +449,21 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	next.Strategy = NormalizeSupplyStrategy(ValueOr(submitted.Strategy, next.Strategy))
 	next.TargetAvailableAccounts = BoundedPositiveOrDefault(submitted.TargetAvailableAccounts, next.TargetAvailableAccounts, 100, 10000)
 	next.ReplenishBatchSize = BoundedPositiveOrDefault(submitted.ReplenishBatchSize, next.ReplenishBatchSize, 10, 100)
+	if submitted.LowPriceReserveEnabled != nil {
+		next.LowPriceReserveEnabled = BoolPtr(*submitted.LowPriceReserveEnabled)
+	} else if next.LowPriceReserveEnabled == nil {
+		next.LowPriceReserveEnabled = BoolPtr(false)
+	}
+	if submitted.LowPriceReserveMaxUnitPriceFen != nil {
+		value := max(int64(0), min(*submitted.LowPriceReserveMaxUnitPriceFen, int64(100_000_000)))
+		next.LowPriceReserveMaxUnitPriceFen = &value
+	}
+	next.LowPriceReserveTargetAccounts = BoundedPositiveOrDefault(
+		submitted.LowPriceReserveTargetAccounts,
+		next.LowPriceReserveTargetAccounts,
+		next.TargetAvailableAccounts,
+		10000,
+	)
 	next.MaxConcurrentOrders = BoundedPositiveOrDefault(submitted.MaxConcurrentOrders, next.MaxConcurrentOrders, 3, 3)
 	next.CheckIntervalSeconds = BoundedPositiveOrDefault(submitted.CheckIntervalSeconds, next.CheckIntervalSeconds, 60, 3600)
 	next.PollIntervalSeconds = BoundedPositiveOrDefault(submitted.PollIntervalSeconds, next.PollIntervalSeconds, 3, 60)
@@ -1045,6 +1062,14 @@ func SupplyStrategyPreset(strategy string) supplyStrategyPreset {
 func ValidateSupplyConfig(cfg store.ManagerSupplyConfig) error {
 	if !SupplyEnabled(cfg) {
 		return nil
+	}
+	if cfg.LowPriceReserveEnabled != nil && *cfg.LowPriceReserveEnabled {
+		if cfg.LowPriceReserveMaxUnitPriceFen == nil || *cfg.LowPriceReserveMaxUnitPriceFen <= 0 {
+			return errors.New("lowPriceReserveMaxUnitPriceFen must be greater than zero when low-price reserve is enabled")
+		}
+		if cfg.LowPriceReserveTargetAccounts <= 0 {
+			return errors.New("lowPriceReserveTargetAccounts must be greater than zero when low-price reserve is enabled")
+		}
 	}
 	platforms := SupplyPlatforms(cfg)
 	enabled := 0

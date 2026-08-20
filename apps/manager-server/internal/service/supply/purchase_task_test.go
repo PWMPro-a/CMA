@@ -128,6 +128,64 @@ func TestPurchaseTaskAdaptiveOrderQuantityWidensSlowScarceCaptureWindow(t *testi
 	}
 }
 
+func TestAutomaticLowPriceTaskDoesNotOverrideLiveReplenishmentTask(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-low-price-priority.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	service := New(st, nil)
+	live, err := service.upsertAutomaticPurchaseTask(ctx, store.SupplyPurchaseTask{
+		Product: "oauth_30d", TargetQuantity: 5, Status: purchaseTaskStatusPending,
+		TriggerReason: "emergency_refill_to_healthy", MaxConcurrentOrders: 2,
+	})
+	if err != nil {
+		t.Fatalf("create live task: %v", err)
+	}
+	selected, err := service.upsertAutomaticPurchaseTask(ctx, store.SupplyPurchaseTask{
+		Product: "oauth_30d", TargetQuantity: 10, Status: purchaseTaskStatusPending,
+		TriggerReason: lowPriceReserveTriggerReason, MaxConcurrentOrders: 1,
+	})
+	if err != nil {
+		t.Fatalf("upsert low-price task: %v", err)
+	}
+	if selected.TaskID != live.TaskID || selected.TargetQuantity != 5 || isLowPriceReserveTrigger(selected.TriggerReason) {
+		t.Fatalf("live task was overridden: live=%#v selected=%#v", live, selected)
+	}
+}
+
+func TestLiveReplenishmentSupersedesAutomaticLowPriceTask(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-low-price-superseded.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	service := New(st, nil)
+	reserve, err := service.upsertAutomaticPurchaseTask(ctx, store.SupplyPurchaseTask{
+		Product: "oauth_30d", TargetQuantity: 8, Status: purchaseTaskStatusPending,
+		TriggerReason: lowPriceReserveTriggerReason, MaxConcurrentOrders: 1,
+	})
+	if err != nil {
+		t.Fatalf("create low-price task: %v", err)
+	}
+	live, err := service.upsertAutomaticPurchaseTask(ctx, store.SupplyPurchaseTask{
+		Product: "oauth_30d", TargetQuantity: 4, Status: purchaseTaskStatusPending,
+		TriggerReason: "emergency_refill_to_healthy", MaxConcurrentOrders: 2,
+	})
+	if err != nil {
+		t.Fatalf("replace with live task: %v", err)
+	}
+	if live.TaskID == reserve.TaskID || live.TargetQuantity != 4 || isLowPriceReserveTrigger(live.TriggerReason) {
+		t.Fatalf("replacement live task = %#v reserve=%#v", live, reserve)
+	}
+	reserve, found, err := st.GetSupplyPurchaseTask(ctx, reserve.TaskID)
+	if err != nil || !found || reserve.Status != purchaseTaskStatusCancelled {
+		t.Fatalf("superseded reserve task = %#v found=%v err=%v", reserve, found, err)
+	}
+}
+
 func TestUnavailablePlatformOrdersAreTerminatedAndTasksAreReplanned(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-platform-retired.sqlite"))

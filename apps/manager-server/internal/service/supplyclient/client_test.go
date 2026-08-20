@@ -411,6 +411,62 @@ func TestNvtokensChallengeLoginReturnsAndValidatesSession(t *testing.T) {
 	}
 }
 
+func TestNvtokensChallengeLoginUsesCurrentSCMSessionCookie(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/login":
+			http.SetCookie(w, &http.Cookie{Name: "scm_session", Value: "current-session", Path: "/", HttpOnly: true, Secure: false})
+			_, _ = w.Write([]byte(`{"user":{"id":"buyer"}}`))
+		case "/api/me":
+			cookie, err := r.Cookie("scm_session")
+			if err != nil || cookie.Value != "current-session" {
+				t.Fatalf("scm_session cookie = %#v err=%v", cookie, err)
+			}
+			_, _ = w.Write([]byte(`{"user":{"id":"buyer"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	session, err := client.LoginNvtokensWithChallenge(context.Background(), Credentials{
+		PlatformType: "nvtokens",
+		BaseURL:      server.URL,
+		Username:     "buyer",
+		Password:     "secret",
+	}, "challenge-token")
+	if err != nil || session != "current-session" {
+		t.Fatalf("session = %q err=%v", session, err)
+	}
+}
+
+func TestNvtokensConfiguredSessionSendsCurrentAndLegacyCookies(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/workspace/seller-candidates" {
+			http.NotFound(w, r)
+			return
+		}
+		current, currentErr := r.Cookie("scm_session")
+		legacy, legacyErr := r.Cookie("session")
+		if currentErr != nil || current.Value != "saved-session" || legacyErr != nil || legacy.Value != "saved-session" {
+			t.Fatalf("current=%#v currentErr=%v legacy=%#v legacyErr=%v", current, currentErr, legacy, legacyErr)
+		}
+		_, _ = w.Write([]byte(`{"sellers":[{"sale_plan_counts":{"plus":1}}]}`))
+	}))
+	defer server.Close()
+
+	catalog, err := New(server.Client()).ProductCatalog(context.Background(), Credentials{
+		ID:           "nvtokens-main",
+		PlatformType: "nvtokens",
+		BaseURL:      server.URL,
+		Token:        "saved-session",
+	})
+	if err != nil || len(catalog.Products) != 1 {
+		t.Fatalf("catalog = %#v err=%v", catalog, err)
+	}
+}
+
 func TestNvtokensProductCatalogAggregatesNativeSalePlans(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
