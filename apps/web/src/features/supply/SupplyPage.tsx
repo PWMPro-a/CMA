@@ -47,6 +47,31 @@ const DEFAULT_QUOTA_ESTIMATION_POLICIES: Record<string, SupplyQuotaEstimationPol
   free: { mode: 'auto', fallbackM: 10, fixedM: 10 },
 };
 
+const PLATFORM_CATALOG_REFRESH_INTERVAL_MS = 10_000;
+
+const platformCatalogIdentity = (platform: SupplyPlatformConfig) =>
+  [
+    platform.id.trim().toLowerCase(),
+    platform.type.trim().toLowerCase(),
+    platform.baseUrl.trim(),
+    platform.username?.trim() ?? '',
+    platform.password ?? '',
+    platform.passwordConfigured === true ? '1' : '0',
+    platform.token?.trim() ?? '',
+    platform.tokenConfigured === true ? '1' : '0',
+  ].join('\u0000');
+
+const canLoadPlatformCatalog = (platform: SupplyPlatformConfig) => {
+  if (platform.type !== 'nvtokens' || platform.enabled === false || !platform.baseUrl.trim()) {
+    return false;
+  }
+  return (
+    Boolean(platform.token?.trim() || platform.tokenConfigured) ||
+    (Boolean(platform.username?.trim()) &&
+      Boolean(platform.password?.trim() || platform.passwordConfigured))
+  );
+};
+
 const newSupplyPlatform = (
   type: 'legacy' | 'bugteam' | 'nvtokens',
   index: number
@@ -130,7 +155,8 @@ const emptyConfig: SupplyConfig = {
   replenishBatchSize: 10,
   lowPriceReserveEnabled: false,
   lowPriceReserveMaxUnitPriceFen: 0,
-  lowPriceReserveTargetAccounts: 100,
+  lowPriceReserveTargetAccounts: 200,
+  lowPriceReserveCheckIntervalMilliseconds: 1000,
   maxConcurrentOrders: 3,
   checkIntervalSeconds: 60,
   pollIntervalSeconds: 3,
@@ -489,8 +515,22 @@ export function SupplyPage() {
   const activeOrderLoadInFlightRef = useRef(false);
   const actionInFlightRef = useRef(false);
   const refreshGenerationRef = useRef(0);
-  const catalogRequestedRef = useRef(new Set<string>());
+  const catalogLoadedIdentityRef = useRef(new Map<string, string>());
+  const catalogInFlightRef = useRef(new Set<string>());
+  const catalogLatestRequestRef = useRef(new Map<string, number>());
+  const catalogRequestSequenceRef = useRef(0);
+  const catalogPlatformsRef = useRef<SupplyPlatformConfig[]>([]);
+  const manualPlatformConfigRef = useRef<SupplyPlatformConfig | undefined>(undefined);
   const hasActiveOrder = Boolean(status?.activeOrder);
+  const catalogRefreshIdentity = useMemo(
+    () =>
+      (draft.platforms ?? [])
+        .filter(canLoadPlatformCatalog)
+        .map(platformCatalogIdentity)
+        .join('\u0001'),
+    [draft.platforms]
+  );
+  catalogPlatformsRef.current = draft.platforms ?? [];
 
   const updateDraft = useCallback((patch: Partial<SupplyConfig>) => {
     configDirtyRef.current = true;
@@ -535,7 +575,7 @@ export function SupplyPage() {
         patch.token !== undefined;
       const existingCatalogKey = draft.platforms?.[index]?.id.trim().toLowerCase();
       if (catalogIdentityChanged && existingCatalogKey) {
-        catalogRequestedRef.current.delete(existingCatalogKey);
+        catalogLoadedIdentityRef.current.delete(existingCatalogKey);
         setPlatformCatalogs((catalogs) => {
           const updated = { ...catalogs };
           delete updated[existingCatalogKey];
@@ -682,20 +722,32 @@ export function SupplyPage() {
   const loadPlatformCatalog = useCallback(
     async (platform: SupplyPlatformConfig, force = false) => {
       const key = platform.id.trim().toLowerCase();
-      if (!key || (!force && catalogRequestedRef.current.has(key))) return;
-      catalogRequestedRef.current.add(key);
+      const identity = platformCatalogIdentity(platform);
+      if (
+        !key ||
+        catalogInFlightRef.current.has(identity) ||
+        (!force && catalogLoadedIdentityRef.current.get(key) === identity)
+      ) {
+        return;
+      }
+      catalogInFlightRef.current.add(identity);
+      const requestId = ++catalogRequestSequenceRef.current;
+      catalogLatestRequestRef.current.set(key, requestId);
       setPlatformCatalogs((current) => ({
         ...current,
         [key]: { ...current[key], loading: true, error: undefined },
       }));
       try {
         const catalog = await supplyApi.getPlatformCatalog(platform);
+        if (catalogLatestRequestRef.current.get(key) !== requestId) return;
+        catalogLoadedIdentityRef.current.set(key, identity);
         setPlatformCatalogs((current) => ({
           ...current,
           [key]: { loading: false, catalog },
         }));
       } catch (error) {
-        catalogRequestedRef.current.delete(key);
+        if (catalogLatestRequestRef.current.get(key) !== requestId) return;
+        catalogLoadedIdentityRef.current.delete(key);
         setPlatformCatalogs((current) => ({
           ...current,
           [key]: {
@@ -704,6 +756,8 @@ export function SupplyPage() {
             error: error instanceof Error ? error.message : t('common.unknown_error'),
           },
         }));
+      } finally {
+        catalogInFlightRef.current.delete(identity);
       }
     },
     [t]
@@ -711,16 +765,32 @@ export function SupplyPage() {
 
   useEffect(() => {
     for (const platform of draft.platforms ?? []) {
-      if (platform.type !== 'nvtokens' || platform.enabled === false) continue;
-      const hasAuthentication =
-        Boolean(platform.token?.trim() || platform.tokenConfigured) ||
-        (Boolean(platform.username?.trim()) &&
-          Boolean(platform.password?.trim() || platform.passwordConfigured));
-      if (platform.baseUrl.trim() && hasAuthentication) {
+      if (canLoadPlatformCatalog(platform)) {
         void loadPlatformCatalog(platform);
       }
     }
   }, [draft.platforms, loadPlatformCatalog]);
+
+  useEffect(() => {
+    if (activeTab !== 'automation' && activeTab !== 'orders') return undefined;
+
+    const refreshCatalogs = () => {
+      if (document.visibilityState !== 'visible') return;
+      for (const platform of catalogPlatformsRef.current) {
+        if (canLoadPlatformCatalog(platform)) {
+          void loadPlatformCatalog(platform, true);
+        }
+      }
+    };
+
+    refreshCatalogs();
+    const timer = window.setInterval(refreshCatalogs, PLATFORM_CATALOG_REFRESH_INTERVAL_MS);
+    document.addEventListener('visibilitychange', refreshCatalogs);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', refreshCatalogs);
+    };
+  }, [activeTab, catalogRefreshIdentity, loadPlatformCatalog]);
 
   const selectSupplyStrategy = useCallback((strategy: SupplyStrategy) => {
     configDirtyRef.current = true;
@@ -792,7 +862,7 @@ export function SupplyPage() {
       setRefreshingPlatformId(platformId);
       try {
         await supplyApi.refreshPlatformSession(platformId);
-        catalogRequestedRef.current.delete(platformId.trim().toLowerCase());
+        catalogLoadedIdentityRef.current.delete(platformId.trim().toLowerCase());
         await load(true, true);
         showNotification(t('supply.session_refresh_success'), 'success');
       } catch (error) {
@@ -1185,6 +1255,7 @@ export function SupplyPage() {
         (platform) => platform.id.trim().toLowerCase() === manualSupplierId.trim().toLowerCase()
       )
     : undefined;
+  manualPlatformConfigRef.current = manualPlatformConfig;
   const manualCatalogState = manualPlatformConfig
     ? platformCatalogs[manualPlatformConfig.id.trim().toLowerCase()]
     : undefined;
@@ -1244,30 +1315,68 @@ export function SupplyPage() {
       manualQuantity > 10000
     ) {
       setManualQuote(null);
+      setManualQuoteLoading(false);
       setManualQuoteError('');
       return undefined;
     }
     let cancelled = false;
-    const timer = window.setTimeout(async () => {
-      setManualQuoteLoading(true);
+    let refreshing = false;
+    let hasQuote = false;
+    let timer = 0;
+    setManualQuote(null);
+    setManualQuoteError('');
+
+    const scheduleRefresh = (delay: number) => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => void refreshQuote(), delay);
+    };
+    const refreshQuote = async () => {
+      if (cancelled || refreshing) return;
+      if (document.visibilityState !== 'visible') {
+        scheduleRefresh(PLATFORM_CATALOG_REFRESH_INTERVAL_MS);
+        return;
+      }
+      refreshing = true;
+      if (!hasQuote) setManualQuoteLoading(true);
       setManualQuoteError('');
       try {
         const quote = await supplyApi.quote(manualQuantity, manualSupplierId, manualProduct);
-        if (!cancelled) setManualQuote(quote);
+        if (!cancelled) {
+          hasQuote = true;
+          setManualQuote(quote);
+          const platform = manualPlatformConfigRef.current;
+          if (platform?.type === 'nvtokens') {
+            void loadPlatformCatalog(platform, true);
+          }
+        }
       } catch (error) {
         if (!cancelled) {
+          hasQuote = false;
           setManualQuote(null);
           setManualQuoteError(error instanceof Error ? error.message : t('common.unknown_error'));
         }
       } finally {
-        if (!cancelled) setManualQuoteLoading(false);
+        refreshing = false;
+        if (!cancelled) {
+          setManualQuoteLoading(false);
+          scheduleRefresh(PLATFORM_CATALOG_REFRESH_INTERVAL_MS);
+        }
       }
-    }, 350);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && !refreshing) {
+        scheduleRefresh(0);
+      }
+    };
+
+    scheduleRefresh(350);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [activeTab, manualProduct, manualQuantity, manualSupplierId, t]);
+  }, [activeTab, loadPlatformCatalog, manualProduct, manualQuantity, manualSupplierId, t]);
   const manualInventory = manualQuote?.inventory;
   const recommendedPlatform = overview?.selectedPlatformId
     ? platformOverviewById.get(overview.selectedPlatformId.trim().toLowerCase())
@@ -1290,6 +1399,7 @@ export function SupplyPage() {
       ? overview?.cpaDeficit
       : Math.max(0, (overview?.cpaTarget ?? draft.targetAvailableAccounts) - displayedCPAAvailable);
   const automation = status?.automation;
+  const lowPriceReserve = status?.lowPriceReserve;
   const recovery = status?.recovery;
   const autoSupplyEnabled = status?.config?.enabled ?? draft.enabled ?? false;
   const smartModeEnabled = smart?.enabled ?? draft.smartEnabled !== false;
@@ -2977,9 +3087,11 @@ export function SupplyPage() {
                               >
                                 {catalogState?.error ||
                                   (catalogState?.catalog
-                                    ? t('supply.catalog_loaded', {
+                                    ? `${t('supply.catalog_loaded', {
                                         count: catalogProducts.length,
-                                      })
+                                      })} · ${t('supply.catalog_checked_at', {
+                                        value: formatTime(catalogState.catalog.checkedAtMs),
+                                      })}`
                                     : t('supply.catalog_auth_hint'))}
                               </small>
                             ) : null}
@@ -3351,47 +3463,122 @@ export function SupplyPage() {
                 <div className={styles.smartToggles}>
                   <ToggleSwitch
                     checked={draft.lowPriceReserveEnabled === true}
-                    onChange={(lowPriceReserveEnabled) =>
-                      updateDraft({ lowPriceReserveEnabled })
-                    }
+                    onChange={(lowPriceReserveEnabled) => updateDraft({ lowPriceReserveEnabled })}
                     label={t('supply.low_price_reserve_enable')}
                   />
                 </div>
                 {draft.lowPriceReserveEnabled ? (
-                  <div className={styles.formGrid}>
-                    <Input
-                      label={t('supply.low_price_reserve_max_price')}
-                      hint={t('supply.low_price_reserve_max_price_hint')}
-                      type="number"
-                      min={0.01}
-                      max={1000000}
-                      step={0.01}
-                      value={(draft.lowPriceReserveMaxUnitPriceFen ?? 0) / 100}
-                      onChange={(event) =>
-                        updateDraft({
-                          lowPriceReserveMaxUnitPriceFen: Math.max(
-                            0,
-                            Math.round(Number(event.target.value) * 100)
-                          ),
-                        })
-                      }
-                    />
-                    <Input
-                      label={t('supply.low_price_reserve_target_accounts')}
-                      hint={t('supply.low_price_reserve_target_accounts_hint')}
-                      type="number"
-                      min={1}
-                      max={10000}
-                      value={
-                        draft.lowPriceReserveTargetAccounts ?? draft.targetAvailableAccounts
-                      }
-                      onChange={(event) =>
-                        updateDraft({
-                          lowPriceReserveTargetAccounts: Number(event.target.value),
-                        })
-                      }
-                    />
-                  </div>
+                  <>
+                    <div className={styles.formGrid}>
+                      <Input
+                        label={t('supply.low_price_reserve_max_price')}
+                        hint={t('supply.low_price_reserve_max_price_hint')}
+                        type="number"
+                        min={0.01}
+                        max={1000000}
+                        step={0.01}
+                        value={(draft.lowPriceReserveMaxUnitPriceFen ?? 0) / 100}
+                        onChange={(event) =>
+                          updateDraft({
+                            lowPriceReserveMaxUnitPriceFen: Math.max(
+                              0,
+                              Math.round(Number(event.target.value) * 100)
+                            ),
+                          })
+                        }
+                      />
+                      <Input
+                        label={t('supply.low_price_reserve_target_accounts')}
+                        hint={t('supply.low_price_reserve_target_accounts_hint')}
+                        type="number"
+                        min={1}
+                        max={10000}
+                        value={draft.lowPriceReserveTargetAccounts ?? 200}
+                        onChange={(event) =>
+                          updateDraft({
+                            lowPriceReserveTargetAccounts: Number(event.target.value),
+                          })
+                        }
+                      />
+                      <Input
+                        label={t('supply.low_price_reserve_check_interval')}
+                        hint={t('supply.low_price_reserve_check_interval_hint')}
+                        type="number"
+                        min={250}
+                        max={600000}
+                        step={250}
+                        value={draft.lowPriceReserveCheckIntervalMilliseconds ?? 1000}
+                        onChange={(event) =>
+                          updateDraft({
+                            lowPriceReserveCheckIntervalMilliseconds: Number(event.target.value),
+                          })
+                        }
+                      />
+                    </div>
+                    <div className={styles.lowPriceRuntime}>
+                      <div>
+                        <span>{t('supply.low_price_reserve_pool')}</span>
+                        <strong>
+                          {lowPriceReserve?.reserveAccounts ?? 0}/
+                          {lowPriceReserve?.targetAccounts ??
+                            draft.lowPriceReserveTargetAccounts ??
+                            200}
+                        </strong>
+                        <small>
+                          {t('supply.low_price_reserve_gap', {
+                            value:
+                              lowPriceReserve?.gap ?? draft.lowPriceReserveTargetAccounts ?? 200,
+                          })}
+                        </small>
+                      </div>
+                      <div>
+                        <span>{t('supply.low_price_reserve_ladder')}</span>
+                        <strong>{lowPriceReserve?.ladder?.join(' → ') || '-'}</strong>
+                        <small>
+                          {t('supply.low_price_reserve_next_stage', {
+                            value: lowPriceReserve?.nextStageQuantity ?? '-',
+                          })}
+                        </small>
+                      </div>
+                      <div>
+                        <span>{t('supply.low_price_reserve_quote')}</span>
+                        <strong>
+                          {lowPriceReserve?.lastQuotedUnitPriceFen
+                            ? formatMoney(lowPriceReserve.lastQuotedUnitPriceFen)
+                            : '-'}
+                        </strong>
+                        <small>{lowPriceReserve?.selectedPlatformId || '-'}</small>
+                      </div>
+                      <div>
+                        <span>{t('supply.low_price_reserve_next_check')}</span>
+                        <strong>
+                          {lowPriceReserve?.running
+                            ? t('supply.automation_running')
+                            : lowPriceReserve?.nextCheckAtMs
+                              ? formatCountdown(lowPriceReserve.nextCheckAtMs, nowMs)
+                              : '-'}
+                        </strong>
+                        <small>
+                          {t(
+                            `supply.low_price_reserve_result_${lowPriceReserve?.lastResult || 'scheduled'}`,
+                            {
+                              defaultValue: lowPriceReserve?.lastResult || '-',
+                            }
+                          )}
+                        </small>
+                      </div>
+                    </div>
+                    {lowPriceReserve?.activeTaskId ? (
+                      <div className={styles.lowPriceRuntimeNote}>
+                        {t('supply.low_price_reserve_active_task', {
+                          value: lowPriceReserve.activeTaskId,
+                        })}
+                      </div>
+                    ) : null}
+                    {lowPriceReserve?.lastError ? (
+                      <div className={styles.executionError}>{lowPriceReserve.lastError}</div>
+                    ) : null}
+                  </>
                 ) : null}
               </article>
 
@@ -3816,8 +4003,13 @@ export function SupplyPage() {
                     disabled={!manualPlatformConfig || manualProductOptions.length === 0}
                     ariaLabel={t('supply.manual_product')}
                   />
-                  {manualCatalogState?.error ? (
-                    <small className={styles.fieldError}>{manualCatalogState.error}</small>
+                  {manualCatalogState?.error || manualCatalogState?.catalog ? (
+                    <small className={manualCatalogState?.error ? styles.fieldError : undefined}>
+                      {manualCatalogState?.error ||
+                        t('supply.catalog_checked_at', {
+                          value: formatTime(manualCatalogState?.catalog?.checkedAtMs),
+                        })}
+                    </small>
                   ) : null}
                 </div>
                 <div className={styles.orderComposer}>

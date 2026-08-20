@@ -96,6 +96,15 @@ func valueOrZero(value *int64) int64 {
 	return *value
 }
 
+func lowPriceReservePlatformCeiling(cfg store.ManagerSupplyConfig, platform store.ManagerSupplyPlatformConfig) int64 {
+	ceiling := valueOrZero(cfg.LowPriceReserveMaxUnitPriceFen)
+	platformCeiling := valueOrZero(platform.MaxUnitPriceFen)
+	if ceiling <= 0 || (platformCeiling > 0 && platformCeiling < ceiling) {
+		return platformCeiling
+	}
+	return ceiling
+}
+
 func supplyPlatformConfigured(platform store.ManagerSupplyPlatformConfig) bool {
 	credentials := supplyPlatformCredentials(platform)
 	if credentials.BaseURL == "" || strings.TrimSpace(platform.Product) == "" {
@@ -381,10 +390,16 @@ func (s *Service) selectLowPriceReservePlatform(
 	if len(requestedProduct) > 0 {
 		product = strings.TrimSpace(requestedProduct[0])
 	}
+	ceiling := valueOrZero(cfg.LowPriceReserveMaxUnitPriceFen)
+	if ceiling <= 0 {
+		return supplyPlatformSelection{}, false, nil
+	}
 	quoteCfg := cfg
 	nvtokensPlatforms := make([]store.ManagerSupplyPlatformConfig, 0, len(supplyPlatforms(cfg)))
 	for _, platform := range supplyPlatforms(cfg) {
 		if strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformNvtokens) {
+			platformCeiling := lowPriceReservePlatformCeiling(cfg, platform)
+			platform.MaxUnitPriceFen = &platformCeiling
 			nvtokensPlatforms = append(nvtokensPlatforms, platform)
 		}
 	}
@@ -399,10 +414,6 @@ func (s *Service) selectLowPriceReservePlatform(
 	quoted, quoteErr := s.selectSupplyPlatformProduct(ctx, quoteCfg, quantity, openOrders, "", product)
 	if quoteErr != nil && len(quoted.all) == 0 {
 		return supplyPlatformSelection{}, false, quoteErr
-	}
-	ceiling := valueOrZero(cfg.LowPriceReserveMaxUnitPriceFen)
-	if ceiling <= 0 {
-		return supplyPlatformSelection{all: quoted.all}, false, nil
 	}
 	platforms := nvtokensPlatforms
 	platformByID := make(map[string]store.ManagerSupplyPlatformConfig, len(platforms))

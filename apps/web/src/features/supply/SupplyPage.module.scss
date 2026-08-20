@@ -1134,6 +1134,52 @@
   align-items: end;
 }
 
+.lowPriceRuntime {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.lowPriceRuntime > div {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 11px;
+  border: 1px solid color-mix(in srgb, #0d9488 25%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, #0d9488 5%, var(--bg-primary));
+}
+
+.lowPriceRuntime span,
+.lowPriceRuntime small {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lowPriceRuntime strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 16px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lowPriceRuntimeNote {
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, #0d9488 25%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, #0d9488 5%, var(--bg-primary));
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
 .configFooter {
   justify-content: space-between;
   padding-top: 13px;
@@ -1594,6 +1640,10 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .lowPriceRuntime {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .workspaceHeader {
     align-items: flex-start;
     flex-direction: column;
@@ -1617,6 +1667,7 @@
   .decisionFooter,
   .miniMetricGrid,
   .summaryList,
+  .lowPriceRuntime,
   .reportMetricGrid,
   .riskBucketGrid,
   .dimensionGrid {

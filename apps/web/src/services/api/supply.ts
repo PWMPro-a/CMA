@@ -81,6 +81,7 @@ export interface SupplyConfig {
   lowPriceReserveEnabled?: boolean;
   lowPriceReserveMaxUnitPriceFen?: number;
   lowPriceReserveTargetAccounts?: number;
+  lowPriceReserveCheckIntervalMilliseconds?: number;
   maxConcurrentOrders?: number;
   checkIntervalSeconds: number;
   pollIntervalSeconds: number;
@@ -514,6 +515,25 @@ export interface SupplyAutomationExecution {
   lastError?: string;
 }
 
+export interface SupplyLowPriceReserveExecution {
+  enabled: boolean;
+  running: boolean;
+  reserveAccounts: number;
+  targetAccounts: number;
+  gap: number;
+  ladder?: number[];
+  nextStageQuantity: number;
+  checkIntervalMilliseconds: number;
+  maxUnitPriceFen: number;
+  lastCheckedAtMs?: number;
+  nextCheckAtMs?: number;
+  lastQuotedUnitPriceFen?: number;
+  selectedPlatformId?: string;
+  activeTaskId?: string;
+  lastResult?: string;
+  lastError?: string;
+}
+
 export interface SupplyRecoverySummary {
   enabled: boolean;
   autoClaim: boolean;
@@ -921,6 +941,7 @@ export interface SupplyStatus {
   accountPool?: SupplyAccountPoolSummary;
   smartResource: SupplySmartResource;
   automation?: SupplyAutomationExecution;
+  lowPriceReserve?: SupplyLowPriceReserveExecution;
   recovery?: SupplyRecoverySummary;
   activeOrder?: SupplyOrder;
   activeOrders?: SupplyOrder[];

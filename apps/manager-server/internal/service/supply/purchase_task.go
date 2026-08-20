@@ -117,6 +117,12 @@ func (s *Service) upsertAutomaticPurchaseTask(ctx context.Context, planned store
 		}
 		return s.createAutomaticPurchaseTask(ctx, planned)
 	}
+	if plannedLowPrice && existingLowPrice {
+		// The watcher enqueues one bounded ladder stage. Repeated millisecond
+		// quotes while that stage is pending must not turn it into an ever-growing
+		// task target.
+		return existing, nil
+	}
 	desiredTarget := existing.FulfilledQuantity + max(1, planned.TargetQuantity)
 	if desiredTarget > existing.TargetQuantity {
 		existing.TargetQuantity = desiredTarget
@@ -331,6 +337,19 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 		return err
 	}
 	for _, candidate := range tasks {
+		if candidate.Source == "automatic" && isLowPriceReserveTrigger(candidate.TriggerReason) {
+			normalActive := false
+			for _, other := range tasks {
+				if other.Source == "automatic" && !isLowPriceReserveTrigger(other.TriggerReason) &&
+					(other.Status == purchaseTaskStatusPending || other.Status == purchaseTaskStatusRunning) {
+					normalActive = true
+					break
+				}
+			}
+			if normalActive {
+				continue
+			}
+		}
 		task, reconcileErr := s.reconcilePurchaseTask(ctx, candidate)
 		if reconcileErr != nil {
 			return reconcileErr
@@ -375,7 +394,7 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 			if !supplyLowPriceReserveEnabled(cfg.Supply) {
 				return s.cancelLowPriceReservePurchaseTask(ctx, &task, "low-price reserve is disabled")
 			}
-			available, countErr := s.countAvailableAccounts(ctx, cfg)
+			available, countErr := s.countLowPriceReserveAccounts(ctx, cfg)
 			if countErr != nil {
 				return countErr
 			}
@@ -620,7 +639,11 @@ func (s *Service) createPurchaseTaskOrder(
 		s.markAutomaticCreate()
 	}
 
-	remote, err := s.supplyClient.CreateOrder(ctx, supplyPlatformCredentials(platform), platform.Product, quantity, attempt.OrderID)
+	credentials := supplyPlatformCredentials(platform)
+	if lowPriceReserve {
+		credentials.MaxUnitPriceFen = lowPriceReservePlatformCeiling(cfg.Supply, platform)
+	}
+	remote, err := s.supplyClient.CreateOrder(ctx, credentials, platform.Product, quantity, attempt.OrderID)
 	if err != nil {
 		if isDefiniteCreateFailure(err) {
 			attempt.Status = "failed"
@@ -676,6 +699,9 @@ func (s *Service) cancelLowPriceReservePurchaseTask(
 	task.NextAttemptAtMS = 0
 	task.LastError = strings.TrimSpace(reason)
 	if err := s.store.UpdateSupplyPurchaseTask(ctx, *task); err != nil {
+		return err
+	}
+	if err := s.cancelReversiblePurchaseTaskOrders(ctx, task.TaskID, nowMS); err != nil {
 		return err
 	}
 	s.invalidateStatusCache()
@@ -991,7 +1017,7 @@ func (s *Service) reconcileAutomaticPurchaseTaskCancellation(ctx context.Context
 	}
 	if shouldCancel {
 		if isLowPriceReserveTrigger(task.TriggerReason) && supplyLowPriceReserveEnabled(cfg.Supply) {
-			available, countErr := s.countAvailableAccounts(ctx, cfg)
+			available, countErr := s.countLowPriceReserveAccounts(ctx, cfg)
 			if countErr != nil {
 				return countErr
 			}

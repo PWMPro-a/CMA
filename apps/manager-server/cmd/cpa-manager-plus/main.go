@@ -188,6 +188,8 @@ func runServer() {
 	supplyReplenishmentWorker.Start(ctx)
 	supplyPurchaseTaskWorker := worker.NewSupplyPurchaseTaskWorker(serverApp.AppContext().SupplyService)
 	supplyPurchaseTaskWorker.Start(ctx)
+	supplyLowPriceReserveWorker := worker.NewSupplyLowPriceReserveWorker(serverApp.AppContext().SupplyService)
+	supplyLowPriceReserveWorker.Start(ctx)
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,

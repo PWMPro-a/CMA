@@ -30,15 +30,17 @@ func TestNormalizeSupplyConfigLowPriceReserve(t *testing.T) {
 	enabled := true
 	ceiling := int64(199)
 	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{
-		TargetAvailableAccounts:        50,
-		ReplenishBatchSize:             8,
-		LowPriceReserveEnabled:         &enabled,
-		LowPriceReserveMaxUnitPriceFen: &ceiling,
-		LowPriceReserveTargetAccounts:  80,
+		TargetAvailableAccounts:                  50,
+		ReplenishBatchSize:                       8,
+		LowPriceReserveEnabled:                   &enabled,
+		LowPriceReserveMaxUnitPriceFen:           &ceiling,
+		LowPriceReserveTargetAccounts:            80,
+		LowPriceReserveCheckIntervalMilliseconds: 750,
 	}, store.ManagerSupplyConfig{})
 	if next.LowPriceReserveEnabled == nil || !*next.LowPriceReserveEnabled ||
 		next.LowPriceReserveMaxUnitPriceFen == nil || *next.LowPriceReserveMaxUnitPriceFen != 199 ||
-		next.LowPriceReserveTargetAccounts != 80 {
+		next.LowPriceReserveTargetAccounts != 80 ||
+		next.LowPriceReserveCheckIntervalMilliseconds != 750 {
 		t.Fatalf("low-price reserve = %#v", next)
 	}
 	cleared := int64(0)
@@ -66,8 +68,13 @@ func TestValidateSupplyConfigRequiresLowPriceReserveCeiling(t *testing.T) {
 	}
 	ceiling := int64(100)
 	cfg.LowPriceReserveMaxUnitPriceFen = &ceiling
+	cfg.LowPriceReserveCheckIntervalMilliseconds = 1000
 	if err := ValidateSupplyConfig(cfg); err != nil {
 		t.Fatalf("valid low-price reserve: %v", err)
+	}
+	cfg.LowPriceReserveCheckIntervalMilliseconds = 100
+	if err := ValidateSupplyConfig(cfg); err == nil {
+		t.Fatal("sub-250ms low-price reserve polling should fail validation")
 	}
 }
 

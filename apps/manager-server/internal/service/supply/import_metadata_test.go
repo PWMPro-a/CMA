@@ -72,3 +72,24 @@ func TestWithSupplyAccountImportMetadataMarksAutomaticSupply(t *testing.T) {
 		t.Fatalf("platform = %#v", payload.Import)
 	}
 }
+
+func TestWithSupplyAccountImportMetadataMarksLowPriceReserve(t *testing.T) {
+	account := normalizedSupplyAccount{payload: []byte(`{"type":"codex","access_token":"TOKEN"}`)}
+	marked := withSupplyAccountImportMetadata(account, store.ManagerSupplyConfig{}, store.SupplyOrder{
+		SupplierID:    "nvtokens",
+		Automatic:     true,
+		TriggerReason: lowPriceReserveTriggerReason,
+	}, time.Unix(1, 0))
+
+	var payload struct {
+		Import struct {
+			Method string `json:"method"`
+		} `json:"cpamp_import"`
+	}
+	if err := json.Unmarshal(marked.payload, &payload); err != nil {
+		t.Fatalf("decode marked payload: %v", err)
+	}
+	if payload.Import.Method != lowPriceReserveTriggerReason {
+		t.Fatalf("method = %q", payload.Import.Method)
+	}
+}

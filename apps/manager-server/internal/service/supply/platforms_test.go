@@ -28,6 +28,19 @@ func TestSupplyPlatformCredentialsIncludeNvtokensPurchaseFilters(t *testing.T) {
 	}
 }
 
+func TestLowPriceReservePlatformCeilingKeepsStricterLimit(t *testing.T) {
+	reserveCeiling := int64(1300)
+	platformCeiling := int64(800)
+	cfg := store.ManagerSupplyConfig{LowPriceReserveMaxUnitPriceFen: &reserveCeiling}
+	if got := lowPriceReservePlatformCeiling(cfg, store.ManagerSupplyPlatformConfig{MaxUnitPriceFen: &platformCeiling}); got != 800 {
+		t.Fatalf("effective ceiling = %d, want platform ceiling 800", got)
+	}
+	platformCeiling = 2400
+	if got := lowPriceReservePlatformCeiling(cfg, store.ManagerSupplyPlatformConfig{MaxUnitPriceFen: &platformCeiling}); got != 1300 {
+		t.Fatalf("effective ceiling = %d, want reserve ceiling 1300", got)
+	}
+}
+
 func TestRequireCredentialsAcceptsNativeNvtokensProducts(t *testing.T) {
 	enabled := true
 	service := New(nil, nil, nil)
@@ -342,24 +355,6 @@ func TestSelectLowPriceReservePlatformDoesNotQuoteOtherPlatformTypes(t *testing.
 	}
 	if legacyCalls.Load() != 0 {
 		t.Fatalf("legacy platform quote calls = %d, want 0", legacyCalls.Load())
-	}
-}
-
-func TestSupplyLowPriceReserveQuantityIsBoundedByPoolGapAndBatch(t *testing.T) {
-	enabled := true
-	ceiling := int64(100)
-	cfg := store.ManagerSupplyConfig{
-		LowPriceReserveEnabled: &enabled, LowPriceReserveMaxUnitPriceFen: &ceiling,
-		LowPriceReserveTargetAccounts: 20, ReplenishBatchSize: 6,
-	}
-	if got := supplyLowPriceReserveQuantity(cfg, 11); got != 6 {
-		t.Fatalf("quantity=%d, want batch cap 6", got)
-	}
-	if got := supplyLowPriceReserveQuantity(cfg, 18); got != 2 {
-		t.Fatalf("quantity=%d, want remaining gap 2", got)
-	}
-	if got := supplyLowPriceReserveQuantity(cfg, 20); got != 0 {
-		t.Fatalf("quantity=%d, want 0 at reserve target", got)
 	}
 }
 

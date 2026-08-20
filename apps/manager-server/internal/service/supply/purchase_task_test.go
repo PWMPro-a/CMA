@@ -156,6 +156,96 @@ func TestAutomaticLowPriceTaskDoesNotOverrideLiveReplenishmentTask(t *testing.T)
 	}
 }
 
+func TestRepeatedLowPriceWatcherDoesNotExpandActiveStage(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-low-price-bounded.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	service := New(st, nil)
+	first, err := service.upsertAutomaticPurchaseTask(ctx, store.SupplyPurchaseTask{
+		Product: "plus", TargetQuantity: 15, Status: purchaseTaskStatusPending,
+		TriggerReason: lowPriceReserveTriggerReason, MaxConcurrentOrders: 1,
+	})
+	if err != nil {
+		t.Fatalf("create low-price stage: %v", err)
+	}
+	second, err := service.upsertAutomaticPurchaseTask(ctx, store.SupplyPurchaseTask{
+		Product: "plus", TargetQuantity: 15, Status: purchaseTaskStatusPending,
+		TriggerReason: lowPriceReserveTriggerReason, MaxConcurrentOrders: 1,
+	})
+	if err != nil {
+		t.Fatalf("repeat low-price stage: %v", err)
+	}
+	if second.TaskID != first.TaskID || second.TargetQuantity != 15 {
+		t.Fatalf("repeated stage = %#v first=%#v", second, first)
+	}
+}
+
+func TestLowPriceReserveOrderUsesDedicatedHardPriceCeiling(t *testing.T) {
+	var submittedCeiling atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		case r.URL.Path == "/api/workspace/extractions/estimate":
+			_, _ = w.Write([]byte(`{"estimate":{"available_quantity":10,"buyer_total_cents":500,"min_unit_price_cents":500,"max_unit_price_cents":500}}`))
+		case r.URL.Path == "/api/me":
+			_, _ = w.Write([]byte(`{"available_balance_cents":100000,"balance_cents":100000}`))
+		case r.URL.Path == "/api/workspace/extractions/batch" && r.Method == http.MethodPost:
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode batch payload: %v", err)
+			}
+			if value, ok := payload["max_unit_price_cents"].(float64); ok {
+				submittedCeiling.Store(int64(value))
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"pending-low-price","status":"processing"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-low-price-ceiling.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	lowCeiling := int64(1300)
+	platformCeiling := int64(2400)
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, LowPriceReserveEnabled: &enabled, LowPriceReserveMaxUnitPriceFen: &lowCeiling,
+			LowPriceReserveTargetAccounts: 50, LowPriceReserveCheckIntervalMilliseconds: 1000,
+			Platforms: []store.ManagerSupplyPlatformConfig{{
+				ID: "nv", Type: managerconfigsvc.SupplyPlatformNvtokens, Enabled: &enabled,
+				BaseURL: server.URL, Token: "nv-token", Product: "plus", MaxUnitPriceFen: &platformCeiling,
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if _, err := st.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
+		TaskID: "low-price-hard-ceiling", Source: "automatic", Product: "plus", TargetQuantity: 1,
+		Status: purchaseTaskStatusPending, TriggerReason: lowPriceReserveTriggerReason, MaxConcurrentOrders: 1,
+	}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	if err := service.RunPurchaseTasks(ctx); err != nil {
+		t.Fatalf("run low-price task: %v", err)
+	}
+	if got := submittedCeiling.Load(); got != lowCeiling {
+		t.Fatalf("submitted ceiling = %d, want dedicated low-price ceiling %d", got, lowCeiling)
+	}
+}
+
 func TestLiveReplenishmentSupersedesAutomaticLowPriceTask(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-low-price-superseded.sqlite"))
@@ -171,6 +261,13 @@ func TestLiveReplenishmentSupersedesAutomaticLowPriceTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create low-price task: %v", err)
 	}
+	reserveOrder, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "reserve-waiting", TaskID: reserve.TaskID, SupplierID: "nv", Product: "plus",
+		RequestedQuantity: 8, Automatic: true, Status: "waiting_inventory", TriggerReason: lowPriceReserveTriggerReason,
+	})
+	if err != nil {
+		t.Fatalf("create low-price child order: %v", err)
+	}
 	live, err := service.upsertAutomaticPurchaseTask(ctx, store.SupplyPurchaseTask{
 		Product: "oauth_30d", TargetQuantity: 4, Status: purchaseTaskStatusPending,
 		TriggerReason: "emergency_refill_to_healthy", MaxConcurrentOrders: 2,
@@ -184,6 +281,24 @@ func TestLiveReplenishmentSupersedesAutomaticLowPriceTask(t *testing.T) {
 	reserve, found, err := st.GetSupplyPurchaseTask(ctx, reserve.TaskID)
 	if err != nil || !found || reserve.Status != purchaseTaskStatusCancelled {
 		t.Fatalf("superseded reserve task = %#v found=%v err=%v", reserve, found, err)
+	}
+	reserveOrder, found, err = st.GetSupplyOrder(ctx, reserveOrder.OrderID)
+	if err != nil || !found || reserveOrder.Status != "cancelled" || reserveOrder.RemoteStatus != "task_cancelled" {
+		t.Fatalf("superseded reserve order = %#v found=%v err=%v", reserveOrder, found, err)
+	}
+}
+
+func TestLowPriceReserveOpenOrdersReversibleOnlyForUncommittedStage(t *testing.T) {
+	reversible := store.SupplyOrder{
+		OrderID: "waiting", Status: "waiting_inventory", Automatic: true,
+		TriggerReason: lowPriceReserveTriggerReason,
+	}
+	if !lowPriceReserveOpenOrdersReversible([]store.SupplyOrder{reversible}) {
+		t.Fatal("uncommitted low-price waiting order should yield to live replenishment")
+	}
+	reversible.ReadyQuantity = 1
+	if lowPriceReserveOpenOrdersReversible([]store.SupplyOrder{reversible}) {
+		t.Fatal("ready low-price order must finish admission before another purchase")
 	}
 }
 

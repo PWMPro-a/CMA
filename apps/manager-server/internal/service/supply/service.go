@@ -113,18 +113,19 @@ type Overview struct {
 }
 
 type Status struct {
-	Config         store.ManagerSupplyConfig      `json:"config"`
-	Running        bool                           `json:"running"`
-	Overview       Overview                       `json:"overview"`
-	AccountPool    *AccountPoolSummary            `json:"accountPool,omitempty"`
-	SmartResource  SmartResource                  `json:"smartResource"`
-	Automation     AutomationExecution            `json:"automation"`
-	Recovery       RecoverySummary                `json:"recovery"`
-	ActiveOrder    *store.SupplyOrder             `json:"activeOrder,omitempty"`
-	ActiveOrders   []store.SupplyOrder            `json:"activeOrders,omitempty"`
-	PurchaseTasks  []store.SupplyPurchaseTask     `json:"purchaseTasks,omitempty"`
-	SessionRefresh []NvtokensSessionRefreshStatus `json:"sessionRefresh,omitempty"`
-	Orders         []store.SupplyOrder            `json:"orders"`
+	Config          store.ManagerSupplyConfig      `json:"config"`
+	Running         bool                           `json:"running"`
+	Overview        Overview                       `json:"overview"`
+	AccountPool     *AccountPoolSummary            `json:"accountPool,omitempty"`
+	SmartResource   SmartResource                  `json:"smartResource"`
+	Automation      AutomationExecution            `json:"automation"`
+	LowPriceReserve LowPriceReserveExecution       `json:"lowPriceReserve"`
+	Recovery        RecoverySummary                `json:"recovery"`
+	ActiveOrder     *store.SupplyOrder             `json:"activeOrder,omitempty"`
+	ActiveOrders    []store.SupplyOrder            `json:"activeOrders,omitempty"`
+	PurchaseTasks   []store.SupplyPurchaseTask     `json:"purchaseTasks,omitempty"`
+	SessionRefresh  []NvtokensSessionRefreshStatus `json:"sessionRefresh,omitempty"`
+	Orders          []store.SupplyOrder            `json:"orders"`
 }
 
 // AccountPoolSummary is the lightweight, operator-facing account split shared
@@ -608,6 +609,7 @@ type Service struct {
 	operatorPool         operatorAccountPoolCache
 	smartResourceState   SmartResource
 	automation           AutomationExecution
+	lowPriceReserve      LowPriceReserveExecution
 	automaticDecisionSet bool
 	automaticDecision    SmartResource
 	recoveryMu           sync.Mutex
@@ -1115,16 +1117,17 @@ func (s *Service) buildStatus(ctx context.Context, limit int) (Status, error) {
 	}
 	applySmartTokenMetrics(&resource)
 	status := Status{
-		Config:         sanitizeConfig(cfg.Supply),
-		Running:        running,
-		Overview:       overview,
-		AccountPool:    accountPool,
-		SmartResource:  resource,
-		Automation:     s.currentAutomationExecution(managerconfigsvc.SupplyEnabled(cfg.Supply)),
-		Recovery:       s.currentRecoverySummary(ctx, cfg.Supply),
-		PurchaseTasks:  purchaseTasks,
-		SessionRefresh: s.nvtokensRefreshStatuses(cfg.Supply),
-		Orders:         orders,
+		Config:          sanitizeConfig(cfg.Supply),
+		Running:         running,
+		Overview:        overview,
+		AccountPool:     accountPool,
+		SmartResource:   resource,
+		Automation:      s.currentAutomationExecution(managerconfigsvc.SupplyEnabled(cfg.Supply)),
+		LowPriceReserve: s.currentLowPriceReserveExecution(cfg.Supply, purchaseTasks),
+		Recovery:        s.currentRecoverySummary(ctx, cfg.Supply),
+		PurchaseTasks:   purchaseTasks,
+		SessionRefresh:  s.nvtokensRefreshStatuses(cfg.Supply),
+		Orders:          orders,
 	}
 	if len(activeOrders) > 0 {
 		status.ActiveOrder = &activeOrders[0]
@@ -2724,7 +2727,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 				return err
 			}
 		}
-		if len(openOrders) > 0 && !parallelEligible {
+		if len(openOrders) > 0 && !parallelEligible && !lowPriceReserveOpenOrdersReversible(openOrders) {
 			return nil
 		}
 	}
@@ -2745,7 +2748,6 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 
 	available := 0
 	useSmart = manualQuantity == 0 && smartSupplyEnabled(supplyCfg)
-	accountSnapshotLoaded := !useSmart
 	if useSmart {
 		timing.next("capacity-snapshot")
 		resource, err = s.smartResource(ctx, cfg, force)
@@ -2762,7 +2764,6 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			return err
 		} else {
 			available = poolAvailable
-			accountSnapshotLoaded = accountLoaded
 			if accountLoaded {
 				s.markAutomaticAccountSnapshot()
 			}
@@ -2782,29 +2783,18 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 			return err
 		}
 	}
-	lowPriceReserveQuantity := 0
-	if manualQuantity == 0 && accountSnapshotLoaded {
-		lowPriceReserveQuantity = supplyLowPriceReserveQuantity(supplyCfg, available)
-	}
 	timing.next("decision")
 	if manualQuantity == 0 {
 		if useSmart {
 			if reason := s.automaticSupplyGuardReason(resource); reason != "" {
-				if lowPriceReserveQuantity > 0 {
-					resource.SuggestedAction = smartActionObserveDemand
-					resource.SuggestedQuantity = lowPriceReserveQuantity
-					resource.DecisionReason = lowPriceReserveTriggerReason
-					s.setSmartResource(resource)
-				} else {
-					resource.EmergencyShortage = false
-					resource.EmergencyReason = ""
-					resource.SuggestedAction = smartActionSnapshotStale
-					resource.SuggestedQuantity = 0
-					resource.DecisionReason = reason
-					s.setSmartResource(resource)
-					s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
-					return nil
-				}
+				resource.EmergencyShortage = false
+				resource.EmergencyReason = ""
+				resource.SuggestedAction = smartActionSnapshotStale
+				resource.SuggestedQuantity = 0
+				resource.DecisionReason = reason
+				s.setSmartResource(resource)
+				s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
+				return nil
 			}
 		}
 		if recent, recentFound, err := s.store.GetLatestCompletedAutomaticSupplyOrder(ctx); err != nil {
@@ -2885,44 +2875,19 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		}
 	}
 	quantity := manualQuantity
-	lowPriceReserve := false
-	useLowPriceReserve := func() bool {
-		if manualQuantity != 0 || lowPriceReserveQuantity <= 0 {
-			return false
-		}
-		quantity = lowPriceReserveQuantity
-		lowPriceReserve = true
-		if useSmart {
-			resource.EmergencyShortage = false
-			resource.EmergencyReason = ""
-			resource.SuggestedAction = smartActionObserveDemand
-			resource.SuggestedQuantity = quantity
-			resource.DecisionReason = lowPriceReserveTriggerReason
-			s.setSmartResource(resource)
-		}
-		return true
-	}
 	if quantity == 0 {
 		if useSmart {
 			planningResource := supplyCreatePlanningResource(supplyCfg, resource, openOrders, parallelEligible)
 			if smartResourceEmergency(resource) {
 				quantity = s.smartSuggestedCreateQuantity(supplyCfg, planningResource)
 			} else if !resource.SnapshotFresh && !smartPartialInspectionCapacityDeficitAllowed(resource) {
-				if !useLowPriceReserve() {
-					return nil
-				}
+				return nil
 			} else if resource.DecisionReason == "usage_rate_not_ready" || resource.ConsumeRCUPerMinute <= 0 {
-				if !useLowPriceReserve() {
-					return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
-				}
+				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
 			} else if resource.CapacityGapRCU <= 0 {
-				if !useLowPriceReserve() {
-					return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
-				}
+				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
 			} else if resource.SuggestedAction == smartActionHealthy || resource.HealthLevel == smartHealthHealthy {
-				if !useLowPriceReserve() {
-					return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
-				}
+				return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
 			} else {
 				quantity = s.smartSuggestedCreateQuantity(supplyCfg, planningResource)
 			}
@@ -2935,13 +2900,25 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 		}
 	}
 	if quantity <= 0 {
-		useLowPriceReserve()
-	}
-	if quantity <= 0 {
 		if useSmart {
 			return s.refreshSupplyOverview(ctx, supplyCfg, available, max(1, supplyCfg.ReplenishBatchSize))
 		}
 		return ErrInvalidQuantity
+	}
+	if manualQuantity == 0 {
+		activeTask, found, taskErr := s.store.GetActiveAutomaticSupplyPurchaseTask(ctx)
+		if taskErr != nil {
+			return taskErr
+		}
+		if found && isLowPriceReserveTrigger(activeTask.TriggerReason) {
+			if taskErr := s.cancelLowPriceReservePurchaseTask(ctx, &activeTask, "superseded by live replenishment demand"); taskErr != nil {
+				return taskErr
+			}
+			openOrders, err = s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	if manualQuantity == 0 && immediateRetryOrder != nil {
 		retryQuantity, retryErr := s.automaticImmediateRetryQuantity(ctx, supplyCfg, *immediateRetryOrder, quantity)
@@ -2961,45 +2938,14 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	}
 
 	timing.next("supplier-quote")
-	var selection supplyPlatformSelection
-	if lowPriceReserve {
-		matched := false
-		for attempts := 0; attempts < 2; attempts++ {
-			selection, matched, err = s.selectLowPriceReservePlatform(ctx, supplyCfg, quantity, openOrders)
-			if err != nil {
-				return err
-			}
-			if !matched {
-				s.setOverview(Overview{
-					CheckedAtMS:  time.Now().UnixMilli(),
-					CPAAvailable: available,
-					CPATarget:    supplyCfg.TargetAvailableAccounts,
-					CPADeficit:   max(0, supplyCfg.TargetAvailableAccounts-available),
-					Platforms:    selection.all,
-				})
-				if useSmart {
-					resource.SuggestedQuantity = 0
-					resource.DecisionReason = "low_price_reserve_price_wait"
-					s.setSmartResource(resource)
-				}
-				return nil
-			}
-			availableInventory := selection.status.Inventory.Available
-			if availableInventory <= 0 || availableInventory >= quantity {
-				break
-			}
-			quantity = availableInventory
-		}
-	} else {
-		selection, err = s.selectSupplyPlatform(ctx, supplyCfg, quantity, openOrders, requestedSupplierID)
-		if err != nil {
-			return err
-		}
+	selection, err := s.selectSupplyPlatform(ctx, supplyCfg, quantity, openOrders, requestedSupplierID)
+	if err != nil {
+		return err
 	}
 	platform := selection.platform
 	inventory := *selection.status.Inventory
 	balance := *selection.status.Balance
-	if useSmart && !lowPriceReserve {
+	if useSmart {
 		pressure := s.smartSupplyPressure(ctx, supplyCfg, inventory, quantity)
 		applySmartSupplyPressure(&resource, pressure)
 		adjustedQuantity, pressureReason, timing := smartPrelockQuantityForSupplyPressureWithTiming(supplyCfg, resource, pressure, quantity)
@@ -3121,9 +3067,6 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	}
 
 	triggerReason := supplyOrderTriggerReason(resource, manualQuantity == 0)
-	if lowPriceReserve {
-		triggerReason = lowPriceReserveTriggerReason
-	}
 	if len(openOrders) > 0 && maxConcurrentSupplyOrders(supplyCfg) > 1 {
 		triggerReason = parallelSupplyTriggerReason(triggerReason)
 	}
@@ -3658,7 +3601,7 @@ func (s *Service) lowPriceReserveOrderAdmission(
 	if order == nil || !isLowPriceReserveTrigger(order.TriggerReason) || !supplyLowPriceReserveEnabled(cfg.Supply) {
 		return false, false, nil
 	}
-	available, err := s.countAvailableAccounts(ctx, cfg)
+	available, err := s.countLowPriceReserveAccounts(ctx, cfg)
 	if err != nil {
 		return true, false, err
 	}
@@ -3666,7 +3609,6 @@ func (s *Service) lowPriceReserveOrderAdmission(
 	if remaining <= 0 {
 		return false, false, nil
 	}
-	s.updateCPAOverview(available, cfg.Supply.TargetAvailableAccounts)
 	if !isSupplyOrderCapacityCommitted(*order) {
 		return true, false, nil
 	}
@@ -3960,7 +3902,9 @@ func withSupplyAccountImportMetadata(account normalizedSupplyAccount, cfg store.
 		platformName = platformID
 	}
 	method := "manual_supply"
-	if order.Automatic {
+	if isLowPriceReserveTrigger(order.TriggerReason) {
+		method = lowPriceReserveTriggerReason
+	} else if order.Automatic {
 		method = "automatic_supply"
 	}
 	metadata["cpamp_import"] = map[string]any{
@@ -8373,23 +8317,23 @@ func supplyLowPriceReserveEnabled(cfg store.ManagerSupplyConfig) bool {
 		cfg.LowPriceReserveTargetAccounts > 0
 }
 
-func supplyLowPriceReserveQuantity(cfg store.ManagerSupplyConfig, available int) int {
-	if !supplyLowPriceReserveEnabled(cfg) {
-		return 0
-	}
-	deficit := cfg.LowPriceReserveTargetAccounts - max(0, available)
-	if deficit <= 0 {
-		return 0
-	}
-	limit := positiveOr(cfg.ReplenishBatchSize, 10)
-	if smartSupplyEnabled(cfg) && cfg.PrelockMaxQuantity > 0 {
-		limit = min(limit, cfg.PrelockMaxQuantity)
-	}
-	return clampInt(deficit, 1, min(100, max(1, limit)))
-}
-
 func isLowPriceReserveTrigger(reason string) bool {
 	return unwrappedSupplyTriggerReason(reason) == lowPriceReserveTriggerReason
+}
+
+func lowPriceReserveOpenOrdersReversible(orders []store.SupplyOrder) bool {
+	if len(orders) == 0 {
+		return false
+	}
+	for _, order := range orders {
+		if !isLowPriceReserveTrigger(order.TriggerReason) ||
+			isSupplyOrderCapacityCommitted(order) ||
+			isSupplyOrderCapacityIrreversible(order) ||
+			purchaseTaskOrderRequiresOperatorReview(order) {
+			return false
+		}
+	}
+	return true
 }
 
 func supplyOrderTriggerReason(resource SmartResource, automatic bool) string {

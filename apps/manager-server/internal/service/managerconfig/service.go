@@ -342,46 +342,47 @@ func (s *Service) DefaultManagerConfig() store.ManagerConfig {
 		},
 		CodexInspection: store.DefaultCodexInspectionConfig(),
 		Supply: store.ManagerSupplyConfig{
-			Enabled:                       BoolPtr(false),
-			BaseURL:                       "https://sogouedu.cc",
-			Product:                       "oauth_30d",
-			TargetAvailableAccounts:       100,
-			ReplenishBatchSize:            10,
-			LowPriceReserveEnabled:        BoolPtr(false),
-			LowPriceReserveTargetAccounts: 100,
-			MaxConcurrentOrders:           3,
-			CheckIntervalSeconds:          60,
-			PollIntervalSeconds:           3,
-			SmartEnabled:                  BoolPtr(true),
-			HealthyMinutesTarget:          120,
-			WarningMinutes:                60,
-			CriticalMinutes:               30,
-			PrelockEnabled:                BoolPtr(true),
-			PrelockMinQuantity:            1,
-			PrelockMaxQuantity:            10,
-			CriticalTakeConfirmRounds:     2,
-			CreateCooldownSeconds:         120,
-			ReleaseCooldownSeconds:        60,
-			AuthFilesCacheTTLSeconds:      60,
-			MinHoldSeconds:                30,
-			NewAccountConfidence:          0.7,
-			RevenueMultiplier:             0.06,
-			Strategy:                      SupplyStrategyStrongSupply,
-			CriticalAvailableAccounts:     2,
-			HealthyAvailableAccounts:      10,
-			DefaultEmergencyMinAccounts:   5,
-			VirtualDemandTTLMinutes:       60,
-			AccountMaxRequestsBefore401:   30,
-			AccountMaxUsefulSeconds401:    120,
-			EmergencyBypassUsageRate:      BoolPtr(true),
-			RecoveryTriggerOn401:          BoolPtr(true),
-			RecoverySyncEnabled:           BoolPtr(true),
-			RecoveryAutoClaim:             BoolPtr(true),
-			RecoverySyncIntervalSeconds:   60,
-			RecoveryClaimBatchSize:        20,
-			RecoveryDisableOriginal:       BoolPtr(true),
-			QuotaEstimationPolicies:       defaultSupplyQuotaEstimationPolicies(),
-			PlatformSelectionStrategy:     SupplyPlatformSelectionBestAvailable,
+			Enabled:                                  BoolPtr(false),
+			BaseURL:                                  "https://sogouedu.cc",
+			Product:                                  "oauth_30d",
+			TargetAvailableAccounts:                  100,
+			ReplenishBatchSize:                       10,
+			LowPriceReserveEnabled:                   BoolPtr(false),
+			LowPriceReserveTargetAccounts:            200,
+			LowPriceReserveCheckIntervalMilliseconds: 1000,
+			MaxConcurrentOrders:                      3,
+			CheckIntervalSeconds:                     60,
+			PollIntervalSeconds:                      3,
+			SmartEnabled:                             BoolPtr(true),
+			HealthyMinutesTarget:                     120,
+			WarningMinutes:                           60,
+			CriticalMinutes:                          30,
+			PrelockEnabled:                           BoolPtr(true),
+			PrelockMinQuantity:                       1,
+			PrelockMaxQuantity:                       10,
+			CriticalTakeConfirmRounds:                2,
+			CreateCooldownSeconds:                    120,
+			ReleaseCooldownSeconds:                   60,
+			AuthFilesCacheTTLSeconds:                 60,
+			MinHoldSeconds:                           30,
+			NewAccountConfidence:                     0.7,
+			RevenueMultiplier:                        0.06,
+			Strategy:                                 SupplyStrategyStrongSupply,
+			CriticalAvailableAccounts:                2,
+			HealthyAvailableAccounts:                 10,
+			DefaultEmergencyMinAccounts:              5,
+			VirtualDemandTTLMinutes:                  60,
+			AccountMaxRequestsBefore401:              30,
+			AccountMaxUsefulSeconds401:               120,
+			EmergencyBypassUsageRate:                 BoolPtr(true),
+			RecoveryTriggerOn401:                     BoolPtr(true),
+			RecoverySyncEnabled:                      BoolPtr(true),
+			RecoveryAutoClaim:                        BoolPtr(true),
+			RecoverySyncIntervalSeconds:              60,
+			RecoveryClaimBatchSize:                   20,
+			RecoveryDisableOriginal:                  BoolPtr(true),
+			QuotaEstimationPolicies:                  defaultSupplyQuotaEstimationPolicies(),
+			PlatformSelectionStrategy:                SupplyPlatformSelectionBestAvailable,
 		},
 	}
 }
@@ -461,9 +462,18 @@ func NormalizeSupplyConfig(submitted store.ManagerSupplyConfig, current store.Ma
 	next.LowPriceReserveTargetAccounts = BoundedPositiveOrDefault(
 		submitted.LowPriceReserveTargetAccounts,
 		next.LowPriceReserveTargetAccounts,
-		next.TargetAvailableAccounts,
+		200,
 		10000,
 	)
+	next.LowPriceReserveCheckIntervalMilliseconds = BoundedPositiveOrDefault(
+		submitted.LowPriceReserveCheckIntervalMilliseconds,
+		next.LowPriceReserveCheckIntervalMilliseconds,
+		1000,
+		600000,
+	)
+	if next.LowPriceReserveCheckIntervalMilliseconds < 250 {
+		next.LowPriceReserveCheckIntervalMilliseconds = 250
+	}
 	next.MaxConcurrentOrders = BoundedPositiveOrDefault(submitted.MaxConcurrentOrders, next.MaxConcurrentOrders, 3, 3)
 	next.CheckIntervalSeconds = BoundedPositiveOrDefault(submitted.CheckIntervalSeconds, next.CheckIntervalSeconds, 60, 3600)
 	next.PollIntervalSeconds = BoundedPositiveOrDefault(submitted.PollIntervalSeconds, next.PollIntervalSeconds, 3, 60)
@@ -1069,6 +1079,9 @@ func ValidateSupplyConfig(cfg store.ManagerSupplyConfig) error {
 		}
 		if cfg.LowPriceReserveTargetAccounts <= 0 {
 			return errors.New("lowPriceReserveTargetAccounts must be greater than zero when low-price reserve is enabled")
+		}
+		if cfg.LowPriceReserveCheckIntervalMilliseconds < 250 {
+			return errors.New("lowPriceReserveCheckIntervalMilliseconds must be at least 250")
 		}
 	}
 	platforms := SupplyPlatforms(cfg)
