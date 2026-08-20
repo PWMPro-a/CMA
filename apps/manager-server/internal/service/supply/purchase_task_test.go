@@ -615,6 +615,54 @@ func TestPurchaseTaskRetriesCreateFailureUntilTargetIsFulfilled(t *testing.T) {
 	}
 }
 
+func TestUndeliverableTakenAccountReleasesPurchaseTaskSlot(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-invalid-delivery.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	task, err := st.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
+		TaskID: "purchase-invalid-delivery", Source: "automatic", Product: "plus",
+		TargetQuantity: 1, Status: purchaseTaskStatusRunning, MaxConcurrentOrders: 1,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	order, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "invalid-delivery", TaskID: task.TaskID, SupplierID: "nv", Product: "plus",
+		RequestedQuantity: 1, ReadyQuantity: 1, Automatic: true, Status: "taking",
+	})
+	if err != nil {
+		t.Fatalf("create taking order: %v", err)
+	}
+	service := New(st, nil)
+	deliveryErr := fmt.Errorf("supply account 1 format is unsupported: account is not an OpenAI OAuth credential")
+	if err := service.failUndeliverableOrder(ctx, &order, deliveryErr); err == nil || err.Error() != deliveryErr.Error() {
+		t.Fatalf("invalid delivery error = %v", err)
+	}
+
+	stored, found, err := st.GetSupplyOrder(ctx, order.OrderID)
+	if err != nil || !found {
+		t.Fatalf("load failed delivery found=%v err=%v", found, err)
+	}
+	if stored.Status != "failed" || stored.RemoteStatus != "invalid_payload" || stored.CompletedAtMS <= 0 ||
+		stored.NextPollAtMS != 0 || stored.LastError != deliveryErr.Error() {
+		t.Fatalf("failed delivery = %#v", stored)
+	}
+	openOrders, err := st.ListOpenSupplyOrders(ctx, 10)
+	if err != nil || len(openOrders) != 0 {
+		t.Fatalf("invalid delivery still occupies an order slot: orders=%#v err=%v", openOrders, err)
+	}
+	reconciled, err := service.reconcilePurchaseTask(ctx, task)
+	if err != nil {
+		t.Fatalf("reconcile task: %v", err)
+	}
+	if reconciled.Status != purchaseTaskStatusRunning || reconciled.FulfilledQuantity != 0 || reconciled.ActiveOrderCount != 0 {
+		t.Fatalf("task after invalid delivery = %#v", reconciled)
+	}
+}
+
 func TestPurchaseTaskSplitsLargeTargetUntilEveryAccountIsImported(t *testing.T) {
 	var createCalls atomic.Int32
 	quantities := make([]int, 0, 3)

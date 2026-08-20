@@ -3252,7 +3252,7 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	for index, raw := range taken.Accounts {
 		normalizedAccounts, err := normalizeAccountPayloads(raw)
 		if err != nil {
-			return s.updateOrderError(ctx, &order, fmt.Errorf("supply account %d format is unsupported: %w", index+1, err), cfg.Supply)
+			return s.failUndeliverableOrder(ctx, &order, fmt.Errorf("supply account %d format is unsupported: %w", index+1, err))
 		}
 		normalized = append(normalized, normalizedAccounts...)
 	}
@@ -3283,7 +3283,7 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	}
 	if len(items) == 0 {
 		err := errors.New("supply take response did not include importable accounts")
-		return s.updateOrderError(ctx, &order, err, cfg.Supply)
+		return s.failUndeliverableOrder(ctx, &order, err)
 	}
 	if _, err := s.store.InsertSupplyImportItems(ctx, order.OrderID, items); err != nil {
 		return s.updateOrderError(ctx, &order, err, cfg.Supply)
@@ -10084,6 +10084,29 @@ func (s *Service) cancelOrder(ctx context.Context, order *store.SupplyOrder, err
 	order.NextPollAtMS = 0
 	order.CompletedAtMS = time.Now().UnixMilli()
 	return s.store.UpdateSupplyOrder(ctx, *order)
+}
+
+// failUndeliverableOrder closes a supplier delivery that has already reached
+// the take stage but contains no usable CPA credential. Retrying the same take
+// response only replays the same bad payload and permanently occupies the
+// purchase task's worker slot. A terminal failed child contributes zero
+// fulfilled/reserved quantity, so the durable task can submit a replacement
+// order on its next execution while retaining the supplier error for repair and
+// reporting.
+func (s *Service) failUndeliverableOrder(ctx context.Context, order *store.SupplyOrder, err error) error {
+	if order == nil {
+		return err
+	}
+	order.Status = "failed"
+	order.RemoteStatus = "invalid_payload"
+	order.LastError = safeError(err)
+	order.NextPollAtMS = 0
+	order.SupplierRetryUntilMS = 0
+	order.CompletedAtMS = time.Now().UnixMilli()
+	if updateErr := s.store.UpdateSupplyOrder(ctx, *order); updateErr != nil {
+		return updateErr
+	}
+	return err
 }
 
 func isHTTPStatus(err error, status int) bool {
