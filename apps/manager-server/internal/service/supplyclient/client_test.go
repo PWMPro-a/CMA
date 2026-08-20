@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -289,6 +290,43 @@ func TestNvtokensFailedPasswordRefreshRetriesOnlyOnce(t *testing.T) {
 	var httpErr *HTTPError
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized || httpErr.Code != "AUTH_REQUIRED" {
 		t.Fatalf("error = %#v, want password refresh AUTH_REQUIRED HTTP 401", err)
+	}
+	if loginCalls.Load() != 1 || catalogCalls.Load() != 1 {
+		t.Fatalf("login=%d catalog=%d, want login=1 catalog=1", loginCalls.Load(), catalogCalls.Load())
+	}
+}
+
+func TestNvtokensCaptchaRefreshReturnsActionableAuthenticationError(t *testing.T) {
+	var loginCalls atomic.Int32
+	var catalogCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/login":
+			loginCalls.Add(1)
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"请完成人机验证"}`))
+		case "/api/workspace/seller-candidates":
+			catalogCalls.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":"AUTH_REQUIRED","message":"登录状态已失效，请重新登录"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	_, err := New(server.Client()).ProductCatalog(context.Background(), Credentials{
+		ID:           "nvtokens-main",
+		PlatformType: "nvtokens",
+		BaseURL:      server.URL,
+		Token:        "expired-session",
+		Username:     "buyer",
+		Password:     "secret",
+	})
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized || httpErr.Code != "AUTH_REQUIRED" ||
+		!strings.Contains(httpErr.Message, "更新 Session") {
+		t.Fatalf("error = %#v, want actionable AUTH_REQUIRED error", err)
 	}
 	if loginCalls.Load() != 1 || catalogCalls.Load() != 1 {
 		t.Fatalf("login=%d catalog=%d, want login=1 catalog=1", loginCalls.Load(), catalogCalls.Load())

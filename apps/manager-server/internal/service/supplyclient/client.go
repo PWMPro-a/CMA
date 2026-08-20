@@ -1287,7 +1287,7 @@ func (c *Client) login(ctx context.Context, credentials Credentials, force bool)
 		}
 		value, _, err := c.request(ctx, credentials.BaseURL, http.MethodPost, "/api/login", payload, tokenState{})
 		if err != nil {
-			return tokenState{}, err
+			return tokenState{}, normalizeNvtokensLoginError(err)
 		}
 		// The web client uses the HttpOnly session cookie set by this endpoint.
 		// A token field is accepted as a fallback for deployments that expose an
@@ -1352,6 +1352,19 @@ func canRefreshAuthentication(credentials Credentials) bool {
 	}
 	platformType := strings.TrimSpace(credentials.PlatformType)
 	return (strings.EqualFold(platformType, "bugteam") || isNvtokens(credentials)) && canPasswordLogin(credentials)
+}
+
+func normalizeNvtokensLoginError(err error) error {
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusBadRequest ||
+		!strings.Contains(strings.TrimSpace(httpErr.Message), "人机验证") {
+		return err
+	}
+	return &HTTPError{
+		StatusCode: http.StatusUnauthorized,
+		Code:       "AUTH_REQUIRED",
+		Message:    "NV 登录态已失效，密码续登需要完成人机验证；请登录 nvtokens 后更新 Session",
+	}
 }
 
 func applyAuthentication(headers http.Header, auth tokenState) {
