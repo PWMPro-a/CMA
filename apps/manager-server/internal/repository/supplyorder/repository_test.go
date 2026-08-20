@@ -137,6 +137,48 @@ func TestPurchaseQueriesExcludeRecoveryImportRows(t *testing.T) {
 	}
 }
 
+func TestPurchaseHistoryHidesUnpaidLocalCreateFailures(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewStore(t, testutil.NewConfig(t))
+	orders := []store.SupplyOrder{
+		{
+			OrderID: "create-unpaid", Product: "plus", RequestedQuantity: 1,
+			Status: "failed", RemoteStatus: "failed",
+		},
+		{
+			OrderID: "create-paid-evidence", Product: "plus", RequestedQuantity: 1,
+			Status: "failed", RemoteStatus: "invalid_payload", ReadyQuantity: 1, Progress: 100,
+		},
+		{
+			OrderID: "remote-failed-order", Product: "plus", RequestedQuantity: 1,
+			Status: "failed", RemoteStatus: "failed",
+		},
+		{
+			OrderID: "remote-completed-order", Product: "plus", RequestedQuantity: 1,
+			Status: "completed", RemoteStatus: "completed", ChargedFen: 1666, ItemCount: 1, ImportedCount: 1,
+		},
+	}
+	for index := range orders {
+		orders[index].CreatedAtMS = time.Now().Add(time.Duration(index) * time.Second).UnixMilli()
+		if _, err := st.CreateSupplyOrder(ctx, orders[index]); err != nil {
+			t.Fatalf("create order %q: %v", orders[index].OrderID, err)
+		}
+	}
+
+	history, err := st.ListSupplyOrders(ctx, 50)
+	if err != nil {
+		t.Fatalf("list purchase history: %v", err)
+	}
+	got := make([]string, 0, len(history))
+	for _, order := range history {
+		got = append(got, order.OrderID)
+	}
+	want := []string{"remote-completed-order", "remote-failed-order", "create-paid-evidence"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("purchase history = %v, want %v", got, want)
+	}
+}
+
 func TestLegacyPurchaseRepairSkipsRecoveryRows(t *testing.T) {
 	ctx := context.Background()
 	st := testutil.NewStore(t, testutil.NewConfig(t))

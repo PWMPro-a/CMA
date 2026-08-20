@@ -62,6 +62,20 @@ const supplyPurchaseOrderPredicate = `lower(coalesce(strategy, '')) <> 'recovery
 	and lower(coalesce(remote_status, '')) <> 'recovery_claimed'
 	and lower(order_id) not like 'recovery-%'`
 
+// supplyHistoryOrderPredicate hides local idempotency attempts that ended in a
+// definite, unpaid create failure. They remain attached to the durable task for
+// auditing and retry accounting, but they are not supplier purchase orders and
+// otherwise crowd paid deliveries out of the operator's bounded history page.
+// Any fulfillment or payment evidence keeps the row visible for reconciliation.
+const supplyHistoryOrderPredicate = `not (
+	lower(coalesce(status, '')) = 'failed'
+	and lower(order_id) like 'create-%'
+	and charged_fen = 0
+	and ready_quantity = 0
+	and progress < 100
+	and item_count = 0
+)`
+
 func New(db *sql.DB, protector ...*security.Protector) Repository {
 	var p *security.Protector
 	if len(protector) > 0 {
@@ -441,6 +455,7 @@ func (r *repository) List(ctx context.Context, limit int) ([]model.SupplyOrder, 
 		limit = 50
 	}
 	rows, err := r.db.QueryContext(ctx, orderSelect+` where `+supplyPurchaseOrderPredicate+`
+		and `+supplyHistoryOrderPredicate+`
 		order by created_at_ms desc, id desc limit ?`, limit)
 	if err != nil {
 		return nil, err
