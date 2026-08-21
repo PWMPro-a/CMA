@@ -161,6 +161,11 @@ func chooseMarketplaceSellerForAutomaticPurchase(
 			untried = append(untried, selection)
 		}
 	}
+	// Quota eligibility is the hard gate. Once sellers have demonstrated enough
+	// usable quota, prefer the currently cheapest inventory and use the quota
+	// score only as a same-price tie breaker. This keeps routine replenishment
+	// and low-price reserve purchases from paying more merely for a marginally
+	// higher historical quota score.
 	sortMarketplaceSellerSelections(approved, true)
 	if len(approved) > 0 {
 		return &approved[0], nil
@@ -172,13 +177,10 @@ func chooseMarketplaceSellerForAutomaticPurchase(
 	return nil, ErrSupplierQuotaGateNoEligibleSeller
 }
 
-func sortMarketplaceSellerSelections(values []marketplaceSellerSelection, qualityFirst bool) {
+func sortMarketplaceSellerSelections(values []marketplaceSellerSelection, quotaScoreTieBreaker bool) {
 	sort.SliceStable(values, func(i, j int) bool {
 		left := values[i]
 		right := values[j]
-		if qualityFirst && left.score.ScoreM != right.score.ScoreM {
-			return left.score.ScoreM > right.score.ScoreM
-		}
 		leftPrice := left.candidate.MinUnitPriceFen
 		rightPrice := right.candidate.MinUnitPriceFen
 		if leftPrice <= 0 {
@@ -190,8 +192,36 @@ func sortMarketplaceSellerSelections(values []marketplaceSellerSelection, qualit
 		if leftPrice != rightPrice {
 			return leftPrice < rightPrice
 		}
+		if quotaScoreTieBreaker && left.score.ScoreM != right.score.ScoreM {
+			return left.score.ScoreM > right.score.ScoreM
+		}
+		leftQuality := valueOrNegativeInfinity(left.candidate.QualityScore)
+		rightQuality := valueOrNegativeInfinity(right.candidate.QualityScore)
+		if leftQuality != rightQuality {
+			return leftQuality > rightQuality
+		}
+		leftActiveRate := valueOrNegativeInfinity(left.candidate.ActiveRatePercent)
+		rightActiveRate := valueOrNegativeInfinity(right.candidate.ActiveRatePercent)
+		if leftActiveRate != rightActiveRate {
+			return leftActiveRate > rightActiveRate
+		}
+		if left.candidate.Available != right.candidate.Available {
+			return left.candidate.Available > right.candidate.Available
+		}
+		leftID := normalizeMarketplaceSellerID(left.candidate.SellerID)
+		rightID := normalizeMarketplaceSellerID(right.candidate.SellerID)
+		if leftID != rightID {
+			return leftID < rightID
+		}
 		return strings.ToLower(left.candidate.Name) < strings.ToLower(right.candidate.Name)
 	})
+}
+
+func valueOrNegativeInfinity(value *float64) float64 {
+	if value == nil {
+		return math.Inf(-1)
+	}
+	return *value
 }
 
 func (s *Service) marketplaceSupplierQuotaScores(
@@ -513,11 +543,37 @@ func sortSupplierQuotaScores(scores []SupplierQuotaScore) {
 		if statusOrder[scores[i].Status] != statusOrder[scores[j].Status] {
 			return statusOrder[scores[i].Status] < statusOrder[scores[j].Status]
 		}
+		leftPrice := supplierQuotaScoreSelectablePrice(scores[i])
+		rightPrice := supplierQuotaScoreSelectablePrice(scores[j])
+		if leftPrice != rightPrice {
+			return leftPrice < rightPrice
+		}
 		if scores[i].ScoreM != scores[j].ScoreM {
 			return scores[i].ScoreM > scores[j].ScoreM
 		}
+		if scores[i].MarketplaceQuality != scores[j].MarketplaceQuality {
+			return scores[i].MarketplaceQuality > scores[j].MarketplaceQuality
+		}
+		if scores[i].MarketplaceActiveRate != scores[j].MarketplaceActiveRate {
+			return scores[i].MarketplaceActiveRate > scores[j].MarketplaceActiveRate
+		}
+		if scores[i].Available != scores[j].Available {
+			return scores[i].Available > scores[j].Available
+		}
+		leftID := normalizeMarketplaceSellerID(scores[i].SellerID)
+		rightID := normalizeMarketplaceSellerID(scores[j].SellerID)
+		if leftID != rightID {
+			return leftID < rightID
+		}
 		return strings.ToLower(scores[i].SellerName) < strings.ToLower(scores[j].SellerName)
 	})
+}
+
+func supplierQuotaScoreSelectablePrice(score SupplierQuotaScore) int64 {
+	if score.Available <= 0 || score.MinUnitPriceFen <= 0 {
+		return math.MaxInt64
+	}
+	return score.MinUnitPriceFen
 }
 
 func normalizeMarketplaceSellerID(value string) string {

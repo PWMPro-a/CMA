@@ -48,6 +48,87 @@ func TestChooseMarketplaceSellerPrefersApprovedAndBoundsTrial(t *testing.T) {
 	}
 }
 
+func TestChooseMarketplaceSellerPrefersLowestPriceAmongApproved(t *testing.T) {
+	enabled := true
+	platform := store.ManagerSupplyPlatformConfig{
+		Type:                     "nvtokens",
+		SupplierQuotaGateEnabled: &enabled,
+		SupplierQuotaMinimumM:    90,
+	}
+	candidates := []supplyclient.MarketplaceSellerCandidate{
+		{SellerID: "higher-quota", Name: "Higher Quota", SelectionToken: "higher-quota-token", Available: 20, MinUnitPriceFen: 2300},
+		{SellerID: "lower-price", Name: "Lower Price", SelectionToken: "lower-price-token", Available: 20, MinUnitPriceFen: 1900},
+	}
+	scores := []SupplierQuotaScore{
+		{SellerID: "higher-quota", Status: supplierQuotaStatusApproved, ScoreM: 150},
+		{SellerID: "lower-price", Status: supplierQuotaStatusApproved, ScoreM: 95},
+	}
+
+	selection, err := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
+	if err != nil || selection == nil || selection.candidate.SellerID != "lower-price" || selection.quantity != 10 || selection.trial {
+		t.Fatalf("low-price approved selection = %#v err=%v", selection, err)
+	}
+}
+
+func TestChooseMarketplaceSellerUsesQuotaScoreForEqualPrice(t *testing.T) {
+	enabled := true
+	platform := store.ManagerSupplyPlatformConfig{
+		Type:                     "nvtokens",
+		SupplierQuotaGateEnabled: &enabled,
+		SupplierQuotaMinimumM:    90,
+	}
+	candidates := []supplyclient.MarketplaceSellerCandidate{
+		{SellerID: "lower-quota", Name: "Lower Quota", SelectionToken: "lower-quota-token", Available: 20, MinUnitPriceFen: 1900},
+		{SellerID: "higher-quota", Name: "Higher Quota", SelectionToken: "higher-quota-token", Available: 20, MinUnitPriceFen: 1900},
+	}
+	scores := []SupplierQuotaScore{
+		{SellerID: "lower-quota", Status: supplierQuotaStatusApproved, ScoreM: 95},
+		{SellerID: "higher-quota", Status: supplierQuotaStatusApproved, ScoreM: 150},
+	}
+
+	selection, err := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
+	if err != nil || selection == nil || selection.candidate.SellerID != "higher-quota" {
+		t.Fatalf("equal-price quota selection = %#v err=%v", selection, err)
+	}
+}
+
+func TestChooseMarketplaceSellerNeverLetsCheapBlockedSellerBypassGate(t *testing.T) {
+	enabled := true
+	platform := store.ManagerSupplyPlatformConfig{
+		Type:                     "nvtokens",
+		SupplierQuotaGateEnabled: &enabled,
+		SupplierQuotaMinimumM:    90,
+	}
+	candidates := []supplyclient.MarketplaceSellerCandidate{
+		{SellerID: "blocked", Name: "Blocked", SelectionToken: "blocked-token", Available: 20, MinUnitPriceFen: 1000},
+		{SellerID: "approved", Name: "Approved", SelectionToken: "approved-token", Available: 20, MinUnitPriceFen: 2000},
+	}
+	scores := []SupplierQuotaScore{
+		{SellerID: "blocked", Status: supplierQuotaStatusBlocked, ScoreM: 20},
+		{SellerID: "approved", Status: supplierQuotaStatusApproved, ScoreM: 100},
+	}
+
+	selection, err := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
+	if err != nil || selection == nil || selection.candidate.SellerID != "approved" {
+		t.Fatalf("quota-gated low-price selection = %#v err=%v", selection, err)
+	}
+}
+
+func TestSortSupplierQuotaScoresShowsCheapestAvailableFirstWithinStatus(t *testing.T) {
+	scores := []SupplierQuotaScore{
+		{SellerID: "high-score-no-stock", SellerName: "High Score No Stock", Status: supplierQuotaStatusApproved, ScoreM: 150},
+		{SellerID: "higher-price", SellerName: "Higher Price", Status: supplierQuotaStatusApproved, ScoreM: 140, Available: 10, MinUnitPriceFen: 2300},
+		{SellerID: "lower-price", SellerName: "Lower Price", Status: supplierQuotaStatusApproved, ScoreM: 95, Available: 2, MinUnitPriceFen: 1900},
+		{SellerID: "trial", SellerName: "Trial", Status: supplierQuotaStatusUntried, Available: 20, MinUnitPriceFen: 1000},
+	}
+
+	sortSupplierQuotaScores(scores)
+
+	if got := []string{scores[0].SellerID, scores[1].SellerID, scores[2].SellerID, scores[3].SellerID}; got[0] != "lower-price" || got[1] != "higher-price" || got[2] != "high-score-no-stock" || got[3] != "trial" {
+		t.Fatalf("seller score order = %#v", got)
+	}
+}
+
 func TestMarketplaceSupplierQuotaScoresUsesIndependentAccountEvidence(t *testing.T) {
 	ctx := context.Background()
 	st := testutil.NewStore(t, testutil.NewConfig(t))
