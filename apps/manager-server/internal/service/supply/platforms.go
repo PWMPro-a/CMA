@@ -736,6 +736,21 @@ func (s *Service) selectSupplyPlatformProduct(
 				results <- result{index: index, marketplaceSeller: marketplaceSeller, supplierQuotaScores: supplierQuotaScores, quantity: effectiveQuantity, err: err}
 				return
 			}
+			// The upstream receives the same ceiling in the estimate/create
+			// payload, but keep a local hard gate as well. A stale or malformed
+			// quote must never let an automatic task pay above the configured
+			// platform limit.
+			if requestedID == "" {
+				ceiling := valueOrZero(platform.MaxUnitPriceFen)
+				if ceiling > 0 && inventory.EstimatedUnitPriceFen > ceiling {
+					results <- result{
+						index: index, marketplaceSeller: marketplaceSeller,
+						supplierQuotaScores: supplierQuotaScores, quantity: effectiveQuantity,
+						err: fmt.Errorf("automatic quote unit price %d exceeds configured ceiling %d", inventory.EstimatedUnitPriceFen, ceiling),
+					}
+					return
+				}
+			}
 			balance, err := s.supplyClient.Balance(ctx, credentials)
 			results <- result{index: index, inventory: inventory, balance: balance, marketplaceSeller: marketplaceSeller, supplierQuotaScores: supplierQuotaScores, quantity: effectiveQuantity, err: err}
 		}(index, platform)

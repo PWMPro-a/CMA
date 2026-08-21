@@ -42,9 +42,10 @@ func TestChooseMarketplaceSellerPrefersApprovedAndBoundsTrial(t *testing.T) {
 	}
 
 	scores[1].Status = supplierQuotaStatusObserving
+	scores[1].RetryAfterMS = time.Now().Add(time.Minute).UnixMilli()
 	selection, err = chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
 	if !errors.Is(err, ErrSupplierQuotaGateNoEligibleSeller) || selection != nil {
-		t.Fatalf("blocked selection = %#v err=%v", selection, err)
+		t.Fatalf("cooling selection = %#v err=%v", selection, err)
 	}
 }
 
@@ -68,6 +69,51 @@ func TestChooseMarketplaceSellerLetsCheaperUnknownSellerRunSingleTrial(t *testin
 	selection, err := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
 	if err != nil || selection == nil || selection.candidate.SellerID != "new-cheap" || selection.quantity != 1 || !selection.trial {
 		t.Fatalf("low-price trial selection = %#v err=%v", selection, err)
+	}
+}
+
+func TestChooseMarketplaceSellerRetriesCheapestObservingSellerAfterCooldown(t *testing.T) {
+	enabled := true
+	maxUnitPriceFen := int64(1400)
+	platform := store.ManagerSupplyPlatformConfig{
+		Type:                       "nvtokens",
+		MaxUnitPriceFen:            &maxUnitPriceFen,
+		SupplierQuotaGateEnabled:   &enabled,
+		SupplierQuotaMinimumM:      90,
+		SupplierQuotaTrialQuantity: 1,
+	}
+	candidates := []supplyclient.MarketplaceSellerCandidate{
+		{SellerID: "observing-cheap", Name: "Observing Cheap", SelectionToken: "observing-token", Available: 20, MinUnitPriceFen: 1200},
+		{SellerID: "approved", Name: "Approved", SelectionToken: "approved-token", Available: 20, MinUnitPriceFen: 1400},
+	}
+	scores := []SupplierQuotaScore{
+		{SellerID: "observing-cheap", Status: supplierQuotaStatusObserving, RetryAfterMS: time.Now().Add(-time.Second).UnixMilli()},
+		{SellerID: "approved", Status: supplierQuotaStatusApproved, ScoreM: 120},
+	}
+
+	selection, err := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
+	if err != nil || selection == nil || selection.candidate.SellerID != "observing-cheap" || selection.quantity != 1 || !selection.trial {
+		t.Fatalf("observing low-price trial selection = %#v err=%v", selection, err)
+	}
+}
+
+func TestChooseMarketplaceSellerSkipsPricesAbovePlatformCeiling(t *testing.T) {
+	enabled := true
+	maxUnitPriceFen := int64(1400)
+	platform := store.ManagerSupplyPlatformConfig{
+		Type:                     "nvtokens",
+		MaxUnitPriceFen:          &maxUnitPriceFen,
+		SupplierQuotaGateEnabled: &enabled,
+		SupplierQuotaMinimumM:    90,
+	}
+	candidates := []supplyclient.MarketplaceSellerCandidate{
+		{SellerID: "over-limit", Name: "Over Limit", SelectionToken: "over-token", Available: 20, MinUnitPriceFen: 1800},
+	}
+	scores := []SupplierQuotaScore{{SellerID: "over-limit", Status: supplierQuotaStatusApproved, ScoreM: 120}}
+
+	selection, err := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
+	if !errors.Is(err, ErrSupplierQuotaGateNoEligibleSeller) || selection != nil {
+		t.Fatalf("over-limit selection = %#v err=%v", selection, err)
 	}
 }
 
@@ -249,6 +295,41 @@ func TestMarketplaceSupplierQuotaScoresBlocksDuplicateInFlightTrial(t *testing.T
 	}})
 	if err != nil || len(scores) != 1 || scores[0].Status != supplierQuotaStatusObserving || !scores[0].InFlightTrial {
 		t.Fatalf("in-flight scores = %#v err=%v", scores, err)
+	}
+}
+
+func TestMarketplaceSupplierQuotaScoresCoolsDownFailedTrialAttempt(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewStore(t, testutil.NewConfig(t))
+	service := New(st, nil)
+	enabled := true
+	platform := store.ManagerSupplyPlatformConfig{
+		ID: "nv", Type: "nvtokens", Product: "plus",
+		SupplierQuotaGateEnabled: &enabled, SupplierQuotaMinimumM: 30,
+	}
+	candidate := supplyclient.MarketplaceSellerCandidate{
+		SellerID: "failed-trial", SelectionToken: "failed-token", Product: "plus", Available: 5,
+	}
+	createdAtMS := time.Now().Add(-time.Minute).UnixMilli()
+	if _, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "failed-trial-order", SupplierID: "nv", Product: "plus", RequestedQuantity: 1,
+		MarketplaceSellerID: "failed-trial", MarketplaceSelectionToken: "failed-token",
+		Status: "failed", RemoteStatus: "failed", CreatedAtMS: createdAtMS, UpdatedAtMS: createdAtMS,
+	}); err != nil {
+		t.Fatalf("create failed trial: %v", err)
+	}
+
+	scores, err := service.marketplaceSupplierQuotaScores(ctx, platform, []supplyclient.MarketplaceSellerCandidate{candidate}, nil)
+	if err != nil || len(scores) != 1 {
+		t.Fatalf("failed trial scores = %#v err=%v", scores, err)
+	}
+	score := scores[0]
+	if score.Status != supplierQuotaStatusObserving || score.AttemptCount != 1 || score.LastAttemptAtMS != createdAtMS || score.RetryAfterMS <= time.Now().UnixMilli() {
+		t.Fatalf("failed trial cooldown score = %#v", score)
+	}
+	selection, selectErr := chooseMarketplaceSellerForAutomaticPurchase(platform, 5, []supplyclient.MarketplaceSellerCandidate{candidate}, scores)
+	if !errors.Is(selectErr, ErrSupplierQuotaGateNoEligibleSeller) || selection != nil {
+		t.Fatalf("failed trial selected during cooldown = %#v err=%v", selection, selectErr)
 	}
 }
 

@@ -18,6 +18,11 @@ var ErrSupplierQuotaGateNoEligibleSeller = errors.New("no marketplace seller cur
 
 const maxSupplierQuotaScoringOrders = 2000
 
+// An observing seller is not permanently excluded. A bounded pause gives the
+// inspection worker time to turn the last trial into quota evidence and also
+// prevents a failed marketplace create from being retried every supply tick.
+const supplierQuotaObservationRetryInterval = 10 * time.Minute
+
 const (
 	supplierQuotaStatusApproved  = "approved"
 	supplierQuotaStatusBlocked   = "blocked"
@@ -45,6 +50,9 @@ type SupplierQuotaScore struct {
 	MaximumObservedM      float64 `json:"maximumObservedM,omitempty"`
 	SampleCount           int     `json:"sampleCount"`
 	ImportedAccounts      int     `json:"importedAccounts"`
+	AttemptCount          int     `json:"attemptCount,omitempty"`
+	LastAttemptAtMS       int64   `json:"lastAttemptAtMs,omitempty"`
+	RetryAfterMS          int64   `json:"retryAfterMs,omitempty"`
 	InFlightTrial         bool    `json:"inFlightTrial,omitempty"`
 	Available             int     `json:"available,omitempty"`
 	MinUnitPriceFen       int64   `json:"minUnitPriceFen,omitempty"`
@@ -142,8 +150,13 @@ func chooseMarketplaceSellerForAutomaticPurchase(
 		byID[normalizeMarketplaceSellerID(score.SellerID)] = score
 	}
 	eligible := make([]marketplaceSellerSelection, 0)
+	nowMS := time.Now().UnixMilli()
+	ceiling := valueOrZero(platform.MaxUnitPriceFen)
 	for _, candidate := range candidates {
 		if candidate.Available <= 0 || strings.TrimSpace(candidate.SelectionToken) == "" {
+			continue
+		}
+		if ceiling > 0 && candidate.MinUnitPriceFen > ceiling {
 			continue
 		}
 		score, found := byID[normalizeMarketplaceSellerID(candidate.SellerID)]
@@ -158,13 +171,22 @@ func chooseMarketplaceSellerForAutomaticPurchase(
 			selection.trial = true
 			selection.quantity = min(max(1, quantity), min(candidate.Available, supplierQuotaTrialQuantity(platform)))
 			eligible = append(eligible, selection)
+		case supplierQuotaStatusObserving:
+			// Observing is a temporary evidence/cooldown state, not a permanent
+			// blacklist. Once the bounded pause has elapsed, let the cheapest
+			// non-blocked seller run another single-account trial.
+			if score.InFlightTrial || score.RetryAfterMS > nowMS {
+				continue
+			}
+			selection.trial = true
+			selection.quantity = min(max(1, quantity), min(candidate.Available, supplierQuotaTrialQuantity(platform)))
+			eligible = append(eligible, selection)
 		}
 	}
-	// Quota eligibility is the hard gate. Once sellers have demonstrated enough
-	// usable quota, prefer the currently cheapest inventory. A cheaper untried
-	// seller is admitted only as a bounded single trial; after that purchase it
-	// becomes observing and is excluded until independent quota evidence exists.
-	// At an equal price, approved inventory wins before quota/quality tie breaks.
+	// Blocked is the only permanent quota exclusion. Across approved sellers and
+	// trial-ready untried/observing sellers, price is the primary key. Trials are
+	// always quantity-bounded; at an equal price, approved inventory wins before
+	// quota/quality tie breaks.
 	sortMarketplaceSellerSelections(eligible)
 	if len(eligible) > 0 {
 		return &eligible[0], nil
@@ -264,7 +286,9 @@ func (s *Service) marketplaceSupplierQuotaScores(
 		candidate      supplyclient.MarketplaceSellerCandidate
 		capacities     []float64
 		imported       int
+		attempted      int
 		purchased      int
+		lastAttemptMS  int64
 		inFlight       bool
 		selectionToken string
 		channelID      string
@@ -298,6 +322,8 @@ func (s *Service) marketplaceSupplierQuotaScores(
 		if entry == nil {
 			continue
 		}
+		entry.attempted++
+		entry.lastAttemptMS = max(entry.lastAttemptMS, order.CreatedAtMS)
 		if supplyOrderHasPaymentEvidence(order) || order.ImportedCount > 0 {
 			entry.purchased++
 		}
@@ -352,6 +378,8 @@ func (s *Service) marketplaceSupplierQuotaScores(
 			Product:          platform.Product,
 			ThresholdM:       threshold,
 			ImportedAccounts: entry.imported,
+			AttemptCount:     entry.attempted,
+			LastAttemptAtMS:  entry.lastAttemptMS,
 			InFlightTrial:    entry.inFlight,
 			Available:        candidate.Available,
 			MinUnitPriceFen:  candidate.MinUnitPriceFen,
@@ -377,9 +405,16 @@ func (s *Service) marketplaceSupplierQuotaScores(
 				score.Status = supplierQuotaStatusBlocked
 				score.Reason = "observed_quota_below_threshold"
 			}
-		} else if entry.imported > 0 || entry.inFlight || entry.purchased > 0 || candidate.PurchasedBefore || candidate.PurchaseCount > 0 {
+		} else if entry.imported > 0 || entry.inFlight || entry.attempted > 0 || entry.purchased > 0 || candidate.PurchasedBefore || candidate.PurchaseCount > 0 {
 			score.Status = supplierQuotaStatusObserving
-			score.Reason = "waiting_for_account_quota_evidence"
+			if entry.inFlight {
+				score.Reason = "trial_in_flight"
+			} else {
+				score.Reason = "waiting_for_account_quota_evidence"
+				if entry.lastAttemptMS > 0 {
+					score.RetryAfterMS = entry.lastAttemptMS + supplierQuotaObservationRetryInterval.Milliseconds()
+				}
+			}
 		} else {
 			score.Status = supplierQuotaStatusUntried
 			score.Reason = "eligible_for_single_trial"
