@@ -4759,6 +4759,7 @@ export function AccountsPage() {
                   <AccountLatestRequest
                     latestRequest={accountHistory?.latest_request}
                     recentRequests={accountHistory?.recent_requests}
+                    fallbackRecentRequests={row.usage.recentRequests}
                     loading={accountHistoryLoading && !accountHistory}
                     unavailable={Boolean(accountHistoryError)}
                     locale={i18n.language}

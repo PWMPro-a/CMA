@@ -4999,6 +4999,40 @@ describe('AccountsPage replacement flows', () => {
     expect(mocks.getAccountHistory).toHaveBeenCalledTimes(settledHistoryCallCount);
   });
 
+  it('renders auth-file request buckets when Manager account history is unavailable', async () => {
+    mocks.files = [
+      {
+        ...makeCodexFile('fallback.json', 'auth-fallback', 'fallback@example.com'),
+        recent_requests: [
+          { time: '13:00-13:10', success: 5, failed: 0 },
+          { time: '13:10-13:20', success: 2, failed: 1 },
+        ],
+      },
+    ];
+    mocks.panelFeatureAvailability = {
+      checking: false,
+      managerServiceBase: '',
+      requestMonitoringAvailable: false,
+      serverCodexInspectionAvailable: false,
+    };
+
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+
+    expect(mocks.getAccountHistory).not.toHaveBeenCalled();
+    const statusTrack = renderer.root.findByProps({
+      'data-account-request-status-track': 'true',
+    });
+    expect(
+      statusTrack
+        .findAll((node) => typeof node.props['data-request-status'] === 'string')
+        .map((node) => node.props['data-request-status'])
+    ).toEqual(['empty', 'empty', 'empty', 'success', 'mixed']);
+    expect(readText(renderer.root.findByProps({ 'data-account-request-time': 'true' }))).toBe(
+      '13:10-13:20'
+    );
+  });
+
   it('shows pending history without blocking account rows', async () => {
     mocks.files = [makeCodexFile('pending.json', 'auth-1', 'pending@example.com')];
     mocks.panelFeatureAvailability = {

@@ -61,6 +61,12 @@
   cursor: help;
 }
 
+.statusBarMixed {
+  background: linear-gradient(to top, var(--error-color) 0 50%, var(--success-color) 50% 100%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--warning-color) 18%, transparent);
+  cursor: help;
+}
+
 .statusBarEmpty {
   background: color-mix(in srgb, var(--accounts-strong-border) 62%, transparent);
 }

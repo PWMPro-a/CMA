@@ -363,8 +363,8 @@ func (r *repository) ListCandidates(ctx context.Context, accountKey, provider st
 		coalesce(quota_unit, '') as quota_unit, reset_credits_available,
 		coalesce(reset_credits_json, '') as reset_credits_json,
 		coalesce(plan_type, '') as plan_type, created_at_ms,
-		coalesce((select availability from account_quota_windows window
-			where window.id = account_quota_snapshots.logical_window_id), 'inactive') as window_availability,
+		coalesce((select availability from account_quota_windows quota_window
+			where quota_window.id = account_quota_snapshots.logical_window_id), 'inactive') as window_availability,
 		row_number() over (
 			partition by logical_window_id, source
 			order by observed_at_ms desc, id desc

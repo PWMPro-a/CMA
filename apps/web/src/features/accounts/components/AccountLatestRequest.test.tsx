@@ -23,6 +23,8 @@ vi.mock('react-i18next', () => ({
         'accounts.latest_request_loading': 'Loading request',
         'accounts.latest_request_unavailable': 'Request record unavailable',
         'accounts.latest_request_empty': 'No request yet',
+        'status_bar.success_short': 'Success',
+        'status_bar.failure_short': 'Failed',
       })[key] ?? key,
   }),
 }));
@@ -158,6 +160,30 @@ describe('AccountLatestRequest', () => {
         'aria-label'
       ]
     ).toBe('Request record unavailable');
+  });
+
+  it('shows auth-file request buckets while precise account history is loading or unavailable', () => {
+    const renderer = renderLatestRequest({
+      fallbackRecentRequests: [
+        { time: '12:00-12:10', success: 4, failed: 0 },
+        { time: '12:10-12:20', success: 2, failed: 1 },
+        { time: '12:20-12:30', success: 0, failed: 3 },
+      ],
+      loading: true,
+      unavailable: true,
+    });
+
+    expect(readText(renderer.root.findByProps({ 'data-account-request-time': 'true' }))).toBe(
+      '12:20-12:30'
+    );
+    expect(
+      renderer.root
+        .findAll((node) => typeof node.props['data-request-status'] === 'string')
+        .map((node) => node.props['data-request-status'])
+    ).toEqual(['empty', 'empty', 'success', 'mixed', 'failed']);
+    expect(
+      renderer.root.findAllByProps({ 'data-request-source': 'auth-file-bucket' })
+    ).toHaveLength(3);
   });
 
   it('shows seconds and exposes the complete timestamp in an immediate two-line tooltip', () => {
