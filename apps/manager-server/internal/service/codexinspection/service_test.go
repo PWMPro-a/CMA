@@ -25,6 +25,7 @@ import (
 	quotasnapshotsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/quotasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
 const xaiCompletedInferenceAPICallResponse = `{"status_code":200,"body":{"object":"response","status":"completed","error":null,"output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}]}}`
@@ -2319,6 +2320,56 @@ func TestRunAutoRecoverEnablesRuntimeInvalidatedAccountAfterHealthyProbe(t *test
 		result.Results[0].ActionStatus != model.CodexInspectionActionStatusSuccess ||
 		result.Results[0].Disabled {
 		t.Fatalf("runtime invalidation recovery result = %#v", result.Results)
+	}
+}
+
+func TestRunAutoRecoverKeepsRuntimeInvalidatedAccountDisabledAfterRecentTokenRevocation(t *testing.T) {
+	var patchCalled bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"files":[{"id":"runtime-auth-1","name":"auth-a.json","auth_index":"auth-1","provider":"codex","account":"alice@example.com","disabled":true,"unavailable":true,"status":"disabled","status_message":"credential invalidated"}]}`))
+		case r.URL.Path == "/v0/management/api-call" && r.Method == http.MethodPost:
+			_, _ = w.Write([]byte(`{"status_code":200,"body":{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000},"secondary_window":{"used_percent":5,"limit_window_seconds":2592000}}}}`))
+		case strings.HasPrefix(r.URL.Path, "/v0/management/auth-files") && r.Method == http.MethodPatch:
+			patchCalled = true
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	db := newCodexInspectionTestStore(t)
+	managerCfg := newCodexInspectionManagerConfig(upstream.URL)
+	managerCfg.CodexInspection.AutoActionMode = model.CodexInspectionAutoActionNone
+	managerCfg.CodexInspection.AutoRecoverEnabled = true
+	if err := db.SaveManagerConfig(context.Background(), managerCfg); err != nil {
+		t.Fatalf("save manager config: %v", err)
+	}
+	now := time.Now()
+	if _, err := db.InsertEvents(context.Background(), []usage.Event{{
+		EventHash: "recent-token-revoked", TimestampMS: now.UnixMilli(), Timestamp: now.Format(time.RFC3339Nano),
+		Provider: "codex", Model: "gpt-5", AuthIndex: "auth-1", AuthFileSnapshot: "auth-a.json",
+		Failed: true, FailStatusCode: http.StatusUnauthorized, FailSummary: "token_revoked",
+		HeaderErrorKind: "auth", HeaderErrorCode: "token_revoked", CreatedAtMS: now.UnixMilli(),
+	}}); err != nil {
+		t.Fatalf("insert recent request: %v", err)
+	}
+
+	result, err := newCodexInspectionTestService(t, db).Run(context.Background(), RunRequest{
+		TriggerType: "manual",
+		TriggerKey:  "manual",
+	})
+	if err != nil {
+		t.Fatalf("run inspection: %v", err)
+	}
+	if patchCalled {
+		t.Fatal("recent token revocation was auto-enabled after a quota-only 200 probe")
+	}
+	if len(result.Results) != 1 || result.Results[0].Action != "reauth" ||
+		result.Results[0].AutoRecoverEligible || !result.Results[0].Disabled {
+		t.Fatalf("runtime invalidation result = %#v", result.Results)
 	}
 }
 

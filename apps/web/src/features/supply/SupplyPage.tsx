@@ -41,6 +41,7 @@ import { useNotificationStore } from '@/stores';
 import { resolveSupplyPoolAccountStats } from './model/poolAccountStats';
 import { reconcileLiveQuotaPlanAccounts } from './model/quotaPlanEstimates';
 import { resolvePurchasePlatformLabel } from './model/purchasePlatform';
+import { localizeSupplyRuntimeError } from './model/runtimeError';
 import styles from './SupplyPage.module.scss';
 
 const DEFAULT_QUOTA_ESTIMATION_POLICIES: Record<string, SupplyQuotaEstimationPolicy> = {
@@ -49,7 +50,6 @@ const DEFAULT_QUOTA_ESTIMATION_POLICIES: Record<string, SupplyQuotaEstimationPol
 };
 
 const PLATFORM_CATALOG_REFRESH_INTERVAL_MS = 10_000;
-const TRANSIENT_QUOTE_RETRY_INTERVAL_MS = 1_000;
 
 const platformCatalogIdentity = (platform: SupplyPlatformConfig) =>
   [
@@ -503,6 +503,10 @@ const snapshotLabelKey = (resource?: SupplySmartResource) => {
 
 export function SupplyPage() {
   const { t } = useTranslation();
+  const localizeRuntimeError = useCallback(
+    (value?: string | null) => localizeSupplyRuntimeError(value, t),
+    [t]
+  );
   const { showNotification, showConfirmation } = useNotificationStore();
   const [status, setStatus] = useState<SupplyStatus | null>(null);
   const [draft, setDraft] = useState<SupplyConfig>(emptyConfig);
@@ -1374,7 +1378,6 @@ export function SupplyPage() {
         return;
       }
       refreshing = true;
-      let retrySoon = false;
       if (!hasQuote) setManualQuoteLoading(true);
       setManualQuoteError('');
       try {
@@ -1387,10 +1390,9 @@ export function SupplyPage() {
             inventory.estimatedTotalFen <= 0 ||
             inventory.estimatedUnitPriceFen <= 0
           ) {
-            // NV occasionally answers a live estimate with an empty/zero quote
-            // while refreshing its seller pool. Never present that transient
-            // response as ¥0.00; keep the last valid quote and retry quickly.
-            retrySoon = true;
+            hasQuote = false;
+            setManualQuote(null);
+            setManualQuoteError(t('supply.quote_unavailable'));
             return;
           }
           hasQuote = true;
@@ -1409,10 +1411,8 @@ export function SupplyPage() {
       } finally {
         refreshing = false;
         if (!cancelled) {
-          setManualQuoteLoading(retrySoon && !hasQuote);
-          scheduleRefresh(
-            retrySoon ? TRANSIENT_QUOTE_RETRY_INTERVAL_MS : PLATFORM_CATALOG_REFRESH_INTERVAL_MS
-          );
+          setManualQuoteLoading(false);
+          scheduleRefresh(PLATFORM_CATALOG_REFRESH_INTERVAL_MS);
         }
       }
     };
@@ -1675,7 +1675,7 @@ export function SupplyPage() {
       })
     : activeOrderDetail;
   const orderExecutionDetail = displayedOrder?.lastError
-    ? `${displayedOrderSummary} · ${t('supply.automation_order_error')}: ${displayedOrder.lastError}`
+    ? `${displayedOrderSummary} · ${t('supply.automation_order_error')}: ${localizeRuntimeError(displayedOrder.lastError)}`
     : activeOrder
       ? `${displayedOrderSummary} · ${activeOrderDetail}`
       : displayedOrderSummary;
@@ -2603,7 +2603,9 @@ export function SupplyPage() {
         </section>
       ) : null}
 
-      {overview?.lastError ? <div className={styles.errorBanner}>{overview.lastError}</div> : null}
+      {overview?.lastError ? (
+        <div className={styles.errorBanner}>{localizeRuntimeError(overview.lastError)}</div>
+      ) : null}
 
       <section className={styles.workspace}>
         <div className={styles.workspaceHeader}>
@@ -2724,7 +2726,8 @@ export function SupplyPage() {
                 </div>
                 {automation?.lastError ? (
                   <div className={styles.executionError}>
-                    {t('supply.automation_last_error')}: {automation.lastError}
+                    {t('supply.automation_last_error')}:{' '}
+                    {localizeRuntimeError(automation.lastError)}
                   </div>
                 ) : null}
                 <div className={styles.decisionFooter}>
@@ -3776,7 +3779,9 @@ export function SupplyPage() {
                       </div>
                     ) : null}
                     {lowPriceReserve?.lastError ? (
-                      <div className={styles.executionError}>{lowPriceReserve.lastError}</div>
+                      <div className={styles.executionError}>
+                        {localizeRuntimeError(lowPriceReserve.lastError)}
+                      </div>
                     ) : null}
                   </>
                 ) : null}
@@ -4243,6 +4248,8 @@ export function SupplyPage() {
                     !manualProduct ||
                     manualQuoteLoading ||
                     Boolean(manualQuoteError) ||
+                    !manualInventory ||
+                    manualInventory.estimatedTotalFen <= 0 ||
                     manualQuantity < 1 ||
                     manualQuantity > 10000
                   }
@@ -4361,7 +4368,7 @@ export function SupplyPage() {
                             </td>
                             <td>
                               <span className={styles.purchaseTaskError}>
-                                {task.lastError || '-'}
+                                {localizeRuntimeError(task.lastError) || '-'}
                               </span>
                             </td>
                             <td>
@@ -5132,7 +5139,7 @@ export function SupplyPage() {
                           </span>
                         </td>
                         <td>
-                          {order.lastError ||
+                          {(order.lastError && localizeRuntimeError(order.lastError)) ||
                             t(`supply.order_result_${order.status}`, {
                               defaultValue: t('supply.order_result_unknown'),
                             })}
@@ -5228,7 +5235,9 @@ function OrderSummary({
           <dd>{formatTime(order.updatedAtMs)}</dd>
         </div>
       </dl>
-      {order.lastError ? <div className={styles.inlineError}>{order.lastError}</div> : null}
+      {order.lastError ? (
+        <div className={styles.inlineError}>{localizeSupplyRuntimeError(order.lastError, t)}</div>
+      ) : null}
       {order.status === 'create_uncertain' ? (
         <div className={styles.uncertainActions}>
           <p>{t('supply.create_uncertain_hint')}</p>

@@ -31,16 +31,26 @@ func TestSupplyPlatformCredentialsIncludeNvtokensPurchaseFilters(t *testing.T) {
 	}
 }
 
-func TestLowPriceReservePlatformCeilingKeepsStricterLimit(t *testing.T) {
+func TestLowPriceReservePlatformCeilingUsesDedicatedLimitAndFallsBack(t *testing.T) {
 	reserveCeiling := int64(1300)
 	platformCeiling := int64(800)
 	cfg := store.ManagerSupplyConfig{LowPriceReserveMaxUnitPriceFen: &reserveCeiling}
-	if got := lowPriceReservePlatformCeiling(cfg, store.ManagerSupplyPlatformConfig{MaxUnitPriceFen: &platformCeiling}); got != 800 {
-		t.Fatalf("effective ceiling = %d, want platform ceiling 800", got)
-	}
-	platformCeiling = 2400
 	if got := lowPriceReservePlatformCeiling(cfg, store.ManagerSupplyPlatformConfig{MaxUnitPriceFen: &platformCeiling}); got != 1300 {
-		t.Fatalf("effective ceiling = %d, want reserve ceiling 1300", got)
+		t.Fatalf("effective ceiling = %d, want dedicated reserve ceiling 1300", got)
+	}
+	cfg.LowPriceReserveMaxUnitPriceFen = nil
+	if got := lowPriceReservePlatformCeiling(cfg, store.ManagerSupplyPlatformConfig{MaxUnitPriceFen: &platformCeiling}); got != 800 {
+		t.Fatalf("fallback ceiling = %d, want platform ceiling 800", got)
+	}
+}
+
+func TestManualSupplyPlatformCredentialsIgnoreAutomaticPriceCeiling(t *testing.T) {
+	platformCeiling := int64(1400)
+	credentials := manualSupplyPlatformCredentials(store.ManagerSupplyPlatformConfig{
+		Type: managerconfigsvc.SupplyPlatformNvtokens, MaxUnitPriceFen: &platformCeiling,
+	})
+	if credentials.MaxUnitPriceFen != 0 {
+		t.Fatalf("manual max unit price = %d, want unlimited preview/purchase", credentials.MaxUnitPriceFen)
 	}
 }
 
@@ -533,6 +543,54 @@ func TestQuotePlatformProductFallsBackToNvtokensCatalogAfterNoContent(t *testing
 	}
 	if estimateCalls.Load() != 2 || quote.Inventory == nil || quote.Inventory.Available != 75 || quote.Inventory.EstimatedUnitPriceFen != 1700 || quote.Inventory.EstimatedTotalFen != 17000 {
 		t.Fatalf("estimate calls=%d quote=%#v", estimateCalls.Load(), quote)
+	}
+}
+
+func TestQuotePlatformProductDoesNotApplyAutomaticPriceCeiling(t *testing.T) {
+	var observedMaxUnitPrice any = "missing"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspace/extractions/estimate":
+			payload := map[string]any{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode estimate payload: %v", err)
+			}
+			observedMaxUnitPrice = payload["max_unit_price_cents"]
+			_, _ = w.Write([]byte(`{"estimate":{"available_quantity":2,"buyer_total_cents":3300,"unit_price_cents":1650}}`))
+		case "/api/me":
+			_, _ = w.Write([]byte(`{"available_balance_cents":100000}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "manual-quote-unlimited.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	automaticCeiling := int64(1400)
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{Supply: store.ManagerSupplyConfig{
+		Platforms: []store.ManagerSupplyPlatformConfig{{
+			ID: "nv", Type: managerconfigsvc.SupplyPlatformNvtokens, Enabled: &enabled,
+			BaseURL: server.URL, Token: "session", Product: "plus", MaxUnitPriceFen: &automaticCeiling,
+		}},
+	}}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	quote, err := service.QuotePlatformProduct(ctx, 2, "nv", "plus")
+	if err != nil {
+		t.Fatalf("quote: %v", err)
+	}
+	if observedMaxUnitPrice != nil {
+		t.Fatalf("manual quote max_unit_price_cents = %#v, want null", observedMaxUnitPrice)
+	}
+	if quote.Inventory == nil || quote.Inventory.EstimatedUnitPriceFen != 1650 || quote.Inventory.EstimatedTotalFen != 3300 {
+		t.Fatalf("quote = %#v", quote)
 	}
 }
 

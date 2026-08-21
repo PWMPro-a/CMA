@@ -246,6 +246,67 @@ func TestLowPriceReserveOrderUsesDedicatedHardPriceCeiling(t *testing.T) {
 	}
 }
 
+func TestManualNvtokensOrderIgnoresAutomaticPriceCeiling(t *testing.T) {
+	var estimateMaxUnitPrice any = "missing"
+	var createMaxUnitPrice any = "missing"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/workspace/extractions/estimate":
+			payload := map[string]any{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode estimate payload: %v", err)
+			}
+			estimateMaxUnitPrice = payload["max_unit_price_cents"]
+			_, _ = w.Write([]byte(`{"estimate":{"available_quantity":1,"buyer_total_cents":1650,"unit_price_cents":1650}}`))
+		case r.URL.Path == "/api/me":
+			_, _ = w.Write([]byte(`{"available_balance_cents":100000,"balance_cents":100000}`))
+		case r.URL.Path == "/api/workspace/extractions/batch" && r.Method == http.MethodPost:
+			payload := map[string]any{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode create payload: %v", err)
+			}
+			createMaxUnitPrice = payload["max_unit_price_cents"]
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"manual-above-auto-ceiling","status":"processing"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "manual-nvtokens-price-ceiling.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	automaticCeiling := int64(1400)
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{Supply: store.ManagerSupplyConfig{
+		Enabled: &enabled,
+		Platforms: []store.ManagerSupplyPlatformConfig{{
+			ID: "nv", Type: managerconfigsvc.SupplyPlatformNvtokens, Enabled: &enabled,
+			BaseURL: server.URL, Token: "nv-token", Product: "plus", MaxUnitPriceFen: &automaticCeiling,
+		}},
+	}}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	if _, err := service.ReplenishProduct(ctx, 1, "nv", "plus"); err != nil {
+		t.Fatalf("create manual task: %v", err)
+	}
+	if err := service.RunPurchaseTasks(ctx); err != nil {
+		t.Fatalf("run manual task: %v", err)
+	}
+	if estimateMaxUnitPrice != nil || createMaxUnitPrice != nil {
+		t.Fatalf("manual price ceilings estimate=%#v create=%#v, want null/null", estimateMaxUnitPrice, createMaxUnitPrice)
+	}
+	order, found, err := st.GetSupplyOrder(ctx, "manual-above-auto-ceiling")
+	if err != nil || !found || order.Automatic {
+		t.Fatalf("manual order = %#v found=%v err=%v", order, found, err)
+	}
+}
+
 func TestLiveReplenishmentSupersedesAutomaticLowPriceTask(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-low-price-superseded.sqlite"))

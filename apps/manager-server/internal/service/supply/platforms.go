@@ -95,6 +95,16 @@ func supplyPlatformCredentials(platform store.ManagerSupplyPlatformConfig) suppl
 	}
 }
 
+// Manual quotes and purchases are explicit operator actions. The platform
+// ceiling protects automatic procurement; applying it here makes the manual
+// screen report a zero quote even when purchasable inventory exists above the
+// automatic limit.
+func manualSupplyPlatformCredentials(platform store.ManagerSupplyPlatformConfig) supplyclient.Credentials {
+	credentials := supplyPlatformCredentials(platform)
+	credentials.MaxUnitPriceFen = 0
+	return credentials
+}
+
 func valueOrZero(value *int64) int64 {
 	if value == nil {
 		return 0
@@ -104,11 +114,10 @@ func valueOrZero(value *int64) int64 {
 
 func lowPriceReservePlatformCeiling(cfg store.ManagerSupplyConfig, platform store.ManagerSupplyPlatformConfig) int64 {
 	ceiling := valueOrZero(cfg.LowPriceReserveMaxUnitPriceFen)
-	platformCeiling := valueOrZero(platform.MaxUnitPriceFen)
-	if ceiling <= 0 || (platformCeiling > 0 && platformCeiling < ceiling) {
-		return platformCeiling
+	if ceiling > 0 {
+		return ceiling
 	}
-	return ceiling
+	return valueOrZero(platform.MaxUnitPriceFen)
 }
 
 func supplyPlatformConfigured(platform store.ManagerSupplyPlatformConfig) bool {
@@ -261,7 +270,7 @@ func (s *Service) QuotePlatformProduct(
 	if !supplyPlatformConfigured(platform) {
 		return PlatformOverview{}, ErrNotConfigured
 	}
-	credentials := supplyPlatformCredentials(platform)
+	credentials := manualSupplyPlatformCredentials(platform)
 	inventory, err := s.supplyClient.Inventory(ctx, credentials, product, quantity)
 	if errors.Is(err, supplyclient.ErrNvtokensEstimateUnavailable) &&
 		strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformNvtokens) {
@@ -791,6 +800,9 @@ func (s *Service) selectSupplyPlatformProduct(
 				}
 			}
 			credentials := marketplaceSellerCredentials(platform, marketplaceSeller)
+			if requestedID != "" {
+				credentials.MaxUnitPriceFen = 0
+			}
 			inventory, err := s.supplyClient.Inventory(ctx, credentials, platform.Product, effectiveQuantity)
 			if err != nil {
 				results <- result{index: index, marketplaceSeller: marketplaceSeller, supplierQuotaScores: supplierQuotaScores, quantity: effectiveQuantity, err: err}

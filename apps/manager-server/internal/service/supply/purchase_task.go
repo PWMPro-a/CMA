@@ -650,7 +650,9 @@ func (s *Service) createPurchaseTaskOrder(
 	}
 
 	credentials := marketplaceSellerCredentials(platform, selection.marketplaceSeller)
-	if lowPriceReserve {
+	if task.Source == "manual" {
+		credentials.MaxUnitPriceFen = 0
+	} else if lowPriceReserve {
 		credentials.MaxUnitPriceFen = lowPriceReservePlatformCeiling(cfg.Supply, platform)
 	}
 	remote, err := s.supplyClient.CreateOrder(ctx, credentials, platform.Product, quantity, attempt.OrderID)

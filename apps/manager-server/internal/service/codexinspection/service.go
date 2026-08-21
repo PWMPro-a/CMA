@@ -1935,6 +1935,11 @@ func (s *Service) inspectSingleAccount(
 		isRateLimitReached(rateLimit) ||
 		(usedPercent != nil && *usedPercent >= settings.UsedPercentThreshold)
 	decision := resolveProbeAction(item, statusCode, response.BodyText, rateLimit, usedPercent, isQuota, settings.UsedPercentThreshold, planType)
+	if decision.Action == "enable" && item.AutoRecoverOwned && s.recentTerminalCredentialFailure(ctx, item) {
+		decision.Action = "reauth"
+		decision.ActionReason = "最近真实请求返回认证令牌失效，保持禁用并建议重新登录账号"
+		decision.IsQuota = false
+	}
 
 	base.Action = decision.Action
 	base.ActionReason = decision.ActionReason
@@ -1976,6 +1981,48 @@ func (s *Service) inspectSingleAccount(
 		"isQuota":        decision.IsQuota,
 	})
 	return base
+}
+
+func (s *Service) recentTerminalCredentialFailure(ctx context.Context, item account) bool {
+	if s == nil || s.store == nil || strings.TrimSpace(item.FileName) == "" {
+		return false
+	}
+	requests, err := s.store.RecentAccountRequests(ctx, []store.LatestAccountRequestQuery{{
+		RequestIndex:     0,
+		AuthFileSnapshot: item.FileName,
+		AuthIndex:        item.AuthIndex,
+	}}, 5)
+	if err != nil {
+		return false
+	}
+	latestSuccessfulRequestMS := int64(0)
+	for _, request := range requests {
+		if !request.Failed && request.TimestampMS > latestSuccessfulRequestMS {
+			latestSuccessfulRequestMS = request.TimestampMS
+		}
+	}
+	for _, request := range requests {
+		if request.TimestampMS <= latestSuccessfulRequestMS {
+			continue
+		}
+		statusCode := 0
+		if request.FailStatusCode.Valid {
+			statusCode = int(request.FailStatusCode.Int64)
+		}
+		decision, ok := credentialpolicy.EvaluateFailure(credentialpolicy.FailureSignal{
+			Provider:   item.Provider,
+			StatusCode: statusCode,
+			ErrorCode:  request.HeaderErrorCode,
+			ErrorType:  request.HeaderErrorKind,
+			Summary:    request.FailSummary,
+		})
+		if ok && (decision.ReasonCode == credentialpolicy.ReasonTokenRevoked ||
+			decision.ReasonCode == credentialpolicy.ReasonInvalidCredentials ||
+			decision.ReasonCode == credentialpolicy.ReasonAccountDeactivated) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) requestCodexUsage(
