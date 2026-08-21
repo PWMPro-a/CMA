@@ -784,6 +784,73 @@ func TestNvtokensProductCatalogAggregatesNativeSalePlans(t *testing.T) {
 	}
 }
 
+func TestNvtokensMarketplaceSellerCandidatesAndPurchaseFilters(t *testing.T) {
+	var estimateCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspace/seller-candidates":
+			if got := r.URL.Query().Get("sale_plan_filter"); got != "plus" {
+				t.Fatalf("sale_plan_filter = %q", got)
+			}
+			_, _ = w.Write([]byte(`{
+				"data":{"sellers":[
+					{"seller_token":"seller-a","selection_token":"select-a","display_name":"Seller A","channel_id":"channel-a","sale_plan_counts":{"plus":8},"sale_plan_prices":{"plus":{"min_cents":1200,"max_cents":1500}},"purchase_count":3,"purchased_before":true,"quality_score":92.5,"active_rate_percent":98.1},
+					{"seller_token":"seller-b","display_name":"Seller B","available_count":2,"sale_plan_stats":{"plus":{"available_count":4,"price_min_cents":900,"price_max_cents":1000}}}
+				]}
+			}`))
+		case "/api/workspace/extractions/estimate":
+			estimateCalls.Add(1)
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode estimate payload: %v", err)
+			}
+			assertStringSlice := func(key, want string) {
+				t.Helper()
+				values, _ := payload[key].([]any)
+				if len(values) != 1 || values[0] != want {
+					t.Fatalf("%s = %#v, want [%q]", key, payload[key], want)
+				}
+			}
+			assertStringSlice("preferred_sellers", "select-a")
+			assertStringSlice("seller_whitelist", "select-a")
+			assertStringSlice("seller_blacklist", "blocked-token")
+			assertStringSlice("preferred_channel_ids", "channel-a")
+			_, _ = w.Write([]byte(`{"estimate":{"matched_quantity":1,"buyer_total_cents":1200,"min_unit_price_cents":1200}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	credentials := Credentials{PlatformType: "nvtokens", BaseURL: server.URL, Token: "session-token"}
+	candidates, err := client.MarketplaceSellerCandidates(context.Background(), credentials, "oauth_30d")
+	if err != nil || len(candidates) != 2 {
+		t.Fatalf("candidates = %#v err=%v", candidates, err)
+	}
+	byID := make(map[string]MarketplaceSellerCandidate, len(candidates))
+	for _, candidate := range candidates {
+		byID[candidate.SellerID] = candidate
+	}
+	if seller := byID["seller-a"]; seller.SelectionToken != "select-a" || seller.ChannelID != "channel-a" || seller.Available != 8 || seller.MinUnitPriceFen != 1200 || seller.MaxUnitPriceFen != 1500 || seller.PurchaseCount != 3 || !seller.PurchasedBefore || seller.QualityScore == nil || *seller.QualityScore != 92.5 || seller.ActiveRatePercent == nil || *seller.ActiveRatePercent != 98.1 {
+		t.Fatalf("seller-a = %#v", seller)
+	}
+	if seller := byID["seller-b"]; seller.SelectionToken != "seller-b" || seller.Available != 4 || seller.MinUnitPriceFen != 900 || seller.MaxUnitPriceFen != 1000 {
+		t.Fatalf("seller-b = %#v", seller)
+	}
+
+	credentials.PreferredSellers = []string{"select-a"}
+	credentials.SellerWhitelist = []string{"select-a"}
+	credentials.SellerBlacklist = []string{"blocked-token"}
+	credentials.PreferredChannelIDs = []string{"channel-a"}
+	if _, err := client.Inventory(context.Background(), credentials, "plus", 1); err != nil {
+		t.Fatalf("filtered inventory: %v", err)
+	}
+	if estimateCalls.Load() != 1 {
+		t.Fatalf("estimate calls = %d", estimateCalls.Load())
+	}
+}
+
 func assertNvtokensPurchaseFilters(t *testing.T, r *http.Request, accountType string, maxUnitPriceFen int64) {
 	t.Helper()
 	var payload map[string]any

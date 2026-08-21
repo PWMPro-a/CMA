@@ -1888,14 +1888,14 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context, configs
 		if len(filtered) == 0 && !smartInspectionRunIsTrustedEmptySupplySnapshot(run) {
 			continue
 		}
-		leaseItems, err := s.store.ListCurrentImportedSupplyLeaseItems(ctx)
+		importItems, err := s.store.ListCurrentImportedSupplyItems(ctx)
 		if err != nil {
 			return inspectionQuotaSnapshot{}, err
 		}
-		currentImportItems := make([]store.SupplyImportItem, 0, len(leaseItems))
-		orderIDs := make([]string, 0, len(leaseItems))
-		orderSeen := make(map[string]struct{}, len(leaseItems))
-		for _, item := range leaseItems {
+		currentImportItems := make([]store.SupplyImportItem, 0, len(importItems))
+		orderIDs := make([]string, 0, len(importItems))
+		orderSeen := make(map[string]struct{}, len(importItems))
+		for _, item := range importItems {
 			orderID := strings.TrimSpace(item.OrderID)
 			if orderID == "" {
 				continue
@@ -1914,9 +1914,9 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context, configs
 		for _, order := range orders {
 			orderByID[strings.TrimSpace(order.OrderID)] = order
 		}
-		supplierByFile := make(map[string]string, len(leaseItems))
-		credentialEffectiveFromByFile := make(map[string]int64, len(leaseItems))
-		for _, item := range leaseItems {
+		supplierByFile := make(map[string]string, len(importItems))
+		credentialEffectiveFromByFile := make(map[string]int64, len(importItems))
+		for _, item := range importItems {
 			fileName := strings.TrimSpace(item.FileName)
 			if fileName == "" {
 				continue
@@ -1981,8 +1981,8 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context, configs
 				}
 			}
 		}
-		leaseExpiresByFile := make(map[string]int64, len(leaseItems))
-		for _, item := range leaseItems {
+		leaseExpiresByFile := make(map[string]int64, len(importItems))
+		for _, item := range importItems {
 			fileName := strings.TrimSpace(item.FileName)
 			if fileName == "" || item.LeaseExpiresAtMS <= 0 {
 				continue

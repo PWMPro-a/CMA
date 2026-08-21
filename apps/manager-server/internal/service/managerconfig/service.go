@@ -652,6 +652,21 @@ func normalizeSupplyPlatforms(submitted []store.ManagerSupplyPlatformConfig, cur
 			}
 			platform.PurchaseAccountType = normalizeSupplyPurchaseAccountType(purchaseAccountType)
 			platform.MaxUnitPriceFen = normalizeSupplyMaxUnitPriceFen(raw.MaxUnitPriceFen, platform.MaxUnitPriceFen)
+			if raw.SupplierQuotaGateEnabled != nil {
+				platform.SupplierQuotaGateEnabled = BoolPtr(*raw.SupplierQuotaGateEnabled)
+			} else if platform.SupplierQuotaGateEnabled == nil {
+				platform.SupplierQuotaGateEnabled = BoolPtr(false)
+			}
+			if raw.SupplierQuotaMinimumM != 0 {
+				platform.SupplierQuotaMinimumM = raw.SupplierQuotaMinimumM
+			} else if platform.SupplierQuotaMinimumM == 0 {
+				platform.SupplierQuotaMinimumM = 30
+			}
+			if raw.SupplierQuotaTrialQuantity != 0 {
+				platform.SupplierQuotaTrialQuantity = raw.SupplierQuotaTrialQuantity
+			} else if platform.SupplierQuotaTrialQuantity == 0 {
+				platform.SupplierQuotaTrialQuantity = 1
+			}
 			if raw.SessionRefreshEnabled != nil {
 				platform.SessionRefreshEnabled = BoolPtr(*raw.SessionRefreshEnabled)
 			} else if platform.SessionRefreshEnabled == nil {
@@ -687,6 +702,9 @@ func normalizeSupplyPlatforms(submitted []store.ManagerSupplyPlatformConfig, cur
 		} else {
 			platform.PurchaseAccountType = ""
 			platform.MaxUnitPriceFen = nil
+			platform.SupplierQuotaGateEnabled = nil
+			platform.SupplierQuotaMinimumM = 0
+			platform.SupplierQuotaTrialQuantity = 0
 			platform.SessionRefreshEnabled = nil
 			platform.ChallengeProvider = ""
 			platform.ChallengeAPIBase = ""
@@ -1121,6 +1139,14 @@ func validateSupplyPlatform(platform store.ManagerSupplyPlatformConfig) error {
 		}
 		if platform.MaxUnitPriceFen != nil && *platform.MaxUnitPriceFen < 0 {
 			return errors.New("maxUnitPriceFen must be zero or greater")
+		}
+		if platform.SupplierQuotaGateEnabled != nil && *platform.SupplierQuotaGateEnabled {
+			if platform.SupplierQuotaMinimumM < 0.5 || platform.SupplierQuotaMinimumM > 500 {
+				return errors.New("supplierQuotaMinimumM must be between 0.5 and 500 when supplier quota gate is enabled")
+			}
+			if platform.SupplierQuotaTrialQuantity < 1 || platform.SupplierQuotaTrialQuantity > 5 {
+				return errors.New("supplierQuotaTrialQuantity must be between 1 and 5 when supplier quota gate is enabled")
+			}
 		}
 		if !supportedNvtokensProduct(platform.Product) {
 			return errors.New("product must be a supported nvtokens sale plan")

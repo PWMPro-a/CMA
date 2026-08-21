@@ -294,7 +294,7 @@ func (r *repository) captureUsageSnapshot(ctx context.Context, limit int) (usage
 		where id <= ?
 		order by timestamp_ms desc, id desc
 		limit ?
-	)
+	) as recent_usage_events
 	order by timestamp_ms asc, id asc
 	limit 1`, snapshot.maxID, limit).Scan(&snapshot.cutoffTimestampMS, &snapshot.cutoffID)
 	if errors.Is(err, sql.ErrNoRows) {

@@ -30,20 +30,26 @@ type PlatformOverview struct {
 	UsableQuotaM          float64                 `json:"usableQuotaM,omitempty"`
 	CostPerUsableQuotaFen float64                 `json:"costPerUsableQuotaFen,omitempty"`
 	LastError             string                  `json:"lastError,omitempty"`
+	SupplierQuotaScores   []SupplierQuotaScore    `json:"supplierQuotaScores,omitempty"`
+	marketplaceSeller     *marketplaceSellerSelection
+	purchaseQuantity      int
 }
 
 type PlatformProductCatalog struct {
-	PlatformID   string                            `json:"platformId"`
-	PlatformName string                            `json:"platformName,omitempty"`
-	PlatformType string                            `json:"platformType"`
-	CheckedAtMS  int64                             `json:"checkedAtMs"`
-	Products     []supplyclient.ProductCatalogItem `json:"products"`
+	PlatformID          string                            `json:"platformId"`
+	PlatformName        string                            `json:"platformName,omitempty"`
+	PlatformType        string                            `json:"platformType"`
+	CheckedAtMS         int64                             `json:"checkedAtMs"`
+	Products            []supplyclient.ProductCatalogItem `json:"products"`
+	SupplierQuotaScores []SupplierQuotaScore              `json:"supplierQuotaScores,omitempty"`
 }
 
 type supplyPlatformSelection struct {
-	platform store.ManagerSupplyPlatformConfig
-	status   PlatformOverview
-	all      []PlatformOverview
+	platform          store.ManagerSupplyPlatformConfig
+	status            PlatformOverview
+	all               []PlatformOverview
+	marketplaceSeller *marketplaceSellerSelection
+	quantity          int
 }
 
 func supplyPlatforms(cfg store.ManagerSupplyConfig) []store.ManagerSupplyPlatformConfig {
@@ -210,6 +216,20 @@ func (s *Service) GetPlatformProductCatalog(
 		return result, err
 	}
 	result.Products = catalog.Products
+	if supplierQuotaGateEnabled(platform) {
+		candidates, candidatesErr := s.supplyClient.MarketplaceSellerCandidates(ctx, supplyPlatformCredentials(platform), platform.Product)
+		if candidatesErr != nil {
+			return result, candidatesErr
+		}
+		openOrders, openErr := s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
+		if openErr != nil {
+			return result, openErr
+		}
+		result.SupplierQuotaScores, err = s.marketplaceSupplierQuotaScores(ctx, platform, candidates, openOrders)
+		if err != nil {
+			return result, err
+		}
+	}
 	return result, nil
 }
 
@@ -495,7 +515,13 @@ func (s *Service) selectLowPriceReservePlatform(
 	}
 	status := quoted.all[selectedIndex]
 	platform := platformByID[strings.ToLower(strings.TrimSpace(status.ID))]
-	return supplyPlatformSelection{platform: platform, status: status, all: quoted.all}, true, nil
+	return supplyPlatformSelection{
+		platform:          platform,
+		status:            status,
+		all:               quoted.all,
+		marketplaceSeller: status.marketplaceSeller,
+		quantity:          status.purchaseQuantity,
+	}, true, nil
 }
 
 // selectLowPriceReserveCatalogPlatform keeps the high-frequency watcher on
@@ -668,12 +694,17 @@ func (s *Service) selectSupplyPlatformProduct(
 	}
 	statuses := make([]PlatformOverview, len(platforms))
 	quoteErrors := make([]error, len(platforms))
+	marketplaceSellers := make([]*marketplaceSellerSelection, len(platforms))
+	effectiveQuantities := make([]int, len(platforms))
 	resource := s.currentSmartResource(cfg)
 	type result struct {
-		index     int
-		inventory supplyclient.Inventory
-		balance   supplyclient.Balance
-		err       error
+		index               int
+		inventory           supplyclient.Inventory
+		balance             supplyclient.Balance
+		marketplaceSeller   *marketplaceSellerSelection
+		supplierQuotaScores []SupplierQuotaScore
+		quantity            int
+		err                 error
 	}
 	results := make(chan result, len(platforms))
 	var wait sync.WaitGroup
@@ -685,14 +716,28 @@ func (s *Service) selectSupplyPlatformProduct(
 				results <- result{index: index, err: ErrNotConfigured}
 				return
 			}
-			credentials := supplyPlatformCredentials(platform)
-			inventory, err := s.supplyClient.Inventory(ctx, credentials, platform.Product, quantity)
+			effectiveQuantity := quantity
+			var marketplaceSeller *marketplaceSellerSelection
+			var supplierQuotaScores []SupplierQuotaScore
+			if requestedID == "" {
+				var selectErr error
+				marketplaceSeller, supplierQuotaScores, selectErr = s.selectMarketplaceSellerForAutomaticPurchase(ctx, platform, quantity, openOrders)
+				if selectErr != nil {
+					results <- result{index: index, supplierQuotaScores: supplierQuotaScores, err: selectErr}
+					return
+				}
+				if marketplaceSeller != nil {
+					effectiveQuantity = marketplaceSeller.quantity
+				}
+			}
+			credentials := marketplaceSellerCredentials(platform, marketplaceSeller)
+			inventory, err := s.supplyClient.Inventory(ctx, credentials, platform.Product, effectiveQuantity)
 			if err != nil {
-				results <- result{index: index, err: err}
+				results <- result{index: index, marketplaceSeller: marketplaceSeller, supplierQuotaScores: supplierQuotaScores, quantity: effectiveQuantity, err: err}
 				return
 			}
 			balance, err := s.supplyClient.Balance(ctx, credentials)
-			results <- result{index: index, inventory: inventory, balance: balance, err: err}
+			results <- result{index: index, inventory: inventory, balance: balance, marketplaceSeller: marketplaceSeller, supplierQuotaScores: supplierQuotaScores, quantity: effectiveQuantity, err: err}
 		}(index, platform)
 	}
 	wait.Wait()
@@ -700,15 +745,24 @@ func (s *Service) selectSupplyPlatformProduct(
 	checkedAtMS := time.Now().UnixMilli()
 	platformErrors := make([]error, 0, len(platforms))
 	for item := range results {
+		marketplaceSellers[item.index] = item.marketplaceSeller
+		if item.quantity > 0 {
+			effectiveQuantities[item.index] = item.quantity
+		} else {
+			effectiveQuantities[item.index] = quantity
+		}
 		platform := platforms[item.index]
 		status := PlatformOverview{
-			ID:            platform.ID,
-			Name:          platform.Name,
-			Type:          platform.Type,
-			Product:       platform.Product,
-			Priority:      platform.Priority,
-			EmergencyOnly: platform.EmergencyOnly,
-			CheckedAtMS:   checkedAtMS,
+			ID:                  platform.ID,
+			Name:                platform.Name,
+			Type:                platform.Type,
+			Product:             platform.Product,
+			Priority:            platform.Priority,
+			EmergencyOnly:       platform.EmergencyOnly,
+			CheckedAtMS:         checkedAtMS,
+			SupplierQuotaScores: item.supplierQuotaScores,
+			marketplaceSeller:   item.marketplaceSeller,
+			purchaseQuantity:    effectiveQuantities[item.index],
 		}
 		if item.err != nil {
 			quoteErrors[item.index] = item.err
@@ -739,9 +793,11 @@ func (s *Service) selectSupplyPlatformProduct(
 		}
 		statuses[selectedIndex].Selected = true
 		return supplyPlatformSelection{
-			platform: platforms[selectedIndex],
-			status:   statuses[selectedIndex],
-			all:      statuses,
+			platform:          platforms[selectedIndex],
+			status:            statuses[selectedIndex],
+			all:               statuses,
+			marketplaceSeller: marketplaceSellers[selectedIndex],
+			quantity:          effectiveQuantities[selectedIndex],
 		}, nil
 	}
 
@@ -779,9 +835,11 @@ func (s *Service) selectSupplyPlatformProduct(
 	selectedIndex := candidates[0]
 	statuses[selectedIndex].Selected = true
 	return supplyPlatformSelection{
-		platform: platforms[selectedIndex],
-		status:   statuses[selectedIndex],
-		all:      statuses,
+		platform:          platforms[selectedIndex],
+		status:            statuses[selectedIndex],
+		all:               statuses,
+		marketplaceSeller: marketplaceSellers[selectedIndex],
+		quantity:          effectiveQuantities[selectedIndex],
 	}, nil
 }
 

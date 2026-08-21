@@ -75,6 +75,51 @@ func TestRecoveryImportDoesNotBlockPurchaseOrder(t *testing.T) {
 	}
 }
 
+func TestMarketplaceSellerProvenancePersistsOnOrderAndImportItem(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewStore(t, testutil.NewConfig(t))
+	created, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "seller-order", SupplierID: "nv", Product: "plus", RequestedQuantity: 1,
+		MarketplaceSellerID: "seller-a", MarketplaceSellerName: "Seller A",
+		MarketplaceChannelID: "channel-a", MarketplaceSelectionToken: "select-a",
+		Status: "completed", RemoteStatus: "completed", ChargedFen: 1200,
+	})
+	if err != nil {
+		t.Fatalf("create seller order: %v", err)
+	}
+	orders, err := st.ListMarketplaceSellerSupplyOrders(ctx, "nv", "plus")
+	if err != nil || len(orders) != 1 || orders[0].OrderID != created.OrderID || orders[0].MarketplaceSellerID != "seller-a" || orders[0].MarketplaceSelectionToken != "select-a" {
+		t.Fatalf("seller orders = %#v err=%v", orders, err)
+	}
+	created.MarketplaceSellerName = "Seller A Updated"
+	created.Status = "ready"
+	if err := st.UpdateSupplyOrder(ctx, created); err != nil {
+		t.Fatalf("update seller order: %v", err)
+	}
+	updated, found, err := st.GetSupplyOrder(ctx, created.OrderID)
+	if err != nil || !found || updated.MarketplaceSellerName != "Seller A Updated" || updated.MarketplaceChannelID != "channel-a" || updated.MarketplaceSelectionToken != "select-a" {
+		t.Fatalf("updated seller order = %#v found=%v err=%v", updated, found, err)
+	}
+	if _, err := st.InsertSupplyImportItems(ctx, created.OrderID, []store.SupplyImportItem{{
+		ItemKey: "seller-item", FileName: "seller.json", PayloadJSON: `{}`,
+		MarketplaceSellerID: "seller-a", MarketplaceSellerName: "Seller A",
+		MarketplaceChannelID: "channel-a", MarketplaceSelectionToken: "select-a",
+	}}); err != nil {
+		t.Fatalf("insert seller item: %v", err)
+	}
+	items, err := st.ListSupplyImportItemsByOrderIDs(ctx, []string{created.OrderID})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("pending seller items = %#v err=%v", items, err)
+	}
+	if err := st.MarkSupplyImportItemImported(ctx, items[0].ID, time.Now().UnixMilli()); err != nil {
+		t.Fatalf("mark imported: %v", err)
+	}
+	current, err := st.ListCurrentImportedSupplyItems(ctx)
+	if err != nil || len(current) != 1 || current[0].MarketplaceSellerID != "seller-a" || current[0].MarketplaceChannelID != "channel-a" || current[0].MarketplaceSelectionToken != "select-a" {
+		t.Fatalf("current seller items = %#v err=%v", current, err)
+	}
+}
+
 func TestPurchaseQueriesExcludeRecoveryImportRows(t *testing.T) {
 	ctx := context.Background()
 	st := testutil.NewStore(t, testutil.NewConfig(t))

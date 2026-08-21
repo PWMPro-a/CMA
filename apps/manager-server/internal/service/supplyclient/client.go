@@ -79,6 +79,10 @@ type Credentials struct {
 	DeliveryMode        string
 	PurchaseAccountType string
 	MaxUnitPriceFen     int64
+	PreferredSellers    []string
+	SellerWhitelist     []string
+	SellerBlacklist     []string
+	PreferredChannelIDs []string
 }
 
 type Inventory struct {
@@ -114,6 +118,25 @@ type ProductCatalogItem struct {
 	Available       int    `json:"available"`
 	MinUnitPriceFen int64  `json:"minUnitPriceFen,omitempty"`
 	MaxUnitPriceFen int64  `json:"maxUnitPriceFen,omitempty"`
+}
+
+// MarketplaceSellerCandidate is one concrete seller/quality-channel choice
+// returned by a marketplace platform. SelectionToken is the exact value sent
+// back in seller_whitelist; SellerID is the stable cross-channel identity used
+// for local quota scoring.
+type MarketplaceSellerCandidate struct {
+	SellerID          string   `json:"sellerId"`
+	Name              string   `json:"name"`
+	SelectionToken    string   `json:"selectionToken"`
+	ChannelID         string   `json:"channelId,omitempty"`
+	Product           string   `json:"product"`
+	Available         int      `json:"available"`
+	MinUnitPriceFen   int64    `json:"minUnitPriceFen,omitempty"`
+	MaxUnitPriceFen   int64    `json:"maxUnitPriceFen,omitempty"`
+	PurchasedBefore   bool     `json:"purchasedBefore,omitempty"`
+	PurchaseCount     int      `json:"purchaseCount,omitempty"`
+	QualityScore      *float64 `json:"qualityScore,omitempty"`
+	ActiveRatePercent *float64 `json:"activeRatePercent,omitempty"`
 }
 
 type Order struct {
@@ -304,6 +327,17 @@ func (c *Client) ProductCatalog(ctx context.Context, credentials Credentials) (P
 	return ProductCatalog{}, errors.New("supply platform does not expose a dynamic product catalog")
 }
 
+func (c *Client) MarketplaceSellerCandidates(
+	ctx context.Context,
+	credentials Credentials,
+	product string,
+) ([]MarketplaceSellerCandidate, error) {
+	if !isNvtokens(credentials) {
+		return nil, errors.New("supply platform does not expose marketplace sellers")
+	}
+	return c.nvtokensMarketplaceSellerCandidates(ctx, credentials, product)
+}
+
 func (c *Client) CreateOrder(ctx context.Context, credentials Credentials, product string, quantity int, idempotencyKey ...string) (Order, error) {
 	if isNvtokens(credentials) {
 		return c.nvtokensCreateOrder(ctx, credentials, product, quantity, idempotencyKey...)
@@ -400,10 +434,10 @@ func nvtokensPurchasePayload(credentials Credentials, product string, quantity i
 		"email_suffixes":                  []string{},
 		"max_unit_price_cents":            maxUnitPriceCents,
 		"purchase_priority":               "price_first",
-		"preferred_sellers":               []string{},
-		"seller_whitelist":                []string{},
-		"seller_blacklist":                []string{},
-		"preferred_channel_ids":           []string{},
+		"preferred_sellers":               append([]string(nil), credentials.PreferredSellers...),
+		"seller_whitelist":                append([]string(nil), credentials.SellerWhitelist...),
+		"seller_blacklist":                append([]string(nil), credentials.SellerBlacklist...),
+		"preferred_channel_ids":           append([]string(nil), credentials.PreferredChannelIDs...),
 	}
 }
 
@@ -547,6 +581,98 @@ func (c *Client) nvtokensProductCatalog(ctx context.Context, credentials Credent
 		return ProductCatalog{}, errors.New("nvtokens product catalog did not include any sale plans")
 	}
 	return ProductCatalog{Products: products}, nil
+}
+
+func (c *Client) nvtokensMarketplaceSellerCandidates(
+	ctx context.Context,
+	credentials Credentials,
+	product string,
+) ([]MarketplaceSellerCandidate, error) {
+	product = normalizeNvtokensSalePlan(product)
+	query := url.Values{}
+	if product != "" {
+		query.Set("sale_plan_filter", product)
+	}
+	endpoint := "/api/workspace/seller-candidates"
+	if encoded := query.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	value, _, err := c.doAuthenticated(ctx, credentials, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	candidates := make([]MarketplaceSellerCandidate, 0)
+	seen := make(map[string]struct{})
+	for _, seller := range nvtokensSellerCandidates(value) {
+		selectionToken := firstNonEmpty(
+			stringValue(seller, "selection_token", "selectionToken"),
+			stringValue(seller, "seller_token", "sellerToken"),
+		)
+		sellerID := firstNonEmpty(
+			stringValue(seller, "seller_token", "sellerToken"),
+			selectionToken,
+			stringValue(seller, "id", "supplier_id", "supplierId"),
+		)
+		if selectionToken == "" || sellerID == "" {
+			continue
+		}
+		counts, _ := seller["sale_plan_counts"].(map[string]any)
+		prices, _ := seller["sale_plan_prices"].(map[string]any)
+		stats, _ := seller["sale_plan_stats"].(map[string]any)
+		stat, _ := stats[product].(map[string]any)
+		price, _ := prices[product].(map[string]any)
+		available := maxInt(intValue(counts, product), intValue(stat, "available_count", "availableCount"))
+		if available == 0 && product == "plus" {
+			available = intValue(seller, "available_count", "availableCount")
+		}
+		minFen := int64Value(price, "min_cents", "minCents", "price_min_cents", "priceMinCents")
+		maxFen := int64Value(price, "max_cents", "maxCents", "price_max_cents", "priceMaxCents")
+		if minFen == 0 {
+			minFen = int64Value(stat, "min_cents", "minCents", "price_min_cents", "priceMinCents")
+		}
+		if maxFen == 0 {
+			maxFen = int64Value(stat, "max_cents", "maxCents", "price_max_cents", "priceMaxCents")
+		}
+		key := strings.ToLower(strings.TrimSpace(selectionToken))
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		candidate := MarketplaceSellerCandidate{
+			SellerID:        sellerID,
+			Name:            firstNonEmpty(stringValue(seller, "display_name", "displayName"), stringValue(seller, "name", "username")),
+			SelectionToken:  selectionToken,
+			ChannelID:       stringValue(seller, "channel_id", "channelId"),
+			Product:         product,
+			Available:       maxInt(available, 0),
+			MinUnitPriceFen: minFen,
+			MaxUnitPriceFen: maxFen,
+			PurchasedBefore: boolValue(seller, "purchased_before", "purchasedBefore"),
+			PurchaseCount:   intValue(seller, "purchase_count", "purchaseCount"),
+		}
+		if score, ok := float64ValueOK(seller, "quality_score", "qualityScore", "rank_score", "rankScore"); ok {
+			candidate.QualityScore = &score
+		}
+		if rate, ok := float64ValueOK(seller, "active_rate_percent", "activeRatePercent"); ok {
+			candidate.ActiveRatePercent = &rate
+		}
+		candidates = append(candidates, candidate)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		leftPrice := candidates[i].MinUnitPriceFen
+		rightPrice := candidates[j].MinUnitPriceFen
+		if leftPrice <= 0 {
+			leftPrice = math.MaxInt64
+		}
+		if rightPrice <= 0 {
+			rightPrice = math.MaxInt64
+		}
+		if leftPrice != rightPrice {
+			return leftPrice < rightPrice
+		}
+		return strings.ToLower(candidates[i].Name) < strings.ToLower(candidates[j].Name)
+	})
+	return candidates, nil
 }
 
 func nvtokensSellerCandidates(value any) []map[string]any {
@@ -2644,6 +2770,30 @@ func int64ValueOK(root map[string]any, keys ...string) (int64, bool) {
 			if result, err := strconv.ParseFloat(strings.TrimSpace(typed), 64); err == nil {
 				return int64(result), true
 			}
+		}
+	}
+	return 0, false
+}
+
+func float64ValueOK(root map[string]any, keys ...string) (float64, bool) {
+	for _, key := range keys {
+		value, ok := root[key]
+		if !ok || value == nil {
+			continue
+		}
+		switch typed := value.(type) {
+		case json.Number:
+			result, err := typed.Float64()
+			return result, err == nil
+		case float64:
+			return typed, true
+		case int:
+			return float64(typed), true
+		case int64:
+			return float64(typed), true
+		case string:
+			result, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+			return result, err == nil
 		}
 	}
 	return 0, false

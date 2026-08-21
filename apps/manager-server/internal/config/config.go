@@ -28,6 +28,8 @@ const (
 type Config struct {
 	HTTPAddr                     string
 	DataDir                      string
+	DBDriver                     string
+	DBDSN                        string
 	DBPath                       string
 	CPAUpstreamURL               string
 	ManagementKey                string
@@ -66,6 +68,8 @@ type LoadOptions struct {
 type fileConfig struct {
 	HTTPAddr                  string   `json:"httpAddr,omitempty"`
 	DataDir                   string   `json:"dataDir,omitempty"`
+	DBDriver                  string   `json:"dbDriver,omitempty"`
+	DBDSN                     string   `json:"dbDsn,omitempty"`
 	DBPath                    string   `json:"dbPath,omitempty"`
 	CPAUpstreamURL            string   `json:"cpaUpstreamUrl,omitempty"`
 	ManagementKeyFile         string   `json:"managementKeyFile,omitempty"`
@@ -140,6 +144,8 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 	return Config{
 		HTTPAddr:                     env("HTTP_ADDR", stringFallback(cfgFile.HTTPAddr, "0.0.0.0:18317")),
 		DataDir:                      dataDir,
+		DBDriver:                     normalizeDatabaseDriver(env("USAGE_DB_DRIVER", cfgFile.DBDriver)),
+		DBDSN:                        env("USAGE_DB_DSN", cfgFile.DBDSN),
 		DBPath:                       env("USAGE_DB_PATH", dbPathFallback),
 		CPAUpstreamURL:               env("CPA_UPSTREAM_URL", cfgFile.CPAUpstreamURL),
 		ManagementKey:                readSecret("CPA_MANAGEMENT_KEY", "CPA_MANAGEMENT_KEY_FILE", managementKeyFile),
@@ -269,6 +275,15 @@ func normalizeCollectorMode(value string) string {
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return "auto"
+	}
+}
+
+func normalizeDatabaseDriver(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "mysql":
+		return "mysql"
+	default:
+		return "sqlite"
 	}
 }
 

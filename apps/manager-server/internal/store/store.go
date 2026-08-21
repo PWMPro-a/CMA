@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/accountaction"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/apikeyalias"
@@ -18,6 +21,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/datamigration"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/deadletter"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/modelprice"
+	mysqlrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/mysql"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotacooldown"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
@@ -146,6 +150,7 @@ type UsagePricingAccountSnapshot struct {
 
 type Store struct {
 	db                   *sql.DB
+	driver               string
 	modelPricesMu        sync.RWMutex
 	Settings             setting.Repository
 	UsageEvents          usageevent.Repository
@@ -174,7 +179,25 @@ func Open(path string, protector ...*security.Protector) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return New(db, protector...), nil
+	st := New(db, protector...)
+	st.driver = "sqlite"
+	return st, nil
+}
+
+func OpenConfig(cfg config.Config, protector ...*security.Protector) (*Store, error) {
+	if strings.EqualFold(strings.TrimSpace(cfg.DBDriver), "mysql") {
+		if strings.TrimSpace(cfg.DBDSN) == "" {
+			return nil, fmt.Errorf("USAGE_DB_DSN is required when USAGE_DB_DRIVER=mysql")
+		}
+		db, err := mysqlrepo.Open(cfg.DBDSN)
+		if err != nil {
+			return nil, err
+		}
+		st := New(db, protector...)
+		st.driver = "mysql"
+		return st, nil
+	}
+	return Open(cfg.DBPath, protector...)
 }
 
 func New(db *sql.DB, protector ...*security.Protector) *Store {
@@ -201,6 +224,13 @@ func New(db *sql.DB, protector ...*security.Protector) *Store {
 		SupplyTasks:          supplytask.New(db),
 		SupplyRecoveries:     supplyrecovery.New(db, protector...),
 	}
+}
+
+func (s *Store) Driver() string {
+	if s == nil || strings.TrimSpace(s.driver) == "" {
+		return "sqlite"
+	}
+	return s.driver
 }
 
 func (s *Store) Close() error {
@@ -547,6 +577,10 @@ func (s *Store) ListSupplyOrdersBetween(ctx context.Context, fromMS int64, toMS 
 	return s.SupplyOrders.ListBetween(ctx, fromMS, toMS, limit)
 }
 
+func (s *Store) ListMarketplaceSellerSupplyOrders(ctx context.Context, supplierID string, product string) ([]SupplyOrder, error) {
+	return s.SupplyOrders.ListMarketplaceSellerOrders(ctx, supplierID, product)
+}
+
 func (s *Store) InsertSupplyImportItems(ctx context.Context, orderID string, items []SupplyImportItem) (int, error) {
 	return s.SupplyOrders.InsertItems(ctx, orderID, items)
 }
@@ -577,6 +611,10 @@ func (s *Store) ListActiveImportedSupplyItems(ctx context.Context, nowMS int64) 
 
 func (s *Store) ListCurrentImportedSupplyLeaseItems(ctx context.Context) ([]SupplyImportItem, error) {
 	return s.SupplyOrders.ListCurrentImportedLeaseItems(ctx)
+}
+
+func (s *Store) ListCurrentImportedSupplyItems(ctx context.Context) ([]SupplyImportItem, error) {
+	return s.SupplyOrders.ListCurrentImportedItems(ctx)
 }
 
 func (s *Store) MarkSupplyImportItemImported(ctx context.Context, id int64, importedAtMS int64) error {

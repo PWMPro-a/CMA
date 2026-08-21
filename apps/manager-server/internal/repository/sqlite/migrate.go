@@ -869,6 +869,10 @@ func Migrate(db *sql.DB) error {
 			order_id text not null unique,
 			task_id text,
 			supplier_id text not null default '',
+			marketplace_seller_id text,
+			marketplace_seller_name text,
+			marketplace_channel_id text,
+			marketplace_selection_token text,
 			product text not null,
 			requested_quantity integer not null,
 			automatic integer not null default 0,
@@ -912,6 +916,10 @@ func Migrate(db *sql.DB) error {
 			superseded_at_ms integer,
 			lease_expires_at_ms integer,
 			warranty_expires_at_ms integer,
+			marketplace_seller_id text,
+			marketplace_seller_name text,
+			marketplace_channel_id text,
+			marketplace_selection_token text,
 			base_price_fen integer not null default 0,
 			charged_fen integer not null default 0,
 			created_at_ms integer not null,
@@ -1237,6 +1245,10 @@ func ensureSupplyOrderColumns(db *sql.DB) error {
 		{name: "trigger_reason", definition: "text"},
 		{name: "supplier_id", definition: "text not null default ''"},
 		{name: "task_id", definition: "text"},
+		{name: "marketplace_seller_id", definition: "text"},
+		{name: "marketplace_seller_name", definition: "text"},
+		{name: "marketplace_channel_id", definition: "text"},
+		{name: "marketplace_selection_token", definition: "text"},
 	} {
 		if _, ok := existing[column.name]; ok {
 			continue
@@ -1304,6 +1316,10 @@ func ensureSupplyImportItemColumns(db *sql.DB) error {
 		{name: "supersedes_item_id", definition: "integer"},
 		{name: "effective_from_ms", definition: "integer"},
 		{name: "superseded_at_ms", definition: "integer"},
+		{name: "marketplace_seller_id", definition: "text"},
+		{name: "marketplace_seller_name", definition: "text"},
+		{name: "marketplace_channel_id", definition: "text"},
+		{name: "marketplace_selection_token", definition: "text"},
 	}
 	for _, column := range columns {
 		if _, ok := existing[column.name]; ok {
@@ -1320,6 +1336,7 @@ func ensureSupplyImportItemColumns(db *sql.DB) error {
 	statements := []string{
 		`create index if not exists idx_supply_import_items_active_lease on supply_import_items(status, lease_expires_at_ms)`,
 		`create index if not exists idx_supply_import_items_name_current on supply_import_items(name_key, superseded_at_ms, imported_at_ms)`,
+		`create index if not exists idx_supply_import_items_marketplace_seller on supply_import_items(marketplace_seller_id, status, superseded_at_ms)`,
 		`update supply_import_items set effective_from_ms = imported_at_ms where status = 'imported' and imported_at_ms > 0 and coalesce(effective_from_ms, 0) = 0`,
 		`update supply_import_items set import_action = 'add' where status = 'imported' and coalesce(import_action, '') = ''`,
 	}

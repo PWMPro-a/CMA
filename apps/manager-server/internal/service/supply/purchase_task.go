@@ -582,6 +582,9 @@ func (s *Service) createPurchaseTaskOrder(
 			return s.recordPurchaseTaskError(ctx, task, err)
 		}
 	}
+	if selection.quantity > 0 && selection.quantity < quantity {
+		quantity = selection.quantity
+	}
 	platform := selection.platform
 	inventory := *selection.status.Inventory
 	balance := *selection.status.Balance
@@ -610,20 +613,25 @@ func (s *Service) createPurchaseTaskOrder(
 		triggerReason = parallelSupplyTriggerReason(triggerReason)
 	}
 	attempt := store.SupplyOrder{
-		OrderID:           newCreateAttemptID(),
-		TaskID:            task.TaskID,
-		SupplierID:        platform.ID,
-		Product:           platform.Product,
-		RequestedQuantity: quantity,
-		Automatic:         task.Source == "automatic",
-		Strategy:          task.Strategy,
-		TriggerReason:     triggerReason,
-		Status:            "creating",
+		OrderID:                   newCreateAttemptID(),
+		TaskID:                    task.TaskID,
+		SupplierID:                platform.ID,
+		MarketplaceSellerID:       marketplaceSellerID(selection.marketplaceSeller),
+		MarketplaceSellerName:     marketplaceSellerName(selection.marketplaceSeller),
+		MarketplaceChannelID:      marketplaceSellerChannelID(selection.marketplaceSeller),
+		MarketplaceSelectionToken: marketplaceSellerSelectionToken(selection.marketplaceSeller),
+		Product:                   platform.Product,
+		RequestedQuantity:         quantity,
+		Automatic:                 task.Source == "automatic",
+		Strategy:                  task.Strategy,
+		TriggerReason:             triggerReason,
+		Status:                    "creating",
 	}
 	attempt, err = s.store.CreateSupplyOrder(ctx, attempt)
 	if err != nil {
 		return s.recordPurchaseTaskError(ctx, task, err)
 	}
+	s.invalidateMarketplaceSupplierQuotaScores(platform.ID, platform.Product)
 	s.invalidateSupplyOrdersCache()
 	defer s.invalidateSupplyOrdersCache()
 	task.Status = purchaseTaskStatusRunning
@@ -639,7 +647,7 @@ func (s *Service) createPurchaseTaskOrder(
 		s.markAutomaticCreate()
 	}
 
-	credentials := supplyPlatformCredentials(platform)
+	credentials := marketplaceSellerCredentials(platform, selection.marketplaceSeller)
 	if lowPriceReserve {
 		credentials.MaxUnitPriceFen = lowPriceReservePlatformCeiling(cfg.Supply, platform)
 	}

@@ -982,6 +982,126 @@
   line-height: 1.5;
 }
 
+.supplierQuotaGatePanel {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 10px;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 24%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--primary-color) 4%, var(--bg-primary));
+}
+
+.supplierQuotaGateHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.supplierQuotaGateHeader > div {
+  display: grid;
+  gap: 3px;
+}
+
+.supplierQuotaGateHeader strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.supplierQuotaGateHeader small,
+.supplierQuotaGateHeader > span,
+.supplierQuotaSeller small {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.supplierQuotaGateHeader > span {
+  flex: 0 0 auto;
+  padding-top: 1px;
+}
+
+.supplierQuotaTableWrap {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.supplierQuotaTableWrap table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.supplierQuotaTableWrap th,
+.supplierQuotaTableWrap td {
+  padding: 8px 9px;
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.supplierQuotaTableWrap th {
+  color: var(--text-secondary);
+  font-weight: 700;
+}
+
+.supplierQuotaSeller {
+  display: grid;
+  gap: 2px;
+  max-width: 220px;
+}
+
+.supplierQuotaSeller strong,
+.supplierQuotaSeller small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.supplierQuotaStatus {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.supplierQuotaStatusApproved {
+  border-color: var(--success-badge-border);
+  background: var(--success-badge-bg);
+  color: var(--success-badge-text);
+}
+
+.supplierQuotaStatusBlocked {
+  border-color: var(--failure-badge-border);
+  background: var(--failure-badge-bg);
+  color: var(--failure-badge-text);
+}
+
+.supplierQuotaStatusObserving {
+  border-color: color-mix(in srgb, #f59e0b 42%, var(--border-color));
+  background: color-mix(in srgb, #f59e0b 10%, var(--bg-primary));
+  color: color-mix(in srgb, #b45309 86%, var(--text-primary));
+}
+
+.supplierQuotaStatusUntried {
+  border-color: color-mix(in srgb, var(--primary-color) 38%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 9%, var(--bg-primary));
+  color: var(--primary-color);
+}
+
+.supplierQuotaEmpty {
+  margin: 0;
+  padding: 10px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-align: center;
+}
+
 .platformQuotaGrid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

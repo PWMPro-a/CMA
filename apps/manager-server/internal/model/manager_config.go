@@ -95,31 +95,37 @@ type ManagerSupplyConfig struct {
 	PlatformSelectionStrategy string                        `json:"platformSelectionStrategy,omitempty"`
 }
 
+// ManagerSupplyPlatformConfig includes an optional automatic-purchase quota
+// gate for marketplace sellers. Unknown sellers receive a bounded trial; low
+// observed quota excludes them from later automatic purchases.
 type ManagerSupplyPlatformConfig struct {
-	ID                        string                                        `json:"id"`
-	Name                      string                                        `json:"name,omitempty"`
-	Type                      string                                        `json:"type"`
-	Enabled                   *bool                                         `json:"enabled,omitempty"`
-	BaseURL                   string                                        `json:"baseUrl"`
-	Username                  string                                        `json:"username,omitempty"`
-	ClearUsername             bool                                          `json:"clearUsername,omitempty"`
-	Password                  string                                        `json:"password,omitempty"`
-	PasswordConfigured        bool                                          `json:"passwordConfigured,omitempty"`
-	Token                     string                                        `json:"token,omitempty"`
-	TokenConfigured           bool                                          `json:"tokenConfigured,omitempty"`
-	Product                   string                                        `json:"product"`
-	PurchaseAccountType       string                                        `json:"purchaseAccountType,omitempty"`
-	MaxUnitPriceFen           *int64                                        `json:"maxUnitPriceFen,omitempty"`
-	SessionRefreshEnabled     *bool                                         `json:"sessionRefreshEnabled,omitempty"`
-	ChallengeProvider         string                                        `json:"challengeProvider,omitempty"`
-	ChallengeAPIBase          string                                        `json:"challengeApiBase,omitempty"`
-	ChallengeAPIKey           string                                        `json:"challengeApiKey,omitempty"`
-	ChallengeAPIKeyConfigured bool                                          `json:"challengeApiKeyConfigured,omitempty"`
-	ClearChallengeAPIKey      bool                                          `json:"clearChallengeApiKey,omitempty"`
-	RefreshCooldownSeconds    int                                           `json:"refreshCooldownSeconds,omitempty"`
-	Priority                  int                                           `json:"priority,omitempty"`
-	EmergencyOnly             bool                                          `json:"emergencyOnly,omitempty"`
-	QuotaEstimationPolicies   map[string]ManagerSupplyQuotaEstimationPolicy `json:"quotaEstimationPolicies,omitempty"`
+	ID                         string                                        `json:"id"`
+	Name                       string                                        `json:"name,omitempty"`
+	Type                       string                                        `json:"type"`
+	Enabled                    *bool                                         `json:"enabled,omitempty"`
+	BaseURL                    string                                        `json:"baseUrl"`
+	Username                   string                                        `json:"username,omitempty"`
+	ClearUsername              bool                                          `json:"clearUsername,omitempty"`
+	Password                   string                                        `json:"password,omitempty"`
+	PasswordConfigured         bool                                          `json:"passwordConfigured,omitempty"`
+	Token                      string                                        `json:"token,omitempty"`
+	TokenConfigured            bool                                          `json:"tokenConfigured,omitempty"`
+	Product                    string                                        `json:"product"`
+	PurchaseAccountType        string                                        `json:"purchaseAccountType,omitempty"`
+	MaxUnitPriceFen            *int64                                        `json:"maxUnitPriceFen,omitempty"`
+	SupplierQuotaGateEnabled   *bool                                         `json:"supplierQuotaGateEnabled,omitempty"`
+	SupplierQuotaMinimumM      float64                                       `json:"supplierQuotaMinimumM,omitempty"`
+	SupplierQuotaTrialQuantity int                                           `json:"supplierQuotaTrialQuantity,omitempty"`
+	SessionRefreshEnabled      *bool                                         `json:"sessionRefreshEnabled,omitempty"`
+	ChallengeProvider          string                                        `json:"challengeProvider,omitempty"`
+	ChallengeAPIBase           string                                        `json:"challengeApiBase,omitempty"`
+	ChallengeAPIKey            string                                        `json:"challengeApiKey,omitempty"`
+	ChallengeAPIKeyConfigured  bool                                          `json:"challengeApiKeyConfigured,omitempty"`
+	ClearChallengeAPIKey       bool                                          `json:"clearChallengeApiKey,omitempty"`
+	RefreshCooldownSeconds     int                                           `json:"refreshCooldownSeconds,omitempty"`
+	Priority                   int                                           `json:"priority,omitempty"`
+	EmergencyOnly              bool                                          `json:"emergencyOnly,omitempty"`
+	QuotaEstimationPolicies    map[string]ManagerSupplyQuotaEstimationPolicy `json:"quotaEstimationPolicies,omitempty"`
 }
 
 type ManagerSupplyQuotaEstimationPolicy struct {

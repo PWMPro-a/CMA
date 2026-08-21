@@ -35,6 +35,7 @@ import {
   type SupplySmartResource,
   type SupplyStatus,
   type SupplyStrategy,
+  type SupplySupplierQuotaScore,
 } from '@/services/api';
 import { useNotificationStore } from '@/stores';
 import { resolveSupplyPoolAccountStats } from './model/poolAccountStats';
@@ -60,6 +61,10 @@ const platformCatalogIdentity = (platform: SupplyPlatformConfig) =>
     platform.passwordConfigured === true ? '1' : '0',
     platform.token?.trim() ?? '',
     platform.tokenConfigured === true ? '1' : '0',
+    platform.product.trim().toLowerCase(),
+    platform.supplierQuotaGateEnabled === true ? '1' : '0',
+    String(platform.supplierQuotaMinimumM ?? 30),
+    String(platform.supplierQuotaTrialQuantity ?? 1),
   ].join('\u0000');
 
 const canLoadPlatformCatalog = (platform: SupplyPlatformConfig) => {
@@ -96,6 +101,9 @@ const newSupplyPlatform = (
   product: type === 'bugteam' ? 'team_1h' : type === 'nvtokens' ? 'plus' : 'oauth_30d',
   purchaseAccountType: type === 'nvtokens' ? 'all' : undefined,
   maxUnitPriceFen: type === 'nvtokens' ? 0 : undefined,
+  supplierQuotaGateEnabled: type === 'nvtokens' ? false : undefined,
+  supplierQuotaMinimumM: type === 'nvtokens' ? 30 : undefined,
+  supplierQuotaTrialQuantity: type === 'nvtokens' ? 1 : undefined,
   sessionRefreshEnabled: type === 'nvtokens' ? false : undefined,
   challengeProvider: type === 'nvtokens' ? 'capsolver' : undefined,
   challengeApiBase: type === 'nvtokens' ? 'https://api.capsolver.com' : undefined,
@@ -121,6 +129,12 @@ const normalizeSupplyConfigForEditor = (config: SupplyConfig): SupplyConfig => {
           clearChallengeApiKey: false,
           purchaseAccountType:
             platform.type === 'nvtokens' ? platform.purchaseAccountType || 'all' : undefined,
+          supplierQuotaGateEnabled:
+            platform.type === 'nvtokens' ? platform.supplierQuotaGateEnabled === true : undefined,
+          supplierQuotaMinimumM:
+            platform.type === 'nvtokens' ? platform.supplierQuotaMinimumM || 30 : undefined,
+          supplierQuotaTrialQuantity:
+            platform.type === 'nvtokens' ? platform.supplierQuotaTrialQuantity || 1 : undefined,
         }))
       : config.baseUrl || config.username || config.passwordConfigured
         ? [
@@ -361,6 +375,19 @@ const formatTokenM = (value?: number, digits = 1) =>
 
 const formatTokenMRate = (value?: number) =>
   typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)} M/min` : '-';
+
+const supplierQuotaStatusClass = (score: SupplySupplierQuotaScore) => {
+  switch (score.status) {
+    case 'approved':
+      return styles.supplierQuotaStatusApproved;
+    case 'blocked':
+      return styles.supplierQuotaStatusBlocked;
+    case 'observing':
+      return styles.supplierQuotaStatusObserving;
+    default:
+      return styles.supplierQuotaStatusUntried;
+  }
+};
 
 const formatMinutes = (value?: number) => {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return '-';
@@ -604,6 +631,9 @@ export function SupplyPage() {
             tokenConfigured: false,
             purchaseAccountType: undefined,
             maxUnitPriceFen: undefined,
+            supplierQuotaGateEnabled: undefined,
+            supplierQuotaMinimumM: undefined,
+            supplierQuotaTrialQuantity: undefined,
             sessionRefreshEnabled: undefined,
             challengeProvider: undefined,
             challengeApiBase: undefined,
@@ -628,6 +658,9 @@ export function SupplyPage() {
             tokenConfigured: false,
             purchaseAccountType: 'all',
             maxUnitPriceFen: 0,
+            supplierQuotaGateEnabled: false,
+            supplierQuotaMinimumM: 30,
+            supplierQuotaTrialQuantity: 1,
             sessionRefreshEnabled: false,
             challengeProvider: 'capsolver',
             challengeApiBase: 'https://api.capsolver.com',
@@ -652,6 +685,9 @@ export function SupplyPage() {
             tokenConfigured: false,
             purchaseAccountType: undefined,
             maxUnitPriceFen: undefined,
+            supplierQuotaGateEnabled: undefined,
+            supplierQuotaMinimumM: undefined,
+            supplierQuotaTrialQuantity: undefined,
             sessionRefreshEnabled: undefined,
             challengeProvider: undefined,
             challengeApiBase: undefined,
@@ -2881,6 +2917,8 @@ export function SupplyPage() {
                     );
                     const catalogState = platformCatalogs[platform.id.trim().toLowerCase()];
                     const catalogProducts = catalogState?.catalog?.products ?? [];
+                    const supplierQuotaScores =
+                      catalogState?.catalog?.supplierQuotaScores ?? live?.supplierQuotaScores ?? [];
                     const platformProductOptions = (() => {
                       if (platform.type === 'bugteam') {
                         return [{ value: 'team_1h', label: t('supply.product_team_1h') }];
@@ -3268,6 +3306,151 @@ export function SupplyPage() {
                                   });
                                 }}
                               />
+                              <div className={styles.field}>
+                                <label>{t('supply.supplier_quota_gate_enabled')}</label>
+                                <ToggleSwitch
+                                  checked={platform.supplierQuotaGateEnabled === true}
+                                  onChange={(supplierQuotaGateEnabled) =>
+                                    updateSupplyPlatform(platformIndex, {
+                                      supplierQuotaGateEnabled,
+                                    })
+                                  }
+                                  label={
+                                    platform.supplierQuotaGateEnabled
+                                      ? t('common.enabled')
+                                      : t('common.disabled')
+                                  }
+                                />
+                              </div>
+                              <Input
+                                label={t('supply.supplier_quota_minimum')}
+                                type="number"
+                                min={0.5}
+                                max={500}
+                                step={0.5}
+                                disabled={platform.supplierQuotaGateEnabled !== true}
+                                value={platform.supplierQuotaMinimumM ?? 30}
+                                onChange={(event) =>
+                                  updateSupplyPlatform(platformIndex, {
+                                    supplierQuotaMinimumM: Number(event.target.value),
+                                  })
+                                }
+                              />
+                              <Input
+                                label={t('supply.supplier_quota_trial_quantity')}
+                                type="number"
+                                min={1}
+                                max={5}
+                                step={1}
+                                disabled={platform.supplierQuotaGateEnabled !== true}
+                                value={platform.supplierQuotaTrialQuantity ?? 1}
+                                onChange={(event) =>
+                                  updateSupplyPlatform(platformIndex, {
+                                    supplierQuotaTrialQuantity: Number(event.target.value),
+                                  })
+                                }
+                              />
+                              <div className={styles.supplierQuotaGatePanel}>
+                                <div className={styles.supplierQuotaGateHeader}>
+                                  <div>
+                                    <strong>{t('supply.supplier_quota_scores_title')}</strong>
+                                    <small>{t('supply.supplier_quota_scores_hint')}</small>
+                                  </div>
+                                  {platform.supplierQuotaGateEnabled ? (
+                                    <span>
+                                      {t('supply.supplier_quota_threshold_summary', {
+                                        value: formatTokenM(platform.supplierQuotaMinimumM ?? 30),
+                                      })}
+                                    </span>
+                                  ) : (
+                                    <span>{t('supply.supplier_quota_gate_disabled_hint')}</span>
+                                  )}
+                                </div>
+                                {platform.supplierQuotaGateEnabled ? (
+                                  supplierQuotaScores.length > 0 ? (
+                                    <div className={styles.supplierQuotaTableWrap}>
+                                      <table>
+                                        <thead>
+                                          <tr>
+                                            <th>{t('supply.supplier_quota_seller')}</th>
+                                            <th>{t('supply.supplier_quota_status')}</th>
+                                            <th>{t('supply.supplier_quota_score')}</th>
+                                            <th>{t('supply.supplier_quota_samples')}</th>
+                                            <th>{t('supply.supplier_quota_inventory')}</th>
+                                            <th>{t('supply.supplier_quota_price')}</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {supplierQuotaScores.map((score) => (
+                                            <tr
+                                              key={`${score.sellerId}:${score.channelId ?? ''}:${score.product}`}
+                                            >
+                                              <td>
+                                                <div className={styles.supplierQuotaSeller}>
+                                                  <strong>
+                                                    {score.sellerName || score.sellerId}
+                                                  </strong>
+                                                  <small>{score.channelId || score.sellerId}</small>
+                                                </div>
+                                              </td>
+                                              <td>
+                                                <span
+                                                  className={`${styles.supplierQuotaStatus} ${supplierQuotaStatusClass(score)}`}
+                                                  title={t(
+                                                    `supply.supplier_quota_reason_${score.reason}`,
+                                                    { defaultValue: score.reason }
+                                                  )}
+                                                >
+                                                  {t(
+                                                    `supply.supplier_quota_status_${score.status}`,
+                                                    {
+                                                      defaultValue: score.status,
+                                                    }
+                                                  )}
+                                                  {score.inFlightTrial
+                                                    ? ` · ${t('supply.supplier_quota_in_flight')}`
+                                                    : ''}
+                                                </span>
+                                              </td>
+                                              <td>
+                                                {score.sampleCount > 0
+                                                  ? formatTokenM(score.scoreM)
+                                                  : '-'}
+                                              </td>
+                                              <td>
+                                                {t('supply.supplier_quota_sample_summary', {
+                                                  samples: score.sampleCount,
+                                                  accounts: score.importedAccounts,
+                                                })}
+                                              </td>
+                                              <td>{formatInteger(score.available)}</td>
+                                              <td>
+                                                {(score.minUnitPriceFen ?? 0) > 0
+                                                  ? (score.maxUnitPriceFen ?? 0) >
+                                                    (score.minUnitPriceFen ?? 0)
+                                                    ? `${formatMoney(score.minUnitPriceFen)}–${formatMoney(score.maxUnitPriceFen)}`
+                                                    : formatMoney(
+                                                        score.minUnitPriceFen ||
+                                                          score.maxUnitPriceFen
+                                                      )
+                                                  : '-'}
+                                              </td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  ) : (
+                                    <p className={styles.supplierQuotaEmpty}>
+                                      {catalogState?.error
+                                        ? catalogState.error
+                                        : catalogState?.loading
+                                          ? t('common.loading')
+                                          : t('supply.supplier_quota_scores_empty')}
+                                    </p>
+                                  )
+                                ) : null}
+                              </div>
                             </>
                           ) : null}
                           <Input

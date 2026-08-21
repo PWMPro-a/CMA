@@ -61,7 +61,7 @@ func (r *repository) RoutingDiagnosticsWithFilter(ctx context.Context, filter An
 				and coalesce(pck_context_root_hash, '') <> ''
 			group by pck_original_hash
 			having count(distinct pck_context_root_hash) > 1
-		)
+		) as conflict_rows
 	)
 	select 'summary' as row_kind, '' as row_key, 0 as row_count,
 		count(*) as total_diagnostics,

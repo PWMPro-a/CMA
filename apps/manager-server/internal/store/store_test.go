@@ -6,8 +6,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
+
+func TestOpenConfigRequiresMySQLDSN(t *testing.T) {
+	_, err := OpenConfig(config.Config{DBDriver: "mysql"})
+	if err == nil || !strings.Contains(err.Error(), "USAGE_DB_DSN") {
+		t.Fatalf("OpenConfig() error = %v", err)
+	}
+}
 
 func TestStorePausesRollupsUntilUsageCacheAccountingMigrationCompletes(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "usage.sqlite"))

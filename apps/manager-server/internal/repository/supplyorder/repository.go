@@ -29,6 +29,7 @@ type Repository interface {
 	ListByTaskIDs(ctx context.Context, taskIDs []string) ([]model.SupplyOrder, error)
 	ListByOrderIDs(ctx context.Context, orderIDs []string) ([]model.SupplyOrder, error)
 	ListBetween(ctx context.Context, fromMS int64, toMS int64, limit int) ([]model.SupplyOrder, error)
+	ListMarketplaceSellerOrders(ctx context.Context, supplierID string, product string) ([]model.SupplyOrder, error)
 	InsertItems(ctx context.Context, orderID string, items []model.SupplyImportItem) (int, error)
 	ListItems(ctx context.Context, limit int, status string) ([]model.SupplyImportItem, error)
 	ListItemsByOrderIDs(ctx context.Context, orderIDs []string) ([]model.SupplyImportItem, error)
@@ -37,6 +38,7 @@ type Repository interface {
 	ListPendingItems(ctx context.Context, orderID string, nowMS int64, limit int) ([]model.SupplyImportItem, error)
 	ListActiveImportedItems(ctx context.Context, nowMS int64) ([]model.SupplyImportItem, error)
 	ListCurrentImportedLeaseItems(ctx context.Context) ([]model.SupplyImportItem, error)
+	ListCurrentImportedItems(ctx context.Context) ([]model.SupplyImportItem, error)
 	MarkItemImported(ctx context.Context, id int64, importedAtMS int64) error
 	MarkItemFailed(ctx context.Context, id int64, lastError string, nextRetryAtMS int64) error
 	UpdateItemFileName(ctx context.Context, id int64, fileName string) error
@@ -99,18 +101,20 @@ func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model
 	}
 	order.UpdatedAtMS = now
 	statement := `insert into supply_orders (
-		order_id, task_id, supplier_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
+		order_id, task_id, supplier_id, marketplace_seller_id, marketplace_seller_name, marketplace_channel_id, marketplace_selection_token,
+		product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
 		ready_quantity, progress, status_url, take_url, charged_fen, released_fen,
 		item_count, imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms,
 		created_at_ms, updated_at_ms
-	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	if isOpenOrderStatus(order.Status) && isPurchaseOrder(order) && !isParallelPurchaseOrder(order) {
 		statement = `insert into supply_orders (
-			order_id, task_id, supplier_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
+			order_id, task_id, supplier_id, marketplace_seller_id, marketplace_seller_name, marketplace_channel_id, marketplace_selection_token,
+			product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
 			ready_quantity, progress, status_url, take_url, charged_fen, released_fen,
 			item_count, imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms,
 			created_at_ms, updated_at_ms
-		) select ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		) select ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		where not exists (select 1 from supply_orders where status in (` + openOrderStatusClause + `)
 			and ` + supplyPurchaseOrderPredicate + `)`
 	}
@@ -118,7 +122,9 @@ func (r *repository) Create(ctx context.Context, order model.SupplyOrder) (model
 	err := sqliterepo.WithBusyRetry(ctx, func() error {
 		var execErr error
 		result, execErr = r.db.ExecContext(ctx, statement,
-			order.OrderID, nullString(order.TaskID), strings.TrimSpace(order.SupplierID), order.Product, order.RequestedQuantity, boolInt(order.Automatic),
+			order.OrderID, nullString(order.TaskID), strings.TrimSpace(order.SupplierID), nullString(order.MarketplaceSellerID),
+			nullString(order.MarketplaceSellerName), nullString(order.MarketplaceChannelID), nullString(order.MarketplaceSelectionToken),
+			order.Product, order.RequestedQuantity, boolInt(order.Automatic),
 			nullString(order.Strategy), nullString(order.TriggerReason), order.Status,
 			nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress, nullString(order.StatusURL),
 			nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen, order.ItemCount,
@@ -326,11 +332,14 @@ func (r *repository) PromoteCreateAttempt(ctx context.Context, localOrderID stri
 	}
 	order.UpdatedAtMS = time.Now().UnixMilli()
 	result, err := r.db.ExecContext(ctx, `update supply_orders set
-		order_id = ?, supplier_id = ?, strategy = ?, trigger_reason = ?, status = ?, remote_status = ?, ready_quantity = ?, progress = ?,
+		order_id = ?, supplier_id = ?, marketplace_seller_id = ?, marketplace_seller_name = ?, marketplace_channel_id = ?, marketplace_selection_token = ?,
+		strategy = ?, trigger_reason = ?, status = ?, remote_status = ?, ready_quantity = ?, progress = ?,
 		status_url = ?, take_url = ?, charged_fen = ?, released_fen = ?, last_error = null,
 		next_poll_at_ms = ?, supplier_retry_until_ms = ?, completed_at_ms = ?, updated_at_ms = ?
 		where order_id = ? and status in ('creating','create_uncertain')`,
-		order.OrderID, strings.TrimSpace(order.SupplierID), nullString(order.Strategy), nullString(order.TriggerReason), order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
+		order.OrderID, strings.TrimSpace(order.SupplierID), nullString(order.MarketplaceSellerID), nullString(order.MarketplaceSellerName),
+		nullString(order.MarketplaceChannelID), nullString(order.MarketplaceSelectionToken), nullString(order.Strategy), nullString(order.TriggerReason),
+		order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
 		nullString(order.StatusURL), nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen,
 		nullPositive(order.NextPollAtMS), nullPositive(order.SupplierRetryUntilMS), nullPositive(order.CompletedAtMS), order.UpdatedAtMS, localOrderID,
 	)
@@ -379,10 +388,13 @@ func (r *repository) Update(ctx context.Context, order model.SupplyOrder) error 
 	order.UpdatedAtMS = time.Now().UnixMilli()
 	return sqliterepo.WithBusyRetry(ctx, func() error {
 		_, err := r.db.ExecContext(ctx, `update supply_orders set
-			task_id = ?, supplier_id = ?, strategy = ?, trigger_reason = ?, status = ?, remote_status = ?, ready_quantity = ?, progress = ?, status_url = ?,
+			task_id = ?, supplier_id = ?, marketplace_seller_id = ?, marketplace_seller_name = ?, marketplace_channel_id = ?, marketplace_selection_token = ?,
+			strategy = ?, trigger_reason = ?, status = ?, remote_status = ?, ready_quantity = ?, progress = ?, status_url = ?,
 			take_url = ?, charged_fen = ?, released_fen = ?, item_count = ?, imported_count = ?,
 			last_error = ?, next_poll_at_ms = ?, supplier_retry_until_ms = ?, completed_at_ms = ?, updated_at_ms = ? where order_id = ?`,
-			nullString(order.TaskID), strings.TrimSpace(order.SupplierID), nullString(order.Strategy), nullString(order.TriggerReason), order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
+			nullString(order.TaskID), strings.TrimSpace(order.SupplierID), nullString(order.MarketplaceSellerID), nullString(order.MarketplaceSellerName),
+			nullString(order.MarketplaceChannelID), nullString(order.MarketplaceSelectionToken), nullString(order.Strategy), nullString(order.TriggerReason),
+			order.Status, nullString(order.RemoteStatus), order.ReadyQuantity, order.Progress,
 			nullString(order.StatusURL), nullString(order.TakeURL), order.ChargedFen, order.ReleasedFen,
 			order.ItemCount, order.ImportedCount, nullString(order.LastError), nullPositive(order.NextPollAtMS),
 			nullPositive(order.SupplierRetryUntilMS), nullPositive(order.CompletedAtMS), order.UpdatedAtMS, order.OrderID,
@@ -536,6 +548,34 @@ func (r *repository) ListBetween(ctx context.Context, fromMS int64, toMS int64, 
 	return orders, rows.Err()
 }
 
+func (r *repository) ListMarketplaceSellerOrders(ctx context.Context, supplierID string, product string) ([]model.SupplyOrder, error) {
+	query := orderSelect + ` where coalesce(marketplace_seller_id, '') <> ''`
+	args := make([]any, 0, 2)
+	if supplierID = strings.TrimSpace(supplierID); supplierID != "" {
+		query += ` and lower(supplier_id) = lower(?)`
+		args = append(args, supplierID)
+	}
+	if product = strings.TrimSpace(product); product != "" {
+		query += ` and lower(product) = lower(?)`
+		args = append(args, product)
+	}
+	query += ` order by created_at_ms desc, id desc`
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	orders := make([]model.SupplyOrder, 0)
+	for rows.Next() {
+		order, scanErr := scanOrder(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		orders = append(orders, order)
+	}
+	return orders, rows.Err()
+}
+
 func (r *repository) InsertItems(ctx context.Context, orderID string, items []model.SupplyImportItem) (int, error) {
 	if len(items) == 0 {
 		return 0, nil
@@ -551,11 +591,14 @@ func (r *repository) InsertItems(ctx context.Context, orderID string, items []mo
 			}
 			result, err := tx.ExecContext(ctx, `insert or ignore into supply_import_items (
 			order_id, item_key, account_name, name_key, file_name, import_action, replaced_file_name,
-			status, payload_json, attempt_count, lease_expires_at_ms, warranty_expires_at_ms,
-			base_price_fen, charged_fen, created_at_ms, updated_at_ms
-		) values (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?, ?, ?)`, orderID, item.ItemKey,
+				status, payload_json, attempt_count, lease_expires_at_ms, warranty_expires_at_ms,
+				marketplace_seller_id, marketplace_seller_name, marketplace_channel_id, marketplace_selection_token,
+				base_price_fen, charged_fen, created_at_ms, updated_at_ms
+			) values (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, orderID, item.ItemKey,
 				nullString(item.AccountName), nullString(item.NameKey), item.FileName, nullString(item.ImportAction), nullString(item.ReplacedFileName), payload,
-				nullPositive(item.LeaseExpiresAtMS), nullPositive(item.WarrantyExpiresAtMS), item.BasePriceFen, item.ChargedFen, now, now)
+				nullPositive(item.LeaseExpiresAtMS), nullPositive(item.WarrantyExpiresAtMS), nullString(item.MarketplaceSellerID),
+				nullString(item.MarketplaceSellerName), nullString(item.MarketplaceChannelID), nullString(item.MarketplaceSelectionToken),
+				item.BasePriceFen, item.ChargedFen, now, now)
 			if err != nil {
 				return err
 			}
@@ -763,6 +806,29 @@ func (r *repository) ListCurrentImportedLeaseItems(ctx context.Context) ([]model
 	return items, rows.Err()
 }
 
+// ListCurrentImportedItems returns the current imported provenance rows even
+// when a marketplace warranty is informational rather than a scheduler lease.
+// This is the source-of-truth mapping from a CPA auth file to its marketplace
+// seller for quota-quality scoring.
+func (r *repository) ListCurrentImportedItems(ctx context.Context) ([]model.SupplyImportItem, error) {
+	rows, err := r.db.QueryContext(ctx, importItemSelect+` from supply_import_items
+		where status = 'imported' and coalesce(superseded_at_ms, 0) = 0
+		order by coalesce(effective_from_ms, imported_at_ms, updated_at_ms) desc, id desc`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]model.SupplyImportItem, 0)
+	for rows.Next() {
+		item, scanErr := r.scanItem(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (r *repository) MarkItemImported(ctx context.Context, id int64, importedAtMS int64) error {
 	if importedAtMS <= 0 {
 		importedAtMS = time.Now().UnixMilli()
@@ -918,7 +984,8 @@ func (r *repository) Counts(ctx context.Context, orderID string) (int, int, erro
 	return total, imported, err
 }
 
-const orderSelect = `select id, order_id, task_id, supplier_id, product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
+const orderSelect = `select id, order_id, task_id, supplier_id, marketplace_seller_id, marketplace_seller_name, marketplace_channel_id, marketplace_selection_token,
+	product, requested_quantity, automatic, strategy, trigger_reason, status, remote_status,
 	ready_quantity, progress, status_url, take_url, charged_fen, released_fen, item_count,
 	imported_count, last_error, next_poll_at_ms, supplier_retry_until_ms, completed_at_ms, created_at_ms, updated_at_ms
 	from supply_orders`
@@ -926,16 +993,19 @@ const orderSelect = `select id, order_id, task_id, supplier_id, product, request
 const importItemSelect = `select id, order_id, item_key, account_name, name_key, file_name,
 	import_action, replaced_file_name, supersedes_item_id, status,
 	payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, effective_from_ms, superseded_at_ms,
-	lease_expires_at_ms, warranty_expires_at_ms, base_price_fen, charged_fen, created_at_ms, updated_at_ms`
+	lease_expires_at_ms, warranty_expires_at_ms, marketplace_seller_id, marketplace_seller_name, marketplace_channel_id, marketplace_selection_token,
+	base_price_fen, charged_fen, created_at_ms, updated_at_ms`
 
 type scanner interface{ Scan(...any) error }
 
 func scanOrder(row scanner) (model.SupplyOrder, error) {
 	var order model.SupplyOrder
 	var automatic int
-	var taskID, strategy, triggerReason, remoteStatus, statusURL, takeURL, lastError sql.NullString
+	var taskID, marketplaceSellerID, marketplaceSellerName, marketplaceChannelID, marketplaceSelectionToken sql.NullString
+	var strategy, triggerReason, remoteStatus, statusURL, takeURL, lastError sql.NullString
 	var nextPollAtMS, supplierRetryUntilMS, completedAtMS sql.NullInt64
-	err := row.Scan(&order.ID, &order.OrderID, &taskID, &order.SupplierID, &order.Product, &order.RequestedQuantity, &automatic,
+	err := row.Scan(&order.ID, &order.OrderID, &taskID, &order.SupplierID, &marketplaceSellerID, &marketplaceSellerName,
+		&marketplaceChannelID, &marketplaceSelectionToken, &order.Product, &order.RequestedQuantity, &automatic,
 		&strategy, &triggerReason, &order.Status, &remoteStatus, &order.ReadyQuantity, &order.Progress, &statusURL, &takeURL,
 		&order.ChargedFen, &order.ReleasedFen, &order.ItemCount,
 		&order.ImportedCount, &lastError, &nextPollAtMS, &supplierRetryUntilMS, &completedAtMS, &order.CreatedAtMS, &order.UpdatedAtMS)
@@ -944,6 +1014,10 @@ func scanOrder(row scanner) (model.SupplyOrder, error) {
 	}
 	order.Automatic = automatic != 0
 	order.TaskID = taskID.String
+	order.MarketplaceSellerID = marketplaceSellerID.String
+	order.MarketplaceSellerName = marketplaceSellerName.String
+	order.MarketplaceChannelID = marketplaceChannelID.String
+	order.MarketplaceSelectionToken = marketplaceSelectionToken.String
 	order.Strategy = strategy.String
 	order.TriggerReason = triggerReason.String
 	order.RemoteStatus = remoteStatus.String
@@ -976,10 +1050,12 @@ func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {
 	var payload string
 	var lastError sql.NullString
 	var accountName, nameKey, importAction, replacedFileName sql.NullString
+	var marketplaceSellerID, marketplaceSellerName, marketplaceChannelID, marketplaceSelectionToken sql.NullString
 	var supersedesItemID, nextRetryAtMS, importedAtMS, effectiveFromMS, supersededAtMS, leaseExpiresAtMS, warrantyExpiresAtMS sql.NullInt64
 	if err := row.Scan(&item.ID, &item.OrderID, &item.ItemKey, &accountName, &nameKey, &item.FileName,
 		&importAction, &replacedFileName, &supersedesItemID, &item.Status,
 		&payload, &lastError, &item.AttemptCount, &nextRetryAtMS, &importedAtMS, &effectiveFromMS, &supersededAtMS, &leaseExpiresAtMS, &warrantyExpiresAtMS,
+		&marketplaceSellerID, &marketplaceSellerName, &marketplaceChannelID, &marketplaceSelectionToken,
 		&item.BasePriceFen, &item.ChargedFen, &item.CreatedAtMS, &item.UpdatedAtMS); err != nil {
 		return model.SupplyImportItem{}, err
 	}
@@ -1000,6 +1076,10 @@ func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {
 	item.SupersededAtMS = supersededAtMS.Int64
 	item.LeaseExpiresAtMS = leaseExpiresAtMS.Int64
 	item.WarrantyExpiresAtMS = warrantyExpiresAtMS.Int64
+	item.MarketplaceSellerID = marketplaceSellerID.String
+	item.MarketplaceSellerName = marketplaceSellerName.String
+	item.MarketplaceChannelID = marketplaceChannelID.String
+	item.MarketplaceSelectionToken = marketplaceSelectionToken.String
 	return item, nil
 }
 

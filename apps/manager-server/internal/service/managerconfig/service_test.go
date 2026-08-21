@@ -52,6 +52,46 @@ func TestNormalizeSupplyConfigLowPriceReserve(t *testing.T) {
 	}
 }
 
+func TestNormalizeAndValidateNvtokensSupplierQuotaGate(t *testing.T) {
+	enabled := true
+	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{Platforms: []store.ManagerSupplyPlatformConfig{{
+		ID: "nv", Type: SupplyPlatformNvtokens, Enabled: &enabled,
+		BaseURL: "https://nvtokens.com", Token: "session", Product: "plus",
+	}}}, store.ManagerSupplyConfig{})
+	if len(next.Platforms) != 1 {
+		t.Fatalf("platforms = %#v", next.Platforms)
+	}
+	platform := next.Platforms[0]
+	if platform.SupplierQuotaGateEnabled == nil || *platform.SupplierQuotaGateEnabled || platform.SupplierQuotaMinimumM != 30 || platform.SupplierQuotaTrialQuantity != 1 {
+		t.Fatalf("supplier quota defaults = %#v", platform)
+	}
+
+	invalid := store.ManagerSupplyPlatformConfig{
+		ID: "nv", Type: SupplyPlatformNvtokens, Enabled: &enabled,
+		BaseURL: "https://nvtokens.com", Token: "session", Product: "plus",
+	}
+	invalid.SupplierQuotaGateEnabled = &enabled
+	invalid.SupplierQuotaMinimumM = 0.4
+	invalid.SupplierQuotaTrialQuantity = 1
+	normalizedInvalid := NormalizeSupplyConfig(store.ManagerSupplyConfig{Platforms: []store.ManagerSupplyPlatformConfig{invalid}}, store.ManagerSupplyConfig{})
+	platform = normalizedInvalid.Platforms[0]
+	platform.SupplierQuotaTrialQuantity = 1
+	if err := validateSupplyPlatform(platform); err == nil {
+		t.Fatal("minimum below 0.5M should fail validation")
+	}
+	invalid.SupplierQuotaMinimumM = 30
+	invalid.SupplierQuotaTrialQuantity = 6
+	normalizedInvalid = NormalizeSupplyConfig(store.ManagerSupplyConfig{Platforms: []store.ManagerSupplyPlatformConfig{invalid}}, store.ManagerSupplyConfig{})
+	platform = normalizedInvalid.Platforms[0]
+	if err := validateSupplyPlatform(platform); err == nil {
+		t.Fatal("trial quantity above 5 should fail validation")
+	}
+	platform.SupplierQuotaTrialQuantity = 1
+	if err := validateSupplyPlatform(platform); err != nil {
+		t.Fatalf("valid supplier quota gate: %v", err)
+	}
+}
+
 func TestValidateSupplyConfigRequiresLowPriceReserveCeiling(t *testing.T) {
 	enabled := true
 	cfg := store.ManagerSupplyConfig{

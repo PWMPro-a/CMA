@@ -651,6 +651,8 @@ type Service struct {
 	challengeClient         *http.Client
 	nvtokensRefreshMu       sync.Mutex
 	nvtokensRefreshState    map[string]*nvtokensRefreshState
+	supplierQuotaScoreMu    sync.Mutex
+	supplierQuotaScores     map[string]supplierQuotaScoreCacheEntry
 }
 
 type supplyAccountListCache struct {
@@ -753,6 +755,7 @@ func New(st *store.Store, managerConfig *managerconfigsvc.Service, httpClient ..
 		criticalConfirmRounds: make(map[string]int),
 		purchaseTaskWake:      make(chan struct{}, 1),
 		nvtokensRefreshState:  make(map[string]*nvtokensRefreshState),
+		supplierQuotaScores:   make(map[string]supplierQuotaScoreCacheEntry),
 	}
 	service.supplyClient.SetNvtokensSessionRefresher(service.refreshNvtokensSession)
 	return service
@@ -1594,7 +1597,7 @@ func (s *Service) refreshActiveOrderRemoteStatus(ctx context.Context, cfg store.
 	if err != nil {
 		return err
 	}
-	credentials := supplyPlatformCredentials(platform)
+	credentials := marketplaceSellerCredentials(platform, marketplaceSellerSelectionFromOrder(*order))
 	remote, err := s.supplyClient.GetOrder(ctx, credentials, order.OrderID, order.StatusURL)
 	if err != nil {
 		if isHTTPStatus(err, http.StatusConflict) || isHTTPStatus(err, http.StatusNotFound) {
@@ -1645,6 +1648,7 @@ func (s *Service) UpdateConfig(ctx context.Context, config store.ManagerSupplyCo
 	if err != nil {
 		return Status{}, err
 	}
+	s.invalidateAllMarketplaceSupplierQuotaScores()
 	s.invalidateStatusCache()
 	wasEnabled := managerconfigsvc.SupplyEnabled(current.Supply)
 	isEnabled := managerconfigsvc.SupplyEnabled(updated)
@@ -3298,7 +3302,7 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	if err != nil {
 		return err
 	}
-	credentials := supplyPlatformCredentials(platform)
+	credentials := marketplaceSellerCredentials(platform, marketplaceSellerSelectionFromOrder(order))
 	remote, err := s.supplyClient.GetOrder(ctx, credentials, order.OrderID, order.StatusURL)
 	if err != nil {
 		if isHTTPStatus(err, http.StatusConflict) || isHTTPStatus(err, http.StatusNotFound) {
@@ -3390,16 +3394,20 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 		}
 		seenItemKeys[account.itemKey] = struct{}{}
 		items = append(items, store.SupplyImportItem{
-			OrderID:             order.OrderID,
-			ItemKey:             account.itemKey,
-			AccountName:         account.accountName,
-			NameKey:             account.nameKey,
-			FileName:            account.fileName,
-			PayloadJSON:         string(account.payload),
-			LeaseExpiresAtMS:    account.leaseExpiresAtMS,
-			WarrantyExpiresAtMS: account.warrantyExpiresAtMS,
-			BasePriceFen:        account.basePriceFen,
-			ChargedFen:          account.chargedFen,
+			OrderID:                   order.OrderID,
+			ItemKey:                   account.itemKey,
+			AccountName:               account.accountName,
+			NameKey:                   account.nameKey,
+			FileName:                  account.fileName,
+			PayloadJSON:               string(account.payload),
+			LeaseExpiresAtMS:          account.leaseExpiresAtMS,
+			WarrantyExpiresAtMS:       account.warrantyExpiresAtMS,
+			MarketplaceSellerID:       order.MarketplaceSellerID,
+			MarketplaceSellerName:     order.MarketplaceSellerName,
+			MarketplaceChannelID:      order.MarketplaceChannelID,
+			MarketplaceSelectionToken: order.MarketplaceSelectionToken,
+			BasePriceFen:              account.basePriceFen,
+			ChargedFen:                account.chargedFen,
 		})
 	}
 	if len(items) == 0 {
@@ -3409,6 +3417,7 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	if _, err := s.store.InsertSupplyImportItems(ctx, order.OrderID, items); err != nil {
 		return s.updateOrderError(ctx, &order, err, cfg.Supply)
 	}
+	s.invalidateMarketplaceSupplierQuotaScores(order.SupplierID, order.Product)
 	s.resetCriticalConfirm(order.OrderID)
 	order.Status = "importing"
 	order.LastError = ""
@@ -3453,7 +3462,7 @@ func (s *Service) syncTakeReplacementFiles(ctx context.Context, cfg store.Manage
 	if err != nil {
 		return err
 	}
-	credentials := supplyPlatformCredentials(platform)
+	credentials := marketplaceSellerCredentials(platform, marketplaceSellerSelectionFromOrder(order))
 	recoveries := make([]store.SupplyRecovery, 0, len(files))
 	for _, file := range files {
 		file.SourceOrderID = firstNonEmptyString(file.SourceOrderID, sourceOrderID)
@@ -3540,7 +3549,8 @@ func (s *Service) retryUncertainCreate(ctx context.Context, cfg store.ManagerCon
 	if err != nil {
 		return err
 	}
-	remote, err := s.supplyClient.CreateOrder(ctx, supplyPlatformCredentials(platform), attempt.Product, attempt.RequestedQuantity, attempt.OrderID)
+	credentials := marketplaceSellerCredentials(platform, marketplaceSellerSelectionFromOrder(attempt))
+	remote, err := s.supplyClient.CreateOrder(ctx, credentials, attempt.Product, attempt.RequestedQuantity, attempt.OrderID)
 	if err != nil {
 		attempt.LastError = safeError(err)
 		attempt.NextPollAtMS = nextSupplierRetryAt(cfg.Supply, err)
@@ -3565,26 +3575,30 @@ func (s *Service) retryUncertainCreate(ctx context.Context, cfg store.ManagerCon
 
 func supplyOrderFromCreateResponse(attempt store.SupplyOrder, remote supplyclient.Order, cfg store.ManagerSupplyConfig) store.SupplyOrder {
 	order := store.SupplyOrder{
-		ID:                   attempt.ID,
-		OrderID:              remote.ID,
-		TaskID:               attempt.TaskID,
-		SupplierID:           attempt.SupplierID,
-		Product:              attempt.Product,
-		RequestedQuantity:    attempt.RequestedQuantity,
-		Automatic:            attempt.Automatic,
-		Strategy:             attempt.Strategy,
-		TriggerReason:        attempt.TriggerReason,
-		Status:               localOrderStatus(remote.Status),
-		RemoteStatus:         remote.Status,
-		ReadyQuantity:        remote.ReadyQuantity,
-		Progress:             remote.Progress,
-		StatusURL:            remote.StatusURL,
-		TakeURL:              remote.TakeURL,
-		ChargedFen:           remote.ChargedFen,
-		ReleasedFen:          remote.ReleasedFen,
-		NextPollAtMS:         nextPollAt(cfg, remote.RetryAfterSeconds),
-		SupplierRetryUntilMS: supplierRetryUntilMS(remote.RetryAfterSeconds),
-		CreatedAtMS:          attempt.CreatedAtMS,
+		ID:                        attempt.ID,
+		OrderID:                   remote.ID,
+		TaskID:                    attempt.TaskID,
+		SupplierID:                attempt.SupplierID,
+		MarketplaceSellerID:       attempt.MarketplaceSellerID,
+		MarketplaceSellerName:     attempt.MarketplaceSellerName,
+		MarketplaceChannelID:      attempt.MarketplaceChannelID,
+		MarketplaceSelectionToken: attempt.MarketplaceSelectionToken,
+		Product:                   attempt.Product,
+		RequestedQuantity:         attempt.RequestedQuantity,
+		Automatic:                 attempt.Automatic,
+		Strategy:                  attempt.Strategy,
+		TriggerReason:             attempt.TriggerReason,
+		Status:                    localOrderStatus(remote.Status),
+		RemoteStatus:              remote.Status,
+		ReadyQuantity:             remote.ReadyQuantity,
+		Progress:                  remote.Progress,
+		StatusURL:                 remote.StatusURL,
+		TakeURL:                   remote.TakeURL,
+		ChargedFen:                remote.ChargedFen,
+		ReleasedFen:               remote.ReleasedFen,
+		NextPollAtMS:              nextPollAt(cfg, remote.RetryAfterSeconds),
+		SupplierRetryUntilMS:      supplierRetryUntilMS(remote.RetryAfterSeconds),
+		CreatedAtMS:               attempt.CreatedAtMS,
 	}
 	if isTerminalRemoteStatus(remote.Status) && !isSuccessfulRemoteStatus(remote.Status) {
 		order.CompletedAtMS = time.Now().UnixMilli()
@@ -4109,7 +4123,7 @@ func withSupplyAccountImportMetadata(account normalizedSupplyAccount, cfg store.
 	} else if order.Automatic {
 		method = "automatic_supply"
 	}
-	metadata["cpamp_import"] = map[string]any{
+	provenance := map[string]any{
 		"version":       1,
 		"source":        "supply",
 		"method":        method,
@@ -4118,6 +4132,16 @@ func withSupplyAccountImportMetadata(account normalizedSupplyAccount, cfg store.
 		"imported_by":   "cpa-manager-plus",
 		"imported_at":   importedAt.UTC().Format(time.RFC3339Nano),
 	}
+	if sellerID := strings.TrimSpace(order.MarketplaceSellerID); sellerID != "" {
+		provenance["marketplace_seller_id"] = sellerID
+		if sellerName := strings.TrimSpace(order.MarketplaceSellerName); sellerName != "" {
+			provenance["marketplace_seller_name"] = sellerName
+		}
+		if channelID := strings.TrimSpace(order.MarketplaceChannelID); channelID != "" {
+			provenance["marketplace_channel_id"] = channelID
+		}
+	}
+	metadata["cpamp_import"] = provenance
 	if normalized, err := json.Marshal(metadata); err == nil {
 		account.payload = normalized
 	}

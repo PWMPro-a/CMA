@@ -475,7 +475,7 @@ func (r *repository) ListSupplyQuotaCalibrationEvents(ctx context.Context, since
 				)
 			order by timestamp_ms desc, id desc
 			limit ?
-		)
+		) as recent_usage_events
 		order by timestamp_ms asc, id asc`, sinceMS, limit)
 	if err != nil {
 		return nil, err

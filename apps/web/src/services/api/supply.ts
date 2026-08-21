@@ -33,6 +33,9 @@ export interface SupplyPlatformConfig {
   product: SupplyProduct | string;
   purchaseAccountType?: SupplyPurchaseAccountType;
   maxUnitPriceFen?: number;
+  supplierQuotaGateEnabled?: boolean;
+  supplierQuotaMinimumM?: number;
+  supplierQuotaTrialQuantity?: number;
   sessionRefreshEnabled?: boolean;
   challengeProvider?:
     | 'capsolver'
@@ -65,6 +68,32 @@ export interface SupplyPlatformProductCatalog {
   platformType: string;
   checkedAtMs: number;
   products: SupplyPlatformProduct[];
+  supplierQuotaScores?: SupplySupplierQuotaScore[];
+}
+
+export interface SupplySupplierQuotaScore {
+  platformId: string;
+  platformName?: string;
+  sellerId: string;
+  sellerName?: string;
+  channelId?: string;
+  selectionToken?: string;
+  product: string;
+  status: 'approved' | 'blocked' | 'observing' | 'untried' | string;
+  reason: string;
+  thresholdM: number;
+  scoreM?: number;
+  minimumObservedM?: number;
+  maximumObservedM?: number;
+  sampleCount: number;
+  importedAccounts: number;
+  inFlightTrial?: boolean;
+  available?: number;
+  minUnitPriceFen?: number;
+  maxUnitPriceFen?: number;
+  marketplaceQuality?: number;
+  marketplaceActiveRate?: number;
+  checkedAtMs: number;
 }
 
 export interface SupplyConfig {
@@ -144,6 +173,10 @@ export interface SupplyOrder {
   orderId: string;
   taskId?: string;
   supplierId?: string;
+  marketplaceSellerId?: string;
+  marketplaceSellerName?: string;
+  marketplaceChannelId?: string;
+  marketplaceSelectionToken?: string;
   product: string;
   requestedQuantity: number;
   automatic: boolean;
@@ -226,6 +259,7 @@ export interface SupplyPlatformOverview {
   usableQuotaM?: number;
   costPerUsableQuotaFen?: number;
   lastError?: string;
+  supplierQuotaScores?: SupplySupplierQuotaScore[];
 }
 
 export interface SupplyAccountPoolSummary {

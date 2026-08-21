@@ -1,16 +1,51 @@
 services:
+  cpamp-mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: "cpamp"
+      MYSQL_USER: "cpamp"
+      MYSQL_PASSWORD: "${CPAMP_MYSQL_PASSWORD:?set CPAMP_MYSQL_PASSWORD}"
+      MYSQL_ROOT_PASSWORD: "${CPAMP_MYSQL_ROOT_PASSWORD:?set CPAMP_MYSQL_ROOT_PASSWORD}"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --innodb-buffer-pool-size=1G
+      - --max-connections=100
+    volumes:
+      - cpa-manager-plus-mysql:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    cpus: 2
+    mem_limit: 4g
+
   cpa-manager-plus:
     build:
       context: .
       dockerfile: Dockerfile.manager-server
     image: seakee/cpa-manager-plus:latest
     restart: unless-stopped
+    depends_on:
+      cpamp-mysql:
+        condition: service_healthy
     ports:
       - "18317:18317"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
       HTTP_ADDR: "0.0.0.0:18317"
+      USAGE_DB_DRIVER: "mysql"
+      USAGE_DB_DSN: "cpamp:${CPAMP_MYSQL_PASSWORD:?set CPAMP_MYSQL_PASSWORD}@tcp(cpamp-mysql:3306)/cpamp?parseTime=true"
+      # Kept only as an untouched rollback location. MySQL mode does not read
+      # or migrate this SQLite file.
       USAGE_DB_PATH: "/data/usage.sqlite"
       CPA_MANAGER_DATA_KEY_PATH: "/data/data.key"
       # Optional: set CPA_MANAGER_ADMIN_KEY or CPA_MANAGER_ADMIN_KEY_FILE to provide
@@ -34,3 +69,4 @@ services:
 
 volumes:
   cpa-manager-plus-data:
+  cpa-manager-plus-mysql:

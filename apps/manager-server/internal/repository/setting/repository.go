@@ -57,9 +57,9 @@ func (r *repository) SaveSetup(ctx context.Context, setup model.Setup) error {
 	}
 	_, err = r.db.ExecContext(
 		ctx,
-		`insert into settings(key, value, updated_at_ms)
+		`insert into settings(`+"`key`"+`, value, updated_at_ms)
 		 values('setup', ?, ?)
-		 on conflict(key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
+		 on conflict(`+"`key`"+`) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
 		string(data),
 		time.Now().UnixMilli(),
 	)
@@ -68,7 +68,7 @@ func (r *repository) SaveSetup(ctx context.Context, setup model.Setup) error {
 
 func (r *repository) LoadSetup(ctx context.Context) (model.Setup, bool, error) {
 	var raw string
-	err := r.db.QueryRowContext(ctx, `select value from settings where key = 'setup'`).Scan(&raw)
+	err := r.db.QueryRowContext(ctx, `select value from settings where `+"`key`"+` = 'setup'`).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Setup{}, false, nil
 	}
@@ -98,9 +98,9 @@ func (r *repository) SaveManagerConfig(ctx context.Context, cfg model.ManagerCon
 	}
 	_, err = r.db.ExecContext(
 		ctx,
-		`insert into settings(key, value, updated_at_ms)
+		`insert into settings(`+"`key`"+`, value, updated_at_ms)
 		 values(?, ?, ?)
-		 on conflict(key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
+		 on conflict(`+"`key`"+`) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
 		managerConfigKey,
 		string(data),
 		cfg.UpdatedAtMS,
@@ -110,7 +110,7 @@ func (r *repository) SaveManagerConfig(ctx context.Context, cfg model.ManagerCon
 
 func (r *repository) LoadManagerConfig(ctx context.Context) (model.ManagerConfig, bool, error) {
 	var raw string
-	err := r.db.QueryRowContext(ctx, `select value from settings where key = ?`, managerConfigKey).Scan(&raw)
+	err := r.db.QueryRowContext(ctx, `select value from settings where `+"`key`"+` = ?`, managerConfigKey).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.ManagerConfig{}, false, nil
 	}
@@ -136,9 +136,9 @@ func (r *repository) SaveAutomationSettings(ctx context.Context, settings model.
 	}
 	_, err = r.db.ExecContext(
 		ctx,
-		`insert into settings(key, value, updated_at_ms)
+		`insert into settings(`+"`key`"+`, value, updated_at_ms)
 		 values(?, ?, ?)
-		 on conflict(key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
+		 on conflict(`+"`key`"+`) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
 		automationSettingsKey,
 		string(data),
 		settings.UpdatedAtMS,
@@ -151,7 +151,7 @@ func (r *repository) SaveAutomationSettings(ctx context.Context, settings model.
 
 func (r *repository) LoadAutomationSettings(ctx context.Context) (model.AutomationSettings, bool, error) {
 	var raw string
-	err := r.db.QueryRowContext(ctx, `select value from settings where key = ?`, automationSettingsKey).Scan(&raw)
+	err := r.db.QueryRowContext(ctx, `select value from settings where `+"`key`"+` = ?`, automationSettingsKey).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.AutomationSettings{}, false, nil
 	}
@@ -175,9 +175,9 @@ func (r *repository) SaveAdminCredential(ctx context.Context, credential model.A
 	}
 	_, err = r.db.ExecContext(
 		ctx,
-		`insert into settings(key, value, updated_at_ms)
+		`insert into settings(`+"`key`"+`, value, updated_at_ms)
 		 values(?, ?, ?)
-		 on conflict(key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
+		 on conflict(`+"`key`"+`) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
 		adminCredentialKey,
 		string(data),
 		time.Now().UnixMilli(),
@@ -187,7 +187,7 @@ func (r *repository) SaveAdminCredential(ctx context.Context, credential model.A
 
 func (r *repository) LoadAdminCredential(ctx context.Context) (model.AdminCredential, bool, error) {
 	var raw string
-	err := r.db.QueryRowContext(ctx, `select value from settings where key = ?`, adminCredentialKey).Scan(&raw)
+	err := r.db.QueryRowContext(ctx, `select value from settings where `+"`key`"+` = ?`, adminCredentialKey).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.AdminCredential{}, false, nil
 	}
@@ -209,9 +209,9 @@ func (r *repository) SaveBootstrapState(ctx context.Context, state model.Bootstr
 	}
 	_, err = r.db.ExecContext(
 		ctx,
-		`insert into settings(key, value, updated_at_ms)
+		`insert into settings(`+"`key`"+`, value, updated_at_ms)
 		 values(?, ?, ?)
-		 on conflict(key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
+		 on conflict(`+"`key`"+`) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
 		bootstrapStateKey,
 		string(data),
 		state.UpdatedAtMS,
@@ -221,7 +221,7 @@ func (r *repository) SaveBootstrapState(ctx context.Context, state model.Bootstr
 
 func (r *repository) LoadBootstrapState(ctx context.Context) (model.BootstrapState, bool, error) {
 	var raw string
-	err := r.db.QueryRowContext(ctx, `select value from settings where key = ?`, bootstrapStateKey).Scan(&raw)
+	err := r.db.QueryRowContext(ctx, `select value from settings where `+"`key`"+` = ?`, bootstrapStateKey).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.BootstrapState{}, false, nil
 	}
@@ -249,7 +249,7 @@ func (r *repository) HasHistoricalData(ctx context.Context) (bool, error) {
 	var settingsCount int64
 	if err := r.db.QueryRowContext(
 		ctx,
-		`select count(*) from settings where key in ('setup', ?)`,
+		`select count(*) from settings where `+"`key`"+` in ('setup', ?)`,
 		managerConfigKey,
 	).Scan(&settingsCount); err != nil {
 		return false, err

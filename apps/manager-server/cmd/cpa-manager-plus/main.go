@@ -57,13 +57,13 @@ func runServer() {
 	if err != nil {
 		log.Fatalf("initialize secret protector: %v", err)
 	}
-	db, err := store.Open(cfg.DBPath, protector)
+	db, err := store.OpenConfig(cfg, protector)
 	if err != nil {
-		log.Fatalf("open sqlite: %v", err)
+		log.Fatalf("open %s database: %v", cfg.DBDriver, err)
 	}
 	defer func() {
 		if err := db.Close(); err != nil {
-			log.Printf("close sqlite: %v", err)
+			log.Printf("close %s database: %v", cfg.DBDriver, err)
 		}
 	}()
 
@@ -88,16 +88,19 @@ func runServer() {
 	collectorWorker := worker.NewCollectorWorker(cfg, db, collectorService)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	walMaintenance, err := sqliterepo.NewWALMaintenance(cfg.DBPath)
-	if err != nil {
-		log.Printf("configure SQLite WAL maintenance: %v", err)
-	} else {
-		walMaintenance.Start(ctx)
-		defer func() {
-			if err := walMaintenance.Close(); err != nil {
-				log.Printf("close SQLite WAL maintenance: %v", err)
-			}
-		}()
+	var walMaintenance *sqliterepo.WALMaintenance
+	if db.Driver() == "sqlite" {
+		walMaintenance, err = sqliterepo.NewWALMaintenance(cfg.DBPath)
+		if err != nil {
+			log.Printf("configure SQLite WAL maintenance: %v", err)
+		} else {
+			walMaintenance.Start(ctx)
+			defer func() {
+				if err := walMaintenance.Close(); err != nil {
+					log.Printf("close SQLite WAL maintenance: %v", err)
+				}
+			}()
+		}
 	}
 
 	serverApp := httpapi.New(cfg, db, manager)

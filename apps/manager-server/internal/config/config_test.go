@@ -160,6 +160,8 @@ func TestLoadEnvOverridesConfig(t *testing.T) {
 	t.Setenv(configEnvKey, configPath)
 	t.Setenv("HTTP_ADDR", "127.0.0.1:19001")
 	t.Setenv("USAGE_DATA_DIR", filepath.Join(dir, "env-data"))
+	t.Setenv("USAGE_DB_DRIVER", "MYSQL")
+	t.Setenv("USAGE_DB_DSN", "cpamp:secret@tcp(mysql:3306)/cpamp")
 	t.Setenv("CPA_MANAGEMENT_KEY", "env-secret")
 	t.Setenv("USAGE_BATCH_SIZE", "12")
 	t.Setenv("CPA_MANAGER_PPROF_ADDR", "[::1]:6061")
@@ -178,6 +180,9 @@ func TestLoadEnvOverridesConfig(t *testing.T) {
 	}
 	if want := filepath.Join(dir, "env-data", "usage.sqlite"); cfg.DBPath != want {
 		t.Fatalf("DBPath = %q, want %q", cfg.DBPath, want)
+	}
+	if cfg.DBDriver != "mysql" || cfg.DBDSN != "cpamp:secret@tcp(mysql:3306)/cpamp" {
+		t.Fatalf("database config = driver %q dsn %q", cfg.DBDriver, cfg.DBDSN)
 	}
 	if cfg.ManagementKey != "env-secret" {
 		t.Fatalf("ManagementKey = %q", cfg.ManagementKey)
@@ -218,12 +223,31 @@ func TestNormalizeCollectorMode(t *testing.T) {
 	}
 }
 
+func TestNormalizeDatabaseDriver(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{"", "sqlite"},
+		{"sqlite", "sqlite"},
+		{"MYSQL", "mysql"},
+		{" mysql ", "mysql"},
+		{"unknown", "sqlite"},
+	} {
+		if got := normalizeDatabaseDriver(tc.input); got != tc.want {
+			t.Errorf("normalizeDatabaseDriver(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		configEnvKey,
 		"HTTP_ADDR",
 		"USAGE_DATA_DIR",
+		"USAGE_DB_DRIVER",
+		"USAGE_DB_DSN",
 		"USAGE_DB_PATH",
 		"CPA_UPSTREAM_URL",
 		"CPA_MANAGEMENT_KEY",
