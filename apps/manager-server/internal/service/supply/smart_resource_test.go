@@ -706,6 +706,37 @@ func TestLoadLatestInspectionQuotaSnapshotSkipsInterruptedRefreshBurst(t *testin
 	}
 }
 
+func TestLoadLatestInspectionQuotaSnapshotSkipsCalibrationForStaleRecoveredRun(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "stale-recovered-calibration.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	result := quotaInspectionResult(25)
+	result.QuotaWindows = []model.CodexInspectionQuotaWindow{quotaWindow("weekly", 25, smartQuotaWeekSeconds)}
+	seedCompletedQuotaInspection(t, st, result)
+	runs, err := st.ListCodexInspectionRuns(context.Background(), 1)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("load completed run: runs=%#v err=%v", runs, err)
+	}
+	staleRun := runs[0]
+	staleRun.FinishedAtMS = time.Now().Add(-smartInspectionSnapshotFreshTTL - time.Minute).UnixMilli()
+	if err := st.UpdateCodexInspectionRun(context.Background(), staleRun); err != nil {
+		t.Fatalf("age completed run: %v", err)
+	}
+
+	snapshot, err := New(st, nil).loadLatestInspectionQuotaSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("load stale recovered snapshot: %v", err)
+	}
+	if snapshot.run.ID != staleRun.ID || len(snapshot.results) != 1 {
+		t.Fatalf("recovered snapshot = %#v", snapshot)
+	}
+	if len(snapshot.quotaWindowUsage) != 0 {
+		t.Fatalf("stale recovered snapshot retained optional quota calibration: %#v", snapshot.quotaWindowUsage)
+	}
+}
+
 func TestEmptyNonSupplyInspectionDoesNotBecomeCapacityBaseline(t *testing.T) {
 	settings := model.DefaultCodexInspectionConfig()
 	snapshot := inspectionQuotaSnapshot{

@@ -1948,26 +1948,37 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context, configs
 				}
 			}
 		}
-		quotaWindowUsage, quotaWindowTargets := smartQuotaWindowBaselinesForInspection(
-			filtered,
-			run,
-			supplierByFile,
-			credentialEffectiveFromByFile,
-		)
-		if len(quotaWindowTargets) > 0 {
-			usageRows, err := s.store.ListSupplyQuotaWindowUsage(ctx, quotaWindowTargets)
-			if err != nil {
-				return inspectionQuotaSnapshot{}, err
-			}
-			usageByRequest := make(map[int]store.SupplyQuotaWindowUsage, len(usageRows))
-			for _, usageRow := range usageRows {
-				usageByRequest[usageRow.RequestIndex] = usageRow
-			}
-			for index := range quotaWindowUsage {
-				usageRow := usageByRequest[quotaWindowUsage[index].requestIndex]
-				quotaWindowUsage[index].windowTokens = usageRow.TotalTokens
-				quotaWindowUsage[index].firstSeenMS = usageRow.FirstSeenMS
-				quotaWindowUsage[index].lastSeenMS = usageRow.LastSeenMS
+		quotaWindowUsage := []smartQuotaWindowBaseline{}
+		// Absolute quota-window calibration is useful only for a current
+		// inspection. When a degraded refresh burst forces recovery of an older
+		// completed baseline, aggregating every historical account window from a
+		// multi-million-row usage table can exceed the status deadline and hide
+		// the otherwise valid capacity snapshot again. Capacity itself comes from
+		// the persisted inspection results, so skip this optional calibration for
+		// an already stale recovered run and use the configured/adopted estimate.
+		if smartInspectionSnapshotFresh(inspectionQuotaSnapshot{generatedAt: time.UnixMilli(run.FinishedAtMS)}, time.Now()) {
+			var quotaWindowTargets []store.SupplyQuotaWindowUsageQuery
+			quotaWindowUsage, quotaWindowTargets = smartQuotaWindowBaselinesForInspection(
+				filtered,
+				run,
+				supplierByFile,
+				credentialEffectiveFromByFile,
+			)
+			if len(quotaWindowTargets) > 0 {
+				usageRows, err := s.store.ListSupplyQuotaWindowUsage(ctx, quotaWindowTargets)
+				if err != nil {
+					return inspectionQuotaSnapshot{}, err
+				}
+				usageByRequest := make(map[int]store.SupplyQuotaWindowUsage, len(usageRows))
+				for _, usageRow := range usageRows {
+					usageByRequest[usageRow.RequestIndex] = usageRow
+				}
+				for index := range quotaWindowUsage {
+					usageRow := usageByRequest[quotaWindowUsage[index].requestIndex]
+					quotaWindowUsage[index].windowTokens = usageRow.TotalTokens
+					quotaWindowUsage[index].firstSeenMS = usageRow.FirstSeenMS
+					quotaWindowUsage[index].lastSeenMS = usageRow.LastSeenMS
+				}
 			}
 		}
 		leaseExpiresByFile := make(map[string]int64, len(leaseItems))
