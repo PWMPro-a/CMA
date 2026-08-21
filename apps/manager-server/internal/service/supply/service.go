@@ -710,6 +710,7 @@ const (
 	supplyStatusStaleTTL       = 30 * time.Minute
 	supplyStatusRetryCooldown  = 5 * time.Second
 	supplyStatusRefreshTimeout = 8 * time.Second
+	smartStatusRefreshTimeout  = 15 * time.Second
 	supplyOverviewQuoteTTL     = 10 * time.Second
 	operatorHeaderCacheTTL     = 15 * time.Second
 	operatorAccountPoolTTL     = 15 * time.Second
@@ -1025,7 +1026,14 @@ func (s *Service) buildStatus(ctx context.Context, limit int) (Status, error) {
 		// current capacity view. Rebuild from the cached inspection snapshot on
 		// every status poll so the usage window, account lease expiry and demand
 		// rate naturally move forward even when no new request arrives.
-		refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		// A large production usage database may need several seconds to aggregate
+		// the per-account quota windows behind a completed inspection. Five
+		// seconds was below the measured healthy-query time once the event table
+		// grew, which discarded an otherwise valid snapshot as unavailable and
+		// started another full inspection. Keep the read bounded, but allow the
+		// indexed baseline query to finish once and populate the short status
+		// cache; subsequent dashboard polls remain fast.
+		refreshCtx, cancel := context.WithTimeout(ctx, smartStatusRefreshTimeout)
 		refreshed, refreshErr := s.smartResource(refreshCtx, cfg, false)
 		cancel()
 		if refreshErr == nil {
