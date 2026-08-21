@@ -299,7 +299,8 @@ type QuotaSetter<T> = (updater: QuotaUpdater<Record<string, T>>) => void;
 const MAX_CONCURRENT_QUOTA_REFRESHES_PER_PROVIDER = 1;
 const MAX_CONCURRENT_QUOTA_REFRESH_PROVIDERS = 3;
 const PASSIVE_HEADER_SNAPSHOT_REFRESH_MS = 60_000;
-const PASSIVE_RUNTIME_CONCURRENCY_REFRESH_MS = 5_000;
+const PASSIVE_RUNTIME_CONCURRENCY_REFRESH_MS = 15_000;
+const PASSIVE_ACCOUNT_POOL_REFRESH_MS = 30_000;
 
 const isCodexHeaderQuotaLimitSnapshot = (snapshot: UsageHeaderSnapshot | undefined): boolean => {
   const usedPercent = getHeaderSnapshotUsedPercent(snapshot);
@@ -831,6 +832,7 @@ export function AccountsPage() {
   const detailEventsAutoLoadKeyRef = useRef<string | null>(null);
   const quotaCooldownRequestIdRef = useRef(0);
   const accountPoolSummaryRequestIdRef = useRef(0);
+  const accountPoolSummaryPromiseRef = useRef<Promise<void> | null>(null);
   const accountHistoryAutoAbortRef = useRef<AbortController | null>(null);
   const accountHistoryTargetAbortRef = useRef<AbortController | null>(null);
   const accountHistoryRequestVersionsRef = useRef<Map<string, number>>(new Map());
@@ -961,25 +963,40 @@ export function AccountsPage() {
   }, [featureAvailability.checking, headerSnapshotLoadKey, loadSharedHeaderSnapshots]);
 
   const loadAccountPoolSummary = useCallback(async () => {
-    const requestId = accountPoolSummaryRequestIdRef.current + 1;
-    accountPoolSummaryRequestIdRef.current = requestId;
     if (!accountPoolSummaryAvailable) {
+      accountPoolSummaryRequestIdRef.current += 1;
+      accountPoolSummaryPromiseRef.current = null;
       setAccountPoolSummary(null);
       setAccountPoolSummaryLoading(false);
       return;
     }
-    try {
-      const summary = await supplyApi.getAccountPoolSummary();
-      if (accountPoolSummaryRequestIdRef.current === requestId) {
-        setAccountPoolSummary(summary);
-      }
-    } catch {
-      // Keep the last complete pool split on transient storage/API failures.
-    } finally {
-      if (accountPoolSummaryRequestIdRef.current === requestId) {
-        setAccountPoolSummaryLoading(false);
-      }
+    if (accountPoolSummaryPromiseRef.current) {
+      return accountPoolSummaryPromiseRef.current;
     }
+    const requestId = accountPoolSummaryRequestIdRef.current + 1;
+    accountPoolSummaryRequestIdRef.current = requestId;
+    const requestPromise = (async () => {
+      try {
+        const summary = await supplyApi.getAccountPoolSummary();
+        if (accountPoolSummaryRequestIdRef.current === requestId) {
+          setAccountPoolSummary(summary);
+        }
+      } catch {
+        // Keep the last complete pool split on transient storage/API failures.
+      } finally {
+        if (accountPoolSummaryRequestIdRef.current === requestId) {
+          setAccountPoolSummaryLoading(false);
+        }
+      }
+    })();
+    accountPoolSummaryPromiseRef.current = requestPromise;
+    const clearRequest = () => {
+      if (accountPoolSummaryPromiseRef.current === requestPromise) {
+        accountPoolSummaryPromiseRef.current = null;
+      }
+    };
+    requestPromise.then(clearRequest, clearRequest);
+    return requestPromise;
   }, [accountPoolSummaryAvailable]);
 
   const loadAccountActionCandidates = useCallback(async () => {
@@ -1049,6 +1066,7 @@ export function AccountsPage() {
     accountHistoryAutoLoadKeyRef.current = null;
     accountActionCandidatesReqIdRef.current += 1;
     accountPoolSummaryRequestIdRef.current += 1;
+    accountPoolSummaryPromiseRef.current = null;
     accountWindowUsageReqIdRef.current += 1;
     accountWindowUsageAbortRef.current?.abort();
     accountWindowUsageAbortRef.current = null;
@@ -1221,7 +1239,9 @@ export function AccountsPage() {
     () => {
       void loadAccountPoolSummary();
     },
-    activeView === 'accounts' && documentVisible && accountPoolSummaryAvailable ? 10_000 : null
+    activeView === 'accounts' && documentVisible && accountPoolSummaryAvailable
+      ? PASSIVE_ACCOUNT_POOL_REFRESH_MS
+      : null
   );
 
   useEffect(

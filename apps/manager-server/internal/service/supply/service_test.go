@@ -1333,6 +1333,90 @@ func TestOperatorAccountPoolStatsSharesOneSnapshotUntilInvalidated(t *testing.T)
 	}
 }
 
+func TestOperatorAccountPoolStatsReturnsStaleSnapshotDuringRefresh(t *testing.T) {
+	var requests atomic.Int32
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	var releaseOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/auth-files" {
+			http.NotFound(w, r)
+			return
+		}
+		if requests.Add(1) == 1 {
+			_, _ = w.Write([]byte(`{"files":[{"name":"first.json","provider":"codex","status":"active","auth_index":"first"}]}`))
+			return
+		}
+		close(refreshStarted)
+		<-releaseRefresh
+		_, _ = w.Write([]byte(`{"files":[{"name":"second.json","provider":"codex","status":"disabled","disabled":true,"auth_index":"second"}]}`))
+	}))
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseRefresh) })
+		server.Close()
+	})
+
+	service := New(nil, nil, server.Client())
+	cfg := store.ManagerConfig{CPAConnection: store.ManagerCPAConnectionConfig{
+		CPABaseURL:    server.URL,
+		ManagementKey: "management-key",
+	}}
+	initial, err := service.countOperatorAccountPoolStats(context.Background(), cfg)
+	if err != nil || initial.enabled != 1 {
+		t.Fatalf("load initial operator snapshot: stats=%#v err=%v", initial, err)
+	}
+	expiredAt := time.Now().Add(-2 * time.Minute)
+	service.operatorPoolMu.Lock()
+	service.operatorPool.generated = expiredAt
+	service.operatorPoolMu.Unlock()
+	service.authCacheMu.Lock()
+	service.authCache.generatedAt = expiredAt
+	service.authCache.attemptedAt = expiredAt
+	service.authCacheMu.Unlock()
+
+	type result struct {
+		stats accountPoolStats
+		err   error
+	}
+	refreshResult := make(chan result, 1)
+	go func() {
+		stats, err := service.countOperatorAccountPoolStats(context.Background(), cfg)
+		refreshResult <- result{stats: stats, err: err}
+	}()
+	select {
+	case <-refreshStarted:
+	case <-time.After(time.Second):
+		t.Fatal("operator snapshot refresh did not start")
+	}
+
+	staleResult := make(chan result, 1)
+	go func() {
+		stats, err := service.countOperatorAccountPoolStats(context.Background(), cfg)
+		staleResult <- result{stats: stats, err: err}
+	}()
+	select {
+	case stale := <-staleResult:
+		if stale.err != nil || stale.stats.enabled != 1 {
+			t.Fatalf("stale operator snapshot: stats=%#v err=%v", stale.stats, stale.err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("stale operator snapshot waited behind the active refresh")
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("concurrent operator snapshot requests = %d, want 2", requests.Load())
+	}
+
+	releaseOnce.Do(func() { close(releaseRefresh) })
+	select {
+	case refreshed := <-refreshResult:
+		if refreshed.err != nil || refreshed.stats.enabled != 0 {
+			t.Fatalf("refreshed operator snapshot: stats=%#v err=%v", refreshed.stats, refreshed.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("operator snapshot refresh did not finish")
+	}
+}
+
 func TestCPAAuthLifecyclePendingIsNotSchedulableCapacity(t *testing.T) {
 	for _, status := range []string{
 		"initializing",

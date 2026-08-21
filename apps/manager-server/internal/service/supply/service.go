@@ -611,6 +611,8 @@ type Service struct {
 	operatorHeadersMu        sync.Mutex
 	operatorHeaders          operatorHeaderSnapshotCache
 	operatorPoolMu           sync.Mutex
+	operatorPoolRefreshMu    sync.Mutex
+	operatorPoolGeneration   uint64
 	operatorPool             operatorAccountPoolCache
 	smartResourceState       SmartResource
 	automation               AutomationExecution
@@ -706,14 +708,14 @@ type operatorAccountPoolCache struct {
 const (
 	supplyAccountListCacheTTL  = 15 * time.Second
 	supplyOrdersCacheTTL       = 5 * time.Second
-	supplyStatusCacheTTL       = 5 * time.Second
+	supplyStatusCacheTTL       = 10 * time.Second
 	supplyStatusStaleTTL       = 30 * time.Minute
-	supplyStatusRetryCooldown  = 5 * time.Second
+	supplyStatusRetryCooldown  = 15 * time.Second
 	supplyStatusRefreshTimeout = 8 * time.Second
 	smartStatusRefreshTimeout  = 15 * time.Second
 	supplyOverviewQuoteTTL     = 10 * time.Second
-	operatorHeaderCacheTTL     = 15 * time.Second
-	operatorAccountPoolTTL     = 15 * time.Second
+	operatorHeaderCacheTTL     = 60 * time.Second
+	operatorAccountPoolTTL     = 30 * time.Second
 )
 
 const (
@@ -6169,23 +6171,53 @@ func (s *Service) countOperatorAccountPoolStats(
 	now := time.Now()
 	cacheKey := strings.TrimSpace(cfg.CPAConnection.CPABaseURL) + "\x00" + strings.TrimSpace(cfg.CPAConnection.ManagementKey)
 	s.operatorPoolMu.Lock()
-	defer s.operatorPoolMu.Unlock()
-	if s.operatorPool.key == cacheKey && !s.operatorPool.generated.IsZero() &&
-		now.Sub(s.operatorPool.generated) <= operatorAccountPoolTTL {
-		return s.operatorPool.stats, s.operatorPool.err
+	cached := s.operatorPool
+	s.operatorPoolMu.Unlock()
+	cacheMatches := cached.key == cacheKey && !cached.generated.IsZero()
+	if cacheMatches && now.Sub(cached.generated) <= operatorAccountPoolTTL {
+		return cached.stats, cached.err
 	}
+	// Once a complete snapshot exists, only one caller pays for refreshing it.
+	// Polling requests arriving behind that refresh get the last complete view
+	// immediately instead of waiting on CPA and SQLite reads until their HTTP
+	// deadlines expire.
+	if cacheMatches {
+		if !s.operatorPoolRefreshMu.TryLock() {
+			return cached.stats, cached.err
+		}
+	} else {
+		s.operatorPoolRefreshMu.Lock()
+	}
+	defer s.operatorPoolRefreshMu.Unlock()
+
+	// A caller may have completed the refresh while this request was waiting for
+	// the single-flight lock. Re-read both the cache and its invalidation epoch.
+	now = time.Now()
+	s.operatorPoolMu.Lock()
+	cached = s.operatorPool
+	refreshGeneration := s.operatorPoolGeneration
+	s.operatorPoolMu.Unlock()
+	cacheMatches = cached.key == cacheKey && !cached.generated.IsZero()
+	if cacheMatches && now.Sub(cached.generated) <= operatorAccountPoolTTL {
+		return cached.stats, cached.err
+	}
+
 	stats, err := s.loadOperatorAccountPoolStats(ctx, cfg)
 	if err == nil || stats.liveObserved {
-		s.operatorPool = operatorAccountPoolCache{
-			key:       cacheKey,
-			generated: time.Now(),
-			stats:     stats,
-			err:       err,
+		s.operatorPoolMu.Lock()
+		if s.operatorPoolGeneration == refreshGeneration {
+			s.operatorPool = operatorAccountPoolCache{
+				key:       cacheKey,
+				generated: time.Now(),
+				stats:     stats,
+				err:       err,
+			}
 		}
+		s.operatorPoolMu.Unlock()
 		return stats, err
 	}
-	if s.operatorPool.key == cacheKey && !s.operatorPool.generated.IsZero() {
-		return s.operatorPool.stats, err
+	if cacheMatches {
+		return cached.stats, err
 	}
 	return stats, err
 }
@@ -10085,6 +10117,7 @@ func (s *Service) invalidateAuthFilesCache() {
 	s.authCache = authFileSnapshot{}
 	s.authCacheMu.Unlock()
 	s.operatorPoolMu.Lock()
+	s.operatorPoolGeneration++
 	s.operatorPool = operatorAccountPoolCache{}
 	s.operatorPoolMu.Unlock()
 }

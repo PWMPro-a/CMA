@@ -880,6 +880,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
   const authFilesOperationGenerationRef = useRef(0);
   const loadFilesRequestRef = useRef(0);
   const runtimeStatusRequestRef = useRef(0);
+  const runtimeStatusPromiseRef = useRef<Promise<void> | null>(null);
   const filesRevisionRef = useRef(0);
   const batchStatusPendingRef = useRef<number | null>(null);
   const statusMutationPendingRef = useRef<Map<string, number>>(new Map());
@@ -897,6 +898,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
     authFilesOperationGenerationRef.current += 1;
     loadFilesRequestRef.current += 1;
     runtimeStatusRequestRef.current += 1;
+    runtimeStatusPromiseRef.current = null;
     batchStatusPendingRef.current = null;
     statusMutationPendingRef.current.clear();
     batchFieldsPendingRef.current = null;
@@ -916,6 +918,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
       authFilesOperationGenerationRef.current += 1;
       loadFilesRequestRef.current += 1;
       runtimeStatusRequestRef.current += 1;
+      runtimeStatusPromiseRef.current = null;
       credentialRefreshGenerationRef.current += 1;
     };
   }, [commitFiles, connectionFingerprint]);
@@ -1032,17 +1035,35 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
       const requestConnectionFingerprint = connectionFingerprint;
       const generation = authFilesOperationGenerationRef.current;
       if (options?.runtimeStatusOnly) {
-        const requestID = ++runtimeStatusRequestRef.current;
-        const isCurrentRequest = () =>
-          authFilesOperationGenerationRef.current === generation &&
-          connectionFingerprintRef.current === requestConnectionFingerprint &&
-          runtimeStatusRequestRef.current === requestID;
+        let requestPromise = runtimeStatusPromiseRef.current;
+        if (!requestPromise) {
+          const requestID = ++runtimeStatusRequestRef.current;
+          const isCurrentRequest = () =>
+            authFilesOperationGenerationRef.current === generation &&
+            connectionFingerprintRef.current === requestConnectionFingerprint &&
+            runtimeStatusRequestRef.current === requestID;
+          requestPromise = (async () => {
+            try {
+              const data = await authFilesApi.listRuntimeStatus();
+              if (!isCurrentRequest()) return;
+              commitFiles((current) => mergeAuthFileRuntimeStatus(current, data?.files || []));
+            } catch (err: unknown) {
+              if (!isCurrentRequest()) return;
+              throw err;
+            }
+          })();
+          runtimeStatusPromiseRef.current = requestPromise;
+          const clearRequest = () => {
+            if (runtimeStatusPromiseRef.current === requestPromise) {
+              runtimeStatusPromiseRef.current = null;
+            }
+          };
+          requestPromise.then(clearRequest, clearRequest);
+        }
         try {
-          const data = await authFilesApi.listRuntimeStatus();
-          if (!isCurrentRequest()) return;
-          commitFiles((current) => mergeAuthFileRuntimeStatus(current, data?.files || []));
+          await requestPromise;
         } catch (err: unknown) {
-          if (!isCurrentRequest() || !options.throwOnError) return;
+          if (!options.throwOnError) return;
           throw err instanceof Error ? err : new Error(t('notification.refresh_failed'));
         }
         return;

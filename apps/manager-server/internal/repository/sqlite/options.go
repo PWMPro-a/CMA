@@ -3,8 +3,8 @@ package sqlite
 import "time"
 
 const (
-	defaultMaxOpenConns    = 2
-	defaultMaxIdleConns    = 1
+	defaultMaxOpenConns    = 4
+	defaultMaxIdleConns    = 2
 	defaultConnMaxIdleTime = 5 * time.Minute
 	busyTimeoutMS          = 30_000
 )

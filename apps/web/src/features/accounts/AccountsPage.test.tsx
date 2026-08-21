@@ -1208,7 +1208,7 @@ describe('AccountsPage replacement flows', () => {
     expect(mocks.loadFiles).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(15_000);
     });
 
     expect(mocks.loadFiles).toHaveBeenCalledTimes(2);
@@ -1216,6 +1216,32 @@ describe('AccountsPage replacement flows', () => {
       silent: true,
       runtimeStatusOnly: true,
     });
+  });
+
+  it('does not overlap account pool summary polling requests', async () => {
+    vi.useFakeTimers();
+    const poolSummary = createDeferred<SupplyAccountPoolSummary>();
+    mocks.getAccountPoolSummary.mockReturnValue(poolSummary.promise);
+    await renderAccountsPage();
+    expect(mocks.getAccountPoolSummary).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(mocks.getAccountPoolSummary).toHaveBeenCalledTimes(1);
+
+    poolSummary.resolve({
+      checkedAtMs: Date.now(),
+      total: 1,
+      normal: 1,
+      needsAttention: 0,
+      quotaRisk: 0,
+      disabled: 0,
+      unconfirmed: 0,
+      classificationObserved: true,
+      credentials: [],
+    });
+    await flushPromises();
   });
 
   it('clears quota snapshot state and ignores a late query from the previous connection', async () => {

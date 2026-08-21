@@ -2075,6 +2075,27 @@ describe('useAuthFilesData status targeting', () => {
     hook.unmount();
   });
 
+  it('coalesces concurrent compact runtime status refreshes', async () => {
+    const runtimeStatus = createDeferred<{ files: AuthFileItem[] }>();
+    mocks.listRuntimeStatus.mockReturnValue(runtimeStatus.promise);
+    const hook = mountUseAuthFilesData('connection-a');
+    let firstRefresh!: Promise<void>;
+    let secondRefresh!: Promise<void>;
+
+    act(() => {
+      firstRefresh = hook.getCurrent().loadFiles({ silent: true, runtimeStatusOnly: true });
+      secondRefresh = hook.getCurrent().loadFiles({ silent: true, runtimeStatusOnly: true });
+    });
+
+    expect(mocks.listRuntimeStatus).toHaveBeenCalledTimes(1);
+    runtimeStatus.resolve({ files: [] });
+    await act(async () => {
+      await Promise.all([firstRefresh, secondRefresh]);
+    });
+    expect(mocks.listRuntimeStatus).toHaveBeenCalledTimes(1);
+    hook.unmount();
+  });
+
   it('does not let an old connection load overwrite the new connection files', async () => {
     const oldFiles = [
       {
