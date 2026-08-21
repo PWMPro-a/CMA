@@ -150,6 +150,52 @@ func TestSupplyStatusCacheInvalidationForcesSuccessfulRefresh(t *testing.T) {
 	}
 }
 
+func TestSupplyStatusCacheDashboardServesStaleWhileRefreshing(t *testing.T) {
+	var cache supplyStatusCache
+	if _, err := cache.get(context.Background(), 50, func(context.Context, int) (Status, error) {
+		return cachedStatusFixture("before"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cache.invalidate()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var builds atomic.Int32
+	build := func(context.Context, int) (Status, error) {
+		if builds.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return cachedStatusFixture("after"), nil
+	}
+
+	status, err := cache.getStaleWhileRefresh(context.Background(), 50, build)
+	if err != nil || status.Orders[0].OrderID != "before" {
+		t.Fatalf("stale dashboard status=%#v err=%v", status, err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("background dashboard refresh did not start")
+	}
+	status, err = cache.getStaleWhileRefresh(context.Background(), 50, build)
+	if err != nil || status.Orders[0].OrderID != "before" || builds.Load() != 1 {
+		t.Fatalf("coalesced stale dashboard status=%#v builds=%d err=%v", status, builds.Load(), err)
+	}
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for {
+		status, err = cache.get(context.Background(), 50, build)
+		if err == nil && status.Orders[0].OrderID == "after" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("background dashboard refresh did not publish: status=%#v err=%v", status, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func cachedStatusFixture(orderID string) Status {
 	order := store.SupplyOrder{OrderID: orderID, Status: "waiting_inventory"}
 	return Status{

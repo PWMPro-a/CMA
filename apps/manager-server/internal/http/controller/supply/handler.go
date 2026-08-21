@@ -88,7 +88,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 				limit = parsed
 			}
 		}
-		result, err := h.App.SupplyService.GetStatus(r.Context(), limit)
+		result, err := h.App.SupplyService.GetDashboardStatus(r.Context(), limit)
 		h.writeResult(w, result, err)
 	case "/v0/management/supply/account-pool":
 		if r.Method != http.MethodGet {

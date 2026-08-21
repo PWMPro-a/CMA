@@ -1417,6 +1417,73 @@ func TestOperatorAccountPoolStatsReturnsStaleSnapshotDuringRefresh(t *testing.T)
 	}
 }
 
+func TestDashboardAccountPoolReturnsInvalidatedSnapshotWhileRefreshing(t *testing.T) {
+	var requests atomic.Int32
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/auth-files" {
+			http.NotFound(w, r)
+			return
+		}
+		if requests.Add(1) == 1 {
+			_, _ = w.Write([]byte(`{"files":[{"name":"first.json","provider":"codex","status":"active","auth_index":"first"}]}`))
+			return
+		}
+		close(refreshStarted)
+		<-releaseRefresh
+		_, _ = w.Write([]byte(`{"files":[{"name":"second.json","provider":"codex","status":"disabled","disabled":true,"auth_index":"second"}]}`))
+	}))
+	t.Cleanup(func() {
+		select {
+		case <-releaseRefresh:
+		default:
+			close(releaseRefresh)
+		}
+		server.Close()
+	})
+
+	service := New(nil, nil, server.Client())
+	cfg := store.ManagerConfig{CPAConnection: store.ManagerCPAConnectionConfig{
+		CPABaseURL:    server.URL,
+		ManagementKey: "management-key",
+	}}
+	initial, err := service.countOperatorAccountPoolStats(context.Background(), cfg)
+	if err != nil || initial.enabled != 1 {
+		t.Fatalf("initial operator snapshot=%#v err=%v", initial, err)
+	}
+	service.invalidateAuthFilesCache()
+
+	stale, err := service.countOperatorAccountPoolStatsForDashboard(context.Background(), cfg)
+	if err != nil || stale.enabled != 1 {
+		t.Fatalf("invalidated dashboard snapshot=%#v err=%v", stale, err)
+	}
+	select {
+	case <-refreshStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background account-pool refresh did not start")
+	}
+	second, err := service.countOperatorAccountPoolStatsForDashboard(context.Background(), cfg)
+	if err != nil || second.enabled != 1 || requests.Load() != 2 {
+		t.Fatalf("coalesced dashboard snapshot=%#v requests=%d err=%v", second, requests.Load(), err)
+	}
+	close(releaseRefresh)
+	deadline := time.Now().Add(time.Second)
+	for {
+		service.operatorPoolMu.Lock()
+		refreshed := service.operatorPool
+		generation := service.operatorPoolGeneration
+		service.operatorPoolMu.Unlock()
+		if refreshed.generation == generation && refreshed.stats.enabled == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("background account-pool refresh did not publish: cache=%#v generation=%d", refreshed, generation)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestCPAAuthLifecyclePendingIsNotSchedulableCapacity(t *testing.T) {
 	for _, status := range []string{
 		"initializing",

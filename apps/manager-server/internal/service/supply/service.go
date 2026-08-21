@@ -612,6 +612,7 @@ type Service struct {
 	operatorHeaders          operatorHeaderSnapshotCache
 	operatorPoolMu           sync.Mutex
 	operatorPoolRefreshMu    sync.Mutex
+	operatorPoolAsyncMu      sync.Mutex
 	operatorPoolGeneration   uint64
 	operatorPool             operatorAccountPoolCache
 	smartResourceState       SmartResource
@@ -699,10 +700,11 @@ type operatorHeaderSnapshotCache struct {
 }
 
 type operatorAccountPoolCache struct {
-	key       string
-	generated time.Time
-	stats     accountPoolStats
-	err       error
+	generation uint64
+	key        string
+	generated  time.Time
+	stats      accountPoolStats
+	err        error
 }
 
 const (
@@ -716,6 +718,7 @@ const (
 	supplyOverviewQuoteTTL     = 10 * time.Second
 	operatorHeaderCacheTTL     = 60 * time.Second
 	operatorAccountPoolTTL     = 30 * time.Second
+	operatorAccountPoolTimeout = 12 * time.Second
 )
 
 const (
@@ -893,10 +896,40 @@ func (s *Service) GetStatus(ctx context.Context, limit int) (Status, error) {
 	return s.statusCache.get(ctx, limit, s.buildStatus)
 }
 
+// GetDashboardStatus keeps the operator console responsive while a refreshed
+// status snapshot is waiting on CPA or SQLite. Mutating service methods still
+// call GetStatus and synchronously observe their post-write state.
+func (s *Service) GetDashboardStatus(ctx context.Context, limit int) (Status, error) {
+	if s == nil {
+		return Status{}, ErrNotConfigured
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	return s.statusCache.getStaleWhileRefresh(ctx, limit, s.buildStatus)
+}
+
 func (c *supplyStatusCache) get(
 	ctx context.Context,
 	limit int,
 	build func(context.Context, int) (Status, error),
+) (Status, error) {
+	return c.getWithMode(ctx, limit, build, false)
+}
+
+func (c *supplyStatusCache) getStaleWhileRefresh(
+	ctx context.Context,
+	limit int,
+	build func(context.Context, int) (Status, error),
+) (Status, error) {
+	return c.getWithMode(ctx, limit, build, true)
+}
+
+func (c *supplyStatusCache) getWithMode(
+	ctx context.Context,
+	limit int,
+	build func(context.Context, int) (Status, error),
+	staleWhileRefresh bool,
 ) (Status, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -925,8 +958,22 @@ func (c *supplyStatusCache) get(
 		c.mu.Unlock()
 		return decodeSupplyStatus(stalePayload)
 	}
+	if staleWhileRefresh && hasStale {
+		// Invalidation advances the generation. Do not start one expensive build
+		// per mutation while an older generation for the same response limit is
+		// still refreshing; the next poll will catch up after it finishes.
+		for activeKey := range c.refreshes {
+			if activeKey.limit == limit {
+				c.mu.Unlock()
+				return decodeSupplyStatus(stalePayload)
+			}
+		}
+	}
 	if refresh := c.refreshes[key]; refresh != nil {
 		c.mu.Unlock()
+		if staleWhileRefresh && hasStale {
+			return decodeSupplyStatus(stalePayload)
+		}
 		select {
 		case <-ctx.Done():
 			return Status{}, ctx.Err()
@@ -943,7 +990,38 @@ func (c *supplyStatusCache) get(
 	refresh := &supplyStatusRefresh{done: make(chan struct{})}
 	c.refreshes[key] = refresh
 	c.mu.Unlock()
+	if staleWhileRefresh && hasStale {
+		refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), supplyStatusRefreshTimeout)
+		go func() {
+			defer cancel()
+			_, refreshErr := c.executeRefresh(refreshCtx, limit, generation, key, refresh, true, build)
+			if refreshErr != nil {
+				log.Printf("[supply] background status refresh failed: %v", refreshErr)
+			}
+		}()
+		return decodeSupplyStatus(stalePayload)
+	}
 
+	status, buildErr := c.executeRefresh(ctx, limit, generation, key, refresh, hasStale, build)
+	if buildErr != nil {
+		if hasStale && transientSupplyStatusError(buildErr) {
+			log.Printf("[supply] serving last good status after transient refresh failure: %v", buildErr)
+			return decodeSupplyStatus(stalePayload)
+		}
+		return Status{}, buildErr
+	}
+	return status, nil
+}
+
+func (c *supplyStatusCache) executeRefresh(
+	ctx context.Context,
+	limit int,
+	generation uint64,
+	key supplyStatusCacheKey,
+	refresh *supplyStatusRefresh,
+	hasStale bool,
+	build func(context.Context, int) (Status, error),
+) (Status, error) {
 	buildCtx := ctx
 	cancel := func() {}
 	if hasStale {
@@ -979,15 +1057,7 @@ func (c *supplyStatusCache) get(
 	delete(c.refreshes, key)
 	close(refresh.done)
 	c.mu.Unlock()
-
-	if buildErr != nil {
-		if hasStale && transientSupplyStatusError(buildErr) {
-			log.Printf("[supply] serving last good status after transient refresh failure: %v", buildErr)
-			return decodeSupplyStatus(stalePayload)
-		}
-		return Status{}, buildErr
-	}
-	return status, nil
+	return status, buildErr
 }
 
 func staleSupplyStatusPayload(entry supplyStatusCacheEntry, cached bool, now time.Time) ([]byte, bool) {
@@ -1195,7 +1265,7 @@ func (s *Service) GetAccountPoolSummary(ctx context.Context) (AccountPoolSummary
 	if err != nil {
 		return AccountPoolSummary{}, err
 	}
-	stats, statsErr := s.countOperatorAccountPoolStats(ctx, cfg)
+	stats, statsErr := s.countOperatorAccountPoolStatsForDashboard(ctx, cfg)
 	if statsErr != nil && !stats.liveObserved {
 		return AccountPoolSummary{}, statsErr
 	}
@@ -6172,16 +6242,18 @@ func (s *Service) countOperatorAccountPoolStats(
 	cacheKey := strings.TrimSpace(cfg.CPAConnection.CPABaseURL) + "\x00" + strings.TrimSpace(cfg.CPAConnection.ManagementKey)
 	s.operatorPoolMu.Lock()
 	cached := s.operatorPool
+	generation := s.operatorPoolGeneration
 	s.operatorPoolMu.Unlock()
 	cacheMatches := cached.key == cacheKey && !cached.generated.IsZero()
-	if cacheMatches && now.Sub(cached.generated) <= operatorAccountPoolTTL {
+	cacheCurrent := cacheMatches && cached.generation == generation
+	if cacheCurrent && now.Sub(cached.generated) <= operatorAccountPoolTTL {
 		return cached.stats, cached.err
 	}
 	// Once a complete snapshot exists, only one caller pays for refreshing it.
 	// Polling requests arriving behind that refresh get the last complete view
 	// immediately instead of waiting on CPA and SQLite reads until their HTTP
 	// deadlines expire.
-	if cacheMatches {
+	if cacheCurrent {
 		if !s.operatorPoolRefreshMu.TryLock() {
 			return cached.stats, cached.err
 		}
@@ -6198,7 +6270,7 @@ func (s *Service) countOperatorAccountPoolStats(
 	refreshGeneration := s.operatorPoolGeneration
 	s.operatorPoolMu.Unlock()
 	cacheMatches = cached.key == cacheKey && !cached.generated.IsZero()
-	if cacheMatches && now.Sub(cached.generated) <= operatorAccountPoolTTL {
+	if cacheMatches && cached.generation == refreshGeneration && now.Sub(cached.generated) <= operatorAccountPoolTTL {
 		return cached.stats, cached.err
 	}
 
@@ -6207,10 +6279,11 @@ func (s *Service) countOperatorAccountPoolStats(
 		s.operatorPoolMu.Lock()
 		if s.operatorPoolGeneration == refreshGeneration {
 			s.operatorPool = operatorAccountPoolCache{
-				key:       cacheKey,
-				generated: time.Now(),
-				stats:     stats,
-				err:       err,
+				generation: refreshGeneration,
+				key:        cacheKey,
+				generated:  time.Now(),
+				stats:      stats,
+				err:        err,
 			}
 		}
 		s.operatorPoolMu.Unlock()
@@ -6220,6 +6293,39 @@ func (s *Service) countOperatorAccountPoolStats(
 		return cached.stats, err
 	}
 	return stats, err
+}
+
+func (s *Service) countOperatorAccountPoolStatsForDashboard(
+	ctx context.Context,
+	cfg store.ManagerConfig,
+) (accountPoolStats, error) {
+	if s == nil {
+		return accountPoolStats{}, errors.New("supply service is unavailable")
+	}
+	now := time.Now()
+	cacheKey := strings.TrimSpace(cfg.CPAConnection.CPABaseURL) + "\x00" + strings.TrimSpace(cfg.CPAConnection.ManagementKey)
+	s.operatorPoolMu.Lock()
+	cached := s.operatorPool
+	generation := s.operatorPoolGeneration
+	s.operatorPoolMu.Unlock()
+	cacheMatches := cached.key == cacheKey && !cached.generated.IsZero()
+	if !cacheMatches {
+		return s.countOperatorAccountPoolStats(ctx, cfg)
+	}
+	if cached.generation == generation && now.Sub(cached.generated) <= operatorAccountPoolTTL {
+		return cached.stats, cached.err
+	}
+	if s.operatorPoolAsyncMu.TryLock() {
+		refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), operatorAccountPoolTimeout)
+		go func() {
+			defer s.operatorPoolAsyncMu.Unlock()
+			defer cancel()
+			if _, err := s.countOperatorAccountPoolStats(refreshCtx, cfg); err != nil {
+				log.Printf("[supply] background account-pool refresh failed: %v", err)
+			}
+		}()
+	}
+	return cached.stats, cached.err
 }
 
 func (s *Service) loadOperatorAccountPoolStats(
@@ -10118,7 +10224,6 @@ func (s *Service) invalidateAuthFilesCache() {
 	s.authCacheMu.Unlock()
 	s.operatorPoolMu.Lock()
 	s.operatorPoolGeneration++
-	s.operatorPool = operatorAccountPoolCache{}
 	s.operatorPoolMu.Unlock()
 }
 
