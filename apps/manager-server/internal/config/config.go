@@ -31,6 +31,9 @@ type Config struct {
 	DBDriver                     string
 	DBDSN                        string
 	DBPath                       string
+	ConfigPath                   string
+	DBConfigSource               string
+	DBConfigEnvLocked            bool
 	CPAUpstreamURL               string
 	ManagementKey                string
 	AdminKey                     string
@@ -70,6 +73,7 @@ type fileConfig struct {
 	DataDir                   string   `json:"dataDir,omitempty"`
 	DBDriver                  string   `json:"dbDriver,omitempty"`
 	DBDSN                     string   `json:"dbDsn,omitempty"`
+	DBDSNFile                 string   `json:"dbDsnFile,omitempty"`
 	DBPath                    string   `json:"dbPath,omitempty"`
 	CPAUpstreamURL            string   `json:"cpaUpstreamUrl,omitempty"`
 	ManagementKeyFile         string   `json:"managementKeyFile,omitempty"`
@@ -116,10 +120,30 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		dataDirFallback = resolveConfigPath("./data", cfgDir)
 	}
 	dataDir := env("USAGE_DATA_DIR", dataDirFallback)
+	configPath := strings.TrimSpace(os.Getenv(configEnvKey))
+	if configPath == "" {
+		configPath, _ = executableConfigPath()
+	}
 
 	dbPathFallback := filepath.Join(dataDir, "usage.sqlite")
 	if !hasEnv("USAGE_DATA_DIR") && cfgFile.DBPath != "" {
 		dbPathFallback = resolveConfigPath(cfgFile.DBPath, cfgDir)
+	}
+	dbDSN := strings.TrimSpace(os.Getenv("USAGE_DB_DSN"))
+	if dbDSN == "" {
+		dsnFile := strings.TrimSpace(os.Getenv("USAGE_DB_DSN_FILE"))
+		if dsnFile == "" {
+			dsnFile = resolveConfigPath(cfgFile.DBDSNFile, cfgDir)
+		}
+		if dsnFile != "" {
+			data, readErr := os.ReadFile(dsnFile)
+			if readErr != nil {
+				return Config{}, fmt.Errorf("read database DSN file %s: %w", dsnFile, readErr)
+			}
+			dbDSN = strings.TrimSpace(string(data))
+		} else {
+			dbDSN = strings.TrimSpace(cfgFile.DBDSN)
+		}
 	}
 
 	managementKeyFile := defaultSecretFile
@@ -145,8 +169,11 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		HTTPAddr:                     env("HTTP_ADDR", stringFallback(cfgFile.HTTPAddr, "0.0.0.0:18317")),
 		DataDir:                      dataDir,
 		DBDriver:                     normalizeDatabaseDriver(env("USAGE_DB_DRIVER", cfgFile.DBDriver)),
-		DBDSN:                        env("USAGE_DB_DSN", cfgFile.DBDSN),
+		DBDSN:                        dbDSN,
 		DBPath:                       env("USAGE_DB_PATH", dbPathFallback),
+		ConfigPath:                   configPath,
+		DBConfigSource:               databaseConfigSource(configPath),
+		DBConfigEnvLocked:            databaseConfigEnvLocked(),
 		CPAUpstreamURL:               env("CPA_UPSTREAM_URL", cfgFile.CPAUpstreamURL),
 		ManagementKey:                readSecret("CPA_MANAGEMENT_KEY", "CPA_MANAGEMENT_KEY_FILE", managementKeyFile),
 		AdminKey:                     readSecret("CPA_MANAGER_ADMIN_KEY", "CPA_MANAGER_ADMIN_KEY_FILE", adminKeyFile),
@@ -285,6 +312,23 @@ func normalizeDatabaseDriver(value string) string {
 	default:
 		return "sqlite"
 	}
+}
+
+func databaseConfigEnvLocked() bool {
+	return hasEnv("USAGE_DB_DRIVER") || hasEnv("USAGE_DB_DSN") ||
+		hasEnv("USAGE_DB_DSN_FILE") || hasEnv("USAGE_DB_PATH")
+}
+
+func databaseConfigSource(configPath string) string {
+	if databaseConfigEnvLocked() {
+		return "environment"
+	}
+	if strings.TrimSpace(configPath) != "" {
+		if _, err := os.Stat(configPath); err == nil {
+			return "file"
+		}
+	}
+	return "default"
 }
 
 func hasEnv(key string) bool {

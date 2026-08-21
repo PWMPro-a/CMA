@@ -29,6 +29,7 @@ import iconGrokDark from '@/assets/icons/grok-dark.svg';
 import iconDeepseek from '@/assets/icons/deepseek.svg';
 import iconMinimax from '@/assets/icons/minimax.svg';
 import { DatabaseStatusCard } from './components/DatabaseStatusCard';
+import { DatabaseMigrationCard } from './components/DatabaseMigrationCard';
 import styles from './SystemPage.module.scss';
 
 const MODEL_CATEGORY_ICONS: Record<string, string | { light: string; dark: string }> = {
@@ -327,6 +328,13 @@ export function SystemPage() {
             error={databaseError}
           />
         )}
+
+        {featureAvailability.managerServiceAvailable && auth.managementKey ? (
+          <DatabaseMigrationCard
+            base={featureAvailability.managerServiceBase}
+            managementKey={auth.managementKey}
+          />
+        ) : null}
 
         <Card
           title={t('system_info.models_title')}

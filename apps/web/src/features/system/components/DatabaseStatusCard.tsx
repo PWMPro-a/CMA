@@ -19,11 +19,13 @@ const formatCount = (value: number | undefined, locale: string) =>
 export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCardProps) {
   const { t, i18n } = useTranslation();
   const database = status?.database;
+  const driver = database?.driver?.trim().toLowerCase() || 'sqlite';
+  const isSQLite = driver === 'sqlite';
   const checkpoint = database?.checkpoint;
   const checkpointError = checkpoint?.error;
   const statusError = !database ? error : '';
   const databaseUnavailable = !loading && !database;
-  const checkpointUnavailable = Boolean(database && !checkpoint);
+  const checkpointUnavailable = Boolean(isSQLite && database && !checkpoint);
   const checkpointBehind =
     Number.isFinite(checkpoint?.logFrames) &&
     Number.isFinite(checkpoint?.checkpointedFrames) &&
@@ -36,12 +38,14 @@ export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCar
   const checkpointWarning = Boolean(
     statusError ||
     databaseUnavailable ||
-    checkpointUnavailable ||
-    checkpointError ||
-    Number(checkpoint?.busy) > 0 ||
-    checkpointBehind ||
-    checkpointPending ||
-    walOverLimit
+    database?.healthy === false ||
+    (isSQLite &&
+      (checkpointUnavailable ||
+        checkpointError ||
+        Number(checkpoint?.busy) > 0 ||
+        checkpointBehind ||
+        checkpointPending ||
+        walOverLimit))
   );
   const initialLoading = loading && !database;
 
@@ -78,34 +82,61 @@ export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCar
         })
       : t('system_info.database_checkpoint_pending');
 
-  const summaryItems = [
-    {
-      label: t('system_info.database_total_size'),
-      value: formatBytes(database?.totalBytes),
-      emphasis: true,
-    },
-    { label: t('system_info.database_file'), value: formatBytes(database?.databaseBytes) },
-    { label: t('system_info.database_wal_file'), value: formatBytes(database?.walBytes) },
-    { label: t('system_info.database_shm_file'), value: formatBytes(database?.shmBytes) },
-  ];
+  const summaryItems: Array<{ label: string; value: string; emphasis?: boolean }> = isSQLite
+    ? [
+        {
+          label: t('system_info.database_total_size'),
+          value: formatBytes(database?.totalBytes),
+          emphasis: true,
+        },
+        { label: t('system_info.database_file'), value: formatBytes(database?.databaseBytes) },
+        { label: t('system_info.database_wal_file'), value: formatBytes(database?.walBytes) },
+        { label: t('system_info.database_shm_file'), value: formatBytes(database?.shmBytes) },
+      ]
+    : [
+        { label: t('system_info.database_backend'), value: driver.toUpperCase(), emphasis: true },
+        { label: t('system_info.database_total_size'), value: formatBytes(database?.sizeBytes) },
+        {
+          label: t('system_info.database_tables'),
+          value: formatCount(database?.tables, i18n.language),
+        },
+        {
+          label: t('system_info.database_estimated_rows'),
+          value: formatCount(database?.estimatedRows, i18n.language),
+        },
+      ];
 
-  const detailItems = [
-    {
-      label: t('system_info.database_journal_size_limit'),
-      value: formatBytes(database?.journalSizeLimitBytes),
-    },
-    {
-      label: t('system_info.database_checkpoint_mode'),
-      value: checkpointMode,
-      isStatus: true,
-    },
-    { label: t('system_info.database_checkpoint_progress'), value: checkpointProgress },
-    {
-      label: t('system_info.database_checkpoint_busy'),
-      value: formatCount(checkpoint?.busy, i18n.language),
-    },
-    { label: t('system_info.database_checkpoint_last_run'), value: checkpointTime },
-  ];
+  const detailItems: Array<{ label: string; value: string; isStatus?: boolean }> = isSQLite
+    ? [
+        {
+          label: t('system_info.database_journal_size_limit'),
+          value: formatBytes(database?.journalSizeLimitBytes),
+        },
+        {
+          label: t('system_info.database_checkpoint_mode'),
+          value: checkpointMode,
+          isStatus: true,
+        },
+        { label: t('system_info.database_checkpoint_progress'), value: checkpointProgress },
+        {
+          label: t('system_info.database_checkpoint_busy'),
+          value: formatCount(checkpoint?.busy, i18n.language),
+        },
+        { label: t('system_info.database_checkpoint_last_run'), value: checkpointTime },
+      ]
+    : [
+        { label: t('system_info.database_name'), value: database?.databaseName || '-' },
+        { label: t('system_info.database_host'), value: database?.host || '-' },
+        { label: t('system_info.database_version'), value: database?.version || '-' },
+        {
+          label: t('system_info.database_latency'),
+          value: `${formatCount(database?.latencyMs, i18n.language)} ms`,
+        },
+        {
+          label: t('system_info.database_connections'),
+          value: `${formatCount(database?.connections?.inUseConnections, i18n.language)} / ${formatCount(database?.connections?.openConnections, i18n.language)}`,
+        },
+      ];
 
   const statusTone = initialLoading
     ? styles.statusPending
@@ -119,7 +150,13 @@ export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCar
       extra={
         <span className={`${styles.statusBadge} ${statusTone}`}>
           <span className={styles.statusDot} />
-          {initialLoading ? t('common.loading') : checkpointMode}
+          {initialLoading
+            ? t('common.loading')
+            : isSQLite
+              ? checkpointMode
+              : database?.healthy
+                ? t('system_info.database_healthy')
+                : t('system_info.database_unhealthy')}
         </span>
       }
       className={styles.card}
@@ -148,7 +185,7 @@ export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCar
         ))}
       </div>
 
-      {checkpointError || statusError ? (
+      {(isSQLite && checkpointError) || statusError || database?.error ? (
         <div className={styles.errorStack}>
           {checkpointError ? (
             <div className={styles.errorLine}>
@@ -160,6 +197,12 @@ export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCar
             <div className={styles.errorLine}>
               <span>{t('system_info.database_status_error')}</span>
               <strong>{statusError}</strong>
+            </div>
+          ) : null}
+          {database?.error ? (
+            <div className={styles.errorLine}>
+              <span>{t('system_info.database_status_error')}</span>
+              <strong>{database.error}</strong>
             </div>
           ) : null}
         </div>

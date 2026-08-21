@@ -129,12 +129,123 @@ export interface UsageServiceCheckpointStatus {
 }
 
 export interface UsageServiceDatabaseStatus {
+  driver?: 'sqlite' | 'mysql' | string;
+  healthy?: boolean;
+  databaseName?: string;
+  host?: string;
+  version?: string;
+  latencyMs?: number;
+  tables?: number;
+  estimatedRows?: number;
+  sizeBytes?: number;
+  connections?: {
+    openConnections?: number;
+    inUseConnections?: number;
+    idleConnections?: number;
+    maxOpenConnections?: number;
+  };
+  error?: string;
   databaseBytes?: number;
   walBytes?: number;
   shmBytes?: number;
   totalBytes?: number;
   journalSizeLimitBytes?: number;
   checkpoint?: UsageServiceCheckpointStatus;
+}
+
+export interface DatabaseConnectionConfig {
+  driver: 'sqlite' | 'mysql';
+  path?: string;
+  dsn?: string;
+}
+
+export interface DatabasePublicConnectionConfig {
+  driver: string;
+  path?: string;
+  dsnMasked?: string;
+}
+
+export interface DatabaseManagementStatus {
+  current: UsageServiceDatabaseStatus;
+  connection: DatabasePublicConnectionConfig;
+  configuration: {
+    source: string;
+    configPath?: string;
+    environmentLock: boolean;
+    restartRequired: boolean;
+  };
+  supportedDrivers: string[];
+  latestMigration?: DatabaseMigrationJob;
+}
+
+export interface DatabaseProbeResult {
+  connection: DatabasePublicConnectionConfig;
+  healthy: boolean;
+  reachable: boolean;
+  exists: boolean;
+  schemaReady: boolean;
+  databaseName?: string;
+  host?: string;
+  version?: string;
+  latencyMs: number;
+  tables: number;
+  error?: string;
+}
+
+export interface DatabaseMigrationPlan {
+  source: DatabasePublicConnectionConfig;
+  target: DatabasePublicConnectionConfig;
+  sourceTables: number;
+  targetTables: number;
+  estimatedSourceRows?: number;
+  targetEmpty: boolean;
+  targetSchemaReady: boolean;
+  requiresEmptyTarget: boolean;
+  requiresRestart: boolean;
+  onlineWritesPossible: boolean;
+  warnings?: string[];
+}
+
+export interface DatabaseMigrationTable {
+  name: string;
+  status: string;
+  totalRows: number;
+  copiedRows: number;
+  startedAtMs?: number;
+  finishedAtMs?: number;
+  error?: string;
+}
+
+export interface DatabaseMigrationJob {
+  id: string;
+  status: string;
+  source: DatabasePublicConnectionConfig;
+  target: DatabasePublicConnectionConfig;
+  createdAtMs: number;
+  startedAtMs?: number;
+  finishedAtMs?: number;
+  currentTable?: string;
+  totalTables: number;
+  completedTables: number;
+  totalRows: number;
+  copiedRows: number;
+  verified: boolean;
+  restartRequired: boolean;
+  consistentSnapshot: boolean;
+  error?: string;
+  tables?: DatabaseMigrationTable[];
+}
+
+export interface DatabaseSwitchResult {
+  migrationId: string;
+  connection: DatabasePublicConnectionConfig;
+  appliedToConfig: boolean;
+  restartRequired: boolean;
+  configurationSource: string;
+  configPath?: string;
+  pendingFile?: string;
+  environment?: Record<string, string>;
+  message: string;
 }
 
 export interface UsageServiceStatus {
@@ -2847,6 +2958,109 @@ export const usageServiceApi = {
         timeout: USAGE_SERVICE_TIMEOUT_MS,
         headers: authHeaders(managementKey),
       });
+      return response.data;
+    });
+  },
+
+  getDatabaseManagementStatus: async (
+    base: string,
+    managementKey?: string
+  ): Promise<DatabaseManagementStatus> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.get<DatabaseManagementStatus>(
+        buildUrl(base, '/v0/management/database'),
+        { timeout: USAGE_SERVICE_TIMEOUT_MS, headers: authHeaders(managementKey) }
+      );
+      return response.data;
+    });
+  },
+
+  testDatabaseConnection: async (
+    base: string,
+    managementKey: string | undefined,
+    target: DatabaseConnectionConfig
+  ): Promise<DatabaseProbeResult> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.post<DatabaseProbeResult>(
+        buildUrl(base, '/v0/management/database/test'),
+        { target },
+        { timeout: USAGE_SERVICE_TIMEOUT_MS, headers: authHeaders(managementKey) }
+      );
+      return response.data;
+    });
+  },
+
+  planDatabaseMigration: async (
+    base: string,
+    managementKey: string | undefined,
+    target: DatabaseConnectionConfig
+  ): Promise<DatabaseMigrationPlan> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.post<DatabaseMigrationPlan>(
+        buildUrl(base, '/v0/management/database/migrations/plan'),
+        { target },
+        { timeout: USAGE_SERVICE_TIMEOUT_MS, headers: authHeaders(managementKey) }
+      );
+      return response.data;
+    });
+  },
+
+  startDatabaseMigration: async (
+    base: string,
+    managementKey: string | undefined,
+    target: DatabaseConnectionConfig
+  ): Promise<DatabaseMigrationJob> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.post<DatabaseMigrationJob>(
+        buildUrl(base, '/v0/management/database/migrations'),
+        { target, requireEmptyTarget: true },
+        { timeout: USAGE_SERVICE_TIMEOUT_MS, headers: authHeaders(managementKey) }
+      );
+      return response.data;
+    });
+  },
+
+  getDatabaseMigration: async (
+    base: string,
+    managementKey: string | undefined,
+    id: string
+  ): Promise<DatabaseMigrationJob> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.get<DatabaseMigrationJob>(
+        buildUrl(base, `/v0/management/database/migrations/${id}`),
+        { timeout: USAGE_SERVICE_TIMEOUT_MS, headers: authHeaders(managementKey) }
+      );
+      return response.data;
+    });
+  },
+
+  cancelDatabaseMigration: async (
+    base: string,
+    managementKey: string | undefined,
+    id: string
+  ): Promise<DatabaseMigrationJob> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.post<DatabaseMigrationJob>(
+        buildUrl(base, `/v0/management/database/migrations/${id}/cancel`),
+        undefined,
+        { timeout: USAGE_SERVICE_TIMEOUT_MS, headers: authHeaders(managementKey) }
+      );
+      return response.data;
+    });
+  },
+
+  prepareDatabaseSwitch: async (
+    base: string,
+    managementKey: string | undefined,
+    migrationId: string,
+    target: DatabaseConnectionConfig
+  ): Promise<DatabaseSwitchResult> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.post<DatabaseSwitchResult>(
+        buildUrl(base, '/v0/management/database/switch'),
+        { migrationId, target },
+        { timeout: USAGE_SERVICE_TIMEOUT_MS, headers: authHeaders(managementKey) }
+      );
       return response.data;
     });
   },

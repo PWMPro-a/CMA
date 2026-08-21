@@ -14,6 +14,7 @@ type Options struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxIdleTime time.Duration
+	SkipMigrate     bool
 }
 
 func (o Options) maxOpenConns() int {

@@ -189,7 +189,7 @@ const AUTH_FILE_COOLDOWN_MARKERS = [
   'http 429',
   'status 429',
   'status_code:429',
-  'status_code\":429',
+  'status_code":429',
   'cooldown',
   'cooling',
   'retry_after',

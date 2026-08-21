@@ -79,8 +79,17 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 			FinishedAtMS:  migration.FinishedAtMS,
 		},
 	}
-	if h.App.DatabaseMaintenance != nil {
-		payload["database"] = h.App.DatabaseMaintenance.Snapshot()
+	databaseStatus := h.App.DatabaseService.Status(r.Context())
+	if h.App.DatabaseMaintenance != nil && databaseStatus.Driver == "sqlite" {
+		snapshot := h.App.DatabaseMaintenance.Snapshot()
+		databaseStatus.DatabaseBytes = snapshot.DatabaseBytes
+		databaseStatus.WALBytes = snapshot.WALBytes
+		databaseStatus.SHMBytes = snapshot.SHMBytes
+		databaseStatus.TotalBytes = snapshot.TotalBytes
+		databaseStatus.SizeBytes = snapshot.TotalBytes
+		databaseStatus.JournalSizeLimitBytes = snapshot.JournalSizeLimitBytes
+		databaseStatus.Checkpoint = snapshot.Checkpoint
 	}
+	payload["database"] = databaseStatus
 	response.JSON(w, http.StatusOK, payload)
 }

@@ -1,0 +1,163 @@
+@use '@/styles/variables' as v;
+
+.card {
+  min-width: 0;
+}
+.description {
+  margin: 0 0 v.$spacing-lg;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.currentGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: v.$spacing-sm;
+}
+.metric {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-md);
+  background: var(--surface-subtle);
+}
+.metric span,
+.jobLabel {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.metric strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.formGrid {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.35fr) minmax(320px, 1fr);
+  gap: v.$spacing-md;
+  margin-top: v.$spacing-lg;
+  padding-top: v.$spacing-lg;
+  border-top: 1px solid var(--app-border);
+}
+.selectField {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.selectField label {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: v.$spacing-sm;
+  margin-top: v.$spacing-md;
+}
+.notice {
+  display: grid;
+  gap: 5px;
+  margin-top: v.$spacing-md;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-md);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.notice code {
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.success {
+  border-color: rgba(16, 185, 129, 0.28);
+  background: rgba(16, 185, 129, 0.08);
+  color: #10b981;
+}
+.warning {
+  border-color: rgba(245, 158, 11, 0.28);
+  background: rgba(245, 158, 11, 0.08);
+  color: #f59e0b;
+}
+.jobPanel {
+  margin-top: v.$spacing-md;
+  padding: v.$spacing-md;
+  border: 1px solid color-mix(in srgb, var(--color-primary) 35%, var(--border-subtle));
+  border-radius: var(--app-radius-md);
+  background: var(--app-accent-soft);
+}
+.jobHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: v.$spacing-md;
+}
+.jobHeader > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.progressTrack {
+  height: 8px;
+  margin-top: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-subtle);
+}
+.progressTrack span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #14b8a6, #22d3ee);
+  transition: width 0.25s ease;
+}
+.jobStats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: v.$spacing-sm;
+  margin-top: 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.jobStats span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.errorBox {
+  margin-top: v.$spacing-md;
+  padding: 10px 12px;
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: var(--app-radius-sm);
+  background: rgba(239, 68, 68, 0.08);
+  color: #ef4444;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 900px) {
+  .currentGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .formGrid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 560px) {
+  .currentGrid,
+  .jobStats {
+    grid-template-columns: 1fr;
+  }
+  .actions {
+    justify-content: stretch;
+  }
+  .actions button {
+    flex: 1;
+  }
+}

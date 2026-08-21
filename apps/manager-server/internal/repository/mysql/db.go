@@ -16,6 +16,7 @@ type Options struct {
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
 	ConnMaxIdleTime time.Duration
+	SkipMigrate     bool
 }
 
 func Open(dsn string) (*sql.DB, error) {
@@ -92,6 +93,9 @@ func OpenWithOptions(options Options) (*sql.DB, error) {
 	// that work made a healthy, newly initialized database fail close to the
 	// final indexes on slower production disks.  Keep the connection probe
 	// bounded separately and allow schema reconciliation a realistic window.
+	if options.SkipMigrate {
+		return db, nil
+	}
 	migrateCtx, migrateCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer migrateCancel()
 	if err := Migrate(migrateCtx, db); err != nil {

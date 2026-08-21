@@ -174,6 +174,7 @@ docker run -d \
 | 配置 Provider、认证文件、配额和插件   | [面板手册](https://seakee.github.io/CPA-Manager-Plus/docs/manual/ai-providers.html)                                                                                                   |
 | 运维 Manager Server、备份、升级与迁移 | [Manager Server 指南](https://seakee.github.io/CPA-Manager-Plus/docs/operations/manager-server.html)                                                                                  |
 | 备份数据或恢复丢失的管理员密钥        | [备份与恢复](https://seakee.github.io/CPA-Manager-Plus/docs/operations/backup.html)、[重置管理员密钥](https://seakee.github.io/CPA-Manager-Plus/docs/operations/reset-admin-key.html) |
+| 在 SQLite 与 MySQL 之间迁移并切换     | [数据库迁移与切换手册](docs/database-migration-runbook.zh-CN.md)                                                                                                                      |
 | 从旧版 CPA-Manager 迁移               | [CPA-Manager 迁移指南](https://seakee.github.io/CPA-Manager-Plus/docs/migration/from-cpa-manager.html)                                                                                |
 | 排查监控为空或队列问题                | [请求监控排障](https://seakee.github.io/CPA-Manager-Plus/docs/troubleshooting/request-monitoring.html)                                                                                |
 
@@ -181,8 +182,8 @@ docker run -d \
 
 - CPAMP 不会回传遥测，不包含分析 SDK，也不要求注册账号。
 - 外部请求只限于 CPA Gateway 及你明确配置或主动触发的 OAuth、Provider 检查、插件 Release 和模型价格同步。
-- 请求历史、配置、模型价格、巡检历史和自动化状态都保存在本地文件。
-- CPA Management Key 入库前会加密；备份需要同时保存 SQLite 文件和 `data.key`。
+- 请求历史、配置、模型价格、巡检历史和自动化状态都保存在你选择的 SQLite 或 MySQL 中。
+- CPA Management Key 入库前会加密；备份数据库时需要同时保存 `data.key`。
 - 普通 API 和 JSONL 导出只暴露脱敏失败摘要，不返回原始失败体或保存的原始 JSON。
 - CPAMP 只应用于你有权管理的流量和凭证。
 

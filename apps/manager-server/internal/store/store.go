@@ -233,6 +233,16 @@ func (s *Store) Driver() string {
 	return s.driver
 }
 
+// SQLDB exposes the shared database handle to infrastructure services such as
+// database health reporting and cross-backend migration. Business services
+// should continue using the typed repositories on Store.
+func (s *Store) SQLDB() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	return s.db
+}
+
 func (s *Store) Close() error {
 	if s.db == nil {
 		return nil

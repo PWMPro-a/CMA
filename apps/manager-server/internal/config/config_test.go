@@ -202,6 +202,34 @@ func TestLoadEnvOverridesConfig(t *testing.T) {
 	}
 }
 
+func TestLoadReadsMySQLDSNFromRestrictedFile(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	dsnPath := filepath.Join(dir, "database.dsn")
+	if err := os.WriteFile(dsnPath, []byte("cpamp:secret@tcp(mysql:3306)/cpamp\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{
+  "dataDir": "data",
+  "dbDriver": "mysql",
+  "dbDsnFile": "database.dsn"
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(configEnvKey, configPath)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DBDriver != "mysql" || cfg.DBDSN != "cpamp:secret@tcp(mysql:3306)/cpamp" {
+		t.Fatalf("database config = %#v", cfg)
+	}
+	if cfg.ConfigPath != configPath || cfg.DBConfigSource != "file" || cfg.DBConfigEnvLocked {
+		t.Fatalf("config source = path %q source %q locked %v", cfg.ConfigPath, cfg.DBConfigSource, cfg.DBConfigEnvLocked)
+	}
+}
+
 func TestNormalizeCollectorMode(t *testing.T) {
 	cases := []struct {
 		input string
@@ -248,6 +276,7 @@ func clearConfigEnv(t *testing.T) {
 		"USAGE_DATA_DIR",
 		"USAGE_DB_DRIVER",
 		"USAGE_DB_DSN",
+		"USAGE_DB_DSN_FILE",
 		"USAGE_DB_PATH",
 		"CPA_UPSTREAM_URL",
 		"CPA_MANAGEMENT_KEY",

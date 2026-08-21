@@ -21,6 +21,7 @@ import (
 	containeropssvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/containerops"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	dashboardsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/dashboard"
+	databasesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/database"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	modelpricesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/modelprice"
 	monitoringsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/monitoring"
@@ -56,6 +57,7 @@ type Context struct {
 	CollectorService               *collectorsvc.Service
 	UsageService                   *usagesvc.Service
 	DashboardService               *dashboardsvc.Service
+	DatabaseService                *databasesvc.Service
 	CodexInspectionService         *codexinspectionsvc.Service
 	CodexQuotaService              *codexquotasvc.Service
 	ContainerOpsService            *containeropssvc.Service
@@ -168,6 +170,7 @@ func fromExisting(
 		CollectorService:     collectorService,
 		UsageService:         usageService,
 		DashboardService:     dashboardsvc.New(st, cfg.DashboardHourlyRollupEnabled),
+		DatabaseService:      databasesvc.New(cfg, st),
 		CodexInspectionService: codexinspectionsvc.NewWithOptions(
 			st,
 			managerConfigService,

@@ -174,6 +174,7 @@ Recommended CPA version: `v7.1.39+`. The HTTP usage queue needs `v6.10.8+`.
 | Configure providers, credentials, quota, and plugins      | [Panel Manual](https://seakee.github.io/CPA-Manager-Plus/docs/en/manual/ai-providers.html)                                                                                                           |
 | Operate Manager Server, backups, upgrades, and migrations | [Manager Server Guide](https://seakee.github.io/CPA-Manager-Plus/docs/en/operations/manager-server.html)                                                                                             |
 | Back up data or recover a lost admin key                  | [Backup And Restore](https://seakee.github.io/CPA-Manager-Plus/docs/en/operations/backup.html), [Reset Admin Key](https://seakee.github.io/CPA-Manager-Plus/docs/en/operations/reset-admin-key.html) |
+| Migrate and cut over between SQLite and MySQL             | [Database Backends](docs/database-backends.md)                                                                                                                                                       |
 | Migrate from the legacy CPA-Manager                       | [Migration From CPA-Manager](https://seakee.github.io/CPA-Manager-Plus/docs/en/migration/from-cpa-manager.html)                                                                                      |
 | Diagnose empty monitoring or queue problems               | [Troubleshooting](https://seakee.github.io/CPA-Manager-Plus/docs/en/troubleshooting/request-monitoring.html)                                                                                         |
 
@@ -181,8 +182,8 @@ Recommended CPA version: `v7.1.39+`. The HTTP usage queue needs `v6.10.8+`.
 
 - CPAMP does not phone home, include analytics SDKs, or require account registration.
 - External calls are limited to the CPA gateway and integrations you explicitly configure or trigger, such as OAuth, provider checks, plugin releases, and model price sync.
-- Request history, configuration, model prices, inspection history, and automation state stay in local files.
-- CPA Management Keys are encrypted before SQLite persistence; backups require the SQLite files and `data.key`.
+- Request history, configuration, model prices, inspection history, and automation state stay in the SQLite or MySQL backend you select.
+- CPA Management Keys are encrypted before persistence; database backups must be kept with `data.key`.
 - Normal APIs and JSONL exports expose redacted failure summaries, never raw failure bodies or stored raw JSON.
 - CPAMP is intended for traffic and credentials you are authorized to operate.
 
