@@ -248,6 +248,32 @@ func TestNvtokensBatchResultsCaptureRemoteOrderIDsAndActualPrices(t *testing.T) 
 	}
 }
 
+func TestNvtokensBatchKeepsWarrantyWhenOnlySummaryHasPrice(t *testing.T) {
+	var value any
+	if err := json.Unmarshal([]byte(`{
+		"summary":{"requested":3,"extracted":3,"buyer_total_cents":4465},
+		"results":[
+			{"status":"extracted","remaining_seconds":3600,"account_json":{"type":"codex","access_token":"access-a","refresh_token":"refresh-a"}},
+			{"status":"extracted","order":{"remaining_seconds":"3599"},"account_json":{"type":"codex","access_token":"access-b","refresh_token":"refresh-b"}},
+			{"status":"extracted","remaining_valid_seconds":3598,"account_json":{"type":"codex","access_token":"access-c","refresh_token":"refresh-c"}}
+		]
+	}`), &value); err != nil {
+		t.Fatalf("decode batch result: %v", err)
+	}
+
+	items := nvtokensResultOrderItems(value, 4465, 3)
+	if len(items) != 3 {
+		t.Fatalf("batch order items = %#v", items)
+	}
+	if items[0].RemainingSeconds != 3600 || items[1].RemainingSeconds != 3599 || items[2].RemainingSeconds != 3598 ||
+		!items[0].HasRemaining || !items[1].HasRemaining || !items[2].HasRemaining {
+		t.Fatalf("batch warranty windows = %#v", items)
+	}
+	if items[0].ChargedFen != 1489 || items[1].ChargedFen != 1488 || items[2].ChargedFen != 1488 {
+		t.Fatalf("batch price split = %#v", items)
+	}
+}
+
 func TestNvtokensResultAccountsPrefersResultsWhenCPABundleIsEmpty(t *testing.T) {
 	var value any
 	if err := json.Unmarshal([]byte(`{

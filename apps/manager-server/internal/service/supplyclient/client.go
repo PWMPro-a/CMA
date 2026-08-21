@@ -1015,7 +1015,7 @@ func nvtokensResultOrderItems(value any, fallbackChargedFen int64, accountCount 
 		order := nvtokensResultOrder(result)
 		charged := nvtokensChargedFen(order)
 		if charged <= 0 {
-			return nil
+			charged = nvtokensChargedFen(result)
 		}
 		remaining, hasRemaining := int64ValueOK(order,
 			"remaining_seconds", "remainingSeconds", "remaining_valid_seconds", "remainingValidSeconds")
@@ -1031,12 +1031,43 @@ func nvtokensResultOrderItems(value any, fallbackChargedFen int64, accountCount 
 		})
 	}
 	if len(items) > 0 {
+		// NV can return the per-account warranty window while charging only at
+		// the batch summary level. Do not discard every warranty timestamp merely
+		// because an individual result omitted its price. Split the trusted batch
+		// total across only the zero-priced delivered items; explicit item prices
+		// remain authoritative.
+		knownCharged := int64(0)
+		missingPriceIndexes := make([]int, 0, len(items))
+		for index := range items {
+			if items[index].ChargedFen > 0 {
+				knownCharged += items[index].ChargedFen
+				continue
+			}
+			missingPriceIndexes = append(missingPriceIndexes, index)
+		}
+		remainingCharged := max(fallbackChargedFen-knownCharged, 0)
+		for ordinal, index := range missingPriceIndexes {
+			charged := splitFenShare(remainingCharged, len(missingPriceIndexes), ordinal)
+			items[index].BasePriceFen = charged
+			items[index].ChargedFen = charged
+		}
 		return items
 	}
 	if accountCount == 1 && fallbackChargedFen > 0 {
 		return []OrderItem{{BasePriceFen: fallbackChargedFen, ChargedFen: fallbackChargedFen}}
 	}
 	return nil
+}
+
+func splitFenShare(total int64, count int, ordinal int) int64 {
+	if total <= 0 || count <= 0 || ordinal < 0 || ordinal >= count {
+		return 0
+	}
+	share := total / int64(count)
+	if int64(ordinal) < total%int64(count) {
+		share++
+	}
+	return share
 }
 
 func nvtokensResultObjects(value any) []map[string]any {
