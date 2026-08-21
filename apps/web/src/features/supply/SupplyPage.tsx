@@ -4390,11 +4390,7 @@ export function SupplyPage() {
                           </td>
                           <td>{formatTime(item.lastUsedAtMs)}</td>
                           <td>{formatTime(item.expiresAtMs)}</td>
-                          <td>
-                            {item.warrantyExpiresAtMs
-                              ? formatCountdown(item.warrantyExpiresAtMs, nowMs)
-                              : '-'}
-                          </td>
+                          <td>{formatTime(item.warrantyExpiresAtMs)}</td>
                           <td>
                             <span className={`${styles.statusPill} ${accountTone(item.status)}`}>
                               {t(`supply.account_status_${item.status}`, {
