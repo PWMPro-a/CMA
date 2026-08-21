@@ -3,6 +3,7 @@ package supply
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -112,7 +113,8 @@ func TestChooseMarketplaceSellerSkipsPricesAbovePlatformCeiling(t *testing.T) {
 	scores := []SupplierQuotaScore{{SellerID: "over-limit", Status: supplierQuotaStatusApproved, ScoreM: 120}}
 
 	selection, err := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
-	if !errors.Is(err, ErrSupplierQuotaGateNoEligibleSeller) || selection != nil {
+	priceWait, ok := marketplacePriceWaitError(err)
+	if !ok || priceWait.MinimumUnitPriceFen != 1800 || priceWait.CeilingFen != 1400 || selection != nil {
 		t.Fatalf("over-limit selection = %#v err=%v", selection, err)
 	}
 }
@@ -268,7 +270,9 @@ func TestMarketplaceSupplierQuotaScoresUsesIndependentAccountEvidence(t *testing
 	if score := bySeller["good-seller"]; score.Status != supplierQuotaStatusApproved || score.ScoreM != 60 || score.SampleCount != 1 {
 		t.Fatalf("good score = %#v", score)
 	}
-	if score := bySeller["low-seller"]; score.Status != supplierQuotaStatusBlocked || score.ScoreM != 12 || score.SampleCount != 1 {
+	if score := bySeller["low-seller"]; score.Status != supplierQuotaStatusObserving ||
+		score.Reason != "waiting_for_more_supplier_evidence" || score.ScoreM != 12 ||
+		score.SampleCount != 1 || score.EvidenceCount != 1 || score.PassRatePercent != 0 {
 		t.Fatalf("low score = %#v", score)
 	}
 	if score := bySeller["new-seller"]; score.Status != supplierQuotaStatusUntried {
@@ -279,7 +283,7 @@ func TestMarketplaceSupplierQuotaScoresUsesIndependentAccountEvidence(t *testing
 	}
 }
 
-func TestMarketplaceSupplierQuotaScoresBlocksSellerWithInvalidCredential(t *testing.T) {
+func TestMarketplaceSupplierQuotaScoresDoesNotBlockSellerFromOneInvalidCredential(t *testing.T) {
 	ctx := context.Background()
 	st := testutil.NewStore(t, testutil.NewConfig(t))
 	service := New(st, nil)
@@ -312,13 +316,63 @@ func TestMarketplaceSupplierQuotaScoresBlocksSellerWithInvalidCredential(t *test
 		t.Fatalf("invalid credential scores = %#v err=%v", scores, err)
 	}
 	score := scores[0]
-	if score.Status != supplierQuotaStatusBlocked || score.Reason != "credential_invalidated" ||
-		score.InvalidCredentialCount != 1 || score.ImportedAccounts != 1 || score.SampleCount != 0 {
+	if score.Status != supplierQuotaStatusObserving || score.Reason != "waiting_for_more_supplier_evidence" ||
+		score.InvalidCredentialCount != 1 || score.ImportedAccounts != 1 || score.SampleCount != 0 ||
+		score.EvidenceCount != 1 || score.PassRatePercent != 0 {
 		t.Fatalf("invalid credential score = %#v", score)
 	}
 	selection, selectErr := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
 	if selection != nil || !errors.Is(selectErr, ErrSupplierQuotaGateNoEligibleSeller) {
 		t.Fatalf("invalid credential seller selected = %#v err=%v", selection, selectErr)
+	}
+}
+
+func TestMarketplaceSupplierQuotaScoresToleratesTwoBadAccountsOutOfTen(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewStore(t, testutil.NewConfig(t))
+	service := New(st, nil)
+	now := time.Now()
+	results := make([]store.CodexInspectionResult, 0, 10)
+	for index := 0; index < 10; index++ {
+		fileName := fmt.Sprintf("mixed-%02d.json", index)
+		seedMarketplaceQuotaAccount(t, st, fmt.Sprintf("mixed-order-%02d", index), "mixed-seller", "Mixed Seller", fileName)
+		result := store.CodexInspectionResult{FileName: fileName, AccountKey: fileName, Provider: "codex"}
+		if index < 2 {
+			statusUnauthorized := 401
+			result.Action = "reauth"
+			result.StatusCode = &statusUnauthorized
+			result.ErrorDetail = `{"error":{"code":"token_revoked"}}`
+		} else {
+			service.smartQuotaState.directSamples["file:"+fileName] = smartQuotaCalibrationSample{
+				identity: "file:" + fileName, capacityM: 120, weight: 1, usedFraction: 0.2,
+				observedMS: now.UnixMilli(), completeWindow: true,
+			}
+		}
+		results = append(results, result)
+	}
+	service.quotaSnapshot = inspectionQuotaSnapshot{results: results, generatedAt: now, attemptedAt: now}
+
+	enabled := true
+	platform := store.ManagerSupplyPlatformConfig{
+		ID: "nv", Name: "NV", Type: "nvtokens", Product: "plus",
+		SupplierQuotaGateEnabled: &enabled, SupplierQuotaMinimumM: 90,
+	}
+	candidate := supplyclient.MarketplaceSellerCandidate{
+		SellerID: "mixed-seller", Name: "Mixed Seller", SelectionToken: "mixed-token",
+		Product: "plus", Available: 20, MinUnitPriceFen: 1200,
+	}
+	scores, err := service.marketplaceSupplierQuotaScores(ctx, platform, []supplyclient.MarketplaceSellerCandidate{candidate}, nil)
+	if err != nil || len(scores) != 1 {
+		t.Fatalf("mixed seller scores = %#v err=%v", scores, err)
+	}
+	score := scores[0]
+	if score.Status != supplierQuotaStatusApproved || score.SampleCount != 8 || score.EvidenceCount != 10 ||
+		score.PassingSampleCount != 8 || score.InvalidCredentialCount != 2 || score.PassRatePercent != 80 {
+		t.Fatalf("mixed seller should tolerate two failures out of ten: %#v", score)
+	}
+	selection, selectErr := chooseMarketplaceSellerForAutomaticPurchase(platform, 5, []supplyclient.MarketplaceSellerCandidate{candidate}, scores)
+	if selectErr != nil || selection == nil || selection.candidate.SellerID != "mixed-seller" || selection.trial {
+		t.Fatalf("mixed seller selection = %#v err=%v", selection, selectErr)
 	}
 }
 
@@ -432,7 +486,7 @@ func seedMarketplaceQuotaAccount(
 		t.Fatalf("create seller order: %v", err)
 	}
 	if _, err := st.InsertSupplyImportItems(ctx, order.OrderID, []store.SupplyImportItem{{
-		ItemKey: sellerID + "-item", FileName: fileName, PayloadJSON: `{}`,
+		ItemKey: orderID + "-item", FileName: fileName, PayloadJSON: `{}`,
 		MarketplaceSellerID: sellerID, MarketplaceSellerName: sellerName,
 		MarketplaceSelectionToken: sellerID + "-token",
 	}}); err != nil {

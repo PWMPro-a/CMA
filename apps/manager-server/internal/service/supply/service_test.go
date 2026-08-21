@@ -83,6 +83,28 @@ func TestAutomationExecutionTracksScheduledAndCompletedCycles(t *testing.T) {
 		t.Fatalf("busy automation should be deferred without an operator error: %#v", deferred)
 	}
 
+	service.beginAutomaticRunDecision()
+	service.recordAutomaticRunDecision(SmartResource{
+		SuggestedAction: smartActionPriceWait,
+		DecisionReason:  "supplier_price_above_ceiling",
+	})
+	service.RecordAutomaticExecution(now, finishedAt, nextAt, nil)
+	priceWait := service.currentAutomationExecution(true)
+	if priceWait.LastResult != "price_wait" || priceWait.LastAction != smartActionPriceWait || priceWait.LastError != "" {
+		t.Fatalf("price wait should be a normal no-order result: %#v", priceWait)
+	}
+
+	service.beginAutomaticRunDecision()
+	service.recordAutomaticRunDecision(SmartResource{
+		SuggestedAction: smartActionSupplierGateWait,
+		DecisionReason:  "supplier_quota_gate_wait",
+	})
+	service.RecordAutomaticExecution(now, finishedAt, nextAt, nil)
+	quotaWait := service.currentAutomationExecution(true)
+	if quotaWait.LastResult != "quota_wait" || quotaWait.LastAction != smartActionSupplierGateWait || quotaWait.LastError != "" {
+		t.Fatalf("supplier evidence wait should be a normal no-order result: %#v", quotaWait)
+	}
+
 	disabled := service.currentAutomationExecution(false)
 	if disabled.Enabled || disabled.NextExecutionAtMS != 0 || disabled.IntervalSeconds != 0 {
 		t.Fatalf("disabled automation must not expose a future execution: %#v", disabled)

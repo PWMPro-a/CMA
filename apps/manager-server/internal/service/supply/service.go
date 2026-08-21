@@ -3110,6 +3110,30 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	timing.next("supplier-quote")
 	selection, err := s.selectSupplyPlatform(ctx, supplyCfg, quantity, openOrders, requestedSupplierID)
 	if err != nil {
+		if manualQuantity == 0 {
+			if action, reason, ok := automaticSupplyWaitDecision(err); ok {
+				resource.SuggestedAction = action
+				resource.SuggestedQuantity = 0
+				resource.DecisionReason = reason
+				if useSmart {
+					s.setSmartResource(resource)
+				}
+				overview := Overview{
+					CheckedAtMS:  time.Now().UnixMilli(),
+					CPAAvailable: available,
+					CPATarget:    supplyCfg.TargetAvailableAccounts,
+					CPADeficit:   max(0, supplyCfg.TargetAvailableAccounts-available),
+					Platforms:    selection.all,
+				}
+				if selection.status.Inventory != nil {
+					overview.Inventory = selection.status.Inventory
+					overview.SelectedPlatformID = selection.platform.ID
+				}
+				s.setOverview(overview)
+				s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
+				return nil
+			}
+		}
 		return err
 	}
 	platform := selection.platform
@@ -4195,6 +4219,12 @@ func (s *Service) refreshSupplyOverview(ctx context.Context, cfg store.ManagerSu
 		Platforms:    selection.all,
 	}
 	if err != nil {
+		if _, _, ok := automaticSupplyWaitDecision(err); ok {
+			overview.Inventory = selection.status.Inventory
+			overview.SelectedPlatformID = selection.platform.ID
+			s.setOverview(overview)
+			return nil
+		}
 		overview.LastError = safeError(err)
 		s.setOverview(overview)
 		return err
@@ -9544,10 +9574,34 @@ func (s *Service) RecordAutomaticExecution(startedAt, finishedAt, nextAt time.Ti
 		s.invalidateStatusCache()
 		return
 	}
+	switch decision.DecisionReason {
+	case "supplier_price_above_ceiling":
+		s.automation.LastResult = "price_wait"
+		s.automation.LastError = ""
+		s.stateMu.Unlock()
+		s.invalidateStatusCache()
+		return
+	case "supplier_quota_gate_wait":
+		s.automation.LastResult = "quota_wait"
+		s.automation.LastError = ""
+		s.stateMu.Unlock()
+		s.invalidateStatusCache()
+		return
+	}
 	s.automation.LastResult = "completed"
 	s.automation.LastError = ""
 	s.stateMu.Unlock()
 	s.invalidateStatusCache()
+}
+
+func automaticSupplyWaitDecision(err error) (action string, reason string, ok bool) {
+	if _, priceWait := marketplacePriceWaitError(err); priceWait {
+		return smartActionPriceWait, "supplier_price_above_ceiling", true
+	}
+	if errors.Is(err, ErrSupplierQuotaGateNoEligibleSeller) {
+		return smartActionSupplierGateWait, "supplier_quota_gate_wait", true
+	}
+	return "", "", false
 }
 
 func (s *Service) NextAutomaticInterval(ctx context.Context, runErr error) time.Duration {

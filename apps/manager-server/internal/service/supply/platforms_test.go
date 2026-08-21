@@ -445,8 +445,8 @@ func TestSelectLowPriceReserveCatalogPlatformAppliesSupplierQuotaGate(t *testing
 	}
 
 	selection, matched, err := service.selectLowPriceReserveCatalogPlatform(ctx, cfg, 15)
-	if err != nil || matched || len(selection.all) != 1 || selection.all[0].Inventory == nil ||
-		selection.all[0].Inventory.EstimatedUnitPriceFen != 1399 {
+	if err != nil || matched || len(selection.all) != 1 || selection.all[0].Inventory != nil ||
+		len(selection.all[0].SupplierQuotaScores) != 2 {
 		t.Fatalf("over-ceiling eligible catalog = %#v matched=%v err=%v", selection, matched, err)
 	}
 
@@ -456,6 +456,52 @@ func TestSelectLowPriceReserveCatalogPlatformAppliesSupplierQuotaGate(t *testing
 		selection.marketplaceSeller.candidate.SellerID != "seller-approved" ||
 		selection.status.Inventory == nil || selection.status.Inventory.EstimatedUnitPriceFen != 1250 {
 		t.Fatalf("eligible catalog = %#v matched=%v err=%v", selection, matched, err)
+	}
+}
+
+func TestSelectLowPriceReserveCatalogPlatformUsesDedicatedCeilingBeforeSellerGate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/workspace/seller-candidates" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"sellers":[{
+			"seller_token":"seller-low","selection_token":"select-low",
+			"sale_plan_counts":{"plus":14},
+			"sale_plan_prices":{"plus":{"min_cents":1738,"max_cents":1788}}
+		}]}`))
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "low-price-dedicated-ceiling.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	reserveCeiling := int64(1800)
+	regularCeiling := int64(1400)
+	platform := store.ManagerSupplyPlatformConfig{
+		ID: "nv", Name: "NV", Type: managerconfigsvc.SupplyPlatformNvtokens, Enabled: &enabled,
+		BaseURL: server.URL, Token: "nv-session", Product: "plus", MaxUnitPriceFen: &regularCeiling,
+		SupplierQuotaGateEnabled: &enabled, SupplierQuotaMinimumM: 90, SupplierQuotaTrialQuantity: 1,
+	}
+	service := New(st, nil, server.Client())
+	service.setCachedMarketplaceSupplierQuotaScores(supplierQuotaScoreCacheKey(platform), []SupplierQuotaScore{{
+		SellerID: "seller-low", Status: supplierQuotaStatusObserving,
+		Reason: "waiting_for_more_supplier_evidence", RetryAfterMS: time.Now().Add(-time.Second).UnixMilli(),
+	}}, time.Now())
+
+	selection, matched, err := service.selectLowPriceReserveCatalogPlatform(ctx, store.ManagerSupplyConfig{
+		LowPriceReserveEnabled: &enabled, LowPriceReserveMaxUnitPriceFen: &reserveCeiling,
+		LowPriceReserveTargetAccounts: 30, Platforms: []store.ManagerSupplyPlatformConfig{platform},
+	}, 15)
+	if err != nil || !matched || selection.marketplaceSeller == nil ||
+		selection.marketplaceSeller.candidate.SellerID != "seller-low" ||
+		selection.quantity != 1 || selection.status.Inventory == nil ||
+		selection.status.Inventory.EstimatedUnitPriceFen != 1738 {
+		t.Fatalf("dedicated reserve ceiling selection = %#v matched=%v err=%v", selection, matched, err)
 	}
 }
 

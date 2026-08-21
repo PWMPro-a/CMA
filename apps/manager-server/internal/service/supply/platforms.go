@@ -564,6 +564,11 @@ func (s *Service) selectLowPriceReserveCatalogPlatform(
 			}
 			platform.Product = product
 		}
+		// The reserve watcher has an independent ceiling. Apply it before seller
+		// selection so a regular ¥14 limit cannot hide a ¥17.38 offer that is
+		// valid under an explicitly configured ¥18 reserve limit.
+		platformCeiling := lowPriceReservePlatformCeiling(cfg, platform)
+		platform.MaxUnitPriceFen = &platformCeiling
 		platforms = append(platforms, platform)
 	}
 	if len(platforms) == 0 {
@@ -595,6 +600,7 @@ func (s *Service) selectLowPriceReserveCatalogPlatform(
 		marketplaceSeller *marketplaceSellerSelection
 		scores            []SupplierQuotaScore
 		noEligibleSeller  bool
+		priceWait         *MarketplacePriceWaitError
 		err               error
 	}
 	results := make(chan result, len(platforms))
@@ -609,6 +615,10 @@ func (s *Service) selectLowPriceReserveCatalogPlatform(
 			}
 			if supplierQuotaGateEnabled(platform) {
 				selection, scores, err := s.selectMarketplaceSellerForAutomaticPurchase(ctx, platform, quantity, openOrders)
+				if priceWait, ok := marketplacePriceWaitError(err); ok {
+					results <- result{index: index, scores: scores, priceWait: priceWait}
+					return
+				}
 				if errors.Is(err, ErrSupplierQuotaGateNoEligibleSeller) {
 					results <- result{index: index, scores: scores, noEligibleSeller: true}
 					return
@@ -644,7 +654,20 @@ func (s *Service) selectLowPriceReserveCatalogPlatform(
 			continue
 		}
 		if item.noEligibleSeller {
-			status.LastError = safeError(ErrSupplierQuotaGateNoEligibleSeller)
+			statuses[item.index] = status
+			continue
+		}
+		if item.priceWait != nil {
+			available := max(0, item.priceWait.Available)
+			quotedQuantity := min(max(1, quantity), available)
+			status.Inventory = &supplyclient.Inventory{
+				Product:               platform.Product,
+				RequestedQuantity:     max(1, quantity),
+				Available:             available,
+				Missing:               max(0, max(1, quantity)-available),
+				EstimatedTotalFen:     item.priceWait.MinimumUnitPriceFen * int64(quotedQuantity),
+				EstimatedUnitPriceFen: item.priceWait.MinimumUnitPriceFen,
+			}
 			statuses[item.index] = status
 			continue
 		}
@@ -765,6 +788,8 @@ func (s *Service) selectSupplyPlatformProduct(
 	quoteErrors := make([]error, len(platforms))
 	marketplaceSellers := make([]*marketplaceSellerSelection, len(platforms))
 	effectiveQuantities := make([]int, len(platforms))
+	priceWaits := make([]*MarketplacePriceWaitError, len(platforms))
+	quotaGateWait := false
 	resource := s.currentSmartResource(cfg)
 	type result struct {
 		index               int
@@ -818,7 +843,11 @@ func (s *Service) selectSupplyPlatformProduct(
 					results <- result{
 						index: index, marketplaceSeller: marketplaceSeller,
 						supplierQuotaScores: supplierQuotaScores, quantity: effectiveQuantity,
-						err: fmt.Errorf("automatic quote unit price %d exceeds configured ceiling %d", inventory.EstimatedUnitPriceFen, ceiling),
+						err: &MarketplacePriceWaitError{
+							MinimumUnitPriceFen: inventory.EstimatedUnitPriceFen,
+							CeilingFen:          ceiling,
+							Available:           inventory.Available,
+						},
 					}
 					return
 				}
@@ -852,6 +881,26 @@ func (s *Service) selectSupplyPlatformProduct(
 			purchaseQuantity:    effectiveQuantities[item.index],
 		}
 		if item.err != nil {
+			if priceWait, ok := marketplacePriceWaitError(item.err); ok {
+				priceWaits[item.index] = priceWait
+				available := max(0, priceWait.Available)
+				quotedQuantity := min(max(1, quantity), available)
+				status.Inventory = &supplyclient.Inventory{
+					Product:               platform.Product,
+					RequestedQuantity:     max(1, quantity),
+					Available:             available,
+					Missing:               max(0, max(1, quantity)-available),
+					EstimatedTotalFen:     priceWait.MinimumUnitPriceFen * int64(quotedQuantity),
+					EstimatedUnitPriceFen: priceWait.MinimumUnitPriceFen,
+				}
+				statuses[item.index] = status
+				continue
+			}
+			if errors.Is(item.err, ErrSupplierQuotaGateNoEligibleSeller) {
+				quotaGateWait = true
+				statuses[item.index] = status
+				continue
+			}
 			quoteErrors[item.index] = item.err
 			status.LastError = safeError(item.err)
 			platformErrors = append(platformErrors, fmt.Errorf("%s: %w", firstNonEmptyString(platform.Name, platform.ID), item.err))
@@ -905,6 +954,26 @@ func (s *Service) selectSupplyPlatformProduct(
 	if len(candidates) == 0 {
 		if len(platformErrors) > 0 {
 			return supplyPlatformSelection{all: statuses}, errors.Join(platformErrors...)
+		}
+		priceWaitIndex := -1
+		for index, priceWait := range priceWaits {
+			if priceWait == nil {
+				continue
+			}
+			if priceWaitIndex < 0 || priceWait.MinimumUnitPriceFen < priceWaits[priceWaitIndex].MinimumUnitPriceFen {
+				priceWaitIndex = index
+			}
+		}
+		if priceWaitIndex >= 0 {
+			statuses[priceWaitIndex].Selected = true
+			return supplyPlatformSelection{
+				platform: platforms[priceWaitIndex],
+				status:   statuses[priceWaitIndex],
+				all:      statuses,
+			}, priceWaits[priceWaitIndex]
+		}
+		if quotaGateWait {
+			return supplyPlatformSelection{all: statuses}, ErrSupplierQuotaGateNoEligibleSeller
 		}
 		return supplyPlatformSelection{all: statuses}, ErrNotConfigured
 	}

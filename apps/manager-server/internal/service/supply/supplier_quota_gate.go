@@ -3,6 +3,7 @@ package supply
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"strconv"
@@ -16,7 +17,45 @@ import (
 
 var ErrSupplierQuotaGateNoEligibleSeller = errors.New("no marketplace seller currently passes the automatic quota gate")
 
+// MarketplacePriceWaitError is a normal automatic-procurement wait state: the
+// marketplace has stock, but every current seller quote is above the hard
+// platform ceiling. It must not be reported as a supplier quota-gate failure.
+type MarketplacePriceWaitError struct {
+	MinimumUnitPriceFen int64
+	CeilingFen          int64
+	Available           int
+}
+
+func (e *MarketplacePriceWaitError) Error() string {
+	if e == nil {
+		return "marketplace price is above the automatic purchase ceiling"
+	}
+	return fmt.Sprintf(
+		"marketplace minimum unit price %d exceeds automatic purchase ceiling %d",
+		e.MinimumUnitPriceFen,
+		e.CeilingFen,
+	)
+}
+
+func marketplacePriceWaitError(err error) (*MarketplacePriceWaitError, bool) {
+	var target *MarketplacePriceWaitError
+	if !errors.As(err, &target) || target == nil {
+		return nil, false
+	}
+	return target, true
+}
+
 const maxSupplierQuotaScoringOrders = 2000
+
+const (
+	// Permanent supplier decisions need a representative batch. Before this
+	// point a weak or revoked account only keeps the seller in single-account
+	// observation; one unlucky delivery never blacklists the whole seller.
+	supplierQuotaMinimumDecisionSamples = 5
+	// Up to 20% weak/invalid deliveries are tolerated. Thus a batch of ten may
+	// contain one or two bad accounts while the seller remains eligible.
+	supplierQuotaMinimumPassRate = 0.80
+)
 
 // An observing seller is not permanently excluded. A bounded pause gives the
 // inspection worker time to turn the last trial into quota evidence and also
@@ -49,6 +88,9 @@ type SupplierQuotaScore struct {
 	MinimumObservedM       float64 `json:"minimumObservedM,omitempty"`
 	MaximumObservedM       float64 `json:"maximumObservedM,omitempty"`
 	SampleCount            int     `json:"sampleCount"`
+	EvidenceCount          int     `json:"evidenceCount"`
+	PassingSampleCount     int     `json:"passingSampleCount"`
+	PassRatePercent        float64 `json:"passRatePercent,omitempty"`
 	ImportedAccounts       int     `json:"importedAccounts"`
 	InvalidCredentialCount int     `json:"invalidCredentialCount,omitempty"`
 	AttemptCount           int     `json:"attemptCount,omitempty"`
@@ -153,13 +195,22 @@ func chooseMarketplaceSellerForAutomaticPurchase(
 	eligible := make([]marketplaceSellerSelection, 0)
 	nowMS := time.Now().UnixMilli()
 	ceiling := valueOrZero(platform.MaxUnitPriceFen)
+	minimumAvailablePriceFen := int64(0)
+	minimumAvailableAtPrice := 0
+	hasPotentiallyPriceQualifiedStock := false
 	for _, candidate := range candidates {
 		if candidate.Available <= 0 || strings.TrimSpace(candidate.SelectionToken) == "" {
 			continue
 		}
+		if candidate.MinUnitPriceFen > 0 &&
+			(minimumAvailablePriceFen == 0 || candidate.MinUnitPriceFen < minimumAvailablePriceFen) {
+			minimumAvailablePriceFen = candidate.MinUnitPriceFen
+			minimumAvailableAtPrice = candidate.Available
+		}
 		if ceiling > 0 && candidate.MinUnitPriceFen > ceiling {
 			continue
 		}
+		hasPotentiallyPriceQualifiedStock = true
 		score, found := byID[normalizeMarketplaceSellerID(candidate.SellerID)]
 		if !found {
 			continue
@@ -191,6 +242,13 @@ func chooseMarketplaceSellerForAutomaticPurchase(
 	sortMarketplaceSellerSelections(eligible)
 	if len(eligible) > 0 {
 		return &eligible[0], nil
+	}
+	if ceiling > 0 && minimumAvailablePriceFen > ceiling && !hasPotentiallyPriceQualifiedStock {
+		return nil, &MarketplacePriceWaitError{
+			MinimumUnitPriceFen: minimumAvailablePriceFen,
+			CeilingFen:          ceiling,
+			Available:           minimumAvailableAtPrice,
+		}
 	}
 	return nil, ErrSupplierQuotaGateNoEligibleSeller
 }
@@ -361,10 +419,9 @@ func (s *Service) marketplaceSupplierQuotaScores(
 		if !found {
 			continue
 		}
-		// A quota sample can recover after its reset window, but an OAuth token
-		// that the independent inspection has proven revoked/invalid is a product
-		// quality failure. Keep that seller out of every subsequent automatic
-		// purchase instead of retrying it as an "observing" quota supplier.
+		// A revoked/invalid credential is a failed quality sample. It contributes
+		// to the seller's combined pass rate, but one isolated failure does not
+		// blacklist the seller before a representative evidence batch exists.
 		if inspectionResultCredentialInvalid(result) {
 			entry.invalid++
 			continue
@@ -403,23 +460,48 @@ func (s *Service) marketplaceSupplierQuotaScores(
 		if candidate.ActiveRatePercent != nil {
 			score.MarketplaceActiveRate = *candidate.ActiveRatePercent
 		}
-		if entry.invalid > 0 {
-			score.Status = supplierQuotaStatusBlocked
-			score.Reason = "credential_invalidated"
-		} else if len(entry.capacities) > 0 {
+		if len(entry.capacities) > 0 {
 			sort.Float64s(entry.capacities)
 			score.SampleCount = len(entry.capacities)
 			score.MinimumObservedM = round2(entry.capacities[0])
 			score.MaximumObservedM = round2(entry.capacities[len(entry.capacities)-1])
 			score.ScoreM = round2(entry.capacities[(len(entry.capacities)-1)/4])
-			if score.ScoreM >= threshold {
+			for _, capacity := range entry.capacities {
+				if capacity >= threshold {
+					score.PassingSampleCount++
+				}
+			}
+		}
+		score.EvidenceCount = score.SampleCount + entry.invalid
+		if score.EvidenceCount > 0 {
+			score.PassRatePercent = round2(float64(score.PassingSampleCount) / float64(score.EvidenceCount) * 100)
+		}
+		switch {
+		case score.EvidenceCount >= supplierQuotaMinimumDecisionSamples:
+			passRate := float64(score.PassingSampleCount) / float64(score.EvidenceCount)
+			if passRate+1e-9 >= supplierQuotaMinimumPassRate && score.ScoreM >= threshold {
 				score.Status = supplierQuotaStatusApproved
 				score.Reason = "observed_quota_meets_threshold"
 			} else {
 				score.Status = supplierQuotaStatusBlocked
-				score.Reason = "observed_quota_below_threshold"
+				score.Reason = "observed_supplier_quality_below_threshold"
 			}
-		} else if entry.imported > 0 || entry.inFlight || entry.attempted > 0 || entry.purchased > 0 || candidate.PurchasedBefore || candidate.PurchaseCount > 0 {
+		case score.EvidenceCount > 0:
+			// A clean high-quota sample may provisionally release a seller, but a
+			// weak or invalid early sample only asks for more single-account trials.
+			// It never creates a permanent block before the evidence batch is large
+			// enough to tolerate normal 10-20% delivery variance.
+			if entry.invalid == 0 && score.PassingSampleCount == score.EvidenceCount {
+				score.Status = supplierQuotaStatusApproved
+				score.Reason = "provisional_quota_meets_threshold"
+			} else {
+				score.Status = supplierQuotaStatusObserving
+				score.Reason = "waiting_for_more_supplier_evidence"
+				if entry.lastAttemptMS > 0 {
+					score.RetryAfterMS = entry.lastAttemptMS + supplierQuotaObservationRetryInterval.Milliseconds()
+				}
+			}
+		case entry.imported > 0 || entry.inFlight || entry.attempted > 0 || entry.purchased > 0 || candidate.PurchasedBefore || candidate.PurchaseCount > 0:
 			score.Status = supplierQuotaStatusObserving
 			if entry.inFlight {
 				score.Reason = "trial_in_flight"
@@ -429,7 +511,7 @@ func (s *Service) marketplaceSupplierQuotaScores(
 					score.RetryAfterMS = entry.lastAttemptMS + supplierQuotaObservationRetryInterval.Milliseconds()
 				}
 			}
-		} else {
+		default:
 			score.Status = supplierQuotaStatusUntried
 			score.Reason = "eligible_for_single_trial"
 		}

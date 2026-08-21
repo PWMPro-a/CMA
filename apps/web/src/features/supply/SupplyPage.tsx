@@ -1637,15 +1637,19 @@ export function SupplyPage() {
     ? t('supply.automation_execution_retrying')
     : automation?.lastError || lastExecutionResult === 'failed'
       ? t('supply.automation_execution_failed')
-      : lastExecutionCreatedOrder && latestAutomaticOrder
-        ? t('supply.automation_execution_order_created', {
-            quantity: latestAutomaticOrder.requestedQuantity,
-          })
-        : activeOrder
-          ? t('supply.automation_execution_order_continued', {
-              orderId: shortOrderId(activeOrder.orderId),
-            })
-          : t('supply.automation_execution_no_order');
+      : lastExecutionResult === 'price_wait'
+        ? t('supply.automation_execution_price_wait')
+        : lastExecutionResult === 'quota_wait'
+          ? t('supply.automation_execution_quota_wait')
+          : lastExecutionCreatedOrder && latestAutomaticOrder
+            ? t('supply.automation_execution_order_created', {
+                quantity: latestAutomaticOrder.requestedQuantity,
+              })
+            : activeOrder
+              ? t('supply.automation_execution_order_continued', {
+                  orderId: shortOrderId(activeOrder.orderId),
+                })
+              : t('supply.automation_execution_no_order');
   const lastExecutionSummary = t('supply.automation_last_execution_summary', {
     result: lastExecutionResultLabel,
     value: automation?.lastFinishedAtMs ? formatTime(automation.lastFinishedAtMs) : '-',
@@ -3444,6 +3448,21 @@ export function SupplyPage() {
                                                       accounts: score.importedAccounts,
                                                     })}
                                                   </span>
+                                                  {(score.evidenceCount ?? 0) > 0 ? (
+                                                    <small>
+                                                      {t(
+                                                        'supply.supplier_quota_pass_rate_summary',
+                                                        {
+                                                          passing: score.passingSampleCount ?? 0,
+                                                          total: score.evidenceCount ?? 0,
+                                                          rate: formatNumber(
+                                                            score.passRatePercent ?? 0,
+                                                            0
+                                                          ),
+                                                        }
+                                                      )}
+                                                    </small>
+                                                  ) : null}
                                                   {(score.invalidCredentialCount ?? 0) > 0 ? (
                                                     <small>
                                                       {t('supply.supplier_quota_invalid_summary', {

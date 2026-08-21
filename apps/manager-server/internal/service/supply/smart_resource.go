@@ -29,6 +29,8 @@ const (
 	smartActionManualReview       = "manual_review"
 	smartActionObserveDemand      = "observe_demand"
 	smartActionEmergencyReplenish = "emergency_replenish"
+	smartActionPriceWait          = "price_wait"
+	smartActionSupplierGateWait   = "supplier_gate_wait"
 
 	smartHealthHealthy  = "healthy"
 	smartHealthWarning  = "warning"
@@ -3314,7 +3316,7 @@ func round2(value float64) float64 {
 }
 
 func supplySmartActionPriority(action string) int {
-	order := []string{smartActionHealthy, smartActionObserveDemand, smartActionPrelock, smartActionWaitLocked, smartActionReleaseLocked, smartActionTakeLocked, smartActionEmergencyReplenish, smartActionBalanceBlocked, smartActionInventoryBlocked, smartActionConfigError, smartActionSnapshotStale, smartActionManualReview}
+	order := []string{smartActionHealthy, smartActionObserveDemand, smartActionPriceWait, smartActionSupplierGateWait, smartActionPrelock, smartActionWaitLocked, smartActionReleaseLocked, smartActionTakeLocked, smartActionEmergencyReplenish, smartActionBalanceBlocked, smartActionInventoryBlocked, smartActionConfigError, smartActionSnapshotStale, smartActionManualReview}
 	for index, item := range order {
 		if item == action {
 			return index
