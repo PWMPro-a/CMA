@@ -180,12 +180,6 @@ func (s *Service) RunLowPriceReserve(ctx context.Context) (LowPriceReserveExecut
 	}
 	if found {
 		execution.ActiveTaskID = active.TaskID
-		if isLowPriceReserveTrigger(active.TriggerReason) {
-			execution.LastResult = "active_task"
-		} else {
-			execution.LastResult = "normal_task_active"
-		}
-		return execution, nil
 	}
 
 	selection, matched, err := s.selectLowPriceReserveCatalogPlatform(ctx, cfg.Supply, execution.NextStageQuantity)
@@ -195,7 +189,28 @@ func (s *Service) RunLowPriceReserve(ctx context.Context) (LowPriceReserveExecut
 		execution.quoteObserved = true
 	}
 	if err != nil {
+		if found {
+			// A transient catalog failure must not hide the task that is already
+			// being delivered. Keep its state visible and retry the quote next tick.
+			if isLowPriceReserveTrigger(active.TriggerReason) {
+				execution.LastResult = "active_task"
+			} else {
+				execution.LastResult = "normal_task_active"
+			}
+			return execution, nil
+		}
 		return execution, err
+	}
+	if found {
+		// Keep the displayed quote current while an earlier task is waiting for
+		// delivery. The task worker performs its own exact re-quote before paying,
+		// so this observation never creates a second order or changes the charge.
+		if isLowPriceReserveTrigger(active.TriggerReason) {
+			execution.LastResult = "active_task"
+		} else {
+			execution.LastResult = "normal_task_active"
+		}
+		return execution, nil
 	}
 	if !matched || selection.status.Inventory == nil {
 		execution.LastResult = "price_wait"

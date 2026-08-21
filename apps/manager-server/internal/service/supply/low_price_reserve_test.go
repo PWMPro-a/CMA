@@ -54,6 +54,7 @@ func TestCountLowPriceReserveFilesUsesOnlyAvailableMarkedAccounts(t *testing.T) 
 }
 
 func TestRunLowPriceReserveCreatesOneBoundedLadderTask(t *testing.T) {
+	var quoteCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v0/management/auth-files":
@@ -66,6 +67,7 @@ func TestRunLowPriceReserveCreatesOneBoundedLadderTask(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"files": files})
 		case "/api/workspace/seller-candidates":
+			quoteCalls++
 			_, _ = w.Write([]byte(`{"sellers":[{"sale_plans":["plus"],"sale_plan_counts":{"plus":20},"sale_plan_prices":{"plus":{"min_cents":50,"max_cents":50}}}]}`))
 		default:
 			http.NotFound(w, r)
@@ -106,8 +108,11 @@ func TestRunLowPriceReserveCreatesOneBoundedLadderTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second watcher run: %v", err)
 	}
-	if second.LastResult != "active_task" || second.ActiveTaskID != first.ActiveTaskID {
+	if second.LastResult != "active_task" || second.ActiveTaskID != first.ActiveTaskID || second.LastQuotedUnitPriceFen != 50 {
 		t.Fatalf("second execution = %#v", second)
+	}
+	if quoteCalls < 2 {
+		t.Fatalf("active task did not refresh the live quote: calls=%d", quoteCalls)
 	}
 	task, found, err := st.GetSupplyPurchaseTask(ctx, first.ActiveTaskID)
 	if err != nil || !found || task.TargetQuantity != 2 {

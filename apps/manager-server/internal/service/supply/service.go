@@ -710,6 +710,7 @@ const (
 	supplyStatusStaleTTL       = 30 * time.Minute
 	supplyStatusRetryCooldown  = 5 * time.Second
 	supplyStatusRefreshTimeout = 8 * time.Second
+	supplyOverviewQuoteTTL     = 10 * time.Second
 	operatorHeaderCacheTTL     = 15 * time.Second
 	operatorAccountPoolTTL     = 15 * time.Second
 )
@@ -1063,8 +1064,9 @@ func (s *Service) buildStatus(ctx context.Context, limit int) (Status, error) {
 	// Overview used to live only in process memory. Recreating the Manager
 	// therefore made inventory and balance look empty until a later automation
 	// branch happened to refresh them; an open order can keep that branch from
-	// running for a long time. Hydrate the read-only supplier snapshot once on
-	// cold start so the dashboard keeps its operational data after deployment.
+	// running for a long time. Hydrate the read-only supplier snapshot on cold
+	// start and refresh it after a short TTL so an order reservation never turns
+	// the dashboard's current price into a historical quote.
 	s.hydrateOverviewIfNeeded(ctx, cfg.Supply)
 	orders, err := s.store.ListSupplyOrders(ctx, limit)
 	if err != nil {
@@ -4076,14 +4078,17 @@ func (s *Service) hydrateOverviewIfNeeded(ctx context.Context, cfg store.Manager
 	s.stateMu.RLock()
 	current := s.overview
 	s.stateMu.RUnlock()
-	if current.Inventory != nil && current.Balance != nil {
+	hasCompleteQuote := current.Inventory != nil && current.Balance != nil
+	if hasCompleteQuote && current.CheckedAtMS > 0 &&
+		time.Since(time.UnixMilli(current.CheckedAtMS)) < supplyOverviewQuoteTTL {
 		return
 	}
 	// Keep a failed supplier request from being retried by every 10-second UI
 	// refresh while still recovering promptly from a short upstream outage.
-	if current.CheckedAtMS > 0 && time.Since(time.UnixMilli(current.CheckedAtMS)) < 20*time.Second {
+	if !hasCompleteQuote && current.CheckedAtMS > 0 && time.Since(time.UnixMilli(current.CheckedAtMS)) < 20*time.Second {
 		return
 	}
+	refreshStartedAtMS := time.Now().UnixMilli()
 
 	refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	selection, err := s.selectSupplyPlatform(refreshCtx, cfg, max(1, cfg.ReplenishBatchSize), nil)
@@ -4092,8 +4097,15 @@ func (s *Service) hydrateOverviewIfNeeded(ctx context.Context, cfg store.Manager
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	// Automation may have refreshed the overview while the supplier request was
-	// in flight. Do not replace fresher complete data with this cold-start copy.
-	if s.overview.Inventory != nil && s.overview.Balance != nil {
+	// in flight. Do not replace fresher complete data with this copy.
+	if s.overview.CheckedAtMS > refreshStartedAtMS && s.overview.Inventory != nil && s.overview.Balance != nil {
+		return
+	}
+	if err != nil && hasCompleteQuote {
+		// Keep the last valid price and balance visible during a transient supplier
+		// outage. The next TTL window retries the live quote.
+		s.overview.Platforms = selection.all
+		s.overview.LastError = safeError(err)
 		return
 	}
 	s.overview.CheckedAtMS = time.Now().UnixMilli()
