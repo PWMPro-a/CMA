@@ -758,6 +758,36 @@ func TestRefreshSupplySnapshotIsReadOnlyAndCodexOnly(t *testing.T) {
 	}
 }
 
+func TestRefreshSupplySnapshotReturnsErrorWhenRunDoesNotComplete(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			<-r.Context().Done()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	db := newCodexInspectionTestStore(t)
+	if err := db.SaveManagerConfig(context.Background(), newCodexInspectionManagerConfig(upstream.URL)); err != nil {
+		t.Fatalf("save manager config: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := newCodexInspectionTestService(t, db).RefreshSupplySnapshot(ctx)
+	if err == nil {
+		t.Fatal("cancelled supply snapshot reported success")
+	}
+	runs, listErr := db.ListCodexInspectionRuns(context.Background(), 1)
+	if listErr != nil || len(runs) != 1 {
+		t.Fatalf("list supply snapshot runs: runs=%#v err=%v", runs, listErr)
+	}
+	if runs[0].Status == model.CodexInspectionStatusCompleted {
+		t.Fatalf("cancelled supply snapshot completed unexpectedly: %#v", runs[0])
+	}
+}
+
 func TestRunXAISkipsInferenceWhenDisabled(t *testing.T) {
 	requestedURLs := make([]string, 0, 2)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

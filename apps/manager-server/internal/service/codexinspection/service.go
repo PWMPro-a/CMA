@@ -1392,13 +1392,28 @@ func (s *Service) localRunCancellable(runID int64, status string) bool {
 // RefreshSupplySnapshot performs a full, Codex-only read-only inspection for
 // smart supply, independently from the periodic inspection schedule.
 func (s *Service) RefreshSupplySnapshot(ctx context.Context) error {
-	_, err := s.Run(ctx, RunRequest{
+	detail, err := s.Run(ctx, RunRequest{
 		TriggerType: model.CodexInspectionTriggerSupplySnapshot,
 		TriggerKey:  fmt.Sprintf("supply-%d", time.Now().UnixMilli()),
 		ReadOnly:    true,
 		TargetTypes: []string{model.CodexInspectionTargetCodex},
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	// Run deliberately reports lifecycle cancellation through the persisted run
+	// state instead of its error return. The supply scheduler needs the stronger
+	// contract: only a completed snapshot may clear its failure backoff. Treat a
+	// deadline, lease loss, shutdown, or other terminal state as a refresh error
+	// so repeated dashboard reads do not immediately start another full scan.
+	if detail.Run.Status != model.CodexInspectionStatusCompleted {
+		reason := strings.TrimSpace(detail.Run.Error)
+		if reason == "" {
+			reason = detail.Run.Status
+		}
+		return fmt.Errorf("supply snapshot %s: %s", detail.Run.Status, reason)
+	}
+	return nil
 }
 
 func (s *Service) ListRuns(ctx context.Context, limit int) ([]model.CodexInspectionRun, error) {
