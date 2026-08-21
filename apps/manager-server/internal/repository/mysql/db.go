@@ -79,13 +79,22 @@ func OpenWithOptions(options Options) (*sql.DB, error) {
 	db.SetConnMaxLifetime(lifetime)
 	db.SetConnMaxIdleTime(idleTime)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := db.PingContext(pingCtx); err != nil {
+		pingCancel()
 		_ = db.Close()
 		return nil, fmt.Errorf("connect mysql: %w", err)
 	}
-	if err := Migrate(ctx, db); err != nil {
+	pingCancel()
+
+	// Empty MySQL installations build the full compatibility schema and its
+	// indexes on first startup.  Sharing the short connectivity deadline with
+	// that work made a healthy, newly initialized database fail close to the
+	// final indexes on slower production disks.  Keep the connection probe
+	// bounded separately and allow schema reconciliation a realistic window.
+	migrateCtx, migrateCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer migrateCancel()
+	if err := Migrate(migrateCtx, db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate mysql: %w", err)
 	}
