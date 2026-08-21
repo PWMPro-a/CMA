@@ -1340,18 +1340,22 @@ func clearInactiveContainerRelationships(
 	}
 	_, err := tx.ExecContext(ctx, `update account_quota_windows
 		set relationship_kind = null, container_provider_window_id = null, updated_at_ms = ?
-		where account_key = ? and provider = ?
-			and coalesce(trim(relationship_kind), '') <> ''
-			and coalesce(trim(container_provider_window_id), '') <> ''
-			and exists (
-				select 1 from account_quota_windows parent
-				where parent.account_key = account_quota_windows.account_key
-					and parent.provider = account_quota_windows.provider
-					and parent.provider_window_id = account_quota_windows.container_provider_window_id
-					and parent.scope_fingerprint = account_quota_windows.scope_fingerprint
-					and parent.inventory_scope_key = account_quota_windows.inventory_scope_key
+		where id in (
+			select child_id from (
+				select child.id as child_id
+				from account_quota_windows child
+				join account_quota_windows parent
+					on parent.account_key = child.account_key
+					and parent.provider = child.provider
+					and parent.provider_window_id = child.container_provider_window_id
+					and parent.scope_fingerprint = child.scope_fingerprint
+					and parent.inventory_scope_key = child.inventory_scope_key
+				where child.account_key = ? and child.provider = ?
+					and coalesce(trim(child.relationship_kind), '') <> ''
+					and coalesce(trim(child.container_provider_window_id), '') <> ''
 					and parent.availability = 'inactive'
-			)`, updatedAtMS, accountKey, provider)
+			) inactive_container_relationships
+		)`, updatedAtMS, accountKey, provider)
 	return err
 }
 
