@@ -21,7 +21,7 @@ func TestChooseMarketplaceSellerPrefersApprovedAndBoundsTrial(t *testing.T) {
 	}
 	candidates := []supplyclient.MarketplaceSellerCandidate{
 		{SellerID: "blocked", Name: "Blocked", SelectionToken: "blocked-token", Available: 20, MinUnitPriceFen: 100},
-		{SellerID: "trial", Name: "Trial", SelectionToken: "trial-token", Available: 20, MinUnitPriceFen: 90},
+		{SellerID: "trial", Name: "Trial", SelectionToken: "trial-token", Available: 20, MinUnitPriceFen: 130},
 		{SellerID: "approved", Name: "Approved", SelectionToken: "approved-token", Available: 20, MinUnitPriceFen: 120},
 	}
 	scores := []SupplierQuotaScore{
@@ -45,6 +45,52 @@ func TestChooseMarketplaceSellerPrefersApprovedAndBoundsTrial(t *testing.T) {
 	selection, err = chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
 	if !errors.Is(err, ErrSupplierQuotaGateNoEligibleSeller) || selection != nil {
 		t.Fatalf("blocked selection = %#v err=%v", selection, err)
+	}
+}
+
+func TestChooseMarketplaceSellerLetsCheaperUnknownSellerRunSingleTrial(t *testing.T) {
+	enabled := true
+	platform := store.ManagerSupplyPlatformConfig{
+		Type:                       "nvtokens",
+		SupplierQuotaGateEnabled:   &enabled,
+		SupplierQuotaMinimumM:      90,
+		SupplierQuotaTrialQuantity: 1,
+	}
+	candidates := []supplyclient.MarketplaceSellerCandidate{
+		{SellerID: "approved", Name: "Approved", SelectionToken: "approved-token", Available: 20, MinUnitPriceFen: 2300},
+		{SellerID: "new-cheap", Name: "New Cheap", SelectionToken: "new-cheap-token", Available: 20, MinUnitPriceFen: 1920},
+	}
+	scores := []SupplierQuotaScore{
+		{SellerID: "approved", Status: supplierQuotaStatusApproved, ScoreM: 120},
+		{SellerID: "new-cheap", Status: supplierQuotaStatusUntried},
+	}
+
+	selection, err := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
+	if err != nil || selection == nil || selection.candidate.SellerID != "new-cheap" || selection.quantity != 1 || !selection.trial {
+		t.Fatalf("low-price trial selection = %#v err=%v", selection, err)
+	}
+}
+
+func TestChooseMarketplaceSellerPrefersApprovedAtEqualPrice(t *testing.T) {
+	enabled := true
+	platform := store.ManagerSupplyPlatformConfig{
+		Type:                       "nvtokens",
+		SupplierQuotaGateEnabled:   &enabled,
+		SupplierQuotaMinimumM:      90,
+		SupplierQuotaTrialQuantity: 1,
+	}
+	candidates := []supplyclient.MarketplaceSellerCandidate{
+		{SellerID: "new", Name: "New", SelectionToken: "new-token", Available: 20, MinUnitPriceFen: 1900},
+		{SellerID: "approved", Name: "Approved", SelectionToken: "approved-token", Available: 20, MinUnitPriceFen: 1900},
+	}
+	scores := []SupplierQuotaScore{
+		{SellerID: "new", Status: supplierQuotaStatusUntried},
+		{SellerID: "approved", Status: supplierQuotaStatusApproved, ScoreM: 95},
+	}
+
+	selection, err := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
+	if err != nil || selection == nil || selection.candidate.SellerID != "approved" || selection.quantity != 10 || selection.trial {
+		t.Fatalf("equal-price approved selection = %#v err=%v", selection, err)
 	}
 }
 

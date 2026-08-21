@@ -141,8 +141,7 @@ func chooseMarketplaceSellerForAutomaticPurchase(
 	for _, score := range scores {
 		byID[normalizeMarketplaceSellerID(score.SellerID)] = score
 	}
-	approved := make([]marketplaceSellerSelection, 0)
-	untried := make([]marketplaceSellerSelection, 0)
+	eligible := make([]marketplaceSellerSelection, 0)
 	for _, candidate := range candidates {
 		if candidate.Available <= 0 || strings.TrimSpace(candidate.SelectionToken) == "" {
 			continue
@@ -154,30 +153,26 @@ func chooseMarketplaceSellerForAutomaticPurchase(
 		selection := marketplaceSellerSelection{candidate: candidate, score: score, quantity: quantity}
 		switch score.Status {
 		case supplierQuotaStatusApproved:
-			approved = append(approved, selection)
+			eligible = append(eligible, selection)
 		case supplierQuotaStatusUntried:
 			selection.trial = true
 			selection.quantity = min(max(1, quantity), min(candidate.Available, supplierQuotaTrialQuantity(platform)))
-			untried = append(untried, selection)
+			eligible = append(eligible, selection)
 		}
 	}
 	// Quota eligibility is the hard gate. Once sellers have demonstrated enough
-	// usable quota, prefer the currently cheapest inventory and use the quota
-	// score only as a same-price tie breaker. This keeps routine replenishment
-	// and low-price reserve purchases from paying more merely for a marginally
-	// higher historical quota score.
-	sortMarketplaceSellerSelections(approved, true)
-	if len(approved) > 0 {
-		return &approved[0], nil
-	}
-	sortMarketplaceSellerSelections(untried, false)
-	if len(untried) > 0 {
-		return &untried[0], nil
+	// usable quota, prefer the currently cheapest inventory. A cheaper untried
+	// seller is admitted only as a bounded single trial; after that purchase it
+	// becomes observing and is excluded until independent quota evidence exists.
+	// At an equal price, approved inventory wins before quota/quality tie breaks.
+	sortMarketplaceSellerSelections(eligible)
+	if len(eligible) > 0 {
+		return &eligible[0], nil
 	}
 	return nil, ErrSupplierQuotaGateNoEligibleSeller
 }
 
-func sortMarketplaceSellerSelections(values []marketplaceSellerSelection, quotaScoreTieBreaker bool) {
+func sortMarketplaceSellerSelections(values []marketplaceSellerSelection) {
 	sort.SliceStable(values, func(i, j int) bool {
 		left := values[i]
 		right := values[j]
@@ -192,7 +187,10 @@ func sortMarketplaceSellerSelections(values []marketplaceSellerSelection, quotaS
 		if leftPrice != rightPrice {
 			return leftPrice < rightPrice
 		}
-		if quotaScoreTieBreaker && left.score.ScoreM != right.score.ScoreM {
+		if left.trial != right.trial {
+			return !left.trial
+		}
+		if left.score.ScoreM != right.score.ScoreM {
 			return left.score.ScoreM > right.score.ScoreM
 		}
 		leftQuality := valueOrNegativeInfinity(left.candidate.QualityScore)
