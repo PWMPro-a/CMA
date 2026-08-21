@@ -4478,13 +4478,16 @@ func TestNormalizeSub2AccountPayloadForCPA(t *testing.T) {
 	if _, exists := result["max_concurrency"]; exists {
 		t.Fatalf("supplier concurrency must not be imported into CPA metadata: %#v", result)
 	}
+	if _, exists := result["priority"]; exists {
+		t.Fatalf("supplier priority must not split the CPA scheduling pool: %#v", result)
+	}
 	if len(key) != 64 || fileName != stableSupplyAccountFileName("user@example.com", "workspace-1") {
 		t.Fatalf("stable identity outputs key=%q file=%q", key, fileName)
 	}
 }
 
-func TestNormalizeDirectCPAAccountPayloadStripsSupplierConcurrencyAndDisablesSelectionErrorFreeze(t *testing.T) {
-	payload, _, _, err := normalizeAccountPayload([]byte(`{"type":"codex","email":"direct@example.com","account_id":"direct-account","access_token":"access","max_concurrency":8,"selection_error_freeze_seconds":45}`))
+func TestNormalizeDirectCPAAccountPayloadStripsSupplierSchedulerLimitsAndDisablesSelectionErrorFreeze(t *testing.T) {
+	payload, _, _, err := normalizeAccountPayload([]byte(`{"type":"codex","email":"direct@example.com","account_id":"direct-account","access_token":"access","priority":50,"max_concurrency":8,"selection_error_freeze_seconds":45}`))
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
@@ -4494,6 +4497,9 @@ func TestNormalizeDirectCPAAccountPayloadStripsSupplierConcurrencyAndDisablesSel
 	}
 	if _, exists := result["max_concurrency"]; exists {
 		t.Fatalf("supplier concurrency must not be imported into CPA metadata: %#v", result)
+	}
+	if _, exists := result["priority"]; exists {
+		t.Fatalf("supplier priority must not split the CPA scheduling pool: %#v", result)
 	}
 	if result["selection_error_freeze_seconds"] != float64(0) ||
 		result["codex_cli_only"] != true || result["codex_cli_only_allow_app_server"] != true ||

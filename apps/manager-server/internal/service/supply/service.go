@@ -10885,6 +10885,12 @@ func normalizeSupplyAccountObject(object map[string]any, exportedAt any) (normal
 	// auth file, otherwise it becomes a hard max_concurrency and overrides the
 	// configured cache-affinity limit.
 	removeSupplierConcurrencyFields(metadata)
+	// Supplier-side priority tiers describe how the marketplace routed its own
+	// inventory. CLIProxyAPI always selects the highest credential priority
+	// bucket first, so preserving that value can leave healthy purchased
+	// accounts completely idle while a few higher-priority accounts absorb all
+	// traffic. CPA-managed imports must enter one shared scheduling tier.
+	delete(metadata, "priority")
 	resetSupplyImportRuntimeState(metadata)
 	enrichCodexIdentityFromTokens(metadata)
 	pinSupplyCodexPlanType(metadata)
