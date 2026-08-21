@@ -13,6 +13,13 @@ import (
 
 var lowPriceReserveLadderWeights = []int{50, 17, 10, 7, 5, 4, 3, 2, 1, 1}
 
+const (
+	lowPriceReserveRetryBackoff         = 30 * time.Second
+	lowPriceReserveExactQuoteBackoff    = "exact_quote_backoff"
+	lowPriceReserveCatalogErrorBackoff  = "catalog_error_backoff"
+	lowPriceReserveInventoryUnavailable = "low-price inventory is no longer available"
+)
+
 type LowPriceReserveExecution struct {
 	Enabled                   bool   `json:"enabled"`
 	Running                   bool   `json:"running"`
@@ -28,6 +35,7 @@ type LowPriceReserveExecution struct {
 	LastQuotedUnitPriceFen    int64  `json:"lastQuotedUnitPriceFen,omitempty"`
 	SelectedPlatformID        string `json:"selectedPlatformId,omitempty"`
 	ActiveTaskID              string `json:"activeTaskId,omitempty"`
+	RetryAfterMS              int64  `json:"retryAfterMs,omitempty"`
 	LastResult                string `json:"lastResult,omitempty"`
 	LastError                 string `json:"lastError,omitempty"`
 
@@ -142,6 +150,75 @@ func lowPriceReserveExecutionFromConfig(cfg store.ManagerSupplyConfig) LowPriceR
 	}
 }
 
+func isLowPriceReserveBackoffResult(result string) bool {
+	switch strings.TrimSpace(result) {
+	case lowPriceReserveExactQuoteBackoff, lowPriceReserveCatalogErrorBackoff:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) beginLowPriceReserveBackoff(result string, backoffErr error, duration time.Duration) LowPriceReserveExecution {
+	if s == nil {
+		return LowPriceReserveExecution{}
+	}
+	if duration <= 0 {
+		duration = lowPriceReserveRetryBackoff
+	}
+	now := time.Now()
+	retryAfterMS := now.Add(duration).UnixMilli()
+	s.stateMu.Lock()
+	if retryAfterMS > s.lowPriceReserve.RetryAfterMS {
+		s.lowPriceReserve.RetryAfterMS = retryAfterMS
+	}
+	s.lowPriceReserve.LastResult = strings.TrimSpace(result)
+	if backoffErr != nil {
+		s.lowPriceReserve.LastError = safeError(backoffErr)
+	}
+	execution := s.lowPriceReserve
+	s.stateMu.Unlock()
+	s.invalidateStatusCache()
+	return execution
+}
+
+func (s *Service) lowPriceReserveBackoff(now time.Time) (LowPriceReserveExecution, bool) {
+	if s == nil {
+		return LowPriceReserveExecution{}, false
+	}
+	nowMS := now.UnixMilli()
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.lowPriceReserve.RetryAfterMS <= nowMS {
+		if s.lowPriceReserve.RetryAfterMS > 0 {
+			s.lowPriceReserve.RetryAfterMS = 0
+			if isLowPriceReserveBackoffResult(s.lowPriceReserve.LastResult) {
+				s.lowPriceReserve.LastResult = "scheduled"
+				s.lowPriceReserve.LastError = ""
+			}
+		}
+		return LowPriceReserveExecution{}, false
+	}
+	return s.lowPriceReserve, true
+}
+
+func (s *Service) clearLowPriceReserveBackoff() {
+	if s == nil {
+		return
+	}
+	s.stateMu.Lock()
+	changed := s.lowPriceReserve.RetryAfterMS != 0 || isLowPriceReserveBackoffResult(s.lowPriceReserve.LastResult)
+	s.lowPriceReserve.RetryAfterMS = 0
+	if isLowPriceReserveBackoffResult(s.lowPriceReserve.LastResult) {
+		s.lowPriceReserve.LastResult = "scheduled"
+		s.lowPriceReserve.LastError = ""
+	}
+	s.stateMu.Unlock()
+	if changed {
+		s.invalidateStatusCache()
+	}
+}
+
 func (s *Service) RunLowPriceReserve(ctx context.Context) (LowPriceReserveExecution, error) {
 	cfg, _, _, err := s.managerConfig.ResolveManagerConfigWithSource(ctx)
 	if err != nil {
@@ -181,6 +258,20 @@ func (s *Service) RunLowPriceReserve(ctx context.Context) (LowPriceReserveExecut
 	if found {
 		execution.ActiveTaskID = active.TaskID
 	}
+	if backoff, coolingDown := s.lowPriceReserveBackoff(time.Now()); coolingDown {
+		execution.RetryAfterMS = backoff.RetryAfterMS
+		execution.LastError = backoff.LastError
+		if found {
+			if isLowPriceReserveTrigger(active.TriggerReason) {
+				execution.LastResult = "active_task"
+			} else {
+				execution.LastResult = "normal_task_active"
+			}
+		} else {
+			execution.LastResult = backoff.LastResult
+		}
+		return execution, nil
+	}
 
 	selection, matched, err := s.selectLowPriceReserveCatalogPlatform(ctx, cfg.Supply, execution.NextStageQuantity)
 	if price, platformID, observed := lowPriceReserveQuoteSnapshot(selection.all); observed {
@@ -189,6 +280,9 @@ func (s *Service) RunLowPriceReserve(ctx context.Context) (LowPriceReserveExecut
 		execution.quoteObserved = true
 	}
 	if err != nil {
+		backoff := s.beginLowPriceReserveBackoff(lowPriceReserveCatalogErrorBackoff, err, lowPriceReserveRetryBackoff)
+		execution.RetryAfterMS = backoff.RetryAfterMS
+		execution.LastError = safeError(err)
 		if found {
 			// A transient catalog failure must not hide the task that is already
 			// being delivered. Keep its state visible and retry the quote next tick.
@@ -199,6 +293,7 @@ func (s *Service) RunLowPriceReserve(ctx context.Context) (LowPriceReserveExecut
 			}
 			return execution, nil
 		}
+		execution.LastResult = lowPriceReserveCatalogErrorBackoff
 		return execution, err
 	}
 	if found {
@@ -220,6 +315,9 @@ func (s *Service) RunLowPriceReserve(ctx context.Context) (LowPriceReserveExecut
 	execution.SelectedPlatformID = selection.platform.ID
 	execution.quoteObserved = true
 	quantity := min(execution.NextStageQuantity, selection.status.Inventory.Available)
+	if selection.quantity > 0 {
+		quantity = min(quantity, selection.quantity)
+	}
 	if quantity <= 0 {
 		execution.LastResult = "price_wait"
 		return execution, nil
@@ -270,7 +368,14 @@ func (s *Service) NextLowPriceReserveInterval(ctx context.Context) time.Duration
 	if err != nil || !managerconfigsvc.SupplyEnabled(cfg.Supply) || !supplyLowPriceReserveEnabled(cfg.Supply) {
 		return 5 * time.Second
 	}
-	return lowPriceReserveCheckInterval(cfg.Supply)
+	interval := lowPriceReserveCheckInterval(cfg.Supply)
+	if backoff, coolingDown := s.lowPriceReserveBackoff(time.Now()); coolingDown {
+		remaining := time.Until(time.UnixMilli(backoff.RetryAfterMS))
+		if remaining > interval {
+			return remaining
+		}
+	}
+	return interval
 }
 
 func (s *Service) ScheduleLowPriceReserveExecution(at time.Time) {
@@ -303,6 +408,11 @@ func (s *Service) RecordLowPriceReserveExecution(
 	}
 	s.stateMu.Lock()
 	previous := s.lowPriceReserve
+	if previous.RetryAfterMS > finishedAt.UnixMilli() && previous.RetryAfterMS > execution.RetryAfterMS {
+		execution.RetryAfterMS = previous.RetryAfterMS
+		execution.LastResult = previous.LastResult
+		execution.LastError = previous.LastError
+	}
 	if !execution.accountCountObserved {
 		execution.ReserveAccounts = previous.ReserveAccounts
 		execution.Gap = max(0, execution.TargetAccounts-execution.ReserveAccounts)
@@ -316,9 +426,11 @@ func (s *Service) RecordLowPriceReserveExecution(
 	execution.LastCheckedAtMS = finishedAt.UnixMilli()
 	execution.NextCheckAtMS = nextAt.UnixMilli()
 	if err != nil {
-		execution.LastResult = "failed"
+		if !isLowPriceReserveBackoffResult(execution.LastResult) {
+			execution.LastResult = "failed"
+		}
 		execution.LastError = safeError(err)
-	} else {
+	} else if execution.RetryAfterMS <= finishedAt.UnixMilli() {
 		execution.LastError = ""
 	}
 	s.lowPriceReserve = execution
@@ -352,8 +464,16 @@ func (s *Service) currentLowPriceReserveExecution(
 	if !execution.Enabled {
 		execution.Running = false
 		execution.NextCheckAtMS = 0
+		execution.RetryAfterMS = 0
 		if execution.LastResult == "" || execution.LastResult == "scheduled" {
 			execution.LastResult = "disabled"
+		}
+	}
+	if execution.RetryAfterMS > 0 && execution.RetryAfterMS <= time.Now().UnixMilli() {
+		execution.RetryAfterMS = 0
+		if isLowPriceReserveBackoffResult(execution.LastResult) {
+			execution.LastResult = "scheduled"
+			execution.LastError = ""
 		}
 	}
 	return execution

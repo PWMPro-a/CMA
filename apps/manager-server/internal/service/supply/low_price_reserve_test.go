@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
@@ -117,6 +119,136 @@ func TestRunLowPriceReserveCreatesOneBoundedLadderTask(t *testing.T) {
 	task, found, err := st.GetSupplyPurchaseTask(ctx, first.ActiveTaskID)
 	if err != nil || !found || task.TargetQuantity != 2 {
 		t.Fatalf("durable stage = %#v found=%v err=%v", task, found, err)
+	}
+}
+
+func TestExactQuoteMissBacksOffWithoutRecreatingTasks(t *testing.T) {
+	var catalogCalls atomic.Int32
+	var estimateCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		case "/api/workspace/seller-candidates":
+			catalogCalls.Add(1)
+			_, _ = w.Write([]byte(`{"sellers":[{"seller_token":"seller-a","selection_token":"select-a","sale_plans":["plus"],"sale_plan_counts":{"plus":20},"sale_plan_prices":{"plus":{"min_cents":1200,"max_cents":1200}}}]}`))
+		case "/api/workspace/extractions/estimate":
+			estimateCalls.Add(1)
+			_, _ = w.Write([]byte(`{"estimate":{"available_quantity":20,"buyer_total_cents":30000,"min_unit_price_cents":1500,"max_unit_price_cents":1500}}`))
+		case "/api/me":
+			_, _ = w.Write([]byte(`{"available_balance_cents":100000,"balance_cents":100000}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "low-price-exact-backoff.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	ceiling := int64(1300)
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, LowPriceReserveEnabled: &enabled, LowPriceReserveMaxUnitPriceFen: &ceiling,
+			LowPriceReserveTargetAccounts: 30, LowPriceReserveCheckIntervalMilliseconds: 1000,
+			Platforms: []store.ManagerSupplyPlatformConfig{{
+				ID: "nv", Type: managerconfigsvc.SupplyPlatformNvtokens, Enabled: &enabled,
+				BaseURL: server.URL, Token: "nv-token", Product: "plus",
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	created, err := service.RunLowPriceReserve(ctx)
+	if err != nil || created.LastResult != "task_created" || created.ActiveTaskID == "" {
+		t.Fatalf("created execution = %#v err=%v", created, err)
+	}
+	if err := service.RunPurchaseTasks(ctx); err != nil {
+		t.Fatalf("run purchase task: %v", err)
+	}
+	task, found, err := st.GetSupplyPurchaseTask(ctx, created.ActiveTaskID)
+	if err != nil || !found || task.Status != purchaseTaskStatusCancelled || task.LastError != lowPriceReserveInventoryUnavailable {
+		t.Fatalf("cancelled task = %#v found=%v err=%v", task, found, err)
+	}
+	if catalogCalls.Load() != 1 || estimateCalls.Load() == 0 {
+		t.Fatalf("catalog=%d estimate=%d", catalogCalls.Load(), estimateCalls.Load())
+	}
+
+	for index := 0; index < 3; index++ {
+		execution, runErr := service.RunLowPriceReserve(ctx)
+		if runErr != nil || execution.LastResult != lowPriceReserveExactQuoteBackoff || execution.RetryAfterMS <= time.Now().UnixMilli() {
+			t.Fatalf("backoff execution %d = %#v err=%v", index, execution, runErr)
+		}
+	}
+	if catalogCalls.Load() != 1 {
+		t.Fatalf("catalog was called during exact quote backoff: %d", catalogCalls.Load())
+	}
+	if interval := service.NextLowPriceReserveInterval(ctx); interval < 25*time.Second {
+		t.Fatalf("backoff interval = %s, want close to 30s", interval)
+	}
+
+	service.stateMu.Lock()
+	service.lowPriceReserve.RetryAfterMS = time.Now().Add(-time.Millisecond).UnixMilli()
+	service.stateMu.Unlock()
+	retried, err := service.RunLowPriceReserve(ctx)
+	if err != nil || retried.LastResult != "task_created" || retried.ActiveTaskID == "" {
+		t.Fatalf("retry after expiry = %#v err=%v", retried, err)
+	}
+	if catalogCalls.Load() != 2 {
+		t.Fatalf("catalog calls after expiry = %d, want 2", catalogCalls.Load())
+	}
+}
+
+func TestLowPriceReserveBoundsUnknownSellerTrialTaskToOne(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		case "/api/workspace/seller-candidates":
+			_, _ = w.Write([]byte(`{"sellers":[{"seller_token":"seller-new","selection_token":"select-new","sale_plans":["plus"],"sale_plan_counts":{"plus":20},"sale_plan_prices":{"plus":{"min_cents":1200,"max_cents":1200}}}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "low-price-trial-task.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	ceiling := int64(1300)
+	platformCeiling := int64(1400)
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, LowPriceReserveEnabled: &enabled, LowPriceReserveMaxUnitPriceFen: &ceiling,
+			LowPriceReserveTargetAccounts: 30, LowPriceReserveCheckIntervalMilliseconds: 1000,
+			Platforms: []store.ManagerSupplyPlatformConfig{{
+				ID: "nv", Type: managerconfigsvc.SupplyPlatformNvtokens, Enabled: &enabled,
+				BaseURL: server.URL, Token: "nv-token", Product: "plus", MaxUnitPriceFen: &platformCeiling,
+				SupplierQuotaGateEnabled: &enabled, SupplierQuotaMinimumM: 90, SupplierQuotaTrialQuantity: 1,
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	execution, err := service.RunLowPriceReserve(ctx)
+	if err != nil || execution.LastResult != "task_created" {
+		t.Fatalf("execution = %#v err=%v", execution, err)
+	}
+	task, found, err := st.GetSupplyPurchaseTask(ctx, execution.ActiveTaskID)
+	if err != nil || !found || task.TargetQuantity != 1 {
+		t.Fatalf("trial task = %#v found=%v err=%v", task, found, err)
 	}
 }
 

@@ -560,12 +560,33 @@ func (s *Service) selectLowPriceReserveCatalogPlatform(
 	if len(platforms) == 0 {
 		return supplyPlatformSelection{}, false, nil
 	}
+	var openOrders []store.SupplyOrder
+	quotaGateConfigured := false
+	for _, platform := range platforms {
+		if supplierQuotaGateEnabled(platform) {
+			quotaGateConfigured = true
+			break
+		}
+	}
+	if quotaGateConfigured {
+		if s == nil || s.store == nil {
+			return supplyPlatformSelection{}, false, ErrNotConfigured
+		}
+		var err error
+		openOrders, err = s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
+		if err != nil {
+			return supplyPlatformSelection{}, false, err
+		}
+	}
 
 	statuses := make([]PlatformOverview, len(platforms))
 	type result struct {
-		index   int
-		catalog supplyclient.ProductCatalog
-		err     error
+		index             int
+		catalog           supplyclient.ProductCatalog
+		marketplaceSeller *marketplaceSellerSelection
+		scores            []SupplierQuotaScore
+		noEligibleSeller  bool
+		err               error
 	}
 	results := make(chan result, len(platforms))
 	var wait sync.WaitGroup
@@ -575,6 +596,15 @@ func (s *Service) selectLowPriceReserveCatalogPlatform(
 			defer wait.Done()
 			if !supplyPlatformConfigured(platform) {
 				results <- result{index: index, err: ErrNotConfigured}
+				return
+			}
+			if supplierQuotaGateEnabled(platform) {
+				selection, scores, err := s.selectMarketplaceSellerForAutomaticPurchase(ctx, platform, quantity, openOrders)
+				if errors.Is(err, ErrSupplierQuotaGateNoEligibleSeller) {
+					results <- result{index: index, scores: scores, noEligibleSeller: true}
+					return
+				}
+				results <- result{index: index, marketplaceSeller: selection, scores: scores, err: err}
 				return
 			}
 			catalog, err := s.supplyClient.ProductCatalog(ctx, supplyPlatformCredentials(platform))
@@ -597,9 +627,37 @@ func (s *Service) selectLowPriceReserveCatalogPlatform(
 			Priority:    platform.Priority,
 			CheckedAtMS: checkedAtMS,
 		}
+		status.SupplierQuotaScores = item.scores
 		if item.err != nil {
 			status.LastError = safeError(item.err)
 			platformErrors = append(platformErrors, fmt.Errorf("%s: %w", firstNonEmptyString(platform.Name, platform.ID), item.err))
+			statuses[item.index] = status
+			continue
+		}
+		if item.noEligibleSeller {
+			status.LastError = safeError(ErrSupplierQuotaGateNoEligibleSeller)
+			statuses[item.index] = status
+			continue
+		}
+		if item.marketplaceSeller != nil {
+			selection := item.marketplaceSeller
+			candidate := selection.candidate
+			available := max(0, candidate.Available)
+			purchaseQuantity := min(max(1, selection.quantity), available)
+			status.Inventory = &supplyclient.Inventory{
+				Product:               platform.Product,
+				RequestedQuantity:     max(1, quantity),
+				Available:             available,
+				Missing:               max(0, max(1, quantity)-available),
+				EstimatedTotalFen:     candidate.MinUnitPriceFen * int64(purchaseQuantity),
+				EstimatedUnitPriceFen: candidate.MinUnitPriceFen,
+			}
+			status.marketplaceSeller = selection
+			status.purchaseQuantity = purchaseQuantity
+			if available > 0 && candidate.MinUnitPriceFen > 0 &&
+				candidate.MinUnitPriceFen <= lowPriceReservePlatformCeiling(cfg, platform) {
+				candidates = append(candidates, item.index)
+			}
 			statuses[item.index] = status
 			continue
 		}
@@ -654,9 +712,11 @@ func (s *Service) selectLowPriceReserveCatalogPlatform(
 	selectedIndex := candidates[0]
 	statuses[selectedIndex].Selected = true
 	return supplyPlatformSelection{
-		platform: platforms[selectedIndex],
-		status:   statuses[selectedIndex],
-		all:      statuses,
+		platform:          platforms[selectedIndex],
+		status:            statuses[selectedIndex],
+		all:               statuses,
+		marketplaceSeller: statuses[selectedIndex].marketplaceSeller,
+		quantity:          statuses[selectedIndex].purchaseQuantity,
 	}, true, nil
 }
 

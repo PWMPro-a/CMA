@@ -3,6 +3,7 @@ package supply
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -391,6 +392,60 @@ func TestSelectLowPriceReserveCatalogPlatformPublishesLatestPriceWithoutEstimate
 	}
 	if catalogCalls.Load() != 1 || estimateCalls.Load() != 0 || len(selection.all) != 1 || selection.all[0].Inventory == nil || selection.all[0].Inventory.EstimatedUnitPriceFen != 1699 {
 		t.Fatalf("catalog=%d estimate=%d statuses=%#v", catalogCalls.Load(), estimateCalls.Load(), selection.all)
+	}
+}
+
+func TestSelectLowPriceReserveCatalogPlatformAppliesSupplierQuotaGate(t *testing.T) {
+	var approvedPrice atomic.Int64
+	approvedPrice.Store(1399)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/workspace/seller-candidates" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"sellers":[
+			{"seller_token":"seller-blocked","selection_token":"select-blocked","sale_plan_counts":{"plus":10},"sale_plan_prices":{"plus":{"min_cents":1200,"max_cents":1200}}},
+			{"seller_token":"seller-approved","selection_token":"select-approved","sale_plan_counts":{"plus":10},"sale_plan_prices":{"plus":{"min_cents":%d,"max_cents":%d}}}
+		]}`, approvedPrice.Load(), approvedPrice.Load())
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "low-price-catalog-gate.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	ceiling := int64(1300)
+	platformCeiling := int64(1400)
+	platform := store.ManagerSupplyPlatformConfig{
+		ID: "nv", Name: "NV", Type: managerconfigsvc.SupplyPlatformNvtokens, Enabled: &enabled,
+		BaseURL: server.URL, Token: "nv-session", Product: "plus", MaxUnitPriceFen: &platformCeiling,
+		SupplierQuotaGateEnabled: &enabled, SupplierQuotaMinimumM: 90, SupplierQuotaTrialQuantity: 1,
+	}
+	service := New(st, nil, server.Client())
+	service.setCachedMarketplaceSupplierQuotaScores(supplierQuotaScoreCacheKey(platform), []SupplierQuotaScore{
+		{SellerID: "seller-blocked", Status: supplierQuotaStatusBlocked, ScoreM: 20, SampleCount: 1},
+		{SellerID: "seller-approved", Status: supplierQuotaStatusApproved, ScoreM: 120, SampleCount: 1},
+	}, time.Now())
+	cfg := store.ManagerSupplyConfig{
+		LowPriceReserveEnabled: &enabled, LowPriceReserveMaxUnitPriceFen: &ceiling,
+		LowPriceReserveTargetAccounts: 30, Platforms: []store.ManagerSupplyPlatformConfig{platform},
+	}
+
+	selection, matched, err := service.selectLowPriceReserveCatalogPlatform(ctx, cfg, 15)
+	if err != nil || matched || len(selection.all) != 1 || selection.all[0].Inventory == nil ||
+		selection.all[0].Inventory.EstimatedUnitPriceFen != 1399 {
+		t.Fatalf("over-ceiling eligible catalog = %#v matched=%v err=%v", selection, matched, err)
+	}
+
+	approvedPrice.Store(1250)
+	selection, matched, err = service.selectLowPriceReserveCatalogPlatform(ctx, cfg, 15)
+	if err != nil || !matched || selection.marketplaceSeller == nil ||
+		selection.marketplaceSeller.candidate.SellerID != "seller-approved" ||
+		selection.status.Inventory == nil || selection.status.Inventory.EstimatedUnitPriceFen != 1250 {
+		t.Fatalf("eligible catalog = %#v matched=%v err=%v", selection, matched, err)
 	}
 }
 

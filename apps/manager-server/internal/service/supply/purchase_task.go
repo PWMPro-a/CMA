@@ -557,23 +557,25 @@ func (s *Service) createPurchaseTaskOrder(
 		matched := false
 		selection, matched, err = s.selectLowPriceReservePlatform(ctx, cfg.Supply, quantity, openOrders, task.Product)
 		if err != nil {
+			s.beginLowPriceReserveBackoff(lowPriceReserveExactQuoteBackoff, err, lowPriceReserveRetryBackoff)
 			return s.recordPurchaseTaskError(ctx, task, err)
 		}
 		if !matched {
-			return s.cancelLowPriceReservePurchaseTask(ctx, task, "low-price inventory is no longer available")
+			return s.cancelLowPriceReservePurchaseTask(ctx, task, lowPriceReserveInventoryUnavailable)
 		}
 		quantity = min(quantity, selection.status.Inventory.Available)
 		if quantity <= 0 {
-			return s.cancelLowPriceReservePurchaseTask(ctx, task, "low-price inventory is no longer available")
+			return s.cancelLowPriceReservePurchaseTask(ctx, task, lowPriceReserveInventoryUnavailable)
 		}
 		// Re-quote the exact reduced quantity before CreateOrder so a partially
 		// available bargain never inherits the price of a larger stale quote.
 		exact, exactMatched, exactErr := s.selectLowPriceReservePlatform(ctx, cfg.Supply, quantity, openOrders, task.Product)
 		if exactErr != nil {
+			s.beginLowPriceReserveBackoff(lowPriceReserveExactQuoteBackoff, exactErr, lowPriceReserveRetryBackoff)
 			return s.recordPurchaseTaskError(ctx, task, exactErr)
 		}
 		if !exactMatched {
-			return s.cancelLowPriceReservePurchaseTask(ctx, task, "low-price inventory is no longer available")
+			return s.cancelLowPriceReservePurchaseTask(ctx, task, lowPriceReserveInventoryUnavailable)
 		}
 		selection = exact
 	} else {
@@ -669,6 +671,9 @@ func (s *Service) createPurchaseTaskOrder(
 		}
 		return s.recordPurchaseTaskError(ctx, task, err)
 	}
+	if lowPriceReserve {
+		s.clearLowPriceReserveBackoff()
+	}
 	order := supplyOrderFromCreateResponse(attempt, remote, cfg.Supply)
 	if err := s.store.PromoteSupplyCreateAttempt(ctx, attempt.OrderID, order); err != nil {
 		attempt.Status = "create_uncertain"
@@ -712,6 +717,13 @@ func (s *Service) cancelLowPriceReservePurchaseTask(
 	if err := s.cancelReversiblePurchaseTaskOrders(ctx, task.TaskID, nowMS); err != nil {
 		return err
 	}
+	if strings.EqualFold(strings.TrimSpace(reason), lowPriceReserveInventoryUnavailable) {
+		s.beginLowPriceReserveBackoff(
+			lowPriceReserveExactQuoteBackoff,
+			errors.New(lowPriceReserveInventoryUnavailable),
+			lowPriceReserveRetryBackoff,
+		)
+	}
 	s.invalidateStatusCache()
 	return nil
 }
@@ -732,6 +744,9 @@ func (s *Service) recordPurchaseTaskError(ctx context.Context, task *store.Suppl
 			backoff = minDuration(time.Minute, time.Duration(task.AttemptCount)*5*time.Second)
 		}
 		retryAtMS = now.Add(backoff).UnixMilli()
+	}
+	if task.Source == "automatic" && isLowPriceReserveTrigger(task.TriggerReason) && task.AttemptCount == 0 {
+		retryAtMS = max(retryAtMS, now.Add(lowPriceReserveRetryBackoff).UnixMilli())
 	}
 	task.NextAttemptAtMS = retryAtMS
 	if updateErr := s.store.UpdateSupplyPurchaseTask(ctx, *task); updateErr != nil {
