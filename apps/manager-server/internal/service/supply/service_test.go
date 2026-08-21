@@ -122,6 +122,24 @@ func TestRecordErrorDoesNotExposeTransientSQLiteContention(t *testing.T) {
 	}
 }
 
+func TestRecordErrorTreatsAutomaticWaitDecisionsAsHealthy(t *testing.T) {
+	service := New(nil, nil)
+	waits := []error{
+		&MarketplacePriceWaitError{MinimumUnitPriceFen: 2200, CeilingFen: 2000, Available: 4},
+		ErrSupplierQuotaGateNoEligibleSeller,
+	}
+	for _, waitErr := range waits {
+		service.setOverview(Overview{LastError: "previous supplier failure"})
+		service.recordError(waitErr)
+		service.stateMu.RLock()
+		lastError := service.overview.LastError
+		service.stateMu.RUnlock()
+		if lastError != "" {
+			t.Fatalf("normal automatic wait %v remained an overview error: %q", waitErr, lastError)
+		}
+	}
+}
+
 func TestScheduleRecoverySyncIfDueIsNonBlockingAndSingleFlight(t *testing.T) {
 	service := New(nil, nil)
 	started := make(chan struct{})

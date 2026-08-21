@@ -10328,6 +10328,17 @@ func (s *Service) recordError(err error) {
 	if err == nil {
 		return
 	}
+	// Price ceilings and supplier-evidence pauses are expected automatic wait
+	// decisions, not operator-actionable failures. The automatic execution
+	// snapshot already exposes their typed result/reason; keeping the same text
+	// in overview.lastError makes a healthy price_wait cycle look broken.
+	if _, _, waiting := automaticSupplyWaitDecision(err); waiting {
+		s.stateMu.Lock()
+		s.overview.LastError = ""
+		s.stateMu.Unlock()
+		s.invalidateStatusCache()
+		return
+	}
 	if sqliterepo.IsBusyError(err) {
 		log.Printf("[supply] automatic check deferred while SQLite writer is busy")
 		return
