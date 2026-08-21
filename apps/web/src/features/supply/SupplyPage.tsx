@@ -3437,10 +3437,21 @@ export function SupplyPage() {
                                                   : '-'}
                                               </td>
                                               <td>
-                                                {t('supply.supplier_quota_sample_summary', {
-                                                  samples: score.sampleCount,
-                                                  accounts: score.importedAccounts,
-                                                })}
+                                                <div className={styles.supplierQuotaSeller}>
+                                                  <span>
+                                                    {t('supply.supplier_quota_sample_summary', {
+                                                      samples: score.sampleCount,
+                                                      accounts: score.importedAccounts,
+                                                    })}
+                                                  </span>
+                                                  {(score.invalidCredentialCount ?? 0) > 0 ? (
+                                                    <small>
+                                                      {t('supply.supplier_quota_invalid_summary', {
+                                                        count: score.invalidCredentialCount,
+                                                      })}
+                                                    </small>
+                                                  ) : null}
+                                                </div>
                                               </td>
                                               <td>{formatInteger(score.available)}</td>
                                               <td>

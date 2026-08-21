@@ -6272,6 +6272,7 @@
     "supplier_quota_price": "單價",
     "supplier_quota_in_flight": "試採中",
     "supplier_quota_sample_summary": "{{samples}} 個樣本 / {{accounts}} 個帳號",
+    "supplier_quota_invalid_summary": "已發現 {{count}} 個失效憑證",
     "supplier_quota_scores_empty": "重新整理商品目錄後顯示供應商評分；新供應商會先單號試採。",
     "supplier_quota_status_approved": "已放行",
     "supplier_quota_status_blocked": "已攔截",
@@ -6279,6 +6280,7 @@
     "supplier_quota_status_untried": "可試採",
     "supplier_quota_reason_observed_quota_meets_threshold": "額度樣本達到門檻",
     "supplier_quota_reason_observed_quota_below_threshold": "額度樣本低於門檻",
+    "supplier_quota_reason_credential_invalidated": "供應商帳號憑證已失效，停止後續自動採購",
     "supplier_quota_reason_waiting_for_account_quota_evidence": "已採購，等待帳號額度證據",
     "supplier_quota_reason_eligible_for_single_trial": "無歷史樣本，可執行一次試採"
   },

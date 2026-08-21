@@ -6272,6 +6272,7 @@
     "supplier_quota_price": "Unit price",
     "supplier_quota_in_flight": "trial in progress",
     "supplier_quota_sample_summary": "{{samples}} samples / {{accounts}} accounts",
+    "supplier_quota_invalid_summary": "{{count}} invalid credential(s) observed",
     "supplier_quota_scores_empty": "Refresh the product catalog to load seller scores. New sellers receive a single-account trial first.",
     "supplier_quota_status_approved": "Approved",
     "supplier_quota_status_blocked": "Blocked",
@@ -6279,6 +6280,7 @@
     "supplier_quota_status_untried": "Trial eligible",
     "supplier_quota_reason_observed_quota_meets_threshold": "Observed quota meets the threshold",
     "supplier_quota_reason_observed_quota_below_threshold": "Observed quota is below the threshold",
+    "supplier_quota_reason_credential_invalidated": "A supplier credential was invalidated; further automatic purchases are blocked",
     "supplier_quota_reason_waiting_for_account_quota_evidence": "Purchased; waiting for account quota evidence",
     "supplier_quota_reason_eligible_for_single_trial": "No local samples; eligible for one trial purchase"
   },

@@ -6272,6 +6272,7 @@
     "supplier_quota_price": "单价",
     "supplier_quota_in_flight": "试采中",
     "supplier_quota_sample_summary": "{{samples}} 个样本 / {{accounts}} 个账号",
+    "supplier_quota_invalid_summary": "已发现 {{count}} 个失效凭证",
     "supplier_quota_scores_empty": "刷新商品目录后显示供应商评分；新供应商会先单号试采。",
     "supplier_quota_status_approved": "已放行",
     "supplier_quota_status_blocked": "已拦截",
@@ -6279,6 +6280,7 @@
     "supplier_quota_status_untried": "可试采",
     "supplier_quota_reason_observed_quota_meets_threshold": "额度样本达到门槛",
     "supplier_quota_reason_observed_quota_below_threshold": "额度样本低于门槛",
+    "supplier_quota_reason_credential_invalidated": "供应商账号凭证已失效，停止后续自动采购",
     "supplier_quota_reason_waiting_for_account_quota_evidence": "已采购，等待账号额度证据",
     "supplier_quota_reason_eligible_for_single_trial": "无历史样本，可执行一次试采"
   },

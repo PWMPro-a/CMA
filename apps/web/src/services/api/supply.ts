@@ -87,6 +87,7 @@ export interface SupplySupplierQuotaScore {
   maximumObservedM?: number;
   sampleCount: number;
   importedAccounts: number;
+  invalidCredentialCount?: number;
   inFlightTrial?: boolean;
   available?: number;
   minUnitPriceFen?: number;

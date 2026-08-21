@@ -279,6 +279,49 @@ func TestMarketplaceSupplierQuotaScoresUsesIndependentAccountEvidence(t *testing
 	}
 }
 
+func TestMarketplaceSupplierQuotaScoresBlocksSellerWithInvalidCredential(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewStore(t, testutil.NewConfig(t))
+	service := New(st, nil)
+	now := time.Now()
+
+	seedMarketplaceQuotaAccount(t, st, "revoked-order", "revoked-seller", "Revoked Seller", "revoked.json")
+	statusUnauthorized := 401
+	service.quotaSnapshot = inspectionQuotaSnapshot{
+		results: []store.CodexInspectionResult{{
+			FileName: "revoked.json", AccountKey: "revoked", Provider: "codex",
+			Action: "reauth", StatusCode: &statusUnauthorized, ErrorKind: "http_status",
+			ErrorDetail: `{"error":{"code":"token_revoked"}}`,
+		}},
+		generatedAt: now,
+		attemptedAt: now,
+	}
+
+	enabled := true
+	platform := store.ManagerSupplyPlatformConfig{
+		ID: "nv", Name: "NV", Type: "nvtokens", Product: "plus",
+		SupplierQuotaGateEnabled: &enabled, SupplierQuotaMinimumM: 30,
+	}
+	candidates := []supplyclient.MarketplaceSellerCandidate{{
+		SellerID: "revoked-seller", Name: "Revoked Seller", SelectionToken: "revoked-token",
+		Product: "plus", Available: 10, MinUnitPriceFen: 900,
+	}}
+
+	scores, err := service.marketplaceSupplierQuotaScores(ctx, platform, candidates, nil)
+	if err != nil || len(scores) != 1 {
+		t.Fatalf("invalid credential scores = %#v err=%v", scores, err)
+	}
+	score := scores[0]
+	if score.Status != supplierQuotaStatusBlocked || score.Reason != "credential_invalidated" ||
+		score.InvalidCredentialCount != 1 || score.ImportedAccounts != 1 || score.SampleCount != 0 {
+		t.Fatalf("invalid credential score = %#v", score)
+	}
+	selection, selectErr := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
+	if selection != nil || !errors.Is(selectErr, ErrSupplierQuotaGateNoEligibleSeller) {
+		t.Fatalf("invalid credential seller selected = %#v err=%v", selection, selectErr)
+	}
+}
+
 func TestMarketplaceSupplierQuotaScoresBlocksDuplicateInFlightTrial(t *testing.T) {
 	st := testutil.NewStore(t, testutil.NewConfig(t))
 	service := New(st, nil)

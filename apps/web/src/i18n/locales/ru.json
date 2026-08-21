@@ -6272,6 +6272,7 @@
     "supplier_quota_price": "Цена за единицу",
     "supplier_quota_in_flight": "идёт пробная закупка",
     "supplier_quota_sample_summary": "образцов: {{samples}} / аккаунтов: {{accounts}}",
+    "supplier_quota_invalid_summary": "Недействительных учетных данных: {{count}}",
     "supplier_quota_scores_empty": "Обновите каталог товаров, чтобы загрузить оценки продавцов. Для новых продавцов сначала покупается один аккаунт.",
     "supplier_quota_status_approved": "Разрешён",
     "supplier_quota_status_blocked": "Заблокирован",
@@ -6279,6 +6280,7 @@
     "supplier_quota_status_untried": "Доступен для пробы",
     "supplier_quota_reason_observed_quota_meets_threshold": "Наблюдаемая квота соответствует порогу",
     "supplier_quota_reason_observed_quota_below_threshold": "Наблюдаемая квота ниже порога",
+    "supplier_quota_reason_credential_invalidated": "Учетные данные поставщика недействительны; дальнейшие автозакупки заблокированы",
     "supplier_quota_reason_waiting_for_account_quota_evidence": "Закупка выполнена; ожидаются данные о квоте аккаунта",
     "supplier_quota_reason_eligible_for_single_trial": "Локальных образцов нет; разрешена одна пробная закупка"
   },
