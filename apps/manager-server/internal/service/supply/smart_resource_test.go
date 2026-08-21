@@ -2093,6 +2093,60 @@ func TestGetStatusStartsSingleFlightRefreshForStaleInspectionSnapshot(t *testing
 	}
 }
 
+func TestInspectionSnapshotRefreshNeededDefersRecentPartialEvidence(t *testing.T) {
+	recent := SmartResource{
+		Enabled:                    true,
+		SnapshotFresh:              false,
+		CapacitySnapshotAtMS:       time.Now().Add(-2 * time.Minute).UnixMilli(),
+		CapacitySnapshotAgeSeconds: int((2 * time.Minute) / time.Second),
+	}
+	for _, reason := range []string{
+		"inspection_quota_incomplete",
+		"inspection_quota_incomplete_capacity_deficit",
+		"inspection_usability_incomplete",
+		"inspection_usability_incomplete_capacity_deficit",
+	} {
+		resource := recent
+		resource.DecisionReason = reason
+		if smartInspectionSnapshotRefreshNeeded(resource) {
+			t.Fatalf("recent partial snapshot %q must wait for the normal inspection cadence", reason)
+		}
+	}
+
+	stale := recent
+	stale.DecisionReason = "inspection_quota_incomplete"
+	stale.CapacitySnapshotAgeSeconds = int(smartInspectionSnapshotFreshTTL/time.Second) + 1
+	if !smartInspectionSnapshotRefreshNeeded(stale) {
+		t.Fatal("expired partial snapshot must request a refresh")
+	}
+
+	missing := recent
+	missing.DecisionReason = "inspection_quota_incomplete"
+	missing.CapacitySnapshotAtMS = 0
+	if !smartInspectionSnapshotRefreshNeeded(missing) {
+		t.Fatal("partial evidence without a completed snapshot must request a refresh")
+	}
+
+	unavailable := recent
+	unavailable.DecisionReason = "inspection_snapshot_unavailable"
+	if !smartInspectionSnapshotRefreshNeeded(unavailable) {
+		t.Fatal("an unavailable snapshot must request a refresh")
+	}
+
+	fresh := recent
+	fresh.SnapshotFresh = true
+	if smartInspectionSnapshotRefreshNeeded(fresh) {
+		t.Fatal("a fresh snapshot must not request a refresh")
+	}
+
+	recalculated := recent
+	recalculated.DecisionReason = "capacity_healthy"
+	recalculated.SnapshotEvidencePartial = true
+	if smartInspectionSnapshotRefreshNeeded(recalculated) {
+		t.Fatal("a recalculated recent partial snapshot must retain the deferred refresh state")
+	}
+}
+
 func TestCurrentSmartResourceRecalculatesHealthForUpdatedWaterLevel(t *testing.T) {
 	service := New(nil, nil)
 	service.setSmartResource(SmartResource{

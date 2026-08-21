@@ -282,6 +282,7 @@ export interface SupplySmartResource {
   decisionReason: string;
   confidence: 'high' | 'medium' | 'low' | string;
   snapshotFresh: boolean;
+  snapshotEvidencePartial?: boolean;
   snapshotRefreshInProgress?: boolean;
   snapshotRefreshLastAttemptMs?: number;
   generatedAtMs: number;

@@ -5698,7 +5698,7 @@
     "snapshot_partial": "證據待補齊",
     "snapshot_not_ready": "快照準備中",
     "snapshot_read_failed": "讀取舊快照",
-    "snapshot_coverage_pending": "巡檢覆蓋 {{coverage}}%，自動刷新中",
+    "snapshot_coverage_pending": "巡檢覆蓋 {{coverage}}%，等待下次巡檢",
     "status_cancelled": "已取消",
     "status_completed": "已完成",
     "status_completed_partial": "部分交付已結算",

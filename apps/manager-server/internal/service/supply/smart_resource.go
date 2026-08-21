@@ -75,6 +75,7 @@ type SmartResource struct {
 	DecisionReason               string  `json:"decisionReason"`
 	Confidence                   string  `json:"confidence"`
 	SnapshotFresh                bool    `json:"snapshotFresh"`
+	SnapshotEvidencePartial      bool    `json:"snapshotEvidencePartial,omitempty"`
 	SnapshotRefreshInProgress    bool    `json:"snapshotRefreshInProgress,omitempty"`
 	SnapshotRefreshLastAttemptMS int64   `json:"snapshotRefreshLastAttemptMs,omitempty"`
 	GeneratedAtMS                int64   `json:"generatedAtMs"`
@@ -790,6 +791,7 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			recalculateSmartResourceCapacityPlan(cfg, &resource)
 		}
 		resource.SnapshotFresh = false
+		resource.SnapshotEvidencePartial = true
 		resource.Confidence = smartConfidenceLow
 		incompleteReason := "inspection_usability_incomplete"
 		if quotaEvidenceIncomplete {
@@ -2023,7 +2025,7 @@ func smartInspectionSnapshotFresh(snapshot inspectionQuotaSnapshot, now time.Tim
 	if snapshot.generatedAt.IsZero() || now.Before(snapshot.generatedAt) {
 		return false
 	}
-	return now.Sub(snapshot.generatedAt) <= 20*time.Minute
+	return now.Sub(snapshot.generatedAt) <= smartInspectionSnapshotFreshTTL
 }
 
 func smartInspectionSnapshotComplete(snapshot inspectionQuotaSnapshot) bool {

@@ -5698,7 +5698,7 @@
     "snapshot_partial": "Данные дополняются",
     "snapshot_not_ready": "Снимок готовится",
     "snapshot_read_failed": "Используется предыдущий снимок",
-    "snapshot_coverage_pending": "Покрытие проверки {{coverage}} %, обновление",
+    "snapshot_coverage_pending": "Покрытие проверки {{coverage}} %; ожидание следующей проверки",
     "status_cancelled": "Отменён",
     "status_completed": "Завершён",
     "status_completed_partial": "Частичная поставка завершена",

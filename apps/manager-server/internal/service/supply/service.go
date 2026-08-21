@@ -719,6 +719,7 @@ const (
 	staleInspectionSnapshotRefreshCooldown  = 30 * time.Second
 	quotaEstimateCalibrationRefreshCooldown = 2 * time.Minute
 	staleInspectionSnapshotRefreshTimeout   = 15 * time.Minute
+	smartInspectionSnapshotFreshTTL         = 20 * time.Minute
 )
 
 type inspectionSnapshotRefreshState struct {
@@ -766,12 +767,33 @@ func (s *Service) SetInspectionSnapshotRefresher(appCtx context.Context, refresh
 }
 
 func (s *Service) publishSmartResource(resource SmartResource) SmartResource {
-	if resource.Enabled && !resource.SnapshotFresh {
+	if smartInspectionSnapshotRefreshNeeded(resource) {
 		s.requestStaleInspectionSnapshotRefresh()
 	}
 	resource = s.withInspectionSnapshotRefreshState(resource)
 	s.setSmartResource(resource)
 	return resource
+}
+
+// smartInspectionSnapshotRefreshNeeded separates a stale snapshot from a
+// recent-but-partial snapshot. A partial inspection is still intentionally
+// excluded from normal automatic purchasing, but immediately repeating the
+// same full-pool scan cannot make credentials that consistently omit quota or
+// usability evidence complete. Let the regular inspection cadence (or the
+// normal 20-minute freshness expiry) retry it instead of keeping the Manager
+// in a permanent refresh loop.
+func smartInspectionSnapshotRefreshNeeded(resource SmartResource) bool {
+	if !resource.Enabled || resource.SnapshotFresh {
+		return false
+	}
+	reason := strings.TrimSuffix(resource.DecisionReason, "_capacity_deficit")
+	partialEvidence := resource.SnapshotEvidencePartial ||
+		reason == "inspection_quota_incomplete" || reason == "inspection_usability_incomplete"
+	if partialEvidence {
+		return resource.CapacitySnapshotAtMS <= 0 ||
+			resource.CapacitySnapshotAgeSeconds > int(smartInspectionSnapshotFreshTTL/time.Second)
+	}
+	return true
 }
 
 func (s *Service) requestStaleInspectionSnapshotRefresh() {
@@ -9115,7 +9137,9 @@ func (s *Service) automaticBaselineBlockReason(resource SmartResource) string {
 	// blocks, and imported accounts remain protected by the separate pending
 	// inspection guard below.
 	if !resource.SnapshotFresh || resource.CapacitySnapshotAtMS <= 0 {
-		s.requestStaleInspectionSnapshotRefresh()
+		if smartInspectionSnapshotRefreshNeeded(resource) {
+			s.requestStaleInspectionSnapshotRefresh()
+		}
 		// A recent incomplete inspection still provides a verified capacity lower
 		// bound. Do not strand a live deficit merely because the remainder of the
 		// pool is still being inspected after a Manager restart. The partial path

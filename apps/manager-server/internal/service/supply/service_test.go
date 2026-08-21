@@ -1172,6 +1172,49 @@ func TestAutomaticSupplyGuardRequiresFreshBaselineAndSettledImports(t *testing.T
 	}
 }
 
+func TestAutomaticBaselineDoesNotLoopRecentPartialSnapshotRefresh(t *testing.T) {
+	service := New(nil, nil)
+	nowMS := time.Now().UnixMilli()
+	service.automaticEnabled = true
+	service.automaticBaselineAtMS = nowMS
+	service.automaticAccountAtMS = nowMS
+	release := make(chan struct{})
+	service.SetInspectionSnapshotRefresher(context.Background(), func(context.Context) error {
+		<-release
+		return nil
+	})
+
+	resource := SmartResource{
+		Enabled:                    true,
+		SnapshotFresh:              false,
+		SnapshotEvidencePartial:    true,
+		CapacitySnapshotAtMS:       time.Now().Add(-2 * time.Minute).UnixMilli(),
+		CapacitySnapshotAgeSeconds: int((2 * time.Minute) / time.Second),
+		DecisionReason:             "capacity_healthy",
+	}
+	if reason := service.automaticBaselineBlockReason(resource); reason != "initial_capacity_snapshot_pending" {
+		t.Fatalf("partial snapshot guard reason = %q", reason)
+	}
+	service.inspectionSnapshotRefreshMu.Lock()
+	running := service.inspectionSnapshotRefresh.running
+	service.inspectionSnapshotRefreshMu.Unlock()
+	if running {
+		t.Fatal("recent partial snapshot started another full inspection")
+	}
+
+	resource.CapacitySnapshotAgeSeconds = int(smartInspectionSnapshotFreshTTL/time.Second) + 1
+	if reason := service.automaticBaselineBlockReason(resource); reason != "initial_capacity_snapshot_pending" {
+		t.Fatalf("expired partial snapshot guard reason = %q", reason)
+	}
+	service.inspectionSnapshotRefreshMu.Lock()
+	running = service.inspectionSnapshotRefresh.running
+	service.inspectionSnapshotRefreshMu.Unlock()
+	if !running {
+		t.Fatal("expired partial snapshot did not start a refresh")
+	}
+	close(release)
+}
+
 func TestAccountPoolStatsSeparateTotalAvailableHealthyAndDisabled(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/management/auth-files" {

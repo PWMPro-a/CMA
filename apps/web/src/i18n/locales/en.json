@@ -5698,7 +5698,7 @@
     "snapshot_partial": "Evidence pending",
     "snapshot_not_ready": "Snapshot preparing",
     "snapshot_read_failed": "Using previous snapshot",
-    "snapshot_coverage_pending": "Inspection coverage {{coverage}}%, refreshing",
+    "snapshot_coverage_pending": "Inspection coverage {{coverage}}%; waiting for the next inspection",
     "status_cancelled": "Cancelled",
     "status_completed": "Completed",
     "status_completed_partial": "Partial delivery settled",
