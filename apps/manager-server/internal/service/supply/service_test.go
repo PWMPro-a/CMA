@@ -4420,17 +4420,20 @@ func TestNormalizeSub2AccountPayloadForCPA(t *testing.T) {
 		result["chatgpt_plan_type"] != "team" || result["codex_plan_type_pinned"] != true ||
 		result["organization_id"] != "org-extra" ||
 		result["workspace_id"] != "workspace-1" ||
-		result["expired"] != "2026-07-30T00:00:00Z" || result["max_concurrency"] != float64(8) ||
+		result["expired"] != "2026-07-30T00:00:00Z" ||
 		result["selection_error_freeze_seconds"] != float64(0) || result["codex_cli_only"] != true ||
 		result["codex_cli_only_allow_app_server"] != true || stringFromMap(result, "codex_identity_fingerprint") == "" {
 		t.Fatalf("normalized metadata = %#v", result)
+	}
+	if _, exists := result["max_concurrency"]; exists {
+		t.Fatalf("supplier concurrency must not be imported into CPA metadata: %#v", result)
 	}
 	if len(key) != 64 || fileName != stableSupplyAccountFileName("user@example.com", "workspace-1") {
 		t.Fatalf("stable identity outputs key=%q file=%q", key, fileName)
 	}
 }
 
-func TestNormalizeDirectCPAAccountPayloadDisablesSelectionErrorFreeze(t *testing.T) {
+func TestNormalizeDirectCPAAccountPayloadStripsSupplierConcurrencyAndDisablesSelectionErrorFreeze(t *testing.T) {
 	payload, _, _, err := normalizeAccountPayload([]byte(`{"type":"codex","email":"direct@example.com","account_id":"direct-account","access_token":"access","max_concurrency":8,"selection_error_freeze_seconds":45}`))
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
@@ -4439,7 +4442,10 @@ func TestNormalizeDirectCPAAccountPayloadDisablesSelectionErrorFreeze(t *testing
 	if err := json.Unmarshal(payload, &result); err != nil {
 		t.Fatalf("decode normalized payload: %v", err)
 	}
-	if result["max_concurrency"] != float64(8) || result["selection_error_freeze_seconds"] != float64(0) ||
+	if _, exists := result["max_concurrency"]; exists {
+		t.Fatalf("supplier concurrency must not be imported into CPA metadata: %#v", result)
+	}
+	if result["selection_error_freeze_seconds"] != float64(0) ||
 		result["codex_cli_only"] != true || result["codex_cli_only_allow_app_server"] != true ||
 		stringFromMap(result, "codex_identity_fingerprint") == "" {
 		t.Fatalf("normalized runtime limits = %#v", result)

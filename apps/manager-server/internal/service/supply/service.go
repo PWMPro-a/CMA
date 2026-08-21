@@ -10795,6 +10795,12 @@ func normalizeSupplyAccountObject(object map[string]any, exportedAt any) (normal
 	} else {
 		return normalizedSupplyAccount{}, errors.New("account does not contain OAuth token data")
 	}
+	// Supplier payloads may advertise a conservative per-account concurrency
+	// value (for example `concurrency: 1`). That value describes the supplier's
+	// own pool, not CPA's runtime scheduler. Never persist it into the imported
+	// auth file, otherwise it becomes a hard max_concurrency and overrides the
+	// configured cache-affinity limit.
+	removeSupplierConcurrencyFields(metadata)
 	resetSupplyImportRuntimeState(metadata)
 	enrichCodexIdentityFromTokens(metadata)
 	pinSupplyCodexPlanType(metadata)
@@ -11090,7 +11096,6 @@ func convertSub2AccountToCPAPayload(account map[string]any, credentials map[stri
 	}
 	setString(metadata, "last_refresh", lastRefresh)
 	copyOptionalSupplyField(metadata, account, "priority", "priority")
-	copyOptionalSupplyField(metadata, account, "max_concurrency", "concurrency")
 	copyOptionalSupplyField(metadata, account, "proxy_url", "proxy_url")
 	copyOptionalSupplyField(metadata, account, "proxy_url", "proxyUrl")
 	copyOptionalSupplyField(metadata, extra, "proxy_url", "proxy_url")
@@ -11556,6 +11561,22 @@ func copyOptionalSupplyField(target map[string]any, source map[string]any, targe
 	}
 	if value, exists := source[sourceKey]; exists && value != nil && strings.TrimSpace(fmt.Sprint(value)) != "" {
 		target[targetKey] = value
+	}
+}
+
+func removeSupplierConcurrencyFields(values map[string]any) {
+	if len(values) == 0 {
+		return
+	}
+	for _, key := range []string{
+		"concurrency",
+		"concurrency_limit",
+		"concurrencyLimit",
+		"max_concurrency",
+		"max-concurrency",
+		"maxConcurrency",
+	} {
+		delete(values, key)
 	}
 }
 
