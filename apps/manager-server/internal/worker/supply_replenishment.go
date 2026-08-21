@@ -44,7 +44,7 @@ func (w *SupplyReplenishmentWorker) run(ctx context.Context) {
 			// after the replenishment decision so it never extends the dashboard's
 			// "checking" state or delays an urgent order.
 			w.service.ScheduleRecoverySyncIfDue(ctx)
-			nextInterval := w.service.NextInterval(ctx)
+			nextInterval := w.service.NextAutomaticInterval(ctx, err)
 			w.service.RecordAutomaticExecution(startedAt, finishedAt, finishedAt.Add(nextInterval), err)
 			timer.Reset(nextInterval)
 		}

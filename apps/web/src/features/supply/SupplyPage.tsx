@@ -41,7 +41,7 @@ import { useNotificationStore } from '@/stores';
 import { resolveSupplyPoolAccountStats } from './model/poolAccountStats';
 import { reconcileLiveQuotaPlanAccounts } from './model/quotaPlanEstimates';
 import { resolvePurchasePlatformLabel } from './model/purchasePlatform';
-import { localizeSupplyRuntimeError } from './model/runtimeError';
+import { isSupplyRuntimeErrorRetrying, localizeSupplyRuntimeError } from './model/runtimeError';
 import styles from './SupplyPage.module.scss';
 
 const DEFAULT_QUOTA_ESTIMATION_POLICIES: Record<string, SupplyQuotaEstimationPolicy> = {
@@ -1609,6 +1609,7 @@ export function SupplyPage() {
           })
         : t('supply.automation_waiting_detail');
   const lastExecutionResult = automation?.lastResult || 'scheduled';
+  const lastExecutionRetrying = isSupplyRuntimeErrorRetrying(automation?.lastError);
   const lastExecutionAction = automation?.lastAction || suggestedAction;
   const lastExecutionReason = automation?.lastReason || decisionReason;
   const lastExecutionDetail = automation?.lastFinishedAtMs
@@ -1620,9 +1621,11 @@ export function SupplyPage() {
   const lastExecutionReasonLabel = t(`supply.smart_reason_${lastExecutionReason}`, {
     defaultValue: lastExecutionReason,
   });
-  const lastExecutionResultLabel = t(`supply.automation_result_${lastExecutionResult}`, {
-    defaultValue: lastExecutionResult,
-  });
+  const lastExecutionResultLabel = lastExecutionRetrying
+    ? t('supply.automation_result_retrying')
+    : t(`supply.automation_result_${lastExecutionResult}`, {
+        defaultValue: lastExecutionResult,
+      });
   const lastExecutionCreatedOrder = Boolean(
     latestAutomaticOrder &&
     automation?.lastStartedAtMs &&
@@ -1630,8 +1633,9 @@ export function SupplyPage() {
     latestAutomaticOrder.createdAtMs <=
       (automation.lastFinishedAtMs ?? nowMs) + Math.max(5_000, automation.intervalSeconds ?? 0)
   );
-  const lastExecutionOutcome =
-    automation?.lastError || lastExecutionResult === 'failed'
+  const lastExecutionOutcome = lastExecutionRetrying
+    ? t('supply.automation_execution_retrying')
+    : automation?.lastError || lastExecutionResult === 'failed'
       ? t('supply.automation_execution_failed')
       : lastExecutionCreatedOrder && latestAutomaticOrder
         ? t('supply.automation_execution_order_created', {
@@ -2604,7 +2608,15 @@ export function SupplyPage() {
       ) : null}
 
       {overview?.lastError ? (
-        <div className={styles.errorBanner}>{localizeRuntimeError(overview.lastError)}</div>
+        <div
+          className={
+            isSupplyRuntimeErrorRetrying(overview.lastError)
+              ? styles.retryBanner
+              : styles.errorBanner
+          }
+        >
+          {localizeRuntimeError(overview.lastError)}
+        </div>
       ) : null}
 
       <section className={styles.workspace}>
@@ -2725,7 +2737,11 @@ export function SupplyPage() {
                   </div>
                 </div>
                 {automation?.lastError ? (
-                  <div className={styles.executionError}>
+                  <div
+                    className={
+                      lastExecutionRetrying ? styles.executionRetry : styles.executionError
+                    }
+                  >
                     {t('supply.automation_last_error')}:{' '}
                     {localizeRuntimeError(automation.lastError)}
                   </div>

@@ -67,6 +67,16 @@ func TestAutomationExecutionTracksScheduledAndCompletedCycles(t *testing.T) {
 		t.Fatalf("failed automation = %#v", failed)
 	}
 
+	transientErr := fmt.Errorf("nv: %w", &supplyclient.HTTPError{StatusCode: http.StatusBadGateway, Message: "origin overloaded"})
+	service.RecordAutomaticExecution(now, finishedAt, nextAt, transientErr)
+	retrying := service.currentAutomationExecution(true)
+	if retrying.LastResult != "retrying" || retrying.LastError == "" {
+		t.Fatalf("transient supplier failure should wait for an automatic retry: %#v", retrying)
+	}
+	if interval := automaticIntervalWithRunError(time.Second, transientErr); interval < automaticTransientRetryBackoff {
+		t.Fatalf("transient supplier retry interval = %s, want at least %s", interval, automaticTransientRetryBackoff)
+	}
+
 	service.RecordAutomaticExecution(now, finishedAt, nextAt, errors.New("database is locked (5) (SQLITE_BUSY)"))
 	deferred := service.currentAutomationExecution(true)
 	if deferred.LastResult != "scheduled" || deferred.LastError != "" {

@@ -53,6 +53,7 @@ const (
 	remoteStatusAutomaticReleasePending = "auto_release_pending"
 	automaticReleasePendingMessage      = "automatically released locally; supplier reservation will expire automatically"
 	defaultSupplyRevenueMultiplier      = 0.06
+	automaticTransientRetryBackoff      = 30 * time.Second
 	recoverySyncBackgroundTimeout       = 10 * time.Minute
 	automaticRunSlowLogThreshold        = 500 * time.Millisecond
 	lowPriceReserveTriggerReason        = "low_price_reserve"
@@ -9530,6 +9531,13 @@ func (s *Service) RecordAutomaticExecution(startedAt, finishedAt, nextAt time.Ti
 			s.invalidateStatusCache()
 			return
 		}
+		if isTransientSupplyAPIError(err) {
+			s.automation.LastResult = "retrying"
+			s.automation.LastError = safeError(err)
+			s.stateMu.Unlock()
+			s.invalidateStatusCache()
+			return
+		}
 		s.automation.LastResult = "failed"
 		s.automation.LastError = safeError(err)
 		s.stateMu.Unlock()
@@ -9540,6 +9548,17 @@ func (s *Service) RecordAutomaticExecution(startedAt, finishedAt, nextAt time.Ti
 	s.automation.LastError = ""
 	s.stateMu.Unlock()
 	s.invalidateStatusCache()
+}
+
+func (s *Service) NextAutomaticInterval(ctx context.Context, runErr error) time.Duration {
+	return automaticIntervalWithRunError(s.NextInterval(ctx), runErr)
+}
+
+func automaticIntervalWithRunError(interval time.Duration, runErr error) time.Duration {
+	if isTransientSupplyAPIError(runErr) && interval < automaticTransientRetryBackoff {
+		return automaticTransientRetryBackoff
+	}
+	return interval
 }
 
 func (s *Service) currentAutomationExecution(enabled bool) AutomationExecution {
@@ -11695,4 +11714,15 @@ func safeError(err error) string {
 		message = message[:1000]
 	}
 	return message
+}
+
+func isTransientSupplyAPIError(err error) bool {
+	var httpErr *supplyclient.HTTPError
+	if !errors.As(err, &httpErr) || httpErr == nil {
+		return false
+	}
+	return httpErr.StatusCode == http.StatusRequestTimeout ||
+		httpErr.StatusCode == http.StatusTooEarly ||
+		httpErr.StatusCode == http.StatusTooManyRequests ||
+		httpErr.StatusCode >= http.StatusInternalServerError
 }

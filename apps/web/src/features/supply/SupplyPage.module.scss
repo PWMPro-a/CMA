@@ -814,6 +814,17 @@
   overflow-wrap: anywhere;
 }
 
+.executionRetry {
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, #f59e0b 42%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, #f59e0b 9%, var(--bg-primary));
+  color: color-mix(in srgb, #f59e0b 72%, var(--text-primary));
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .decisionFooter,
 .miniMetricGrid,
 .summaryList {
@@ -1594,6 +1605,16 @@
   border-radius: var(--app-radius-sm);
   background: var(--failure-badge-bg);
   color: var(--failure-badge-text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.retryBanner {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, #f59e0b 42%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, #f59e0b 9%, var(--bg-primary));
+  color: color-mix(in srgb, #f59e0b 72%, var(--text-primary));
   font-size: 12px;
   overflow-wrap: anywhere;
 }
