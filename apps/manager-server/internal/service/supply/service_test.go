@@ -1215,6 +1215,45 @@ func TestAutomaticBaselineDoesNotLoopRecentPartialSnapshotRefresh(t *testing.T) 
 	close(release)
 }
 
+func TestInspectionSnapshotRefreshFailureUsesScheduledCadenceBackoff(t *testing.T) {
+	service := New(nil, nil)
+	failed := make(chan struct{})
+	var calls atomic.Int32
+	service.SetInspectionSnapshotRefresher(context.Background(), func(context.Context) error {
+		calls.Add(1)
+		close(failed)
+		return errors.New("lease lost")
+	})
+
+	service.requestStaleInspectionSnapshotRefresh()
+	select {
+	case <-failed:
+	case <-time.After(time.Second):
+		t.Fatal("refresh did not run")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		service.inspectionSnapshotRefreshMu.Lock()
+		running := service.inspectionSnapshotRefresh.running
+		retryAfter := service.inspectionSnapshotRefresh.retryAfter
+		lastAttempt := service.inspectionSnapshotRefresh.lastAttempt
+		service.inspectionSnapshotRefreshMu.Unlock()
+		if !running && retryAfter.After(time.Now()) && !lastAttempt.IsZero() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("failure backoff was not recorded: running=%v retryAfter=%v lastAttempt=%v", running, retryAfter, lastAttempt)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	service.requestStaleInspectionSnapshotRefresh()
+	time.Sleep(20 * time.Millisecond)
+	if calls.Load() != 1 {
+		t.Fatalf("failed refresh retried immediately: calls=%d", calls.Load())
+	}
+}
+
 func TestAccountPoolStatsSeparateTotalAvailableHealthyAndDisabled(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/management/auth-files" {

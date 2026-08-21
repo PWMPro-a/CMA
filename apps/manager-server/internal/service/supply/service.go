@@ -720,6 +720,7 @@ const (
 	staleInspectionSnapshotRefreshCooldown  = 30 * time.Second
 	quotaEstimateCalibrationRefreshCooldown = 2 * time.Minute
 	staleInspectionSnapshotRefreshTimeout   = 15 * time.Minute
+	inspectionSnapshotRefreshFailureBackoff = 15 * time.Minute
 	smartInspectionSnapshotFreshTTL         = 20 * time.Minute
 )
 
@@ -728,6 +729,7 @@ type inspectionSnapshotRefreshState struct {
 	refresh     func(context.Context) error
 	running     bool
 	lastAttempt time.Time
+	retryAfter  time.Time
 }
 
 func New(st *store.Store, managerConfig *managerconfigsvc.Service, httpClient ...*http.Client) *Service {
@@ -815,7 +817,7 @@ func (s *Service) requestInspectionSnapshotRefresh(cooldown time.Duration) {
 	now := time.Now()
 	s.inspectionSnapshotRefreshMu.Lock()
 	state := &s.inspectionSnapshotRefresh
-	if state.refresh == nil || state.running ||
+	if state.refresh == nil || state.running || now.Before(state.retryAfter) ||
 		(!state.lastAttempt.IsZero() && now.Sub(state.lastAttempt) < cooldown) {
 		s.inspectionSnapshotRefreshMu.Unlock()
 		return
@@ -834,8 +836,15 @@ func (s *Service) requestInspectionSnapshotRefresh(cooldown time.Duration) {
 		err := refresh(refreshCtx)
 		cancel()
 
+		finishedAt := time.Now()
 		s.inspectionSnapshotRefreshMu.Lock()
 		s.inspectionSnapshotRefresh.running = false
+		s.inspectionSnapshotRefresh.lastAttempt = finishedAt
+		if err != nil {
+			s.inspectionSnapshotRefresh.retryAfter = finishedAt.Add(inspectionSnapshotRefreshFailureBackoff)
+		} else {
+			s.inspectionSnapshotRefresh.retryAfter = time.Time{}
+		}
 		s.inspectionSnapshotRefreshMu.Unlock()
 		// A completed inspection is durable in the store. Publish the completed
 		// runtime state before dropping read caches so the next status rebuild
@@ -843,6 +852,9 @@ func (s *Service) requestInspectionSnapshotRefresh(cooldown time.Duration) {
 		if err == nil {
 			s.invalidateInspectionQuotaSnapshot()
 			s.invalidateStatusCache()
+		} else {
+			log.Printf("[supply] inspection snapshot refresh failed; retry after %s: %v",
+				finishedAt.Add(inspectionSnapshotRefreshFailureBackoff).Format(time.RFC3339), err)
 		}
 	}()
 }
