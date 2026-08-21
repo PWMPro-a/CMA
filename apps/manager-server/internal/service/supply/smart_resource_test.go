@@ -668,6 +668,44 @@ func TestLoadLatestInspectionQuotaSnapshotAcceptsTrustedEmptySupplySnapshot(t *t
 	}
 }
 
+func TestLoadLatestInspectionQuotaSnapshotSkipsInterruptedRefreshBurst(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "interrupted-refresh-burst.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	seedCompletedQuotaInspection(t, st, quotaInspectionResult(25))
+	completed, err := st.ListCodexInspectionRuns(context.Background(), 1)
+	if err != nil || len(completed) != 1 {
+		t.Fatalf("load completed baseline: runs=%#v err=%v", completed, err)
+	}
+	settings := model.DefaultCodexInspectionConfig()
+	settings.TargetTypes = []string{model.CodexInspectionTargetCodex}
+	settings.TargetType = model.CodexInspectionTargetCodex
+	for index := 0; index < 25; index++ {
+		now := time.Now().Add(time.Duration(index+1) * time.Millisecond)
+		if _, err := st.CreateCodexInspectionRun(context.Background(), store.CodexInspectionRun{
+			TriggerType:  model.CodexInspectionTriggerSupplySnapshot,
+			TriggerKey:   fmt.Sprintf("interrupted-%d", index),
+			Status:       model.CodexInspectionStatusInterrupted,
+			StartedAtMS:  now.UnixMilli(),
+			FinishedAtMS: now.UnixMilli(),
+			Error:        "lease lost",
+			Settings:     settings,
+		}); err != nil {
+			t.Fatalf("create interrupted run %d: %v", index, err)
+		}
+	}
+
+	snapshot, err := New(st, nil).loadLatestInspectionQuotaSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("load baseline behind interrupted burst: %v", err)
+	}
+	if snapshot.run.ID != completed[0].ID || len(snapshot.results) != 1 {
+		t.Fatalf("recovered snapshot = run %d results %d, want run %d", snapshot.run.ID, len(snapshot.results), completed[0].ID)
+	}
+}
+
 func TestEmptyNonSupplyInspectionDoesNotBecomeCapacityBaseline(t *testing.T) {
 	settings := model.DefaultCodexInspectionConfig()
 	snapshot := inspectionQuotaSnapshot{

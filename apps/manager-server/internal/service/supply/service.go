@@ -1528,7 +1528,7 @@ func (s *Service) newerCompletedSmartInspectionAvailable(ctx context.Context, cu
 	if s == nil || s.store == nil {
 		return false
 	}
-	runs, err := s.store.ListCodexInspectionRuns(ctx, 20)
+	runs, err := s.store.ListCodexInspectionRuns(ctx, latestSmartInspectionSearchLimit)
 	if err != nil {
 		return false
 	}

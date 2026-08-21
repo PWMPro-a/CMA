@@ -65,6 +65,11 @@ const (
 	// memory still protects the low-water state, but must not create a fresh
 	// short-lived batch after traffic has genuinely gone idle.
 	smartEmergencyDemandMemoryMaxAge = 5 * time.Minute
+	// Repeated interrupted refresh attempts must not hide the most recent
+	// completed capacity baseline. A short 20-run window can be exhausted in a
+	// few minutes by a degraded SQLite/inspection loop, leaving smart supply
+	// unable to recover even though a valid completed snapshot still exists.
+	latestSmartInspectionSearchLimit = 100
 )
 
 type SmartResource struct {
@@ -1858,7 +1863,7 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context, configs
 	if len(configs) > 0 {
 		cfg = configs[0]
 	}
-	runs, err := s.store.ListCodexInspectionRuns(ctx, 20)
+	runs, err := s.store.ListCodexInspectionRuns(ctx, latestSmartInspectionSearchLimit)
 	if err != nil {
 		return inspectionQuotaSnapshot{}, err
 	}
