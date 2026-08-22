@@ -133,8 +133,40 @@ func TestRefreshAuthFileJSONImportMetadataAddsMarkerToLegacyCredential(t *testin
 		t.Fatalf("decode refreshed payload: %v", err)
 	}
 	marker, ok := payload["cpamp_import"].(map[string]any)
-	if !ok || marker["source"] != "manual" || marker["imported_at"] != "2026-08-22T15:04:05Z" {
+	if !ok || marker["source"] != "manual" || marker["method"] != "file_upload" ||
+		marker["platform_id"] != "manual" || marker["platform_name"] != "manual" ||
+		marker["imported_at"] != "2026-08-22T15:04:05Z" {
 		t.Fatalf("legacy import marker = %#v", payload["cpamp_import"])
+	}
+}
+
+func TestRefreshAuthFileJSONImportMetadataMakesManualGenerationVisibleToCPA(t *testing.T) {
+	const importedAt = "2026-08-23T02:00:00Z"
+	refreshed, changed := refreshAuthFileJSONImportMetadata(
+		[]byte(`{"type":"codex","email":"account@example.com","cpamp_import":{"source":"manual","imported_at":"2026-08-22T12:00:00Z"}}`),
+		importedAt,
+	)
+	if !changed {
+		t.Fatal("expected manual import marker to advance")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(refreshed, &payload); err != nil {
+		t.Fatalf("decode refreshed payload: %v", err)
+	}
+	marker, ok := payload["cpamp_import"].(map[string]any)
+	if !ok {
+		t.Fatalf("manual import marker = %#v", payload["cpamp_import"])
+	}
+	for key, want := range map[string]string{
+		"source":        "manual",
+		"method":        "file_upload",
+		"platform_id":   "manual",
+		"platform_name": "manual",
+		"imported_at":   importedAt,
+	} {
+		if got := fmt.Sprint(marker[key]); got != want {
+			t.Fatalf("manual import marker[%q] = %q, want %q: %#v", key, got, want, marker)
+		}
 	}
 }
 

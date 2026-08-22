@@ -1374,8 +1374,32 @@ func refreshAuthFileJSONImportMetadataWithOptions(raw []byte, importedAt string,
 		}
 		marker, ok := item["cpamp_import"].(map[string]any)
 		if !ok || marker == nil {
-			marker = map[string]any{"source": "manual"}
+			// CPA only exposes import provenance when the marker has a method and
+			// platform identity. Keep those fields on manual uploads so the
+			// re-import generation remains visible to the quota worker.
+			marker = map[string]any{
+				"source":        "manual",
+				"method":        "file_upload",
+				"platform_id":   "manual",
+				"platform_name": "manual",
+			}
 			item["cpamp_import"] = marker
+		}
+		if source, ok := marker["source"].(string); !ok || strings.TrimSpace(source) == "" {
+			marker["source"] = "manual"
+			changed = true
+		}
+		if method, ok := marker["method"].(string); !ok || strings.TrimSpace(method) == "" {
+			marker["method"] = "file_upload"
+			changed = true
+		}
+		if platformID, ok := marker["platform_id"].(string); !ok || strings.TrimSpace(platformID) == "" {
+			marker["platform_id"] = "manual"
+			changed = true
+		}
+		if platformName, ok := marker["platform_name"].(string); !ok || strings.TrimSpace(platformName) == "" {
+			marker["platform_name"] = "manual"
+			changed = true
 		}
 		if marker["imported_at"] != importedAt {
 			marker["imported_at"] = importedAt
