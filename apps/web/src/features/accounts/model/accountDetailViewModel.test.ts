@@ -1109,6 +1109,7 @@ describe('accountDetailViewModel', () => {
 
     const viewModel = buildAccountDetailViewModel(row, {
       codexQuota,
+      codexResetCreditsHistoryCount: 5,
       history: makeHistory(),
       actionCandidates: [
         makeCandidate({
@@ -1123,6 +1124,7 @@ describe('accountDetailViewModel', () => {
     const serialized = JSON.stringify(viewModel);
 
     expect(viewModel.quota.resetCreditsAvailableCount).toBe(2);
+    expect(viewModel.quota.resetCreditsHistoryCount).toBe(5);
     expect(viewModel.strategy.actionCandidates[0].hasEvidence).toBe(true);
     expect(serialized).not.toContain('sk-raw-access-secret');
     expect(serialized).not.toContain('sk-raw-refresh-secret');

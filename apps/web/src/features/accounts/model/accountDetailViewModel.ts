@@ -298,6 +298,7 @@ export interface AccountDetailViewModel {
     windows: AccountDetailQuotaWindow[];
     cooldown: QuotaCooldownInfo | null;
     resetCreditsAvailableCount: number | null;
+    resetCreditsHistoryCount: number | null;
     resetCreditExpiries: AccountDetailResetCreditExpiry[];
   };
   auth: {
@@ -331,6 +332,7 @@ export interface BuildAccountDetailViewModelOptions {
   history?: MonitoringAccountHistoryItem | null;
   valueRow?: UsageValueRow | null;
   codexQuota?: CodexQuotaState | null;
+  codexResetCreditsHistoryCount?: number | null;
   xaiQuota?: XaiQuotaState | null;
   diagnosticsSummary?: MonitoringAnalyticsSummary | null;
   diagnosticsRecentFailure?: MonitoringAnalyticsRecentFailure | null;
@@ -1473,6 +1475,7 @@ export const buildAccountDetailViewModel = (
       windows: buildQuotaWindows(row, quotaWindows, options.windowUsageByKey ?? new Map()),
       cooldown: quotaCooldown,
       resetCreditsAvailableCount: options.codexQuota?.rateLimitResetCreditsAvailableCount ?? null,
+      resetCreditsHistoryCount: options.codexResetCreditsHistoryCount ?? null,
       resetCreditExpiries: getSortedCodexResetCreditExpiries(
         options.codexQuota?.rateLimitResetCredits
       ).map((item) => ({ id: item.id, expiresAtMs: item.expiresAtMs })),

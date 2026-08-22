@@ -321,6 +321,15 @@ export function AccountQuotaTab({
                     {t('codex_quota.reset_credits_unit')}
                   </span>
                 </div>
+                <span
+                  className={styles.accountQuotaResetHistory}
+                  data-quota-reset-history="true"
+                  title={t('codex_quota.reset_credits_history_title')}
+                >
+                  {t('codex_quota.reset_credits_history', {
+                    count: detailView.quota.resetCreditsHistoryCount ?? '—',
+                  })}
+                </span>
                 <Button
                   variant="secondary"
                   size="sm"

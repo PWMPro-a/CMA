@@ -3663,6 +3663,43 @@ describe('AccountsPage replacement flows', () => {
     expect(resetAction.props.disabled).toBe(true);
   });
 
+  it('uses auth index fallback for reset history after a file rename or re-import', async () => {
+    const file = mocks.files[0];
+    mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      windows: [],
+      rateLimitResetCreditsAvailableCount: 1,
+      rateLimitResetCredits: [],
+    });
+    mocks.listCodexResetCounts.mockResolvedValue([
+      { authFileName: 'previous-name.json', authIndex: file.authIndex as string, resetCount: 4 },
+    ]);
+
+    const renderer = await renderAccountsPage();
+    const resetHistory = renderer.root.findByProps({ 'data-account-list-reset-history': 'true' });
+    expect(readText(resetHistory)).toContain('4');
+  });
+
+  it('allows quota_preempt Codex accounts with zero concurrency to use reset credits', async () => {
+    const file = {
+      ...makeCodexFile('codex-preempt.json', 'auth-preempt', 'preempt@example.com'),
+      disabled: true,
+      runtime_last_skip_reason: 'quota_preempt',
+      runtime_current_concurrency: 0,
+    } as AuthFileItem;
+    mocks.files = [file];
+    mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      windows: [],
+      rateLimitResetCreditsAvailableCount: 1,
+      rateLimitResetCredits: [],
+    });
+
+    const renderer = await renderAccountsPage();
+    const resetAction = renderer.root.findByProps({ 'data-account-list-reset-action': 'true' });
+    expect(resetAction.props.disabled).toBe(false);
+  });
+
   it('refreshes reset history from the server after a manual reset', async () => {
     const file = mocks.files[0];
     mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {

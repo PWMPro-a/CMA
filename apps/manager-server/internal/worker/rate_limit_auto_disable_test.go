@@ -458,6 +458,29 @@ func TestRateLimitAutoDisableWorkerChecksStaleQuotaPreemptFilesWithoutCooldownRo
 	}
 }
 
+func TestQuotaPreemptOperationIDScopesCredentialGeneration(t *testing.T) {
+	base := cpaauthfiles.File{
+		AuthIndex:       "auth-reused",
+		AccountID:       "account-reused",
+		AccountSnapshot: "account@example.com",
+		Raw: map[string]any{
+			"cpamp_import":         map[string]any{"imported_at": "2026-08-23T00:00:00Z"},
+			"runtime_frozen_until": "2026-08-23T01:00:00Z",
+		},
+	}
+	reimported := base
+	reimported.Raw = map[string]any{
+		"cpamp_import":         map[string]any{"imported_at": "2026-08-23T02:00:00Z"},
+		"runtime_frozen_until": "2026-08-23T03:00:00Z",
+	}
+	if first, second := quotaPreemptOperationID(base), quotaPreemptOperationID(base); first != second {
+		t.Fatalf("same freeze should remain idempotent: %q != %q", first, second)
+	}
+	if quotaPreemptOperationID(base) == quotaPreemptOperationID(reimported) {
+		t.Fatal("re-imported credential generation must receive a new operation id")
+	}
+}
+
 func mustSingleActiveCooldown(t *testing.T, st *store.Store) store.QuotaCooldown {
 	t.Helper()
 	items, err := st.QuotaCooldowns.ListActive(context.Background())

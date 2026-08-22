@@ -308,6 +308,47 @@ const isManagedCodexQuotaCooldown = (cooldown: QuotaCooldownInfo): boolean =>
   cooldown.owner === QUOTA_COOLDOWN_OWNER_CODEX_USAGE &&
   (!cooldown.provider || cooldown.provider.trim().toLowerCase() === CODEX_CONFIG.type);
 
+const isQuotaPreemptDisabledCodexRow = (row: AccountRow): boolean => {
+  if (!row.disabled || row.provider !== CODEX_CONFIG.type || row.currentConcurrency !== 0) {
+    return false;
+  }
+  const reason = [
+    row.raw['runtime_last_skip_reason'],
+    row.raw['runtimeLastSkipReason'],
+    row.raw['last_skip_reason'],
+    row.raw['lastSkipReason'],
+  ]
+    .find((value) => typeof value === 'string' && value.trim())
+    ?.toString()
+    .trim()
+    .toLowerCase();
+  return reason === 'quota_preempt';
+};
+
+type CodexResetCountLookup = {
+  byIdentity: Map<string, number>;
+  byUniqueAuthIndex: Map<string, number>;
+};
+
+const EMPTY_CODEX_RESET_COUNT_LOOKUP: CodexResetCountLookup = {
+  byIdentity: new Map(),
+  byUniqueAuthIndex: new Map(),
+};
+
+const getCodexResetCountForRow = (
+  row: AccountRow,
+  lookup: CodexResetCountLookup,
+  loaded: boolean
+): number | null => {
+  if (!loaded) return null;
+  const identityKey = `${row.fileName}\u0000${row.authIndex}`;
+  const exact = lookup.byIdentity.get(identityKey);
+  if (exact !== undefined) return exact;
+  const authIndex = row.authIndex.trim();
+  if (!authIndex) return 0;
+  return lookup.byUniqueAuthIndex.get(authIndex) ?? 0;
+};
+
 const isCodexHeaderQuotaLimitSnapshot = (snapshot: UsageHeaderSnapshot | undefined): boolean => {
   const usedPercent = getHeaderSnapshotUsedPercent(snapshot);
   const errorText =
@@ -763,8 +804,8 @@ export function AccountsPage() {
     managementKey,
   });
   const [quotaRefreshing, setQuotaRefreshing] = useState(false);
-  const [codexResetCountsByIdentity, setCodexResetCountsByIdentity] = useState<Map<string, number>>(
-    () => new Map()
+  const [codexResetCounts, setCodexResetCounts] = useState<CodexResetCountLookup>(
+    () => EMPTY_CODEX_RESET_COUNT_LOOKUP
   );
   const [codexResetCountsLoaded, setCodexResetCountsLoaded] = useState(false);
   const [historyRefreshing, setHistoryRefreshing] = useState(false);
@@ -2063,7 +2104,7 @@ export function AccountsPage() {
       !featureAvailability.managerServiceBase ||
       !managementKey
     ) {
-      setCodexResetCountsByIdentity(new Map());
+      setCodexResetCounts(EMPTY_CODEX_RESET_COUNT_LOOKUP);
       setCodexResetCountsLoaded(false);
       return;
     }
@@ -2073,19 +2114,38 @@ export function AccountsPage() {
         featureAvailability.managerServiceBase,
         managementKey
       );
-      const next = new Map<string, number>();
+      const byIdentity = new Map<string, number>();
+      const byAuthIndex = new Map<string, number>();
+      const authIndexIdentities = new Map<string, Set<string>>();
       items.forEach((item) => {
         const authIndex = item.authIndex.trim();
         const identity = `${item.authFileName.trim()}\u0000${authIndex}`;
-        if (authIndex) next.set(identity, Math.max(0, Math.trunc(item.resetCount)));
+        if (!authIndex) return;
+        const resetCount = Math.max(0, Math.trunc(item.resetCount));
+        byIdentity.set(identity, resetCount);
+        const identities = authIndexIdentities.get(authIndex) ?? new Set<string>();
+        identities.add(identity);
+        authIndexIdentities.set(authIndex, identities);
       });
-      setCodexResetCountsByIdentity(next);
+      authIndexIdentities.forEach((identities, authIndex) => {
+        if (identities.size !== 1) return;
+        const identity = identities.values().next().value as string | undefined;
+        if (identity === undefined) return;
+        const count = byIdentity.get(identity);
+        if (count !== undefined) byAuthIndex.set(authIndex, count);
+      });
+      setCodexResetCounts({ byIdentity, byUniqueAuthIndex: byAuthIndex });
       setCodexResetCountsLoaded(true);
     } catch {
-      setCodexResetCountsByIdentity(new Map());
+      setCodexResetCounts(EMPTY_CODEX_RESET_COUNT_LOOKUP);
       setCodexResetCountsLoaded(false);
     }
-  }, [featureAvailability.checking, featureAvailability.managerServiceBase, managementKey, managerStorageAvailable]);
+  }, [
+    featureAvailability.checking,
+    featureAvailability.managerServiceBase,
+    managementKey,
+    managerStorageAvailable,
+  ]);
 
   useEffect(() => {
     void loadCodexResetCounts();
@@ -3401,10 +3461,8 @@ export function AccountsPage() {
     (row: AccountRow) => {
       if (row.provider !== CODEX_CONFIG.type || row.runtimeOnly) return false;
       const hasManagedCooldown =
-        quotaCooldownsByRowKey
-          .get(row.selectionKey)
-          ?.some(isManagedCodexQuotaCooldown) === true;
-      if (row.disabled && !hasManagedCooldown) return false;
+        quotaCooldownsByRowKey.get(row.selectionKey)?.some(isManagedCodexQuotaCooldown) === true;
+      if (row.disabled && !hasManagedCooldown && !isQuotaPreemptDisabledCodexRow(row)) return false;
       const quota = mergeCodexResetCreditsFromQuotaSnapshots(
         getDisplayCodexQuota(row.raw),
         quotaSnapshotWindowsByRowKey.get(row.selectionKey) ?? []
@@ -4595,9 +4653,11 @@ export function AccountsPage() {
               Number.isFinite(rowCodexQuota.rateLimitResetCreditsAvailableCount)
                 ? Math.max(0, Math.trunc(rowCodexQuota.rateLimitResetCreditsAvailableCount))
                 : null;
-            const resetCount = codexResetCountsLoaded
-              ? (codexResetCountsByIdentity.get(`${row.fileName}\u0000${row.authIndex}`) ?? 0)
-              : null;
+            const resetCount = getCodexResetCountForRow(
+              row,
+              codexResetCounts,
+              codexResetCountsLoaded
+            );
             const quotaCooldown = quotaCooldownsByRowKey.get(row.selectionKey)?.[0] ?? null;
             const codexStatus = codexStatusBySelectionKey.get(row.selectionKey) ?? null;
             const poolStatus = accountPoolStatusByRowKey.get(row.selectionKey) ?? null;
@@ -5215,6 +5275,11 @@ export function AccountsPage() {
       history: accountHistoryByRowKey.get(selectedRow.selectionKey) ?? null,
       valueRow,
       codexQuota: selectedCodexQuota,
+      codexResetCreditsHistoryCount: getCodexResetCountForRow(
+        selectedRow,
+        codexResetCounts,
+        codexResetCountsLoaded
+      ),
       xaiQuota:
         selectedRow.provider === XAI_CONFIG.type
           ? getCredentialScopedQuotaState(xaiQuota, selectedRow.raw)

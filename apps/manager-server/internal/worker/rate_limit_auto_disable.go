@@ -553,7 +553,7 @@ func (w *RateLimitAutoDisableWorker) reconcileQuotaPreemptedFiles(ctx context.Co
 		if strings.TrimSpace(file.AuthIndex) == "" {
 			continue
 		}
-		operationID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex-auto-reset-preempt:"+strings.TrimSpace(file.AuthIndex))).String()
+		operationID := quotaPreemptOperationID(file)
 		w.operationMu.Lock()
 		_, eligibility, err := resetter.AutoResetCredit(ctx, codexquotasvc.ResetRequest{
 			AuthIndex:   file.AuthIndex,
@@ -566,6 +566,59 @@ func (w *RateLimitAutoDisableWorker) reconcileQuotaPreemptedFiles(ctx context.Co
 		}
 		log.Printf("[quota-auto-disable] stale quota_preempt recovery checked authFile=%q eligible=%t reason=%s", file.Name, eligibility.Eligible, eligibility.Reason)
 	}
+}
+
+// quotaPreemptOperationID scopes the idempotency key to the current credential
+// generation and runtime freeze. Auth indexes can be reused after a delete and
+// re-import, while the freeze marker changes for each new native preemption.
+func quotaPreemptOperationID(file cpaauthfiles.File) string {
+	parts := []string{
+		strings.TrimSpace(file.AuthIndex),
+		strings.TrimSpace(file.ID),
+		stableCodexAccountKey(file),
+		firstRawString(file.Raw,
+			"cpamp_import.imported_at",
+			"cpamp_import.importedAt",
+			"cpampImport.imported_at",
+			"cpampImport.importedAt",
+			"runtime_frozen_until",
+			"runtimeFrozenUntil",
+			"runtime_rate_limited_until",
+			"runtimeRateLimitedUntil",
+		),
+	}
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex-auto-reset-preempt:"+strings.Join(parts, "\x00"))).String()
+}
+
+func stableCodexAccountKey(file cpaauthfiles.File) string {
+	if value := strings.ToLower(strings.TrimSpace(file.AccountID)); value != "" {
+		return "account-id:" + value
+	}
+	if value := strings.ToLower(strings.TrimSpace(file.AccountSnapshot)); value != "" {
+		return "account:" + value
+	}
+	return "auth-index:" + strings.ToLower(strings.TrimSpace(file.AuthIndex))
+}
+
+func firstRawString(raw map[string]any, paths ...string) string {
+	for _, path := range paths {
+		parts := strings.Split(path, ".")
+		value := raw
+		for index, part := range parts {
+			if index == len(parts)-1 {
+				if text, ok := value[part].(string); ok && strings.TrimSpace(text) != "" {
+					return strings.TrimSpace(text)
+				}
+				continue
+			}
+			nested, ok := value[part].(map[string]any)
+			if !ok {
+				break
+			}
+			value = nested
+		}
+	}
+	return ""
 }
 
 func runtimeQuotaPreempted(raw map[string]any) bool {
