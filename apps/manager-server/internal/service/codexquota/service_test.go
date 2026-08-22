@@ -88,6 +88,7 @@ type recordingGateway struct {
 	consumeErr              error
 	consumeAccepted         bool
 	usageInitiallyAvailable bool
+	usageExplicitAvailable  bool
 	resetCreditsAvailable   int
 }
 
@@ -113,12 +114,18 @@ func (g *recordingGateway) usage(context.Context, store.Setup, string, string) (
 	defer g.mu.Unlock()
 	g.usageCalls++
 	used := 100
+	limitReached := true
 	if g.consumeAccepted || g.usageInitiallyAvailable {
 		used = 0
+		limitReached = false
+	}
+	if g.usageExplicitAvailable {
+		limitReached = false
 	}
 	body, _ := json.Marshal(map[string]any{
 		"rate_limit": map[string]any{
 			"allowed":        true,
+			"limit_reached":  limitReached,
 			"primary_window": map[string]any{"used_percent": used},
 		},
 	})
@@ -183,6 +190,46 @@ func TestAutoResetCreditChecksEligibilityBeforeCreatingOperation(t *testing.T) {
 				t.Fatalf("response state=%q, want completed", response.State)
 			}
 		})
+	}
+}
+
+func TestAutoResetCreditRecoversExplicitlyAllowedQuotaPreempt(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "explicit-available.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	file := cpaauthfiles.File{
+		ID: "runtime-explicit-available", Name: "codex.json", AuthIndex: "auth-explicit-available",
+		Provider: "codex", AccountSnapshot: "available@example.com", AccountID: "ACCOUNT-AVAILABLE",
+		Disabled: true,
+		Raw: map[string]any{
+			"runtime_last_skip_reason":    "quota_preempt",
+			"runtime_current_concurrency": json.Number("0"),
+		},
+	}
+	statuses := &recordingAuthStatuses{file: file}
+	service := &Service{
+		operations:        st.CodexQuotaOperations,
+		setupService:      staticSetupResolver{setup: store.Setup{CPAUpstreamURL: "http://cpa", ManagementKey: "key"}},
+		authFiles:         staticAuthFiles{file: file},
+		authStatuses:      statuses,
+		gateway:           &recordingGateway{usageExplicitAvailable: true},
+		authFileMutations: cpaauthfiles.NewMutationCoordinator(),
+		locks:             newAccountLocks(),
+	}
+
+	response, eligibility, err := service.AutoResetCredit(context.Background(), ResetRequest{
+		AuthIndex: file.AuthIndex, OperationID: "2e1119c6-f9d0-4b75-a39d-6c6cf5a1a1a4",
+	})
+	if err != nil || !eligibility.Eligible || eligibility.Reason != "quota_already_recovered" || response.State != model.CodexQuotaOperationStateCompleted {
+		t.Fatalf("response=%#v eligibility=%#v err=%v", response, eligibility, err)
+	}
+	statuses.mu.Lock()
+	patches := append([]bool(nil), statuses.patches...)
+	statuses.mu.Unlock()
+	if len(patches) != 1 || patches[0] {
+		t.Fatalf("status patches=%v, want one enable", patches)
 	}
 }
 
@@ -659,5 +706,28 @@ func TestCodexUsageLimitStateUsesRecoveryThreshold(t *testing.T) {
 	}`), 90)
 	if !observed || limited {
 		t.Fatalf("2 percent should be recovered: observed=%v limited=%v", observed, limited)
+	}
+}
+
+func TestCodexUsageLimitStateTrustsExplicitAllowedState(t *testing.T) {
+	observed, limited := codexUsageLimitState(json.RawMessage(`{
+		"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":100}}
+	}`), 90)
+	if !observed || limited {
+		t.Fatalf("explicitly allowed account should be recovered: observed=%v limited=%v", observed, limited)
+	}
+
+	observed, limited = codexUsageLimitState(json.RawMessage(`{
+		"rate_limit":{"allowed":true,"limit_reached":true,"primary_window":{"used_percent":2}}
+	}`), 90)
+	if !observed || !limited {
+		t.Fatalf("explicit limit_reached must remain exhausted: observed=%v limited=%v", observed, limited)
+	}
+
+	observed, limited = codexUsageLimitState(json.RawMessage(`{
+		"rate_limit":{"allowed":false,"limit_reached":false,"primary_window":{"used_percent":2}}
+	}`), 90)
+	if !observed || !limited {
+		t.Fatalf("explicitly disallowed account must remain exhausted: observed=%v limited=%v", observed, limited)
 	}
 }

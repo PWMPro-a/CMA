@@ -416,13 +416,26 @@ func codexUsageLimitState(body json.RawMessage, recoveryThreshold float64) (bool
 }
 
 func rateLimitReached(limit map[string]any, recoveryThreshold float64) bool {
-	if allowed, ok := boolValue(limit["allowed"]); ok && !allowed {
+	allowed, hasAllowed := boolValue(limit["allowed"])
+	if hasAllowed && !allowed {
 		return true
 	}
+	var limitReached bool
+	var hasLimitReached bool
 	for _, key := range []string{"limit_reached", "limitReached"} {
-		if reached, ok := boolValue(limit[key]); ok && reached {
-			return true
+		if reached, ok := boolValue(limit[key]); ok {
+			limitReached = reached
+			hasLimitReached = true
+			if reached {
+				return true
+			}
 		}
+	}
+	// The usage endpoint can report a rounded 100% window while explicitly
+	// confirming that requests are still allowed and the limit is not reached.
+	// Trust those explicit recovery signals over the percentage fallback.
+	if hasAllowed && allowed && hasLimitReached && !limitReached {
+		return false
 	}
 	for _, key := range []string{"primary_window", "primaryWindow", "secondary_window", "secondaryWindow"} {
 		window, _ := limit[key].(map[string]any)

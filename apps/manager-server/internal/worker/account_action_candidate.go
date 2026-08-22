@@ -215,6 +215,13 @@ func (w *AccountActionCandidateWorker) maybeAutoDisable(ctx context.Context, ite
 		log.Printf("[account-action] auto-disable verification failed for pending candidate %d authFile=%q: %v", item.ID, item.AuthFileName, err)
 		return
 	}
+	// A delete/re-import creates a new credential generation. Do not apply an
+	// authentication failure recorded for the previous generation to the
+	// replacement, even when CPA reused the same file name and auth index.
+	if credentialImportedAfter(target.File.Raw, candidate.SeenAtMS) {
+		log.Printf("[account-action] skip stale candidate %d for re-imported auth file %q event=%q", item.ID, item.AuthFileName, candidate.EventHash)
+		return
+	}
 	if target.File.Disabled {
 		log.Printf("[account-action] auto-disable skipped for pending candidate %d authFile=%q reason=already_disabled", item.ID, item.AuthFileName)
 		return

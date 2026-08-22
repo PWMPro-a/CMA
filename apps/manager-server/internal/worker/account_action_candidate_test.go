@@ -936,6 +936,61 @@ func TestAccountActionCandidateWorkerAutoDisablesReauth(t *testing.T) {
 	}
 }
 
+func TestAccountActionCandidateWorkerSkipsFailureFromPreviousImport(t *testing.T) {
+	st, err := store.Open(t.TempDir() + "/usage.sqlite")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	patchCalls := 0
+	importedAt := time.Now().UTC()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"id": "runtime-codex-7", "name": "codex-auth.json", "auth_index": "7",
+				"provider": "codex", "account": "user@example.com", "account_id": "acct-123",
+				"disabled":     false,
+				"cpamp_import": map[string]any{"imported_at": importedAt.Format(time.RFC3339Nano)},
+			}})
+		case "PATCH /v0/management/auth-files/status":
+			patchCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	worker := NewAccountActionCandidateWorker(st, true)
+	worker.handleCandidate(context.Background(), accountActionCandidate{
+		BaseURL:             server.URL,
+		ManagementKey:       "mgmt",
+		FileName:            "codex-auth.json",
+		AuthIndex:           "7",
+		DisplayAccount:      "user@example.com",
+		AccountID:           "acct-123",
+		Provider:            "codex",
+		ActionType:          model.AccountActionTypeReauth,
+		AutoDisableEligible: true,
+		Reason:              "token revoked before re-import",
+		EventHash:           "stale-event",
+		SeenAtMS:            importedAt.Add(-time.Minute).UnixMilli(),
+	})
+
+	if patchCalls != 0 {
+		t.Fatalf("stale candidate patch calls = %d, want 0", patchCalls)
+	}
+	items, err := st.ListAccountActionCandidates(context.Background(), model.AccountActionStatusPending, 10)
+	if err != nil {
+		t.Fatalf("list candidates: %v", err)
+	}
+	if len(items) != 1 || items[0].AutoDisabledAtMS != 0 {
+		t.Fatalf("items = %#v, want pending candidate without auto-disable", items)
+	}
+}
+
 func TestAccountActionCandidateWorkerAutoDisablesEligibleXAIReviewWithProviderAlias(t *testing.T) {
 	st, err := store.Open(t.TempDir() + "/usage.sqlite")
 	if err != nil {
