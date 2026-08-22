@@ -581,10 +581,16 @@ func quotaPreemptOperationID(file cpaauthfiles.File) string {
 			"cpamp_import.importedAt",
 			"cpampImport.imported_at",
 			"cpampImport.importedAt",
+		),
+		firstRawString(file.Raw,
 			"runtime_frozen_until",
 			"runtimeFrozenUntil",
 			"runtime_rate_limited_until",
 			"runtimeRateLimitedUntil",
+		),
+		firstRawString(file.Raw,
+			"runtime_last_skip_reason",
+			"runtimeLastSkipReason",
 		),
 	}
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex-auto-reset-preempt:"+strings.Join(parts, "\x00"))).String()
@@ -629,7 +635,12 @@ func runtimeQuotaPreempted(raw map[string]any) bool {
 		}
 		reason := strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
 		reason = strings.NewReplacer("-", "_", " ", "_").Replace(reason)
-		return reason == "quota_preempt"
+		switch reason {
+		case "quota_preempt", "usage_limit_reached", "codex_usage_limit_reached":
+			return true
+		default:
+			return false
+		}
 	}
 	return false
 }

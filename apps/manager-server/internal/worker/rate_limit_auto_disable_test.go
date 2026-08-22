@@ -447,6 +447,11 @@ func TestRateLimitAutoDisableWorkerChecksStaleQuotaPreemptFilesWithoutCooldownRo
 					"runtime_last_skip_reason": "quota_preempt",
 				},
 				{
+					"id": "runtime-usage-limit", "name": "usage-limit.json", "auth_index": "auth-usage-limit",
+					"provider": "codex", "disabled": true, "runtime_current_concurrency": 0,
+					"runtime_last_skip_reason": "usage_limit_reached",
+				},
+				{
 					"id": "runtime-manual", "name": "manual.json", "auth_index": "auth-manual",
 					"provider": "codex", "disabled": true, "runtime_current_concurrency": 0,
 					"runtime_last_skip_reason": "manual",
@@ -463,8 +468,8 @@ func TestRateLimitAutoDisableWorkerChecksStaleQuotaPreemptFilesWithoutCooldownRo
 	worker.SetAutoReset(true)
 	worker.SetAutoResetter(resetter)
 	worker.reconcileActiveCooldowns(context.Background(), time.Now())
-	if resetter.called != 1 {
-		t.Fatalf("auto reset calls=%d, want one stale quota_preempt account", resetter.called)
+	if resetter.called != 2 {
+		t.Fatalf("auto reset calls=%d, want both native quota reason variants", resetter.called)
 	}
 }
 
@@ -483,11 +488,19 @@ func TestQuotaPreemptOperationIDScopesCredentialGeneration(t *testing.T) {
 		"cpamp_import":         map[string]any{"imported_at": "2026-08-23T02:00:00Z"},
 		"runtime_frozen_until": "2026-08-23T03:00:00Z",
 	}
+	nextFreeze := base
+	nextFreeze.Raw = map[string]any{
+		"cpamp_import":         map[string]any{"imported_at": "2026-08-23T00:00:00Z"},
+		"runtime_frozen_until": "2026-08-23T04:00:00Z",
+	}
 	if first, second := quotaPreemptOperationID(base), quotaPreemptOperationID(base); first != second {
 		t.Fatalf("same freeze should remain idempotent: %q != %q", first, second)
 	}
 	if quotaPreemptOperationID(base) == quotaPreemptOperationID(reimported) {
 		t.Fatal("re-imported credential generation must receive a new operation id")
+	}
+	if quotaPreemptOperationID(base) == quotaPreemptOperationID(nextFreeze) {
+		t.Fatal("a new runtime freeze must receive a new operation id")
 	}
 }
 

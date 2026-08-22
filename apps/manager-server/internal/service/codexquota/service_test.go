@@ -204,7 +204,7 @@ func TestAutoResetCreditRecoversExplicitlyAllowedQuotaPreempt(t *testing.T) {
 		Provider: "codex", AccountSnapshot: "available@example.com", AccountID: "ACCOUNT-AVAILABLE",
 		Disabled: true,
 		Raw: map[string]any{
-			"runtime_last_skip_reason":    "quota_preempt",
+			"runtime_last_skip_reason":    "usage_limit_reached",
 			"runtime_current_concurrency": json.Number("0"),
 		},
 	}

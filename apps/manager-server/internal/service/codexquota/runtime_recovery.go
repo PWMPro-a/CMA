@@ -9,10 +9,11 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
-// recoverRuntimeQuotaPreempt clears a native CPA quota_preempt freeze after a
-// fresh upstream quota check has confirmed recovery. It deliberately requires
-// the runtime reason and zero concurrency so manual disables and live requests
-// are left untouched.
+// recoverRuntimeQuotaPreempt clears a native CPA quota freeze after a fresh
+// upstream quota check has confirmed recovery. CPA versions have emitted both
+// quota_preempt and usage_limit_reached for this state. It deliberately
+// requires the runtime reason and zero concurrency so manual disables and live
+// requests are left untouched.
 func (s *Service) recoverRuntimeQuotaPreempt(ctx context.Context, setup store.Setup, file cpaauthfiles.File) error {
 	if s == nil || !file.Disabled || !runtimeQuotaPreempted(file.Raw) || !currentRequestCountZero(file.Raw) {
 		return nil
@@ -53,7 +54,12 @@ func runtimeQuotaPreempted(raw map[string]any) bool {
 		}
 		reason := strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
 		reason = strings.NewReplacer("-", "_", " ", "_").Replace(reason)
-		return reason == "quota_preempt"
+		switch reason {
+		case "quota_preempt", "usage_limit_reached", "codex_usage_limit_reached":
+			return true
+		default:
+			return false
+		}
 	}
 	return false
 }
