@@ -28,6 +28,7 @@ type PlatformOverview struct {
 	Balance               *supplyclient.Balance   `json:"balance,omitempty"`
 	ExpectedQuotaM        float64                 `json:"expectedQuotaM,omitempty"`
 	UsableQuotaM          float64                 `json:"usableQuotaM,omitempty"`
+	CostPerCapacityFen    float64                 `json:"costPerCapacityFen,omitempty"`
 	CostPerUsableQuotaFen float64                 `json:"costPerUsableQuotaFen,omitempty"`
 	LastError             string                  `json:"lastError,omitempty"`
 	SupplierQuotaScores   []SupplierQuotaScore    `json:"supplierQuotaScores,omitempty"`
@@ -470,7 +471,7 @@ func (s *Service) selectLowPriceReservePlatform(
 	quoteCfg.Platforms = nvtokensPlatforms
 	// A normal priority-first strategy is useful for quality-sensitive routine
 	// procurement. The explicit purpose of this path is cost capture, so rank
-	// all price-qualified suppliers by effective cost after deliverability.
+	// all price-qualified suppliers by price / capacity after deliverability.
 	quoteCfg.PlatformSelectionStrategy = managerconfigsvc.SupplyPlatformSelectionBestAvailable
 	quoted, quoteErr := s.selectSupplyPlatformProduct(ctx, quoteCfg, quantity, openOrders, "", product)
 	if quoteErr != nil && len(quoted.all) == 0 {
@@ -507,18 +508,15 @@ func (s *Service) selectLowPriceReservePlatform(
 	if len(candidates) == 0 {
 		return supplyPlatformSelection{all: quoted.all}, false, nil
 	}
-	sort.SliceStable(candidates, func(i, j int) bool {
-		return supplyPlatformLessWithPriority(
-			quoted.all[candidates[i]],
-			quoted.all[candidates[j]],
-			quantity,
-			cfg.MinBalanceReserveFen,
-			used,
-			false,
-			false,
-		)
-	})
-	selectedIndex := candidates[0]
+	selectedIndex := bestSupplyPlatformCandidateIndex(
+		quoted.all,
+		candidates,
+		quantity,
+		cfg.MinBalanceReserveFen,
+		used,
+		false,
+		false,
+	)
 	for index := range quoted.all {
 		quoted.all[index].Selected = index == selectedIndex
 	}
@@ -686,6 +684,7 @@ func (s *Service) selectLowPriceReserveCatalogPlatform(
 			}
 			status.marketplaceSeller = selection
 			status.purchaseQuantity = purchaseQuantity
+			applyMarketplaceSellerEconomics(&status, selection, SmartResource{}, purchaseQuantity)
 			if available > 0 && candidate.MinUnitPriceFen > 0 &&
 				candidate.MinUnitPriceFen <= lowPriceReservePlatformCeiling(cfg, platform) {
 				candidates = append(candidates, item.index)
@@ -707,6 +706,7 @@ func (s *Service) selectLowPriceReserveCatalogPlatform(
 				EstimatedTotalFen:     catalogItem.MinUnitPriceFen * int64(quotedQuantity),
 				EstimatedUnitPriceFen: catalogItem.MinUnitPriceFen,
 			}
+			applySupplyPlatformEconomics(&status, cfg, SmartResource{}, platform, quotedQuantity)
 			if available > 0 && catalogItem.MinUnitPriceFen > 0 && catalogItem.MinUnitPriceFen <= ceiling {
 				candidates = append(candidates, item.index)
 			}
@@ -720,28 +720,15 @@ func (s *Service) selectLowPriceReserveCatalogPlatform(
 		}
 		return supplyPlatformSelection{all: statuses}, false, nil
 	}
-	sort.SliceStable(candidates, func(i, j int) bool {
-		left := statuses[candidates[i]]
-		right := statuses[candidates[j]]
-		leftPrice := left.Inventory.EstimatedUnitPriceFen
-		rightPrice := right.Inventory.EstimatedUnitPriceFen
-		if leftPrice != rightPrice {
-			return leftPrice < rightPrice
-		}
-		leftPriority := left.Priority
-		if leftPriority <= 0 {
-			leftPriority = math.MaxInt
-		}
-		rightPriority := right.Priority
-		if rightPriority <= 0 {
-			rightPriority = math.MaxInt
-		}
-		if leftPriority != rightPriority {
-			return leftPriority < rightPriority
-		}
-		return strings.ToLower(left.ID) < strings.ToLower(right.ID)
-	})
-	selectedIndex := candidates[0]
+	selectedIndex := bestSupplyPlatformCandidateIndex(
+		statuses,
+		candidates,
+		quantity,
+		0,
+		nil,
+		false,
+		false,
+	)
 	statuses[selectedIndex].Selected = true
 	return supplyPlatformSelection{
 		platform:          platforms[selectedIndex],
@@ -911,6 +898,7 @@ func (s *Service) selectSupplyPlatformProduct(
 			status.Inventory = &item.inventory
 			status.Balance = &item.balance
 			applySupplyPlatformEconomics(&status, cfg, resource, platform, quantity)
+			applyMarketplaceSellerEconomics(&status, item.marketplaceSeller, resource, effectiveQuantities[item.index])
 		}
 		statuses[item.index] = status
 	}
@@ -981,14 +969,15 @@ func (s *Service) selectSupplyPlatformProduct(
 		strings.TrimSpace(cfg.PlatformSelectionStrategy),
 		managerconfigsvc.SupplyPlatformSelectionPriorityFirst,
 	)
-	sort.SliceStable(candidates, func(i, j int) bool {
-		leftIndex := candidates[i]
-		rightIndex := candidates[j]
-		left := statuses[leftIndex]
-		right := statuses[rightIndex]
-		return supplyPlatformLessWithPriority(left, right, quantity, cfg.MinBalanceReserveFen, used, emergency, priorityFirst)
-	})
-	selectedIndex := candidates[0]
+	selectedIndex := bestSupplyPlatformCandidateIndex(
+		statuses,
+		candidates,
+		quantity,
+		cfg.MinBalanceReserveFen,
+		used,
+		emergency,
+		priorityFirst,
+	)
 	statuses[selectedIndex].Selected = true
 	return supplyPlatformSelection{
 		platform:          platforms[selectedIndex],
@@ -1022,19 +1011,12 @@ func supplyPlatformLessWithPriority(left PlatformOverview, right PlatformOvervie
 			return leftPriority < rightPriority
 		}
 	}
-	leftCost := left.CostPerUsableQuotaFen
-	if leftCost <= 0 {
-		leftCost = math.MaxFloat64
-	}
-	rightCost := right.CostPerUsableQuotaFen
-	if rightCost <= 0 {
-		rightCost = math.MaxFloat64
-	}
-	if leftCost != rightCost {
+	leftCost := left.CostPerCapacityFen
+	rightCost := right.CostPerCapacityFen
+	leftCostKnown := leftCost > 0
+	rightCostKnown := rightCost > 0
+	if leftCostKnown && rightCostKnown && leftCost != rightCost {
 		return leftCost < rightCost
-	}
-	if left.UsableQuotaM != right.UsableQuotaM {
-		return left.UsableQuotaM > right.UsableQuotaM
 	}
 	leftPrice := int64(math.MaxInt64)
 	if left.Inventory != nil && left.Inventory.EstimatedUnitPriceFen > 0 {
@@ -1043,6 +1025,12 @@ func supplyPlatformLessWithPriority(left PlatformOverview, right PlatformOvervie
 	rightPrice := int64(math.MaxInt64)
 	if right.Inventory != nil && right.Inventory.EstimatedUnitPriceFen > 0 {
 		rightPrice = right.Inventory.EstimatedUnitPriceFen
+	}
+	if (!leftCostKnown || !rightCostKnown) && leftPrice != rightPrice {
+		return leftPrice < rightPrice
+	}
+	if left.ExpectedQuotaM != right.ExpectedQuotaM {
+		return left.ExpectedQuotaM > right.ExpectedQuotaM
 	}
 	if leftPrice != rightPrice {
 		return leftPrice < rightPrice
@@ -1078,6 +1066,79 @@ func supplyPlatformLessWithPriority(left PlatformOverview, right PlatformOvervie
 	return left.Priority < right.Priority
 }
 
+// bestSupplyPlatformCandidateIndex keeps mixed sampled/unsampled selection
+// deterministic. Sampled candidates use price/capacity; an unknown candidate
+// only jumps ahead when its raw price is below the best sampled price, giving
+// it one economical trial without making unknown capacity dominate forever.
+func bestSupplyPlatformCandidateIndex(
+	statuses []PlatformOverview,
+	candidates []int,
+	quantity int,
+	balanceReserveFen int64,
+	used map[string]struct{},
+	emergency bool,
+	priorityFirst bool,
+) int {
+	if len(candidates) == 0 {
+		return -1
+	}
+	bestTier := math.MaxInt
+	for _, index := range candidates {
+		bestTier = min(bestTier, supplyPlatformAvailabilityTier(statuses[index], quantity, balanceReserveFen))
+	}
+	finalists := make([]int, 0, len(candidates))
+	for _, index := range candidates {
+		if supplyPlatformAvailabilityTier(statuses[index], quantity, balanceReserveFen) == bestTier {
+			finalists = append(finalists, index)
+		}
+	}
+	if priorityFirst {
+		bestPriority := math.MaxInt
+		for _, index := range finalists {
+			priority := statuses[index].Priority
+			if priority <= 0 {
+				priority = math.MaxInt
+			}
+			bestPriority = min(bestPriority, priority)
+		}
+		filtered := finalists[:0]
+		for _, index := range finalists {
+			priority := statuses[index].Priority
+			if priority <= 0 {
+				priority = math.MaxInt
+			}
+			if priority == bestPriority {
+				filtered = append(filtered, index)
+			}
+		}
+		finalists = filtered
+	}
+	bestKnown, bestUnknown := -1, -1
+	for _, index := range finalists {
+		if statuses[index].CostPerCapacityFen > 0 {
+			if bestKnown < 0 || supplyPlatformLessWithPriority(statuses[index], statuses[bestKnown], quantity, balanceReserveFen, used, emergency, false) {
+				bestKnown = index
+			}
+		} else if bestUnknown < 0 || supplyPlatformLessWithPriority(statuses[index], statuses[bestUnknown], quantity, balanceReserveFen, used, emergency, false) {
+			bestUnknown = index
+		}
+	}
+	if bestUnknown >= 0 && (bestKnown < 0 || platformOverviewUnitPrice(statuses[bestUnknown]) < platformOverviewUnitPrice(statuses[bestKnown])) {
+		return bestUnknown
+	}
+	if bestKnown >= 0 {
+		return bestKnown
+	}
+	return bestUnknown
+}
+
+func platformOverviewUnitPrice(status PlatformOverview) int64 {
+	if status.Inventory == nil || status.Inventory.EstimatedUnitPriceFen <= 0 {
+		return math.MaxInt64
+	}
+	return status.Inventory.EstimatedUnitPriceFen
+}
+
 func applySupplyPlatformEconomics(
 	status *PlatformOverview,
 	cfg store.ManagerSupplyConfig,
@@ -1089,6 +1150,37 @@ func applySupplyPlatformEconomics(
 		return
 	}
 	expectedQuotaM := supplyPlatformExpectedQuotaM(cfg, resource, platform)
+	applySupplyEconomicsForExpectedQuota(status, resource, quantity, expectedQuotaM)
+}
+
+func applyMarketplaceSellerEconomics(
+	status *PlatformOverview,
+	selection *marketplaceSellerSelection,
+	resource SmartResource,
+	quantity int,
+) {
+	if status == nil || selection == nil {
+		return
+	}
+	if selection.score.ScoreM <= 0 {
+		status.ExpectedQuotaM = 0
+		status.UsableQuotaM = 0
+		status.CostPerCapacityFen = 0
+		status.CostPerUsableQuotaFen = 0
+		return
+	}
+	applySupplyEconomicsForExpectedQuota(status, resource, quantity, selection.score.ScoreM)
+}
+
+func applySupplyEconomicsForExpectedQuota(
+	status *PlatformOverview,
+	resource SmartResource,
+	quantity int,
+	expectedQuotaM float64,
+) {
+	if status == nil || status.Inventory == nil {
+		return
+	}
 	usableQuotaM := expectedQuotaM
 	remainingSeconds := status.Inventory.MaximumRemainingSeconds
 	demandMPerMinute := math.Max(resource.ConsumeTokenMPerMinute, resource.DemandPlanningTokenMPerMinute)
@@ -1103,6 +1195,9 @@ func applySupplyPlatformEconomics(
 	}
 	status.ExpectedQuotaM = round2(math.Max(expectedQuotaM, 0))
 	status.UsableQuotaM = round2(math.Max(usableQuotaM, 0))
+	if status.ExpectedQuotaM > 0 && status.Inventory.EstimatedUnitPriceFen > 0 {
+		status.CostPerCapacityFen, _ = supplierCostPerCapacityFen(status.Inventory.EstimatedUnitPriceFen, status.ExpectedQuotaM)
+	}
 	if status.UsableQuotaM > 0 && status.Inventory.EstimatedUnitPriceFen > 0 {
 		status.CostPerUsableQuotaFen = math.Round((float64(status.Inventory.EstimatedUnitPriceFen)/status.UsableQuotaM)*100) / 100
 	}
@@ -1114,7 +1209,7 @@ func supplyPlatformExpectedQuotaM(
 	platform store.ManagerSupplyPlatformConfig,
 ) float64 {
 	supplierID := normalizeSmartQuotaSupplierID(platform.ID)
-	planType := "team"
+	planType := supplyProductQuotaPlanType(platform.Product)
 	for _, estimate := range resource.AccountQuotaPlanEstimates {
 		if normalizeSmartQuotaSupplierID(estimate.SupplierID) == supplierID &&
 			strings.EqualFold(strings.TrimSpace(estimate.PlanType), planType) && estimate.AdoptedM > 0 {
@@ -1129,6 +1224,20 @@ func supplyPlatformExpectedQuotaM(
 		return policy.FallbackM
 	}
 	return smartQuotaFallbackForPlan(planType)
+}
+
+func supplyProductQuotaPlanType(product string) string {
+	product = strings.ToLower(strings.TrimSpace(product))
+	switch product {
+	case "", "oauth_30d", "oauth_7d", "team_1h", "team", "bugteam", "k12":
+		return "team"
+	case "grokfree":
+		return "free"
+	case "grokpro":
+		return "pro"
+	default:
+		return product
+	}
 }
 
 func supplyPlatformAvailabilityTier(status PlatformOverview, quantity int, balanceReserveFen int64) int {

@@ -45,7 +45,10 @@ func marketplacePriceWaitError(err error) (*MarketplacePriceWaitError, bool) {
 	return target, true
 }
 
-const maxSupplierQuotaScoringOrders = 2000
+const (
+	maxSupplierQuotaScoringOrders  = 2000
+	supplierQuotaRecentSampleLimit = 20
+)
 
 const (
 	// Permanent supplier decisions need a representative batch. Before this
@@ -70,9 +73,9 @@ const (
 )
 
 // SupplierQuotaScore is the operator-facing decision record for one concrete
-// marketplace seller and sale plan. ScoreM is the conservative lower quartile
-// of independently observed account capacities, rather than the marketplace's
-// own quality score.
+// marketplace seller and sale plan. ScoreM is the trimmed mean of the seller's
+// latest 20 independently observed account capacities: one minimum and one
+// maximum are removed before averaging when at least three samples exist.
 type SupplierQuotaScore struct {
 	PlatformID             string  `json:"platformId"`
 	PlatformName           string  `json:"platformName,omitempty"`
@@ -100,6 +103,7 @@ type SupplierQuotaScore struct {
 	Available              int     `json:"available,omitempty"`
 	MinUnitPriceFen        int64   `json:"minUnitPriceFen,omitempty"`
 	MaxUnitPriceFen        int64   `json:"maxUnitPriceFen,omitempty"`
+	CostPerCapacityFen     float64 `json:"costPerCapacityFen,omitempty"`
 	MarketplaceQuality     float64 `json:"marketplaceQuality,omitempty"`
 	MarketplaceActiveRate  float64 `json:"marketplaceActiveRate,omitempty"`
 	CheckedAtMS            int64   `json:"checkedAtMs"`
@@ -235,10 +239,10 @@ func chooseMarketplaceSellerForAutomaticPurchase(
 			eligible = append(eligible, selection)
 		}
 	}
-	// Blocked is the only permanent quota exclusion. Across approved sellers and
-	// trial-ready untried/observing sellers, price is the primary key. Trials are
-	// always quantity-bounded; at an equal price, approved inventory wins before
-	// quota/quality tie breaks.
+	// Blocked is the only permanent quota exclusion. Sellers with capacity
+	// evidence are ranked by unit price / trimmed capacity mean. A seller without
+	// a denominator can still win one bounded trial when its raw price is lower
+	// than the best sampled seller's raw price.
 	sortMarketplaceSellerSelections(eligible)
 	if len(eligible) > 0 {
 		return &eligible[0], nil
@@ -254,46 +258,84 @@ func chooseMarketplaceSellerForAutomaticPurchase(
 }
 
 func sortMarketplaceSellerSelections(values []marketplaceSellerSelection) {
-	sort.SliceStable(values, func(i, j int) bool {
-		left := values[i]
-		right := values[j]
-		leftPrice := left.candidate.MinUnitPriceFen
-		rightPrice := right.candidate.MinUnitPriceFen
-		if leftPrice <= 0 {
-			leftPrice = math.MaxInt64
+	if len(values) < 2 {
+		return
+	}
+	known := make([]marketplaceSellerSelection, 0, len(values))
+	unknown := make([]marketplaceSellerSelection, 0, len(values))
+	for _, value := range values {
+		if _, ok := supplierCostPerCapacityFen(marketplaceSellerSelectionPrice(value), value.score.ScoreM); ok {
+			known = append(known, value)
+		} else {
+			unknown = append(unknown, value)
 		}
-		if rightPrice <= 0 {
-			rightPrice = math.MaxInt64
+	}
+	sort.SliceStable(known, func(i, j int) bool {
+		leftCost, _ := supplierCostPerCapacityFen(marketplaceSellerSelectionPrice(known[i]), known[i].score.ScoreM)
+		rightCost, _ := supplierCostPerCapacityFen(marketplaceSellerSelectionPrice(known[j]), known[j].score.ScoreM)
+		if leftCost != rightCost {
+			return leftCost < rightCost
 		}
+		return marketplaceSellerSelectionTieLess(known[i], known[j])
+	})
+	sort.SliceStable(unknown, func(i, j int) bool {
+		leftPrice := marketplaceSellerSelectionPrice(unknown[i])
+		rightPrice := marketplaceSellerSelectionPrice(unknown[j])
 		if leftPrice != rightPrice {
 			return leftPrice < rightPrice
 		}
-		if left.trial != right.trial {
-			return !left.trial
-		}
-		if left.score.ScoreM != right.score.ScoreM {
-			return left.score.ScoreM > right.score.ScoreM
-		}
-		leftQuality := valueOrNegativeInfinity(left.candidate.QualityScore)
-		rightQuality := valueOrNegativeInfinity(right.candidate.QualityScore)
-		if leftQuality != rightQuality {
-			return leftQuality > rightQuality
-		}
-		leftActiveRate := valueOrNegativeInfinity(left.candidate.ActiveRatePercent)
-		rightActiveRate := valueOrNegativeInfinity(right.candidate.ActiveRatePercent)
-		if leftActiveRate != rightActiveRate {
-			return leftActiveRate > rightActiveRate
-		}
-		if left.candidate.Available != right.candidate.Available {
-			return left.candidate.Available > right.candidate.Available
-		}
-		leftID := normalizeMarketplaceSellerID(left.candidate.SellerID)
-		rightID := normalizeMarketplaceSellerID(right.candidate.SellerID)
-		if leftID != rightID {
-			return leftID < rightID
-		}
-		return strings.ToLower(left.candidate.Name) < strings.ToLower(right.candidate.Name)
+		return marketplaceSellerSelectionTieLess(unknown[i], unknown[j])
 	})
+
+	ordered := make([]marketplaceSellerSelection, 0, len(values))
+	if len(unknown) > 0 && (len(known) == 0 ||
+		marketplaceSellerSelectionPrice(unknown[0]) < marketplaceSellerSelectionPrice(known[0])) {
+		// Only the cheapest unknown seller is promoted ahead of sampled inventory.
+		// The purchase quantity is already bounded to one account, after which the
+		// seller becomes observing and cannot repeatedly bypass capacity scoring.
+		ordered = append(ordered, unknown[0])
+		ordered = append(ordered, known...)
+		ordered = append(ordered, unknown[1:]...)
+	} else {
+		ordered = append(ordered, known...)
+		ordered = append(ordered, unknown...)
+	}
+	copy(values, ordered)
+}
+
+func marketplaceSellerSelectionPrice(value marketplaceSellerSelection) int64 {
+	if value.candidate.MinUnitPriceFen <= 0 {
+		return math.MaxInt64
+	}
+	return value.candidate.MinUnitPriceFen
+}
+
+func marketplaceSellerSelectionTieLess(left marketplaceSellerSelection, right marketplaceSellerSelection) bool {
+	if left.trial != right.trial {
+		return !left.trial
+	}
+	if left.score.ScoreM != right.score.ScoreM {
+		return left.score.ScoreM > right.score.ScoreM
+	}
+	leftQuality := valueOrNegativeInfinity(left.candidate.QualityScore)
+	rightQuality := valueOrNegativeInfinity(right.candidate.QualityScore)
+	if leftQuality != rightQuality {
+		return leftQuality > rightQuality
+	}
+	leftActiveRate := valueOrNegativeInfinity(left.candidate.ActiveRatePercent)
+	rightActiveRate := valueOrNegativeInfinity(right.candidate.ActiveRatePercent)
+	if leftActiveRate != rightActiveRate {
+		return leftActiveRate > rightActiveRate
+	}
+	if left.candidate.Available != right.candidate.Available {
+		return left.candidate.Available > right.candidate.Available
+	}
+	leftID := normalizeMarketplaceSellerID(left.candidate.SellerID)
+	rightID := normalizeMarketplaceSellerID(right.candidate.SellerID)
+	if leftID != rightID {
+		return leftID < rightID
+	}
+	return strings.ToLower(left.candidate.Name) < strings.ToLower(right.candidate.Name)
 }
 
 func valueOrNegativeInfinity(value *float64) float64 {
@@ -343,7 +385,7 @@ func (s *Service) marketplaceSupplierQuotaScores(
 	}
 	type evidence struct {
 		candidate      supplyclient.MarketplaceSellerCandidate
-		capacities     []float64
+		accountSamples []supplierQuotaAccountSample
 		imported       int
 		invalid        int
 		attempted      int
@@ -432,13 +474,18 @@ func (s *Service) marketplaceSupplierQuotaScores(
 		// A revoked/invalid credential is a failed quality sample. It contributes
 		// to the seller's combined pass rate, but one isolated failure does not
 		// blacklist the seller before a representative evidence batch exists.
+		observedAtMS := max(item.ImportedAtMS, max(item.UpdatedAtMS, item.CreatedAtMS))
 		if found && inspectionResultCredentialInvalid(result) {
-			entry.invalid++
+			entry.accountSamples = append(entry.accountSamples, supplierQuotaAccountSample{
+				itemID: item.ID, observedAtMS: observedAtMS, invalid: true,
+			})
 			continue
 		}
 		estimate, ok := s.smartQuotaSupplierEstimateForAt(now, identities...)
 		if ok && estimate.CapacityM > 0 {
-			entry.capacities = append(entry.capacities, estimate.CapacityM)
+			entry.accountSamples = append(entry.accountSamples, supplierQuotaAccountSample{
+				itemID: item.ID, observedAtMS: observedAtMS, capacityM: estimate.CapacityM,
+			})
 		}
 	}
 	scores := make([]SupplierQuotaScore, 0, len(bySeller))
@@ -469,18 +516,31 @@ func (s *Service) marketplaceSupplierQuotaScores(
 		if candidate.ActiveRatePercent != nil {
 			score.MarketplaceActiveRate = *candidate.ActiveRatePercent
 		}
-		if len(entry.capacities) > 0 {
-			sort.Float64s(entry.capacities)
-			score.SampleCount = len(entry.capacities)
-			score.MinimumObservedM = round2(entry.capacities[0])
-			score.MaximumObservedM = round2(entry.capacities[len(entry.capacities)-1])
-			score.ScoreM = round2(entry.capacities[(len(entry.capacities)-1)/4])
-			for _, capacity := range entry.capacities {
+		recentSamples := recentSupplierQuotaAccountSamples(entry.accountSamples, supplierQuotaRecentSampleLimit)
+		capacities := make([]float64, 0, len(recentSamples))
+		for _, sample := range recentSamples {
+			if sample.invalid {
+				entry.invalid++
+				continue
+			}
+			if sample.capacityM > 0 {
+				capacities = append(capacities, sample.capacityM)
+			}
+		}
+		if len(capacities) > 0 {
+			sort.Float64s(capacities)
+			score.SampleCount = len(capacities)
+			score.MinimumObservedM = round2(capacities[0])
+			score.MaximumObservedM = round2(capacities[len(capacities)-1])
+			score.ScoreM = trimmedSupplierQuotaCapacityMean(capacities)
+			for _, capacity := range capacities {
 				if capacity >= threshold {
 					score.PassingSampleCount++
 				}
 			}
 		}
+		score.InvalidCredentialCount = entry.invalid
+		score.CostPerCapacityFen, _ = supplierCostPerCapacityFen(score.MinUnitPriceFen, score.ScoreM)
 		score.EvidenceCount = score.SampleCount + entry.invalid
 		if score.EvidenceCount > 0 {
 			score.PassRatePercent = round2(float64(score.PassingSampleCount) / float64(score.EvidenceCount) * 100)
@@ -530,6 +590,52 @@ func (s *Service) marketplaceSupplierQuotaScores(
 	sortSupplierQuotaScores(scores)
 	s.setCachedMarketplaceSupplierQuotaScores(cacheKey, scores, now)
 	return scores, nil
+}
+
+type supplierQuotaAccountSample struct {
+	itemID       int64
+	observedAtMS int64
+	capacityM    float64
+	invalid      bool
+}
+
+func recentSupplierQuotaAccountSamples(samples []supplierQuotaAccountSample, limit int) []supplierQuotaAccountSample {
+	if len(samples) == 0 || limit <= 0 {
+		return nil
+	}
+	ordered := append([]supplierQuotaAccountSample(nil), samples...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].observedAtMS != ordered[j].observedAtMS {
+			return ordered[i].observedAtMS > ordered[j].observedAtMS
+		}
+		return ordered[i].itemID > ordered[j].itemID
+	})
+	if len(ordered) > limit {
+		ordered = ordered[:limit]
+	}
+	return ordered
+}
+
+func trimmedSupplierQuotaCapacityMean(sortedCapacities []float64) float64 {
+	if len(sortedCapacities) == 0 {
+		return 0
+	}
+	values := sortedCapacities
+	if len(values) >= 3 {
+		values = values[1 : len(values)-1]
+	}
+	total := 0.0
+	for _, value := range values {
+		total += value
+	}
+	return round2(total / float64(len(values)))
+}
+
+func supplierCostPerCapacityFen(unitPriceFen int64, capacityM float64) (float64, bool) {
+	if unitPriceFen <= 0 || capacityM <= 0 {
+		return 0, false
+	}
+	return math.Round((float64(unitPriceFen)/capacityM)*10_000) / 10_000, true
 }
 
 func inspectionResultCredentialInvalid(result store.CodexInspectionResult) bool {
@@ -623,6 +729,7 @@ func mergeMarketplaceSupplierQuotaScores(
 		score.Available = 0
 		score.MinUnitPriceFen = 0
 		score.MaxUnitPriceFen = 0
+		score.CostPerCapacityFen = 0
 		score.CheckedAtMS = now.UnixMilli()
 		bySeller[normalizeMarketplaceSellerID(score.SellerID)] = score
 	}
@@ -647,6 +754,7 @@ func mergeMarketplaceSupplierQuotaScores(
 		score.Available = candidate.Available
 		score.MinUnitPriceFen = candidate.MinUnitPriceFen
 		score.MaxUnitPriceFen = candidate.MaxUnitPriceFen
+		score.CostPerCapacityFen, _ = supplierCostPerCapacityFen(score.MinUnitPriceFen, score.ScoreM)
 		score.CheckedAtMS = now.UnixMilli()
 		if candidate.QualityScore != nil {
 			score.MarketplaceQuality = *candidate.QualityScore
@@ -722,7 +830,15 @@ func sortSupplierQuotaScores(scores []SupplierQuotaScore) {
 		}
 		leftPrice := supplierQuotaScoreSelectablePrice(scores[i])
 		rightPrice := supplierQuotaScoreSelectablePrice(scores[j])
-		if leftPrice != rightPrice {
+		leftCost, leftCostKnown := supplierCostPerCapacityFen(leftPrice, scores[i].ScoreM)
+		rightCost, rightCostKnown := supplierCostPerCapacityFen(rightPrice, scores[j].ScoreM)
+		if leftCostKnown != rightCostKnown {
+			return leftCostKnown
+		}
+		if leftCostKnown && leftCost != rightCost {
+			return leftCost < rightCost
+		}
+		if !leftCostKnown && leftPrice != rightPrice {
 			return leftPrice < rightPrice
 		}
 		if scores[i].ScoreM != scores[j].ScoreM {

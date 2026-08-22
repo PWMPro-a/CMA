@@ -335,6 +335,11 @@ const reportRangeForPreset = (preset: ReportRangePreset, now = new Date()) => {
 
 const formatMoney = (fen?: number) => `¥${((fen ?? 0) / 100).toFixed(2)}`;
 
+const formatCapacityCost = (fenPerM?: number) =>
+  typeof fenPerM === 'number' && Number.isFinite(fenPerM) && fenPerM > 0
+    ? `¥${(fenPerM / 100).toFixed(3)} / M`
+    : '-';
+
 const hasSupplierCost = (basePriceFen?: number, chargedFen?: number) =>
   (basePriceFen ?? 0) > 0 || (chargedFen ?? 0) > 0;
 
@@ -3398,6 +3403,7 @@ export function SupplyPage() {
                                             <th>{t('supply.supplier_quota_seller')}</th>
                                             <th>{t('supply.supplier_quota_status')}</th>
                                             <th>{t('supply.supplier_quota_score')}</th>
+                                            <th>{t('supply.supplier_quota_cost_per_capacity')}</th>
                                             <th>{t('supply.supplier_quota_samples')}</th>
                                             <th>{t('supply.supplier_quota_inventory')}</th>
                                             <th>{t('supply.supplier_quota_price')}</th>
@@ -3439,6 +3445,11 @@ export function SupplyPage() {
                                                 {score.sampleCount > 0
                                                   ? formatTokenM(score.scoreM)
                                                   : '-'}
+                                              </td>
+                                              <td>
+                                                {(score.costPerCapacityFen ?? 0) > 0
+                                                  ? formatCapacityCost(score.costPerCapacityFen)
+                                                  : t('supply.supplier_quota_cost_price_fallback')}
                                               </td>
                                               <td>
                                                 <div className={styles.supplierQuotaSeller}>
@@ -3619,9 +3630,9 @@ export function SupplyPage() {
                           </span>
                           <span>
                             {t('supply.platform_cost_per_quota')}:{' '}
-                            {live?.costPerUsableQuotaFen
-                              ? `${formatMoney(live.costPerUsableQuotaFen)} / M`
-                              : '-'}
+                            {live?.costPerCapacityFen
+                              ? formatCapacityCost(live.costPerCapacityFen)
+                              : t('supply.supplier_quota_cost_price_fallback')}
                           </span>
                           {live?.lastError ? <strong>{live.lastError}</strong> : null}
                         </div>

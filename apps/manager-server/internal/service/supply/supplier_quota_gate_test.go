@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -143,7 +144,7 @@ func TestChooseMarketplaceSellerPrefersApprovedAtEqualPrice(t *testing.T) {
 	}
 }
 
-func TestChooseMarketplaceSellerPrefersLowestPriceAmongApproved(t *testing.T) {
+func TestChooseMarketplaceSellerPrefersLowestCostPerCapacityAmongApproved(t *testing.T) {
 	enabled := true
 	platform := store.ManagerSupplyPlatformConfig{
 		Type:                     "nvtokens",
@@ -155,13 +156,13 @@ func TestChooseMarketplaceSellerPrefersLowestPriceAmongApproved(t *testing.T) {
 		{SellerID: "lower-price", Name: "Lower Price", SelectionToken: "lower-price-token", Available: 20, MinUnitPriceFen: 1900},
 	}
 	scores := []SupplierQuotaScore{
-		{SellerID: "higher-quota", Status: supplierQuotaStatusApproved, ScoreM: 150},
+		{SellerID: "higher-quota", Status: supplierQuotaStatusApproved, ScoreM: 170},
 		{SellerID: "lower-price", Status: supplierQuotaStatusApproved, ScoreM: 95},
 	}
 
 	selection, err := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
-	if err != nil || selection == nil || selection.candidate.SellerID != "lower-price" || selection.quantity != 10 || selection.trial {
-		t.Fatalf("low-price approved selection = %#v err=%v", selection, err)
+	if err != nil || selection == nil || selection.candidate.SellerID != "higher-quota" || selection.quantity != 10 || selection.trial {
+		t.Fatalf("cost-per-capacity approved selection = %#v err=%v", selection, err)
 	}
 }
 
@@ -209,7 +210,7 @@ func TestChooseMarketplaceSellerNeverLetsCheapBlockedSellerBypassGate(t *testing
 	}
 }
 
-func TestSortSupplierQuotaScoresShowsCheapestAvailableFirstWithinStatus(t *testing.T) {
+func TestSortSupplierQuotaScoresShowsLowestCostPerCapacityFirstWithinStatus(t *testing.T) {
 	scores := []SupplierQuotaScore{
 		{SellerID: "high-score-no-stock", SellerName: "High Score No Stock", Status: supplierQuotaStatusApproved, ScoreM: 150},
 		{SellerID: "higher-price", SellerName: "Higher Price", Status: supplierQuotaStatusApproved, ScoreM: 140, Available: 10, MinUnitPriceFen: 2300},
@@ -219,8 +220,70 @@ func TestSortSupplierQuotaScoresShowsCheapestAvailableFirstWithinStatus(t *testi
 
 	sortSupplierQuotaScores(scores)
 
-	if got := []string{scores[0].SellerID, scores[1].SellerID, scores[2].SellerID, scores[3].SellerID}; got[0] != "lower-price" || got[1] != "higher-price" || got[2] != "high-score-no-stock" || got[3] != "trial" {
+	if got := []string{scores[0].SellerID, scores[1].SellerID, scores[2].SellerID, scores[3].SellerID}; got[0] != "higher-price" || got[1] != "lower-price" || got[2] != "high-score-no-stock" || got[3] != "trial" {
 		t.Fatalf("seller score order = %#v", got)
+	}
+}
+
+func TestChooseMarketplaceSellerUsesPriceFallbackForUnknownCapacity(t *testing.T) {
+	enabled := true
+	platform := store.ManagerSupplyPlatformConfig{
+		Type: "nvtokens", SupplierQuotaGateEnabled: &enabled,
+		SupplierQuotaMinimumM: 90, SupplierQuotaTrialQuantity: 1,
+	}
+	candidates := []supplyclient.MarketplaceSellerCandidate{
+		{SellerID: "sampled-value", SelectionToken: "sampled-token", Available: 20, MinUnitPriceFen: 2300},
+		{SellerID: "unknown-expensive", SelectionToken: "unknown-token", Available: 20, MinUnitPriceFen: 2400},
+	}
+	scores := []SupplierQuotaScore{
+		{SellerID: "sampled-value", Status: supplierQuotaStatusApproved, ScoreM: 170},
+		{SellerID: "unknown-expensive", Status: supplierQuotaStatusUntried},
+	}
+
+	selection, err := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
+	if err != nil || selection == nil || selection.candidate.SellerID != "sampled-value" || selection.trial {
+		t.Fatalf("unknown-capacity fallback selection = %#v err=%v", selection, err)
+	}
+}
+
+func TestRecentSupplierQuotaSamplesKeepLatestTwenty(t *testing.T) {
+	samples := make([]supplierQuotaAccountSample, 0, 25)
+	for index := 1; index <= 25; index++ {
+		samples = append(samples, supplierQuotaAccountSample{
+			itemID: int64(index), observedAtMS: int64(index), capacityM: float64(index),
+		})
+	}
+
+	recent := recentSupplierQuotaAccountSamples(samples, supplierQuotaRecentSampleLimit)
+	if len(recent) != 20 || recent[0].capacityM != 25 || recent[19].capacityM != 6 {
+		t.Fatalf("recent samples = %#v", recent)
+	}
+	capacities := make([]float64, 0, len(recent))
+	for _, sample := range recent {
+		capacities = append(capacities, sample.capacityM)
+	}
+	sort.Float64s(capacities)
+	if got := trimmedSupplierQuotaCapacityMean(capacities); got != 15.5 {
+		t.Fatalf("trimmed recent mean = %.2f, want 15.5", got)
+	}
+}
+
+func TestTrimmedSupplierQuotaCapacityMeanUsesAllSamplesBelowThree(t *testing.T) {
+	if got := trimmedSupplierQuotaCapacityMean([]float64{100}); got != 100 {
+		t.Fatalf("single-sample mean = %.2f", got)
+	}
+	if got := trimmedSupplierQuotaCapacityMean([]float64{100, 200}); got != 150 {
+		t.Fatalf("two-sample mean = %.2f", got)
+	}
+	if got := trimmedSupplierQuotaCapacityMean([]float64{10, 100, 170, 300}); got != 135 {
+		t.Fatalf("trimmed mean = %.2f, want 135", got)
+	}
+}
+
+func TestSupplierCostPerCapacityFen(t *testing.T) {
+	got, ok := supplierCostPerCapacityFen(1800, 170)
+	if !ok || got != 10.5882 {
+		t.Fatalf("cost per capacity = %.4f ok=%v", got, ok)
 	}
 }
 
@@ -322,7 +385,8 @@ func TestMarketplaceSupplierQuotaScoresUsesFivePercentEstimateBeforeInspectionAn
 		t.Fatalf("5%% seller scores = %#v err=%v", scores, err)
 	}
 	if score := scores[0]; score.Status != supplierQuotaStatusApproved || score.ScoreM != 120 ||
-		score.SampleCount != 1 || score.EvidenceCount != 1 || score.Reason != "provisional_quota_meets_threshold" {
+		score.CostPerCapacityFen != 10 || score.SampleCount != 1 || score.EvidenceCount != 1 ||
+		score.Reason != "provisional_quota_meets_threshold" {
 		t.Fatalf("5%% seller score = %#v", score)
 	}
 
@@ -339,7 +403,8 @@ func TestMarketplaceSupplierQuotaScoresUsesFivePercentEstimateBeforeInspectionAn
 		t.Fatalf("exhausted seller scores = %#v err=%v", scores, err)
 	}
 	if score := scores[0]; score.Status != supplierQuotaStatusObserving || score.ScoreM != 80 ||
-		score.SampleCount != 1 || score.EvidenceCount != 1 || score.Reason != "waiting_for_more_supplier_evidence" {
+		score.CostPerCapacityFen != 15 || score.SampleCount != 1 || score.EvidenceCount != 1 ||
+		score.Reason != "waiting_for_more_supplier_evidence" {
 		t.Fatalf("exhausted seller score did not replace its provisional sample: %#v", score)
 	}
 }

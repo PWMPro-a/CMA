@@ -95,6 +95,7 @@ export interface SupplySupplierQuotaScore {
   available?: number;
   minUnitPriceFen?: number;
   maxUnitPriceFen?: number;
+  costPerCapacityFen?: number;
   marketplaceQuality?: number;
   marketplaceActiveRate?: number;
   checkedAtMs: number;
@@ -261,6 +262,7 @@ export interface SupplyPlatformOverview {
   balance?: SupplyBalance;
   expectedQuotaM?: number;
   usableQuotaM?: number;
+  costPerCapacityFen?: number;
   costPerUsableQuotaFen?: number;
   lastError?: string;
   supplierQuotaScores?: SupplySupplierQuotaScore[];

@@ -117,14 +117,43 @@ func TestSupplyPlatformEconomicsUsesSupplierQuotaAndLifetimeDemand(t *testing.T)
 	if status.CostPerUsableQuotaFen != 4 {
 		t.Fatalf("effective cost = %.2f fen/M, want 4", status.CostPerUsableQuotaFen)
 	}
+	if status.CostPerCapacityFen != 0.5 {
+		t.Fatalf("capacity cost = %.2f fen/M, want 0.5", status.CostPerCapacityFen)
+	}
 }
 
-func TestSupplyPlatformSelectionPrefersLowerEffectiveQuotaCost(t *testing.T) {
+func TestSupplyPlatformSelectionPrefersLowerCostPerCapacity(t *testing.T) {
 	higherPriceHigherQuota := supplyPlatformTestOverview("high-quota", 10, 200, 2_000, 120, 100, 2)
 	lowerPriceLowerQuota := supplyPlatformTestOverview("low-quota", 10, 100, 2_000, 120, 20, 5)
 
 	if !supplyPlatformLess(higherPriceHigherQuota, lowerPriceLowerQuota, 2, 0, nil, false) {
-		t.Fatal("higher unit price with lower effective fen/M should be selected")
+		t.Fatal("higher unit price with lower price/capacity should be selected")
+	}
+}
+
+func TestBestSupplyPlatformCandidateUsesRawPriceForUnknownCapacity(t *testing.T) {
+	statuses := []PlatformOverview{
+		supplyPlatformTestOverview("sampled", 10, 2300, 10_000, 120, 170, 13.5294),
+		supplyPlatformTestOverview("unknown-cheap", 10, 1800, 10_000, 120, 0, 0),
+		supplyPlatformTestOverview("unknown-expensive", 10, 2400, 10_000, 120, 0, 0),
+	}
+	if got := bestSupplyPlatformCandidateIndex(statuses, []int{0, 1, 2}, 1, 0, nil, false, false); got != 1 {
+		t.Fatalf("best platform index = %d, want cheap unknown trial", got)
+	}
+	statuses[1].Inventory.EstimatedUnitPriceFen = 2350
+	if got := bestSupplyPlatformCandidateIndex(statuses, []int{0, 1, 2}, 1, 0, nil, false, false); got != 0 {
+		t.Fatalf("best platform index = %d, want sampled value", got)
+	}
+}
+
+func TestSupplyPlatformExpectedQuotaUsesProductPlan(t *testing.T) {
+	platform := store.ManagerSupplyPlatformConfig{ID: "nv", Product: "plus"}
+	resource := SmartResource{AccountQuotaPlanEstimates: []SmartQuotaPlanEstimate{
+		{SupplierID: "nv", PlanType: "team", AdoptedM: 40},
+		{SupplierID: "nv", PlanType: "plus", AdoptedM: 170},
+	}}
+	if got := supplyPlatformExpectedQuotaM(store.ManagerSupplyConfig{}, resource, platform); got != 170 {
+		t.Fatalf("plus expected quota = %.2f, want 170", got)
 	}
 }
 
@@ -650,7 +679,9 @@ func supplyPlatformTestOverview(id string, available int, unitPriceFen int64, ba
 			MaximumRemainingSeconds: lifetimeMinutes * 60,
 		},
 		Balance:               &supplyclient.Balance{AvailableFen: balanceFen},
+		ExpectedQuotaM:        usableQuotaM,
 		UsableQuotaM:          usableQuotaM,
+		CostPerCapacityFen:    effectiveCostFen,
 		CostPerUsableQuotaFen: effectiveCostFen,
 	}
 }
