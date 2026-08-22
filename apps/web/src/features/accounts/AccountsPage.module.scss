@@ -1088,6 +1088,68 @@
   }
 }
 
+.accountQuotaResetRow {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  min-width: 0;
+  min-height: 22px;
+}
+
+.accountQuotaResetCount {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--accounts-info) 34%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accounts-info) 10%, var(--accounts-surface));
+  color: var(--accounts-info);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+
+  span {
+    min-width: 0;
+    overflow: hidden;
+    font-size: 10px;
+    font-weight: 750;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  strong {
+    flex: 0 0 auto;
+    font-size: 12px;
+    font-weight: 850;
+  }
+}
+
+.accountQuotaResetButton:global(.btn.btn-xs) {
+  flex: 0 0 22px;
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--accounts-info) 30%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accounts-info) 9%, var(--accounts-surface));
+  color: var(--accounts-info);
+  box-shadow: none;
+
+  &:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--accounts-info) 48%, transparent);
+    background: color-mix(in srgb, var(--accounts-info) 16%, var(--accounts-surface));
+  }
+
+  &:disabled {
+    opacity: 0.42;
+  }
+}
+
 .quotaEmptyState {
   display: flex;
   align-items: center;

@@ -3609,6 +3609,52 @@ describe('AccountsPage replacement flows', () => {
     expect(treeText(renderer)).not.toContain('SUM');
   });
 
+  it('shows Codex reset credits with an adjacent reset action in the quota column', async () => {
+    const file = mocks.files[0];
+    mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      windows: [],
+      rateLimitResetCreditsAvailableCount: 1,
+      rateLimitResetCredits: [],
+    });
+
+    const renderer = await renderAccountsPage();
+    const resetCount = renderer.root.findByProps({ 'data-account-list-reset-count': 'true' });
+    const resetAction = renderer.root.findByProps({ 'data-account-list-reset-action': 'true' });
+
+    expect(readText(resetCount)).toContain('codex_quota.reset_credits_label');
+    expect(readText(resetCount)).toContain('1');
+    expect(readText(resetCount)).toContain('codex_quota.reset_credits_unit');
+    expect(resetAction.props.disabled).toBe(false);
+
+    const stopPropagation = vi.fn();
+    await act(async () => {
+      resetAction.props.onClick({ stopPropagation });
+    });
+
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    expect(mocks.showConfirmation).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'codex_quota.reset_confirm_title' })
+    );
+  });
+
+  it('keeps the quota-column reset action disabled when no reset credits remain', async () => {
+    const file = mocks.files[0];
+    mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      windows: [],
+      rateLimitResetCreditsAvailableCount: 0,
+      rateLimitResetCredits: [],
+    });
+
+    const renderer = await renderAccountsPage();
+    const resetCount = renderer.root.findByProps({ 'data-account-list-reset-count': 'true' });
+    const resetAction = renderer.root.findByProps({ 'data-account-list-reset-action': 'true' });
+
+    expect(readText(resetCount)).toContain('0');
+    expect(resetAction.props.disabled).toBe(true);
+  });
+
   it('selects account cards by row click while selection mode is active', async () => {
     const renderer = await renderAccountsPage();
 

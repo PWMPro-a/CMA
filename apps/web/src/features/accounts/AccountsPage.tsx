@@ -3282,15 +3282,22 @@ export function AccountsPage() {
   const canResetCodexQuota = useCallback(
     (row: AccountRow) => {
       if (row.provider !== CODEX_CONFIG.type || row.disabled || row.runtimeOnly) return false;
-      return CODEX_CONFIG.canResetQuota?.(row.raw, getDisplayCodexQuota(row.raw)) === true;
+      const quota = mergeCodexResetCreditsFromQuotaSnapshots(
+        getDisplayCodexQuota(row.raw),
+        quotaSnapshotWindowsByRowKey.get(row.selectionKey) ?? []
+      );
+      return CODEX_CONFIG.canResetQuota?.(row.raw, quota) === true;
     },
-    [getDisplayCodexQuota]
+    [getDisplayCodexQuota, quotaSnapshotWindowsByRowKey]
   );
 
   const resetCodexQuotaForRow = useCallback(
     (row: AccountRow) => {
       if (!canResetCodexQuota(row) || !CODEX_CONFIG.resetQuota) return;
-      const quota = getDisplayCodexQuota(row.raw);
+      const quota = mergeCodexResetCreditsFromQuotaSnapshots(
+        getDisplayCodexQuota(row.raw),
+        quotaSnapshotWindowsByRowKey.get(row.selectionKey) ?? []
+      );
       const storeKey = CODEX_CONFIG.getStoreKey?.(row.raw) ?? row.fileName;
       const resetCount = quota?.rateLimitResetCreditsAvailableCount ?? 0;
       const displayName = getDisplayAccount(row);
@@ -3364,6 +3371,7 @@ export function AccountsPage() {
       canResetCodexQuota,
       getDisplayAccount,
       getDisplayCodexQuota,
+      quotaSnapshotWindowsByRowKey,
       setCodexQuota,
       showConfirmation,
       showNotification,
@@ -4434,6 +4442,18 @@ export function AccountsPage() {
             const recommendation = recommendationBySelectionKey.get(row.selectionKey) ?? null;
             const quotaWindows =
               quotaDisplayWindowsByRowKey.get(row.selectionKey) ?? buildQuotaDisplayWindows(row);
+            const rowCodexQuota =
+              row.provider === CODEX_CONFIG.type
+                ? mergeCodexResetCreditsFromQuotaSnapshots(
+                    getDisplayCodexQuota(row.raw),
+                    quotaSnapshotWindowsByRowKey.get(row.selectionKey) ?? []
+                  )
+                : undefined;
+            const resetCreditsAvailableCount =
+              typeof rowCodexQuota?.rateLimitResetCreditsAvailableCount === 'number' &&
+              Number.isFinite(rowCodexQuota.rateLimitResetCreditsAvailableCount)
+                ? Math.max(0, Math.trunc(rowCodexQuota.rateLimitResetCreditsAvailableCount))
+                : null;
             const quotaCooldown = quotaCooldownsByRowKey.get(row.selectionKey)?.[0] ?? null;
             const codexStatus = codexStatusBySelectionKey.get(row.selectionKey) ?? null;
             const poolStatus = accountPoolStatusByRowKey.get(row.selectionKey) ?? null;
@@ -4816,6 +4836,37 @@ export function AccountsPage() {
                 </div>
 
                 <div className={styles.accountCardBusiness}>
+                  {row.provider === CODEX_CONFIG.type ? (
+                    <div className={styles.accountQuotaResetRow} data-account-list-reset-row="true">
+                      <div
+                        className={styles.accountQuotaResetCount}
+                        data-account-list-reset-count="true"
+                        title={t('codex_quota.reset_credits_card_subtitle')}
+                      >
+                        <span>{t('codex_quota.reset_credits_label')}</span>
+                        <strong>
+                          {resetCreditsAvailableCount ?? t('codex_quota.reset_credits_unknown')}
+                        </strong>
+                        <span>{t('codex_quota.reset_credits_unit')}</span>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        iconOnly
+                        className={styles.accountQuotaResetButton}
+                        data-account-list-reset-action="true"
+                        title={t('codex_quota.reset_action_button')}
+                        aria-label={t('codex_quota.reset_action_button')}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          resetCodexQuotaForRow(row);
+                        }}
+                        disabled={!canResetCodexQuota(row) || configurationSaving}
+                      >
+                        <IconRefreshCw size={13} />
+                      </Button>
+                    </div>
+                  ) : null}
                   <div
                     className={[
                       styles.quotaWindowGrid,
