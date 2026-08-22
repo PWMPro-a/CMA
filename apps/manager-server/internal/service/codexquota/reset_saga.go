@@ -221,6 +221,15 @@ func (s *Service) completePostConsume(
 		return operationResponse(operation), nil
 	}
 	result.LocalResetResponse = localResponse
+	if err := s.recoverRuntimeQuotaPreempt(ctx, setup, file); err != nil {
+		operation.State = model.CodexQuotaOperationStateLocallyRecovered
+		operation.LastError = truncate(err.Error(), 2048)
+		operation, persistErr := s.persist(ctx, operation, result, addWarning(warnings, "runtime_quota_preempt_recovery_failed"))
+		if persistErr != nil {
+			return OperationResponse{}, persistErr
+		}
+		return operationResponse(operation), nil
+	}
 	operation.State = model.CodexQuotaOperationStateLocallyRecovered
 	operation.LastError = ""
 	operation, err = s.persist(ctx, operation, result, warnings)
@@ -238,6 +247,19 @@ func (s *Service) finishAfterLocalReset(
 	result ResetResult,
 	warnings []string,
 ) (OperationResponse, error) {
+	// A previous completion attempt may have finished the quota reset but lost
+	// the runtime status PATCH. Retry that narrow recovery before finalizing the
+	// operation so a transient control-plane error cannot leave the credential
+	// disabled indefinitely.
+	if err := s.recoverRuntimeQuotaPreempt(ctx, setup, file); err != nil {
+		operation.State = model.CodexQuotaOperationStateLocallyRecovered
+		operation.LastError = truncate(err.Error(), 2048)
+		operation, persistErr := s.persist(ctx, operation, result, addWarning(warnings, "runtime_quota_preempt_recovery_failed"))
+		if persistErr != nil {
+			return OperationResponse{}, persistErr
+		}
+		return operationResponse(operation), nil
+	}
 	credits, err := s.gateway.resetCredits(ctx, setup, operation.AuthIndex, file.AccountID)
 	if err != nil || !successfulStatus(credits.StatusCode) {
 		warnings = addWarning(warnings, "reset_credits_after_unavailable")

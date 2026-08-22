@@ -489,7 +489,7 @@ func (w *RateLimitAutoDisableWorker) reconcileActiveCooldowns(ctx context.Contex
 		}
 		items = append(items, item)
 	}
-	if len(items) == 0 {
+	if len(items) == 0 && !w.autoResetEnabled() {
 		w.nextInvariantCheck = now.Add(quotaAutoDisableInvariantTick)
 		w.invariantMu.Unlock()
 		return
@@ -506,6 +506,9 @@ func (w *RateLimitAutoDisableWorker) reconcileActiveCooldowns(ctx context.Contex
 	if err != nil {
 		log.Printf("[quota-auto-disable] failed to fetch auth files for cooldown invariant check: %v", err)
 		return
+	}
+	if w.autoResetEnabled() {
+		w.reconcileQuotaPreemptedFiles(ctx, baseURL, managementKey, files)
 	}
 	reenabled := 0
 	autoResetChecked := 0
@@ -532,6 +535,50 @@ func (w *RateLimitAutoDisableWorker) reconcileActiveCooldowns(ctx context.Contex
 		}
 	}
 	log.Printf("[quota-auto-disable] cooldown invariant check complete active=%d reenabled=%d autoResetChecked=%d files=%d duration=%s", len(items), reenabled, autoResetChecked, len(files), time.Since(started))
+}
+
+// reconcileQuotaPreemptedFiles repairs a stale native runtime freeze after a
+// fresh quota read reports that the account is usable again. CPA can retain a
+// quota_preempt freeze independently of CPAMP's quota_cooldowns table, so
+// scanning only owned cooldowns leaves valid credentials disabled forever.
+func (w *RateLimitAutoDisableWorker) reconcileQuotaPreemptedFiles(ctx context.Context, baseURL string, managementKey string, files []cpaauthfiles.File) {
+	resetter := w.autoResetterRef()
+	if resetter == nil {
+		return
+	}
+	for _, file := range files {
+		if normalizeQuotaProvider(file.Provider) != "codex" || !file.Disabled || !runtimeQuotaPreempted(file.Raw) || !currentConcurrencyZero(file.Raw) {
+			continue
+		}
+		if strings.TrimSpace(file.AuthIndex) == "" {
+			continue
+		}
+		operationID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex-auto-reset-preempt:"+strings.TrimSpace(file.AuthIndex))).String()
+		w.operationMu.Lock()
+		_, eligibility, err := resetter.AutoResetCredit(ctx, codexquotasvc.ResetRequest{
+			AuthIndex:   file.AuthIndex,
+			OperationID: operationID,
+		})
+		w.operationMu.Unlock()
+		if err != nil {
+			log.Printf("[quota-auto-disable] stale quota_preempt recovery failed authFile=%q: %v", file.Name, err)
+			continue
+		}
+		log.Printf("[quota-auto-disable] stale quota_preempt recovery checked authFile=%q eligible=%t reason=%s", file.Name, eligibility.Eligible, eligibility.Reason)
+	}
+}
+
+func runtimeQuotaPreempted(raw map[string]any) bool {
+	for _, key := range []string{"runtime_last_skip_reason", "runtimeLastSkipReason"} {
+		value, ok := raw[key]
+		if !ok {
+			continue
+		}
+		reason := strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
+		reason = strings.NewReplacer("-", "_", " ", "_").Replace(reason)
+		return reason == "quota_preempt"
+	}
+	return false
 }
 
 func findQuotaCooldownAuthFile(files []cpaauthfiles.File, item store.QuotaCooldown) (cpaauthfiles.File, bool) {

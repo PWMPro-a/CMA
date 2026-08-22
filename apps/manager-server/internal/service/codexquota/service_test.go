@@ -36,9 +36,11 @@ func (f staticAuthFiles) Fetch(context.Context, string, string) ([]cpaauthfiles.
 }
 
 type recordingAuthStatuses struct {
-	mu      sync.Mutex
-	file    cpaauthfiles.File
-	patches []bool
+	mu            sync.Mutex
+	file          cpaauthfiles.File
+	patches       []bool
+	patchFailures int
+	patchErr      error
 }
 
 func (s *recordingAuthStatuses) ResolveVerifiedStatusMutationTarget(
@@ -65,6 +67,13 @@ func (s *recordingAuthStatuses) PatchDisabledTarget(
 ) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.patchFailures > 0 {
+		s.patchFailures--
+		if s.patchErr != nil {
+			return s.patchErr
+		}
+		return errors.New("injected status patch failure")
+	}
 	s.file.Disabled = disabled
 	s.patches = append(s.patches, disabled)
 	return nil
@@ -509,6 +518,100 @@ func TestResetCreditReleasesCooldownWithoutConsumingWhenQuotaAlreadyRecovered(t 
 	statuses.mu.Unlock()
 	if len(patches) != 1 || patches[0] {
 		t.Fatalf("status patches=%v, want one enable", patches)
+	}
+}
+
+func TestResetCreditClearsStaleRuntimeQuotaPreemptFreeze(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "quota-preempt-recovery.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	file := cpaauthfiles.File{
+		ID:              "runtime-codex-preempt",
+		Name:            "preempt.json",
+		AuthIndex:       "auth-preempt",
+		Provider:        "codex",
+		AccountSnapshot: "preempt@example.com",
+		AccountID:       "ACCOUNT-PREEMPT",
+		Disabled:        true,
+		Raw: map[string]any{
+			"runtime_last_skip_reason":    "quota_preempt",
+			"runtime_current_concurrency": json.Number("0"),
+		},
+	}
+	statuses := &recordingAuthStatuses{file: file}
+	service := &Service{
+		operations:        st.CodexQuotaOperations,
+		setupService:      staticSetupResolver{setup: store.Setup{CPAUpstreamURL: "http://cpa", ManagementKey: "key"}},
+		authFiles:         staticAuthFiles{file: file},
+		authStatuses:      statuses,
+		gateway:           &recordingGateway{usageInitiallyAvailable: true},
+		authFileMutations: cpaauthfiles.NewMutationCoordinator(),
+		locks:             newAccountLocks(),
+	}
+
+	result, err := service.ResetCredit(context.Background(), ResetRequest{
+		AuthIndex:   file.AuthIndex,
+		OperationID: "f6ef8cbf-c5d5-5c4b-86f0-5c3f5d6e6ee2",
+	})
+	if err != nil || result.State != model.CodexQuotaOperationStateCompleted {
+		t.Fatalf("reset result=%#v err=%v", result, err)
+	}
+	statuses.mu.Lock()
+	patches := append([]bool(nil), statuses.patches...)
+	disabled := statuses.file.Disabled
+	statuses.mu.Unlock()
+	if len(patches) != 1 || patches[0] || disabled {
+		t.Fatalf("status patches=%v disabled=%t, want one enable", patches, disabled)
+	}
+}
+
+func TestResetCreditRetriesRuntimeQuotaPreemptRecoveryWhenResumed(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "quota-preempt-retry.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	file := cpaauthfiles.File{
+		ID:              "runtime-codex-preempt-retry",
+		Name:            "preempt-retry.json",
+		AuthIndex:       "auth-preempt-retry",
+		Provider:        "codex",
+		AccountSnapshot: "preempt-retry@example.com",
+		AccountID:       "ACCOUNT-PREEMPT-RETRY",
+		Disabled:        true,
+		Raw: map[string]any{
+			"runtime_last_skip_reason":    "quota_preempt",
+			"runtime_current_concurrency": json.Number("0"),
+		},
+	}
+	statuses := &recordingAuthStatuses{file: file, patchFailures: 1, patchErr: errors.New("temporary status failure")}
+	service := &Service{
+		operations:        st.CodexQuotaOperations,
+		setupService:      staticSetupResolver{setup: store.Setup{CPAUpstreamURL: "http://cpa", ManagementKey: "key"}},
+		authFiles:         staticAuthFiles{file: file},
+		authStatuses:      statuses,
+		gateway:           &recordingGateway{usageInitiallyAvailable: true},
+		authFileMutations: cpaauthfiles.NewMutationCoordinator(),
+		locks:             newAccountLocks(),
+	}
+
+	request := ResetRequest{AuthIndex: file.AuthIndex, OperationID: "a2e1f1e4-05d9-5d12-9640-369ab4b1581a"}
+	first, err := service.ResetCredit(context.Background(), request)
+	if err != nil || first.State != model.CodexQuotaOperationStateLocallyRecovered {
+		t.Fatalf("first reset result=%#v err=%v, want resumable local recovery", first, err)
+	}
+	second, err := service.ResetCredit(context.Background(), request)
+	if err != nil || second.State != model.CodexQuotaOperationStateCompleted {
+		t.Fatalf("resumed reset result=%#v err=%v, want completed", second, err)
+	}
+	statuses.mu.Lock()
+	patches := append([]bool(nil), statuses.patches...)
+	disabled := statuses.file.Disabled
+	statuses.mu.Unlock()
+	if len(patches) != 1 || patches[0] || disabled {
+		t.Fatalf("status patches=%v disabled=%t, want one successful enable on resume", patches, disabled)
 	}
 }
 

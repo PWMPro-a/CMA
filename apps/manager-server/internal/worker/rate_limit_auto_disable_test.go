@@ -417,6 +417,47 @@ func TestRateLimitAutoDisableWorkerEnablesAfterCodexAutoReset(t *testing.T) {
 	}
 }
 
+func TestRateLimitAutoDisableWorkerChecksStaleQuotaPreemptFilesWithoutCooldownRows(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "quota-preempt-scan.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-management-key" {
+			http.Error(w, "missing auth", http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"id": "runtime-preempt", "name": "preempt.json", "auth_index": "auth-preempt",
+					"provider": "codex", "disabled": true, "runtime_current_concurrency": 0,
+					"runtime_last_skip_reason": "quota_preempt",
+				},
+				{
+					"id": "runtime-manual", "name": "manual.json", "auth_index": "auth-manual",
+					"provider": "codex", "disabled": true, "runtime_current_concurrency": 0,
+					"runtime_last_skip_reason": "manual",
+				},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	resetter := &recordingAutoResetter{result: codexquotasvc.AutoResetResult{Reason: "quota_already_recovered"}}
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{CPAUpstreamURL: server.URL, ManagementKey: "test-management-key"})
+	worker.SetAutoReset(true)
+	worker.SetAutoResetter(resetter)
+	worker.reconcileActiveCooldowns(context.Background(), time.Now())
+	if resetter.called != 1 {
+		t.Fatalf("auto reset calls=%d, want one stale quota_preempt account", resetter.called)
+	}
+}
+
 func mustSingleActiveCooldown(t *testing.T, st *store.Store) store.QuotaCooldown {
 	t.Helper()
 	items, err := st.QuotaCooldowns.ListActive(context.Background())
