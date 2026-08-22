@@ -322,7 +322,11 @@ const isQuotaPreemptDisabledCodexRow = (row: AccountRow): boolean => {
     ?.toString()
     .trim()
     .toLowerCase();
-  return reason === 'quota_preempt';
+  return (
+    reason === 'quota_preempt' ||
+    reason === 'usage_limit_reached' ||
+    reason === 'codex_usage_limit_reached'
+  );
 };
 
 type CodexResetCountLookup = {

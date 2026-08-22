@@ -3700,6 +3700,29 @@ describe('AccountsPage replacement flows', () => {
     expect(resetAction.props.disabled).toBe(false);
   });
 
+  it.each(['usage_limit_reached', 'codex_usage_limit_reached'])(
+    'allows Codex accounts disabled by %s to use reset credits',
+    async (reason) => {
+      const file = {
+        ...makeCodexFile(`codex-${reason}.json`, `auth-${reason}`, `${reason}@example.com`),
+        disabled: true,
+        runtime_last_skip_reason: reason,
+        runtime_current_concurrency: 0,
+      } as AuthFileItem;
+      mocks.files = [file];
+      mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
+        status: 'success',
+        windows: [],
+        rateLimitResetCreditsAvailableCount: 1,
+        rateLimitResetCredits: [],
+      });
+
+      const renderer = await renderAccountsPage();
+      const resetAction = renderer.root.findByProps({ 'data-account-list-reset-action': 'true' });
+      expect(resetAction.props.disabled).toBe(false);
+    }
+  );
+
   it('refreshes reset history from the server after a manual reset', async () => {
     const file = mocks.files[0];
     mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
