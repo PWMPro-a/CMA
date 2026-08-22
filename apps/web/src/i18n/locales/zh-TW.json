@@ -4306,7 +4306,21 @@
     "show_full_credentials_hint": "顯示完整憑證標識",
     "show_masked_credentials_hint": "顯示脫敏憑證標識",
     "observed_from_usage_headers": "來自最近用量回應 Header 的歷史記錄，不代表即時額度查詢。",
-    "observed_from_usage_headers_at": "來自最近用量回應 Header 的歷史記錄，記錄時間：{{time}}。"
+    "observed_from_usage_headers_at": "來自最近用量回應 Header 的歷史記錄，記錄時間：{{time}}。",
+    "codex_reset_credit_inspection_button": "巡檢重置次數",
+    "codex_reset_credit_batch_button": "批次重置（{{count}}）",
+    "codex_reset_credit_inspection_done": "已檢測 {{total}} 個 Codex 帳號，其中 {{eligible}} 個符合重置條件。",
+    "codex_reset_credit_batch_title": "批次重置 Codex 額度",
+    "codex_reset_credit_batch_confirm": "確認重置檢測到的 {{count}} 個符合條件帳號？",
+    "codex_reset_credit_results_title": "重置次數巡檢結果",
+    "codex_reset_credit_count": "剩餘 {{count}} 次",
+    "codex_reset_credit_eligible": "可重置",
+    "codex_reset_credit_reason_quota_not_exhausted": "額度未耗盡",
+    "codex_reset_credit_reason_no_reset_credit": "沒有剩餘次數",
+    "codex_reset_credit_reason_active_requests": "仍有請求處理中",
+    "codex_reset_credit_reason_usage_unavailable": "額度查詢失敗",
+    "codex_reset_credit_reason_reset_credits_unavailable": "重置次數查詢失敗",
+    "codex_reset_credit_reason_unknown": "不符合條件"
   },
   "codex_reauth": {
     "title": "Codex 重新登入",
@@ -4842,7 +4856,19 @@
     "advanced_summary": "詳情",
     "env_locked_hint": "此開關由服務啟動環境鎖定，請修改環境變數並重新啟動。",
     "env_locked_reason": "由環境變數 {{envKey}} 鎖定。修改該變數並重新啟動服務後才能變更此開關。",
-    "gating_note": "關閉某項策略只會影響之後發現的新問題；已經排隊或正在處理的任務會繼續完成。"
+    "gating_note": "關閉某項策略只會影響之後發現的新問題；已經排隊或正在處理的任務會繼續完成。",
+    "codexAutoReset_title": "Codex 額度耗盡自動重置",
+    "codexAutoReset_summary": "額度耗盡且目前請求歸零時，使用剩餘重置次數恢復 Codex 帳號並自動重新啟用。",
+    "codexAutoReset_toggle": "啟用 Codex 自動重置",
+    "codexAutoReset_description": "僅處理 CPAMP 自動管理的 Codex 額度冷卻帳號；偵測到額度耗盡、請求數為零且存在重置次數後，執行一次具冪等性的重置。",
+    "codexAutoReset_behavior": [
+      "預設開啟",
+      "僅在額度視窗明確耗盡時處理",
+      "要求目前請求數明確為 0",
+      "要求存在剩餘重置次數",
+      "重置驗證成功後自動恢復並啟用帳號",
+      "不改變手動停用帳號狀態"
+    ]
   },
   "container_ops": {
     "title": "容器運維",

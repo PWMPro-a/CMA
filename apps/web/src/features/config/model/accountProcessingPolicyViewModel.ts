@@ -1,6 +1,7 @@
 import type { AccountPolicyCapability, AccountProcessingPolicy } from '@/services/api/usageService';
 
 export type AccountPolicyCapabilityKey =
+  | 'codexAutoReset'
   | 'providerQuotaCooldown'
   | 'authIssueQueue'
   | 'authIssueAutoDisable';
@@ -41,6 +42,7 @@ export interface AccountPolicyViewGroup {
 }
 
 const capabilityKeys: AccountPolicyCapabilityKey[] = [
+  'codexAutoReset',
   'providerQuotaCooldown',
   'authIssueQueue',
   'authIssueAutoDisable',
@@ -48,8 +50,9 @@ const capabilityKeys: AccountPolicyCapabilityKey[] = [
 
 const capabilitySourceKey: Record<
   AccountPolicyCapabilityKey,
-  'codexQuotaCooldown' | 'authIssueQueue' | 'authIssueAutoDisable'
+  'codexAutoReset' | 'codexQuotaCooldown' | 'authIssueQueue' | 'authIssueAutoDisable'
 > = {
+  codexAutoReset: 'codexAutoReset',
   providerQuotaCooldown: 'codexQuotaCooldown',
   authIssueQueue: 'authIssueQueue',
   authIssueAutoDisable: 'authIssueAutoDisable',
@@ -62,6 +65,14 @@ const capabilityMetadata: Record<
     'titleKey' | 'descriptionKey' | 'behaviorKey' | 'summaryKey' | 'toggleLabelKey' | 'nested'
   >
 > = {
+  codexAutoReset: {
+    titleKey: 'accountPolicy.codexAutoReset_title',
+    descriptionKey: 'accountPolicy.codexAutoReset_description',
+    behaviorKey: 'accountPolicy.codexAutoReset_behavior',
+    summaryKey: 'accountPolicy.codexAutoReset_summary',
+    toggleLabelKey: 'accountPolicy.codexAutoReset_toggle',
+    nested: false,
+  },
   providerQuotaCooldown: {
     titleKey: 'accountPolicy.providerQuotaCooldown_title',
     descriptionKey: 'accountPolicy.providerQuotaCooldown_description',
@@ -98,7 +109,7 @@ const groupDefinitions: Array<{
     key: 'quota',
     titleKey: 'accountPolicy.group_quota_title',
     descriptionKey: 'accountPolicy.group_quota_description',
-    itemKeys: ['providerQuotaCooldown'],
+    itemKeys: ['codexAutoReset', 'providerQuotaCooldown'],
   },
   {
     key: 'authIssues',

@@ -6218,6 +6218,14 @@ export const getDemoQuotaStoreState = (): DemoQuotaStoreState => {
 export const getDemoAccountProcessingPolicy = (): AccountProcessingPolicy => ({
   source: 'db',
   updatedAtMs: now() - hour,
+  codexAutoReset: {
+    enabled: true,
+    configured: true,
+    source: 'db',
+    locked: false,
+    envKey: 'USAGE_CODEX_AUTO_RESET_ENABLED',
+    configFileKey: 'codexAutoResetEnabled',
+  },
   codexQuotaCooldown: {
     enabled: true,
     configured: true,

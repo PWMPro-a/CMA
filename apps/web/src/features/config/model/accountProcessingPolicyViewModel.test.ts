@@ -5,6 +5,14 @@ import { buildAccountProcessingPolicyViewModel } from './accountProcessingPolicy
 function policy(overrides: Partial<AccountProcessingPolicy> = {}): AccountProcessingPolicy {
   return {
     source: 'startup',
+    codexAutoReset: {
+      enabled: false,
+      configured: false,
+      source: 'startup',
+      locked: false,
+      envKey: 'USAGE_CODEX_AUTO_RESET_ENABLED',
+      configFileKey: 'codexAutoResetEnabled',
+    },
     codexQuotaCooldown: {
       enabled: false,
       configured: false,
@@ -40,7 +48,10 @@ describe('buildAccountProcessingPolicyViewModel', () => {
 
     expect(groups).toHaveLength(2);
     expect(groups[0].key).toBe('quota');
-    expect(groups[0].items.map((item) => item.key)).toEqual(['providerQuotaCooldown']);
+    expect(groups[0].items.map((item) => item.key)).toEqual([
+      'codexAutoReset',
+      'providerQuotaCooldown',
+    ]);
     expect(groups[1].key).toBe('authIssues');
     expect(groups[1].items.map((item) => item.key)).toEqual([
       'authIssueQueue',
@@ -95,7 +106,7 @@ describe('buildAccountProcessingPolicyViewModel', () => {
       })
     );
 
-    const quota = groups[0].items[0];
+    const quota = groups[0].items[1];
     expect(quota.locked).toBe(true);
     expect(quota.statusTone).toBe('locked');
     expect(quota.toggleDisabled).toBe(true);

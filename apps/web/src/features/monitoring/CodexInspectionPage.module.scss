@@ -41,6 +41,29 @@
   min-width: 0;
 }
 
+.resultsTable {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.resultRow {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.5fr) repeat(3, minmax(110px, 1fr));
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+}
+
+@media (max-width: 720px) {
+  .resultRow {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 .panel {
   position: relative;
   border: 1px solid var(--inspect-line);

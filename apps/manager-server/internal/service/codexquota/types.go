@@ -44,3 +44,36 @@ type OperationResponse struct {
 	CreatedAtMS    int64        `json:"created_at_ms"`
 	UpdatedAtMS    int64        `json:"updated_at_ms"`
 }
+
+// AutoResetResult describes the eligibility check used by the cooldown worker.
+// It is intentionally separate from OperationResponse so a poll that finds no
+// remaining credit never creates an operation or consumes a credit.
+type AutoResetResult struct {
+	Eligible bool   `json:"eligible"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+type ResetCreditInspectionItem struct {
+	AuthIndex       string `json:"auth_index"`
+	AuthFileName    string `json:"auth_file_name"`
+	AccountID       string `json:"account_id,omitempty"`
+	Account         string `json:"account,omitempty"`
+	Disabled        bool   `json:"disabled"`
+	CurrentRequests *int64 `json:"current_requests,omitempty"`
+	AvailableCount  int64  `json:"available_count"`
+	Exhausted       bool   `json:"exhausted"`
+	Eligible        bool   `json:"eligible"`
+	Reason          string `json:"reason,omitempty"`
+}
+
+type BatchResetRequest struct {
+	AuthIndexes []string `json:"auth_indexes"`
+}
+
+type BatchResetOutcome struct {
+	AuthIndex string `json:"auth_index"`
+	State     string `json:"state,omitempty"`
+	Eligible  bool   `json:"eligible"`
+	Reason    string `json:"reason,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
