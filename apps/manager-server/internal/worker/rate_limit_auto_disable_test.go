@@ -20,12 +20,24 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	quotacooldownrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotacooldown"
 	accountactionsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/accountaction"
+	codexquotasvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/codexquota"
 	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	managerconfigsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
+
+type recordingAutoResetter struct {
+	response codexquotasvc.OperationResponse
+	result   codexquotasvc.AutoResetResult
+	called   int
+}
+
+func (r *recordingAutoResetter) AutoResetCredit(context.Context, codexquotasvc.ResetRequest) (codexquotasvc.OperationResponse, codexquotasvc.AutoResetResult, error) {
+	r.called++
+	return r.response, r.result, nil
+}
 
 func TestQuotaAutoDisableCandidateRequiresStrictCodexUsageLimit(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
@@ -301,6 +313,89 @@ func TestRateLimitAutoDisableWorkerReDisablesEnabledActiveCooldown(t *testing.T)
 	if !gotDisabled || gotPatches != 1 {
 		t.Fatalf("cooldown invariant state disabled=%t patches=%d, want disabled=true patches=1", gotDisabled, gotPatches)
 	}
+}
+
+func TestRateLimitAutoDisableWorkerEnablesAfterCodexAutoReset(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "auto-reset-recovery.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	var mu sync.Mutex
+	disabled := true
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-management-key" {
+			http.Error(w, "missing auth", http.StatusUnauthorized)
+			return
+		}
+		switch {
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			mu.Lock()
+			currentDisabled := disabled
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"id": "runtime-codex-auth-1", "name": "codex-auth.json", "auth_index": "auth-1",
+				"account": "user@example.com", "account_id": "ACCOUNT-1", "provider": "codex", "disabled": currentDisabled,
+				"runtime_current_concurrency": 0,
+			}})
+		case r.URL.Path == "/v0/management/auth-files/status" && r.Method == http.MethodPatch:
+			var item struct {
+				Disabled bool `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			disabled = item.Disabled
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	now := time.Now()
+	if _, err := st.UpsertQuotaCooldown(context.Background(), store.QuotaCooldownUpsert{
+		AuthFileName: "codex-auth.json", AuthIndex: "auth-1", AccountSnapshot: "user@example.com", Provider: "codex",
+		ReasonCode: quotaReasonCodexUsageLimit, RecoverAtMS: now.Add(time.Hour).UnixMilli(),
+		Owner: model.QuotaCooldownOwnerUsage429, EventHash: "evt-auto-reset", DisabledAtMS: now.Add(-time.Minute).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("seed cooldown: %v", err)
+	}
+	resetter := &recordingAutoResetter{
+		response: codexquotasvc.OperationResponse{State: model.CodexQuotaOperationStateCompleted},
+		result:   codexquotasvc.AutoResetResult{Eligible: true, Reason: "reset_started"},
+	}
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{CPAUpstreamURL: server.URL, ManagementKey: "test-management-key"})
+	worker.SetAutoReset(true)
+	worker.SetAutoResetter(resetter)
+	worker.recoverCooldown(context.Background(), server.URL, "test-management-key", mustSingleActiveCooldown(t, st), now)
+
+	mu.Lock()
+	gotDisabled := disabled
+	mu.Unlock()
+	if resetter.called != 1 || gotDisabled {
+		t.Fatalf("auto reset calls=%d disabled=%t, want one call and enabled account", resetter.called, gotDisabled)
+	}
+	active, err := st.QuotaCooldowns.ListActive(context.Background())
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("active cooldowns=%#v, want none", active)
+	}
+}
+
+func mustSingleActiveCooldown(t *testing.T, st *store.Store) store.QuotaCooldown {
+	t.Helper()
+	items, err := st.QuotaCooldowns.ListActive(context.Background())
+	if err != nil || len(items) != 1 {
+		t.Fatalf("active cooldowns=%#v err=%v", items, err)
+	}
+	return items[0]
 }
 
 func TestQuotaAutoDisableCandidateAcceptsXAIIncludedFreeUsageExhausted(t *testing.T) {

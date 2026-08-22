@@ -862,6 +862,7 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 		log.Printf("[quota-auto-disable] auth file %q already enabled; marked cooldown recovered", item.AuthFileName)
 		return
 	}
+	autoResetRecovered := false
 	if provider == "codex" && w.autoResetEnabled() && currentConcurrencyZero(target.File.Raw) {
 		releaseMutation()
 		mutationHeld = false
@@ -888,12 +889,46 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 				return
 			}
 			log.Printf("[quota-auto-disable] Codex auto reset recovered authFile=%q reason=%s", item.AuthFileName, eligibility.Reason)
-			return
+			autoResetRecovered = true
 		}
 	}
-	if provider == "codex" && w.autoResetEnabled() && now.Before(time.UnixMilli(item.RecoverAtMS)) {
+	if provider == "codex" && w.autoResetEnabled() && !autoResetRecovered && now.Before(time.UnixMilli(item.RecoverAtMS)) {
 		log.Printf("[quota-auto-disable] Codex cooldown authFile=%q remains disabled until active requests reach zero", item.AuthFileName)
 		return
+	}
+	if !mutationHeld {
+		releaseMutation, err = w.authFileMutations.Acquire(ctx, item.AuthFileName)
+		if err != nil {
+			_ = w.store.RecordQuotaCooldownFailure(ctx, item.ID, err.Error())
+			log.Printf("[quota-auto-disable] failed to coordinate auth file %q before enabling: %v", item.AuthFileName, err)
+			return
+		}
+		mutationHeld = true
+		target, ok, err = w.currentAuthFileTarget(ctx, baseURL, managementKey, cpaauthfiles.Identity{
+			AuthFileName:      item.AuthFileName,
+			AuthIndex:         authIndex,
+			Provider:          provider,
+			AccountSnapshot:   accountSnapshot,
+			AccountIDSnapshot: target.File.AccountID,
+		})
+		if err != nil {
+			_ = w.store.RecordQuotaCooldownFailure(ctx, item.ID, err.Error())
+			log.Printf("[quota-auto-disable] failed to revalidate auth file %q before enabling: %v", item.AuthFileName, err)
+			return
+		}
+		if !ok {
+			_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, "auth file missing or auth index mismatch")
+			log.Printf("[quota-auto-disable] auth file %q disappeared before enabling, skip auto-enable", item.AuthFileName)
+			return
+		}
+		if !target.File.Disabled {
+			if err := w.store.MarkQuotaCooldownRecovered(ctx, item.ID, now.UnixMilli()); err != nil {
+				_ = w.store.RecordQuotaCooldownFailure(ctx, item.ID, fmt.Sprintf("mark already-enabled cooldown recovered: %v", err))
+				return
+			}
+			log.Printf("[quota-auto-disable] auth file %q enabled during Codex auto reset; marked cooldown recovered", item.AuthFileName)
+			return
+		}
 	}
 
 	log.Printf("[quota-auto-disable] reset time reached for auth file %q account=%q, enabling", item.AuthFileName, item.AccountSnapshot)
