@@ -73,6 +73,7 @@ Cooldown records include a reason code and window kind. Current window kinds are
 Notes:
 
 - Enable it with `USAGE_QUOTA_COOLDOWN_ENABLED` or the Configuration switch.
+- Codex automatic reset is enabled by default and can be changed from the Accounts header or Configuration. It only handles Codex cooldowns owned by CPAMP and requires exhausted quota, exactly zero active requests, and a remaining reset credit.
 - Auto-restore depends on CPAMP continuing to run.
 - While the CPAMP cooldown is active, the credential is disabled in CPA and is not selected for new requests.
 - Quota cooldown restores only credentials disabled by that cooldown record. Manual, inspection-owned, or auth-failure disables are not overridden.

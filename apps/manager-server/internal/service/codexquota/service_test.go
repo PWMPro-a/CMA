@@ -31,6 +31,10 @@ func (f staticAuthFiles) Find(context.Context, string, string, string, string) (
 	return f.file, true, nil
 }
 
+func (f staticAuthFiles) Fetch(context.Context, string, string) ([]cpaauthfiles.File, error) {
+	return []cpaauthfiles.File{f.file}, nil
+}
+
 type recordingAuthStatuses struct {
 	mu      sync.Mutex
 	file    cpaauthfiles.File
@@ -75,6 +79,7 @@ type recordingGateway struct {
 	consumeErr              error
 	consumeAccepted         bool
 	usageInitiallyAvailable bool
+	resetCreditsAvailable   int
 }
 
 type failOnceUpdateRepository struct {
@@ -115,7 +120,93 @@ func (g *recordingGateway) resetCredits(context.Context, store.Setup, string, st
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.resetCreditCalls++
-	return apiCallResult{StatusCode: 200, Body: json.RawMessage(`{"available_count":1,"credits":[]}`)}, nil
+	available := g.resetCreditsAvailable
+	if available == 0 && g.resetCreditCalls == 1 {
+		available = 1
+	}
+	body, _ := json.Marshal(map[string]any{"available_count": available, "credits": []any{}})
+	return apiCallResult{StatusCode: 200, Body: body}, nil
+}
+
+func TestAutoResetCreditChecksEligibilityBeforeCreatingOperation(t *testing.T) {
+	tests := []struct {
+		name             string
+		usageAvailable   bool
+		creditsAvailable int
+		wantEligible     bool
+		wantReason       string
+		wantConsume      int
+	}{
+		{name: "exhausted with credit", creditsAvailable: 2, wantEligible: true, wantReason: "reset_started", wantConsume: 1},
+		{name: "quota already available", usageAvailable: true, creditsAvailable: 2, wantEligible: true, wantReason: "quota_already_recovered"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, err := store.Open(filepath.Join(t.TempDir(), "auto-reset.sqlite"))
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			defer st.Close()
+			gateway := &recordingGateway{
+				usageInitiallyAvailable: tt.usageAvailable,
+				resetCreditsAvailable:   tt.creditsAvailable,
+			}
+			service := &Service{
+				operations:   st.CodexQuotaOperations,
+				setupService: staticSetupResolver{setup: store.Setup{CPAUpstreamURL: "http://cpa", ManagementKey: "key"}},
+				authFiles: staticAuthFiles{file: cpaauthfiles.File{
+					Name: "codex.json", AuthIndex: "auth-1", Provider: "codex", AccountID: "ACCOUNT-1",
+				}},
+				gateway: gateway,
+				locks:   newAccountLocks(),
+			}
+			response, eligibility, err := service.AutoResetCredit(context.Background(), ResetRequest{
+				AuthIndex: "auth-1", OperationID: "d8b34d78-cfe5-5ad2-9f45-d8a5d5f1b530",
+			})
+			if err != nil {
+				t.Fatalf("auto reset: %v", err)
+			}
+			if eligibility.Eligible != tt.wantEligible || eligibility.Reason != tt.wantReason || gateway.consumeCalls != tt.wantConsume {
+				t.Fatalf("response=%#v eligibility=%#v consume=%d", response, eligibility, gateway.consumeCalls)
+			}
+			if tt.usageAvailable && response.State != model.CodexQuotaOperationStateCompleted {
+				t.Fatalf("response state=%q, want completed", response.State)
+			}
+		})
+	}
+}
+
+func TestAvailableResetCreditCountAcceptsCreditInventory(t *testing.T) {
+	body := json.RawMessage(`{"credits":[{"id":"credit-1","status":"available"},{"id":"credit-2","status":"available"},{"id":"credit-3","status":"consumed"}]}`)
+	if got := availableResetCreditCount(body); got != 2 {
+		t.Fatalf("availableResetCreditCount=%d, want 2", got)
+	}
+}
+
+func TestInspectResetCreditsRequiresExhaustedQuotaCreditAndZeroRequests(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "reset-inspection.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	gateway := &recordingGateway{resetCreditsAvailable: 1}
+	service := &Service{
+		operations:   st.CodexQuotaOperations,
+		setupService: staticSetupResolver{setup: store.Setup{CPAUpstreamURL: "http://cpa", ManagementKey: "key"}},
+		authFiles: staticAuthFiles{file: cpaauthfiles.File{
+			Name: "codex.json", AuthIndex: "auth-1", Provider: "codex", AccountID: "ACCOUNT-1",
+			Raw: map[string]any{"runtime_current_concurrency": float64(0)},
+		}},
+		gateway: gateway,
+		locks:   newAccountLocks(),
+	}
+	items, err := service.InspectResetCredits(context.Background())
+	if err != nil {
+		t.Fatalf("inspect reset credits: %v", err)
+	}
+	if len(items) != 1 || !items[0].Eligible || items[0].AvailableCount != 1 || items[0].CurrentRequests == nil || *items[0].CurrentRequests != 0 {
+		t.Fatalf("inspection items=%#v", items)
+	}
 }
 
 func (g *recordingGateway) consumeResetCredit(context.Context, store.Setup, string, string, string) (apiCallResult, error) {

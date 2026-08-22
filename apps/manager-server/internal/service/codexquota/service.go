@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,6 +24,10 @@ const persistenceTimeout = 3 * time.Second
 
 type authFileFinder interface {
 	Find(ctx context.Context, baseURL string, managementKey string, fileName string, authIndex string) (cpaauthfiles.File, bool, error)
+}
+
+type authFileFetcher interface {
+	Fetch(ctx context.Context, baseURL string, managementKey string) ([]cpaauthfiles.File, error)
 }
 
 type authFileStatusMutator interface {
@@ -99,7 +105,7 @@ func NewWithMutationCoordinator(
 func (s *Service) ResetCredit(ctx context.Context, request ResetRequest) (OperationResponse, error) {
 	authIndex := strings.TrimSpace(request.AuthIndex)
 	operationID := strings.TrimSpace(request.OperationID)
-	if authIndex == "" || !isUUIDV4(operationID) {
+	if authIndex == "" || !isOperationUUID(operationID) {
 		return OperationResponse{}, ErrInvalidRequest
 	}
 	setup, ok, err := s.resolveSetup(ctx)
@@ -155,9 +161,221 @@ func (s *Service) ResetCredit(ctx context.Context, request ResetRequest) (Operat
 	return s.resume(ctx, setup, file, operation)
 }
 
+// AutoResetCredit verifies that the account is currently exhausted and has a
+// reset credit before entering the existing idempotent reset saga. The caller
+// supplies a stable operation id derived from the cooldown row.
+func (s *Service) AutoResetCredit(ctx context.Context, request ResetRequest) (OperationResponse, AutoResetResult, error) {
+	authIndex := strings.TrimSpace(request.AuthIndex)
+	operationID := strings.TrimSpace(request.OperationID)
+	if authIndex == "" || !isOperationUUID(operationID) {
+		return OperationResponse{}, AutoResetResult{Reason: "invalid_request"}, ErrInvalidRequest
+	}
+	setup, ok, err := s.resolveSetup(ctx)
+	if err != nil {
+		return OperationResponse{}, AutoResetResult{}, err
+	}
+	if !ok {
+		return OperationResponse{}, AutoResetResult{}, ErrNotConfigured
+	}
+	file, found, err := s.authFiles.Find(ctx, setup.CPAUpstreamURL, setup.ManagementKey, "", authIndex)
+	if err != nil {
+		return OperationResponse{}, AutoResetResult{}, err
+	}
+	if !found || !strings.EqualFold(strings.TrimSpace(file.Provider), "codex") {
+		return OperationResponse{}, AutoResetResult{Reason: "auth_not_found"}, ErrAuthNotFound
+	}
+	usage, credits := s.fetchBefore(ctx, setup, file)
+	if usage.err != nil || !successfulStatus(usage.response.StatusCode) {
+		return OperationResponse{}, AutoResetResult{Reason: "usage_unavailable"}, nil
+	}
+	observed, exhausted := codexUsageLimitState(usage.response.Body, codexQuotaRecoveryThreshold)
+	if !observed {
+		return OperationResponse{}, AutoResetResult{Reason: "usage_unavailable"}, nil
+	}
+	if !exhausted {
+		response, err := s.ResetCredit(ctx, request)
+		if err != nil {
+			return OperationResponse{}, AutoResetResult{Eligible: true, Reason: "recovery_failed"}, err
+		}
+		return response, AutoResetResult{Eligible: true, Reason: "quota_already_recovered"}, nil
+	}
+	if credits.err != nil || !successfulStatus(credits.response.StatusCode) || !hasAvailableResetCredit(credits.response.Body) {
+		return OperationResponse{}, AutoResetResult{Reason: "no_reset_credit"}, nil
+	}
+	response, err := s.ResetCredit(ctx, request)
+	if err != nil {
+		return OperationResponse{}, AutoResetResult{Eligible: true, Reason: "reset_failed"}, err
+	}
+	return response, AutoResetResult{Eligible: true, Reason: "reset_started"}, nil
+}
+
+func (s *Service) InspectResetCredits(ctx context.Context) ([]ResetCreditInspectionItem, error) {
+	setup, ok, err := s.resolveSetup(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrNotConfigured
+	}
+	fetcher, ok := s.authFiles.(authFileFetcher)
+	if !ok {
+		return nil, ErrNotConfigured
+	}
+	files, err := fetcher.Fetch(ctx, setup.CPAUpstreamURL, setup.ManagementKey)
+	if err != nil {
+		return nil, err
+	}
+	candidates := make([]cpaauthfiles.File, 0, len(files))
+	for _, file := range files {
+		if !strings.EqualFold(strings.TrimSpace(file.Provider), "codex") || strings.TrimSpace(file.AuthIndex) == "" {
+			continue
+		}
+		candidates = append(candidates, file)
+	}
+	items := make([]ResetCreditInspectionItem, len(candidates))
+	if len(candidates) == 0 {
+		return items, nil
+	}
+	workerCount := 8
+	if len(candidates) < workerCount {
+		workerCount = len(candidates)
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workerCount; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				items[index] = s.inspectResetCreditItem(ctx, setup, candidates[index])
+			}
+		}()
+	}
+	for index := range candidates {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+	return items, nil
+}
+
+func (s *Service) inspectResetCreditItem(ctx context.Context, setup store.Setup, file cpaauthfiles.File) ResetCreditInspectionItem {
+	usage, credits := s.fetchBefore(ctx, setup, file)
+	item := ResetCreditInspectionItem{
+		AuthIndex: file.AuthIndex, AuthFileName: file.Name, AccountID: file.AccountID,
+		Account: file.AccountSnapshot, Disabled: file.Disabled,
+	}
+	if usage.err != nil || !successfulStatus(usage.response.StatusCode) {
+		item.Reason = "usage_unavailable"
+	} else {
+		_, item.Exhausted = codexUsageLimitState(usage.response.Body, codexQuotaRecoveryThreshold)
+	}
+	if credits.err == nil && successfulStatus(credits.response.StatusCode) {
+		item.AvailableCount = availableResetCreditCount(credits.response.Body)
+	} else {
+		item.Reason = "reset_credits_unavailable"
+	}
+	if currentRequests, ok := currentRequestCount(file.Raw); ok {
+		item.CurrentRequests = &currentRequests
+		item.Eligible = item.Exhausted && item.AvailableCount > 0 && currentRequests == 0
+	} else {
+		item.Eligible = false
+	}
+	if !item.Eligible && item.Reason == "" {
+		switch {
+		case !item.Exhausted:
+			item.Reason = "quota_not_exhausted"
+		case item.AvailableCount == 0:
+			item.Reason = "no_reset_credit"
+		default:
+			item.Reason = "active_requests"
+		}
+	}
+	return item
+}
+
+func (s *Service) BatchResetCredits(ctx context.Context, request BatchResetRequest) ([]BatchResetOutcome, error) {
+	seen := make(map[string]struct{}, len(request.AuthIndexes))
+	outcomes := make([]BatchResetOutcome, 0, len(request.AuthIndexes))
+	for _, raw := range request.AuthIndexes {
+		authIndex := strings.TrimSpace(raw)
+		if authIndex == "" {
+			continue
+		}
+		if _, ok := seen[authIndex]; ok {
+			continue
+		}
+		seen[authIndex] = struct{}{}
+		opID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("manual-batch-reset:"+authIndex+":"+strconv.FormatInt(time.Now().Unix()/60, 10))).String()
+		response, eligible, err := s.AutoResetCredit(ctx, ResetRequest{AuthIndex: authIndex, OperationID: opID})
+		outcome := BatchResetOutcome{AuthIndex: authIndex, Eligible: eligible.Eligible, Reason: eligible.Reason}
+		if err != nil {
+			outcome.Error = err.Error()
+		} else {
+			outcome.State = response.State
+		}
+		outcomes = append(outcomes, outcome)
+	}
+	return outcomes, nil
+}
+
+func hasAvailableResetCredit(body json.RawMessage) bool {
+	return availableResetCreditCount(body) > 0
+}
+
+func availableResetCreditCount(body json.RawMessage) int64 {
+	var payload map[string]any
+	if len(body) == 0 || json.Unmarshal(body, &payload) != nil {
+		return 0
+	}
+	if value, ok := payload["available_count"]; ok {
+		if count, ok := numberValue(value); ok {
+			return int64(count)
+		}
+	}
+	for _, key := range []string{"credits", "reset_credits", "resetCredits"} {
+		items, ok := payload[key].([]any)
+		if !ok {
+			continue
+		}
+		available := int64(0)
+		for _, item := range items {
+			record, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			status, _ := record["status"].(string)
+			if strings.EqualFold(strings.TrimSpace(status), "available") || status == "" {
+				available++
+			}
+		}
+		if available > 0 {
+			return available
+		}
+	}
+	return 0
+}
+
+func currentRequestCountZero(raw map[string]any) bool {
+	count, ok := currentRequestCount(raw)
+	return ok && count == 0
+}
+
+func currentRequestCount(raw map[string]any) (int64, bool) {
+	for _, key := range []string{"runtime_current_concurrency", "runtimeCurrentConcurrency", "current_concurrency", "currentConcurrency", "active_requests", "activeRequests", "in_flight_requests", "inFlightRequests"} {
+		value, ok := raw[key]
+		if !ok {
+			continue
+		}
+		count, ok := numberValue(value)
+		return int64(count), ok
+	}
+	return 0, false
+}
+
 func (s *Service) GetOperation(ctx context.Context, operationID string) (OperationResponse, error) {
 	operationID = strings.TrimSpace(operationID)
-	if !isUUIDV4(operationID) {
+	if !isOperationUUID(operationID) {
 		return OperationResponse{}, ErrInvalidRequest
 	}
 	operation, found, err := s.operations.Get(ctx, operationID)
@@ -222,6 +440,14 @@ func identityHash(value string) string {
 func isUUIDV4(value string) bool {
 	parsed, err := uuid.Parse(value)
 	return err == nil && parsed.Version() == 4
+}
+
+func isOperationUUID(value string) bool {
+	parsed, err := uuid.Parse(value)
+	if err != nil {
+		return false
+	}
+	return parsed.Version() == 4 || parsed.Version() == 5
 }
 
 func operationResponse(operation model.CodexQuotaOperation) OperationResponse {

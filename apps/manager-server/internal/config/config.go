@@ -50,6 +50,7 @@ type Config struct {
 	CORSOrigins                  []string
 	TLSSkipVerify                bool
 	QuotaCooldownEnabled         bool
+	CodexAutoResetEnabled        bool
 	AccountActionsEnabled        bool
 	AccountActionsAutoDisable    bool
 	DashboardHourlyRollupEnabled bool
@@ -58,6 +59,7 @@ type Config struct {
 	UsageImportMaxSessions       int
 	UsageImportSessionTTL        time.Duration
 	QuotaCooldownEnvSet          bool
+	CodexAutoResetEnvSet         bool
 	AccountActionsEnvSet         bool
 	AccountActionsAutoEnvSet     bool
 	ContainerOpsAgentURL         string
@@ -91,6 +93,7 @@ type fileConfig struct {
 	CORSOrigins               []string `json:"corsOrigins,omitempty"`
 	TLSSkipVerify             bool     `json:"tlsSkipVerify,omitempty"`
 	QuotaCooldownEnabled      bool     `json:"quotaCooldownEnabled,omitempty"`
+	CodexAutoResetEnabled     *bool    `json:"codexAutoResetEnabled,omitempty"`
 	AccountActionsEnabled     bool     `json:"accountActionsEnabled,omitempty"`
 	AccountActionsAutoDisable bool     `json:"accountActionsAutoDisable,omitempty"`
 	UsageImportChunkBytes     int64    `json:"usageImportChunkBytes,omitempty"`
@@ -190,6 +193,7 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		CORSOrigins:                  splitCSV(env("USAGE_CORS_ORIGINS", strings.Join(sliceFallback(cfgFile.CORSOrigins, []string{"*"}), ","))),
 		TLSSkipVerify:                envBool("USAGE_RESP_TLS_SKIP_VERIFY", cfgFile.TLSSkipVerify),
 		QuotaCooldownEnabled:         envBool("USAGE_QUOTA_COOLDOWN_ENABLED", cfgFile.QuotaCooldownEnabled),
+		CodexAutoResetEnabled:        envBool("USAGE_CODEX_AUTO_RESET_ENABLED", boolPointerFallback(cfgFile.CodexAutoResetEnabled, true)),
 		AccountActionsEnabled:        envBool("USAGE_ACCOUNT_ACTIONS_ENABLED", cfgFile.AccountActionsEnabled),
 		AccountActionsAutoDisable:    envBool("USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE", cfgFile.AccountActionsAutoDisable),
 		DashboardHourlyRollupEnabled: envBool("USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED", true),
@@ -210,6 +214,7 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 			intFallback(cfgFile.UsageImportTTLMinutes, int(DefaultUsageImportSessionTTL/time.Minute)),
 		)) * time.Minute,
 		QuotaCooldownEnvSet:      hasEnv("USAGE_QUOTA_COOLDOWN_ENABLED"),
+		CodexAutoResetEnvSet:     hasEnv("USAGE_CODEX_AUTO_RESET_ENABLED"),
 		AccountActionsEnvSet:     hasEnv("USAGE_ACCOUNT_ACTIONS_ENABLED"),
 		AccountActionsAutoEnvSet: hasEnv("USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE"),
 		ContainerOpsAgentURL:     env("CPAMP_AGENT_URL", ""),
@@ -373,6 +378,13 @@ func envBool(key string, fallback bool) bool {
 		return fallback
 	}
 	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func boolPointerFallback(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 
 func stringFallback(value string, fallback string) string {

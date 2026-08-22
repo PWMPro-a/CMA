@@ -76,6 +76,7 @@ type recordingQuotaAutomationWorker struct {
 	handleCount  int
 	runtimeCount int
 	enabled      bool
+	autoReset    bool
 }
 
 func (w *recordingQuotaAutomationWorker) Start(context.Context) {
@@ -84,6 +85,10 @@ func (w *recordingQuotaAutomationWorker) Start(context.Context) {
 
 func (w *recordingQuotaAutomationWorker) SetEnabled(enabled bool) {
 	w.enabled = enabled
+}
+
+func (w *recordingQuotaAutomationWorker) SetAutoReset(enabled bool) {
+	w.autoReset = enabled
 }
 
 func (w *recordingQuotaAutomationWorker) HandleUsageEvents(context.Context, collectorpkg.RuntimeConfig, []usage.Event) {

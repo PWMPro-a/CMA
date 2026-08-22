@@ -36,6 +36,7 @@ import { CodexInspectionStatusPanel } from '@/features/monitoring/components/Cod
 import { InspectionConfigDrawer } from '@/features/monitoring/components/InspectionConfigDrawer';
 import { InspectionConfigFields } from '@/features/monitoring/components/InspectionConfigFields';
 import { CodexReauthDialog } from '@/features/oauth/CodexReauthDialog';
+import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import type { CodexReauthTarget } from '@/features/oauth/codexReauthModel';
 import {
   CODEX_INSPECTION_RESULT_PAGE_SIZE_OPTIONS,
@@ -74,6 +75,11 @@ import {
   type CredentialInspectionTarget,
 } from '@/features/monitoring/model/credentialInspectionSnapshot';
 import { useAuthStore, useConfigStore, useNotificationStore } from '@/stores';
+import {
+  usageServiceApi,
+  type CodexBatchResetOutcome,
+  type CodexResetCreditInspectionItem,
+} from '@/services/api/usageService';
 import styles from './CodexInspectionPage.module.scss';
 
 interface CodexInspectionPageProps {
@@ -97,6 +103,8 @@ export function CodexInspectionPage({
   const apiBase = useAuthStore((state) => state.apiBase);
   const managementKey = useAuthStore((state) => state.managementKey);
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
+  const featureAvailability = usePanelFeatureAvailability();
+  const managerServiceBase = featureAvailability.managerServiceBase ?? '';
   const showNotification = useNotificationStore((state) => state.showNotification);
   const showConfirmation = useNotificationStore((state) => state.showConfirmation);
   const connectionFingerprint = useMemo(
@@ -139,6 +147,10 @@ export function CodexInspectionPage({
     () => initialLastRun?.connectionFingerprint ?? null
   );
   const [executing, setExecuting] = useState(false);
+  const [resetCreditInspecting, setResetCreditInspecting] = useState(false);
+  const [resetCreditBatching, setResetCreditBatching] = useState(false);
+  const [resetCreditItems, setResetCreditItems] = useState<CodexResetCreditInspectionItem[]>([]);
+  const [resetCreditOutcomes, setResetCreditOutcomes] = useState<CodexBatchResetOutcome[]>([]);
   const [actionFilter, setActionFilter] = useState<ActionFilter>(() =>
     normalizeActionFilter(initialLastRun?.actionFilter ?? 'all')
   );
@@ -541,6 +553,69 @@ export function CodexInspectionPage({
 
     startFreshInspection(false);
   }, [runStatus, startFreshInspection]);
+
+  const handleInspectResetCredits = useCallback(async () => {
+    if (!managerServiceBase || !managementKey) return;
+    setResetCreditInspecting(true);
+    try {
+      const items = await usageServiceApi.inspectCodexResetCredits(managerServiceBase, managementKey);
+      setResetCreditItems(items);
+      setResetCreditOutcomes([]);
+      showNotification(
+        t('monitoring.codex_reset_credit_inspection_done', {
+          total: items.length,
+          eligible: items.filter((item) => item.eligible).length,
+          defaultValue: `Detected ${items.length} accounts`,
+        }),
+        'success'
+      );
+    } catch (err) {
+      showNotification(err instanceof Error ? err.message : t('common.unknown_error'), 'error');
+    } finally {
+      setResetCreditInspecting(false);
+    }
+  }, [managerServiceBase, managementKey, showNotification, t]);
+
+  const handleBatchResetCredits = useCallback(() => {
+    const targets = resetCreditItems.filter((item) => item.eligible);
+    if (targets.length === 0) return;
+    showConfirmation({
+      title: t('monitoring.codex_reset_credit_batch_title'),
+      message: t('monitoring.codex_reset_credit_batch_confirm', {
+        count: targets.length,
+        defaultValue: `Reset ${targets.length} eligible accounts now?`,
+      }),
+      confirmText: t('monitoring.codex_reset_credit_batch_button'),
+      cancelText: t('common.cancel'),
+      variant: 'primary',
+      onConfirm: async () => {
+        setResetCreditBatching(true);
+        try {
+          const outcomes = await usageServiceApi.batchResetCodexCredits(
+            managerServiceBase,
+            managementKey,
+            targets.map((item) => item.authIndex)
+          );
+          setResetCreditOutcomes(outcomes);
+          await handleInspectResetCredits();
+          void onCredentialsChanged?.();
+        } catch (err) {
+          showNotification(err instanceof Error ? err.message : t('common.unknown_error'), 'error');
+        } finally {
+          setResetCreditBatching(false);
+        }
+      },
+    });
+  }, [
+    handleInspectResetCredits,
+    managerServiceBase,
+    managementKey,
+    onCredentialsChanged,
+    resetCreditItems,
+    showConfirmation,
+    showNotification,
+    t,
+  ]);
 
   const handlePauseInspection = useCallback(() => {
     if (runStatus !== 'running') return;
@@ -1205,6 +1280,36 @@ export function CodexInspectionPage({
         configOverviewTitle={t('monitoring.codex_inspection_config_overview_title')}
         configOverviewEditLabel={t('monitoring.codex_inspection_config_overview_edit')}
         modeControl={modeControl}
+        extraActions={
+          <>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void handleInspectResetCredits()}
+              loading={resetCreditInspecting}
+              disabled={resetCreditInspecting || resetCreditBatching || connectionStatus !== 'connected'}
+              data-codex-reset-credit-inspection="true"
+            >
+              {t('monitoring.codex_reset_credit_inspection_button')}
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleBatchResetCredits}
+              loading={resetCreditBatching}
+              disabled={
+                resetCreditBatching ||
+                resetCreditInspecting ||
+                !resetCreditItems.some((item) => item.eligible)
+              }
+              data-codex-reset-credit-batch="true"
+            >
+              {t('monitoring.codex_reset_credit_batch_button', {
+                count: resetCreditItems.filter((item) => item.eligible).length,
+              })}
+            </Button>
+          </>
+        }
         showBackLink={!embedded}
         t={t}
         onEditConfig={openSettingsModal}
@@ -1212,6 +1317,33 @@ export function CodexInspectionPage({
         onPauseInspection={handlePauseInspection}
         onStopInspection={handleStopInspection}
       />
+
+      {resetCreditItems.length > 0 ? (
+        <section className={styles.panel} data-codex-reset-credit-results="true">
+          <h3>{t('monitoring.codex_reset_credit_results_title')}</h3>
+          <div className={styles.resultsTable}>
+            {resetCreditItems.map((item) => {
+              const outcome = resetCreditOutcomes.find(
+                (candidate) => candidate.authIndex === item.authIndex
+              );
+              return (
+                <div className={styles.resultRow} key={item.authIndex}>
+                  <strong>{item.account || item.accountId || item.authFileName}</strong>
+                  <span>
+                    {t('monitoring.codex_reset_credit_count', { count: item.availableCount })}
+                  </span>
+                  <span>
+                    {item.eligible
+                      ? t('monitoring.codex_reset_credit_eligible')
+                      : t(`monitoring.codex_reset_credit_reason_${item.reason ?? 'unknown'}`)}
+                  </span>
+                  {outcome ? <span>{outcome.error || outcome.state || outcome.reason}</span> : null}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
 
       <CodexInspectionResultsPanel
         result={result}

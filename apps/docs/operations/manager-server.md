@@ -212,6 +212,7 @@ Manager Server 管理：
 | `USAGE_CORS_ORIGINS`                    | `*`                                                         | 兼容接口 CORS origin。                                                                                                                                     |
 | `USAGE_RESP_TLS_SKIP_VERIFY`            | `false`                                                     | RESP 跳过 TLS 校验。                                                                                                                                       |
 | `USAGE_QUOTA_COOLDOWN_ENABLED`          | `false`                                                     | 启用多供应商额度冷却 worker，严格处理 Codex usage-limit 和 xAI free-usage-exhausted 信号。                                                                 |
+| `USAGE_CODEX_AUTO_RESET_ENABLED`        | `true`                                                      | CPAMP 管理的 Codex 冷却账号在额度耗尽、当前请求为 0 且存在剩余重置次数时，自动执行幂等重置，并在验证成功后重新启用。 |
 | `USAGE_ACCOUNT_ACTIONS_ENABLED`         | `false`                                                     | 启用账号处理队列，用于记录需要人工处理的认证问题。                                                                                                         |
 | `USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE`    | `false`                                                     | 启用认证问题自动禁用；只有账号处理队列启用时才会生效。                                                                                                     |
 | `PANEL_PATH`                            | 空                                                          | 使用自定义 `management.html`。                                                                                                                             |
@@ -254,7 +255,7 @@ USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED=false
 
 完整的优化原因、实现阶段和 100k benchmark 数据见 [2026-07-10 性能优化报告](./performance-optimization-2026-07-10.md)。
 
-如果 `USAGE_QUOTA_COOLDOWN_ENABLED`、`USAGE_ACCOUNT_ACTIONS_ENABLED` 或 `USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE` 由环境变量设置，面板中的对应开关会显示为环境变量来源并被锁定。要改成面板可编辑，需要移除环境变量并重启 Manager Server。
+如果 `USAGE_QUOTA_COOLDOWN_ENABLED`、`USAGE_CODEX_AUTO_RESET_ENABLED`、`USAGE_ACCOUNT_ACTIONS_ENABLED` 或 `USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE` 由环境变量设置，面板中的对应开关会显示为环境变量来源并被锁定。要改成面板可编辑，需要移除环境变量并重启 Manager Server。
 
 ::: details 高级：运行时接口
 

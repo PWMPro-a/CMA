@@ -13,8 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	codexquotasvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/codexquota"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
@@ -51,10 +53,14 @@ type RateLimitAutoDisableWorker struct {
 	reconciledEventHashes map[string]struct{}
 	reconciledEventOrder  []string
 
-	operationMu         sync.Mutex
-	invariantMu         sync.Mutex
-	mu                  sync.RWMutex
-	enabled             bool
+	operationMu  sync.Mutex
+	invariantMu  sync.Mutex
+	mu           sync.RWMutex
+	enabled      bool
+	autoReset    bool
+	autoResetter interface {
+		AutoResetCredit(context.Context, codexquotasvc.ResetRequest) (codexquotasvc.OperationResponse, codexquotasvc.AutoResetResult, error)
+	}
 	baseURL             string
 	managementKey       string
 	enableCheckInterval time.Duration
@@ -130,6 +136,26 @@ func (w *RateLimitAutoDisableWorker) SetEnabled(enabled bool) {
 		default:
 		}
 	}
+}
+
+func (w *RateLimitAutoDisableWorker) SetAutoReset(enabled bool) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	w.autoReset = enabled
+	w.mu.Unlock()
+}
+
+func (w *RateLimitAutoDisableWorker) SetAutoResetter(resetter interface {
+	AutoResetCredit(context.Context, codexquotasvc.ResetRequest) (codexquotasvc.OperationResponse, codexquotasvc.AutoResetResult, error)
+}) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	w.autoResetter = resetter
+	w.mu.Unlock()
 }
 
 func (w *RateLimitAutoDisableWorker) UpdateRuntimeConfig(ctx context.Context, cfg collectorpkg.RuntimeConfig) {
@@ -218,6 +244,20 @@ func (w *RateLimitAutoDisableWorker) isEnabled() bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.enabled
+}
+
+func (w *RateLimitAutoDisableWorker) autoResetEnabled() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.autoReset && w.autoResetter != nil
+}
+
+func (w *RateLimitAutoDisableWorker) autoResetterRef() interface {
+	AutoResetCredit(context.Context, codexquotasvc.ResetRequest) (codexquotasvc.OperationResponse, codexquotasvc.AutoResetResult, error)
+} {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.autoResetter
 }
 
 // reconcileRecentUsageEvents is a bounded safety net for events that were
@@ -432,7 +472,11 @@ func (w *RateLimitAutoDisableWorker) reconcileActiveCooldowns(ctx context.Contex
 	}
 	items := make([]store.QuotaCooldown, 0, len(active))
 	for _, item := range active {
-		if item.PreDisabledState || item.RecoverAtMS <= now.UnixMilli() {
+		if item.PreDisabledState {
+			continue
+		}
+		codexAutoReset := normalizeQuotaProvider(item.Provider) == "codex" && w.autoResetEnabled()
+		if !codexAutoReset && item.RecoverAtMS <= now.UnixMilli() {
 			continue
 		}
 		if item.Owner != model.QuotaCooldownOwnerUsage429 && item.Owner != model.QuotaCooldownOwnerXAIFreeUsage {
@@ -459,16 +503,26 @@ func (w *RateLimitAutoDisableWorker) reconcileActiveCooldowns(ctx context.Contex
 		return
 	}
 	reenabled := 0
+	autoResetChecked := 0
 	for _, item := range items {
 		current, ok := findQuotaCooldownAuthFile(files, item)
-		if !ok || current.Disabled {
+		if !ok {
+			continue
+		}
+		if current.Disabled {
+			if normalizeQuotaProvider(current.Provider) == "codex" && w.autoResetEnabled() && currentConcurrencyZero(current.Raw) {
+				w.operationMu.Lock()
+				w.recoverCooldown(ctx, baseURL, managementKey, item, now)
+				w.operationMu.Unlock()
+				autoResetChecked++
+			}
 			continue
 		}
 		if w.enforceActiveCooldown(ctx, baseURL, managementKey, item) {
 			reenabled++
 		}
 	}
-	log.Printf("[quota-auto-disable] cooldown invariant check complete active=%d reenabled=%d files=%d duration=%s", len(items), reenabled, len(files), time.Since(started))
+	log.Printf("[quota-auto-disable] cooldown invariant check complete active=%d reenabled=%d autoResetChecked=%d files=%d duration=%s", len(items), reenabled, autoResetChecked, len(files), time.Since(started))
 }
 
 func findQuotaCooldownAuthFile(files []cpaauthfiles.File, item store.QuotaCooldown) (cpaauthfiles.File, bool) {
@@ -506,7 +560,12 @@ func (w *RateLimitAutoDisableWorker) enforceActiveCooldown(ctx context.Context, 
 		log.Printf("[quota-auto-disable] failed to coordinate cooldown invariant disable for %q: %v", item.AuthFileName, err)
 		return false
 	}
-	defer releaseMutation()
+	releasedMutation := false
+	defer func() {
+		if !releasedMutation {
+			releaseMutation()
+		}
+	}()
 	target, ok, err := w.currentAuthFileTarget(ctx, baseURL, managementKey, cpaauthfiles.Identity{
 		AuthFileName:    item.AuthFileName,
 		AuthIndex:       item.AuthIndex,
@@ -766,7 +825,12 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 		log.Printf("[quota-auto-disable] failed to coordinate auth file %q recovery: %v", item.AuthFileName, err)
 		return
 	}
-	defer releaseMutation()
+	mutationHeld := true
+	defer func() {
+		if mutationHeld {
+			releaseMutation()
+		}
+	}()
 	target, ok, err := w.currentAuthFileTarget(ctx, baseURL, managementKey, cpaauthfiles.Identity{
 		AuthFileName:    item.AuthFileName,
 		AuthIndex:       authIndex,
@@ -796,6 +860,39 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 			return
 		}
 		log.Printf("[quota-auto-disable] auth file %q already enabled; marked cooldown recovered", item.AuthFileName)
+		return
+	}
+	if provider == "codex" && w.autoResetEnabled() && currentConcurrencyZero(target.File.Raw) {
+		releaseMutation()
+		mutationHeld = false
+		operationID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex-auto-reset:"+strconv.FormatInt(item.ID, 10))).String()
+		resetter := w.autoResetterRef()
+		response, eligibility, resetErr := resetter.AutoResetCredit(ctx, codexquotasvc.ResetRequest{
+			AuthIndex:   target.File.AuthIndex,
+			OperationID: operationID,
+		})
+		if resetErr != nil {
+			_ = w.store.RecordQuotaCooldownFailure(ctx, item.ID, resetErr.Error())
+			log.Printf("[quota-auto-disable] Codex auto reset failed authFile=%q: %v", item.AuthFileName, resetErr)
+			return
+		}
+		if !eligibility.Eligible {
+			log.Printf("[quota-auto-disable] Codex auto reset skipped authFile=%q reason=%s", item.AuthFileName, eligibility.Reason)
+			if now.Before(time.UnixMilli(item.RecoverAtMS)) {
+				return
+			}
+			log.Printf("[quota-auto-disable] Codex auto reset unavailable at recovery time authFile=%q; using scheduled enable", item.AuthFileName)
+		} else {
+			if response.State != model.CodexQuotaOperationStateCompleted && response.State != model.CodexQuotaOperationStateLocallyRecovered {
+				log.Printf("[quota-auto-disable] Codex auto reset pending authFile=%q state=%s", item.AuthFileName, response.State)
+				return
+			}
+			log.Printf("[quota-auto-disable] Codex auto reset recovered authFile=%q reason=%s", item.AuthFileName, eligibility.Reason)
+			return
+		}
+	}
+	if provider == "codex" && w.autoResetEnabled() && now.Before(time.UnixMilli(item.RecoverAtMS)) {
+		log.Printf("[quota-auto-disable] Codex cooldown authFile=%q remains disabled until active requests reach zero", item.AuthFileName)
 		return
 	}
 
@@ -834,6 +931,36 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 		return
 	}
 	log.Printf("[quota-auto-disable] enabled auth file %q after quota cooldown", item.AuthFileName)
+}
+
+func currentConcurrencyZero(raw map[string]any) bool {
+	for _, key := range []string{"runtime_current_concurrency", "runtimeCurrentConcurrency", "current_concurrency", "currentConcurrency", "active_requests", "activeRequests", "in_flight_requests", "inFlightRequests"} {
+		value, ok := raw[key]
+		if !ok {
+			continue
+		}
+		count, ok := numberValue(value)
+		return ok && count == 0
+	}
+	return false
+}
+
+func numberValue(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func quotaAutoDisableCandidateFromEvent(event usage.Event, baseURL string, managementKey string, now time.Time) (quotaAutoDisableCandidate, bool) {

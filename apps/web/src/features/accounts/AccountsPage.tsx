@@ -240,6 +240,7 @@ import {
   usageServiceApi,
   type AccountActionCandidate,
   type AccountGroup,
+  type AccountProcessingPolicy,
   type AccountQuotaSnapshotObservationInput,
   type AccountQuotaSnapshotWriteEntry,
   type AccountQuotaSnapshotWindow,
@@ -585,6 +586,10 @@ export function AccountsPage() {
     [apiBase, managementKey]
   );
   const [importDefaults, setImportDefaults] = useState(readAuthFileImportDefaults);
+  const [accountProcessingPolicy, setAccountProcessingPolicy] =
+    useState<AccountProcessingPolicy | null>(null);
+  const [accountProcessingPolicyLoading, setAccountProcessingPolicyLoading] = useState(false);
+  const [accountProcessingPolicySaving, setAccountProcessingPolicySaving] = useState(false);
   const managerStorageAvailable =
     !featureAvailability.checking &&
     Boolean(featureAvailability.managerServiceBase) &&
@@ -594,6 +599,61 @@ export function AccountsPage() {
     Boolean(managementKey) &&
     (Boolean(featureAvailability.managerServiceBase) ||
       featureAvailability.panelHostMode === 'manager_embedded');
+
+  const loadAccountProcessingPolicy = useCallback(async () => {
+    if (!managerStorageAvailable || !featureAvailability.managerServiceBase || !managementKey) {
+      setAccountProcessingPolicy(null);
+      return;
+    }
+    setAccountProcessingPolicyLoading(true);
+    try {
+      setAccountProcessingPolicy(
+        await usageServiceApi.getAccountProcessingPolicy(
+          featureAvailability.managerServiceBase,
+          managementKey
+        )
+      );
+    } catch {
+      // The switch remains at its enabled-by-default presentation until the
+      // manager returns a persisted policy.
+    } finally {
+      setAccountProcessingPolicyLoading(false);
+    }
+  }, [featureAvailability.managerServiceBase, managementKey, managerStorageAvailable]);
+
+  useEffect(() => {
+    void loadAccountProcessingPolicy();
+  }, [loadAccountProcessingPolicy]);
+
+  const handleCodexAutoResetChange = useCallback(
+    async (enabled: boolean) => {
+      if (!featureAvailability.managerServiceBase || !managementKey) return;
+      setAccountProcessingPolicySaving(true);
+      try {
+        const next = await usageServiceApi.updateAccountProcessingPolicy(
+          featureAvailability.managerServiceBase,
+          managementKey,
+          { codexAutoResetEnabled: enabled }
+        );
+        setAccountProcessingPolicy(next);
+        showNotification(
+          t('accountPolicy.save_success', { defaultValue: 'Account processing policy updated.' }),
+          'success'
+        );
+      } catch (err) {
+        showNotification(
+          t('accountPolicy.save_failed', {
+            message: err instanceof Error ? err.message : t('common.unknown_error'),
+            defaultValue: 'Save failed',
+          }),
+          'error'
+        );
+      } finally {
+        setAccountProcessingPolicySaving(false);
+      }
+    },
+    [featureAvailability.managerServiceBase, managementKey, showNotification, t]
+  );
   const requestHistoryAvailable =
     managerStorageAvailable && featureAvailability.requestMonitoringAvailable;
 
@@ -3112,7 +3172,7 @@ export function AccountsPage() {
 
   const refreshQuotaForRow = useCallback(
     async (row: AccountRow) => {
-      if (row.disabled || row.runtimeOnly) return false;
+      if ((row.disabled && row.provider !== CODEX_CONFIG.type) || row.runtimeOnly) return false;
       const refreshWithConfig = <TState, TData>(
         config: QuotaConfig<TState, TData>,
         setQuota: QuotaSetter<TState>
@@ -3155,7 +3215,9 @@ export function AccountsPage() {
       if (quotaRefreshBatchPromiseRef.current) {
         return quotaRefreshBatchPromiseRef.current;
       }
-      const refreshable = targets.filter((row) => !row.disabled && !row.runtimeOnly);
+      const refreshable = targets.filter(
+        (row) => (!row.disabled || row.provider === CODEX_CONFIG.type) && !row.runtimeOnly
+      );
       if (refreshable.length === 0) {
         showNotification(t('accounts.no_refreshable_accounts'), 'warning');
         return Promise.resolve();
@@ -5593,6 +5655,26 @@ export function AccountsPage() {
           disabled={disableControls || uploading || authJsonPasteSaving}
           ariaLabel={t('auth_files.import_default_websockets_label')}
           label={t('auth_files.import_default_websockets_label')}
+          labelPosition="left"
+        />
+      </div>
+      <div
+        className={styles.importDefaultsControl}
+        title={t('accountPolicy.codexAutoReset_summary')}
+        data-account-policy-codex-auto-reset="true"
+      >
+        <IconRefreshCw size={15} aria-hidden="true" />
+        <ToggleSwitch
+          checked={accountProcessingPolicy?.codexAutoReset.enabled ?? true}
+          onChange={(value) => void handleCodexAutoResetChange(value)}
+          disabled={
+            disableControls ||
+            accountProcessingPolicyLoading ||
+            accountProcessingPolicySaving ||
+            accountProcessingPolicy?.codexAutoReset.locked === true
+          }
+          ariaLabel={t('accountPolicy.codexAutoReset_toggle')}
+          label={t('accountPolicy.codexAutoReset_toggle')}
           labelPosition="left"
         />
       </div>

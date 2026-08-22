@@ -36,12 +36,14 @@ type Capability struct {
 type Status struct {
 	Source                    string     `json:"source"`
 	UpdatedAtMS               int64      `json:"updatedAtMs,omitempty"`
+	CodexAutoReset            Capability `json:"codexAutoReset"`
 	QuotaCooldown             Capability `json:"codexQuotaCooldown"`
 	AccountActions            Capability `json:"authIssueQueue"`
 	AccountActionsAutoDisable Capability `json:"authIssueAutoDisable"`
 }
 
 type UpdateRequest struct {
+	CodexAutoResetEnabled     *bool `json:"codexAutoResetEnabled,omitempty"`
 	QuotaCooldownEnabled      *bool `json:"codexQuotaCooldownEnabled,omitempty"`
 	AccountActionsEnabled     *bool `json:"authIssueQueueEnabled,omitempty"`
 	AccountActionsAutoDisable *bool `json:"authIssueAutoDisableEnabled,omitempty"`
@@ -92,6 +94,12 @@ func (s *Service) Update(ctx context.Context, req UpdateRequest) (Status, error)
 	current, _, err := s.loadSettings(ctx)
 	if err != nil {
 		return Status{}, err
+	}
+	if req.CodexAutoResetEnabled != nil {
+		if s.cfg.CodexAutoResetEnvSet {
+			return Status{}, errors.New("codexAutoResetEnabled is locked by environment variable")
+		}
+		current.CodexAutoResetEnabled = boolPtr(*req.CodexAutoResetEnabled)
 	}
 	if req.QuotaCooldownEnabled != nil {
 		if s.cfg.QuotaCooldownEnvSet {
@@ -150,6 +158,7 @@ func (s *Service) RuntimeSettings(ctx context.Context) RuntimeSettings {
 }
 
 type RuntimeSettings struct {
+	CodexAutoResetEnabled     bool
 	QuotaCooldownEnabled      bool
 	AccountActionsEnabled     bool
 	AccountActionsAutoDisable bool
@@ -163,28 +172,34 @@ func (s *Service) loadSettings(ctx context.Context) (store.AutomationSettings, b
 }
 
 type resolved struct {
-	quotaValue, quotaLocked     bool
-	quotaSource                 string
-	accountValue, accountLocked bool
-	accountSource               string
-	autoConfigured, autoLocked  bool
-	autoSource                  string
+	codexAutoResetValue, codexAutoResetLocked bool
+	codexAutoResetSource                      string
+	quotaValue, quotaLocked                   bool
+	quotaSource                               string
+	accountValue, accountLocked               bool
+	accountSource                             string
+	autoConfigured, autoLocked                bool
+	autoSource                                string
 }
 
 func (s *Service) resolve(settings store.AutomationSettings) resolved {
+	codexAutoResetValue, codexAutoResetSource, codexAutoResetLocked := s.resolveField(settings.CodexAutoResetEnabled, s.cfg.CodexAutoResetEnabled, s.cfg.CodexAutoResetEnvSet)
 	quotaValue, quotaSource, quotaLocked := s.resolveField(settings.QuotaCooldownEnabled, s.cfg.QuotaCooldownEnabled, s.cfg.QuotaCooldownEnvSet)
 	accountValue, accountSource, accountLocked := s.resolveField(settings.AccountActionsEnabled, s.cfg.AccountActionsEnabled, s.cfg.AccountActionsEnvSet)
 	autoConfigured, autoSource, autoLocked := s.resolveField(settings.AccountActionsAutoDisable, s.cfg.AccountActionsAutoDisable, s.cfg.AccountActionsAutoEnvSet)
 	return resolved{
-		quotaValue:     quotaValue,
-		quotaSource:    quotaSource,
-		quotaLocked:    quotaLocked,
-		accountValue:   accountValue,
-		accountSource:  accountSource,
-		accountLocked:  accountLocked,
-		autoConfigured: autoConfigured,
-		autoSource:     autoSource,
-		autoLocked:     autoLocked,
+		codexAutoResetValue:  codexAutoResetValue,
+		codexAutoResetSource: codexAutoResetSource,
+		codexAutoResetLocked: codexAutoResetLocked,
+		quotaValue:           quotaValue,
+		quotaSource:          quotaSource,
+		quotaLocked:          quotaLocked,
+		accountValue:         accountValue,
+		accountSource:        accountSource,
+		accountLocked:        accountLocked,
+		autoConfigured:       autoConfigured,
+		autoSource:           autoSource,
+		autoLocked:           autoLocked,
 	}
 }
 
@@ -193,8 +208,16 @@ func (s *Service) statusFromSettings(settings store.AutomationSettings) Status {
 	autoEffective := r.accountValue && r.autoConfigured
 
 	return Status{
-		Source:      overallSource(r.quotaSource, r.accountSource, r.autoSource),
+		Source:      overallSource(r.codexAutoResetSource, r.quotaSource, r.accountSource, r.autoSource),
 		UpdatedAtMS: settings.UpdatedAtMS,
+		CodexAutoReset: Capability{
+			Enabled:       r.codexAutoResetValue,
+			Configured:    r.codexAutoResetValue,
+			Source:        r.codexAutoResetSource,
+			Locked:        r.codexAutoResetLocked,
+			EnvKey:        "USAGE_CODEX_AUTO_RESET_ENABLED",
+			ConfigFileKey: "codexAutoResetEnabled",
+		},
 		QuotaCooldown: Capability{
 			Enabled:       r.quotaValue,
 			Configured:    r.quotaValue,
@@ -226,6 +249,7 @@ func (s *Service) statusFromSettings(settings store.AutomationSettings) Status {
 func (s *Service) runtimeFromSettings(settings store.AutomationSettings) RuntimeSettings {
 	r := s.resolve(settings)
 	return RuntimeSettings{
+		CodexAutoResetEnabled:     r.codexAutoResetValue,
 		QuotaCooldownEnabled:      r.quotaValue,
 		AccountActionsEnabled:     r.accountValue,
 		AccountActionsAutoDisable: r.accountValue && r.autoConfigured,

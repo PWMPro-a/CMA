@@ -14,6 +14,7 @@ import (
 )
 
 const resetCreditPath = "/v0/management/cpamp/codex-quota/reset-credit"
+const resetCreditInspectionPath = "/v0/management/cpamp/codex-quota/reset-credit-inspection"
 
 type Handler struct {
 	App *app.Context
@@ -25,6 +26,35 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.TrimRight(strings.TrimSpace(r.URL.Path), "/")
 	switch {
+	case path == resetCreditInspectionPath:
+		if r.Method != http.MethodPost {
+			response.MethodNotAllowed(w)
+			return
+		}
+		items, err := h.App.CodexQuotaService.InspectResetCredits(r.Context())
+		if err != nil {
+			response.Error(w, errorStatus(err), err)
+			return
+		}
+		response.JSON(w, http.StatusOK, map[string]any{"items": items})
+	case path == resetCreditInspectionPath+"/batch-reset":
+		if r.Method != http.MethodPost {
+			response.MethodNotAllowed(w)
+			return
+		}
+		var request codexquotasvc.BatchResetRequest
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256*1024))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&request); err != nil {
+			response.Error(w, http.StatusBadRequest, err)
+			return
+		}
+		outcomes, err := h.App.CodexQuotaService.BatchResetCredits(r.Context(), request)
+		if err != nil {
+			response.Error(w, errorStatus(err), err)
+			return
+		}
+		response.JSON(w, http.StatusOK, map[string]any{"items": outcomes})
 	case path == resetCreditPath:
 		if r.Method != http.MethodPost {
 			response.MethodNotAllowed(w)

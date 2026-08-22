@@ -214,6 +214,7 @@ Saving CPAMP configuration does not rewrite the full CPA `config.yaml`.
 | `USAGE_CORS_ORIGINS`                    | `*`                                                         | CORS origins for compatibility endpoints.                                                                                                                                                                                          |
 | `USAGE_RESP_TLS_SKIP_VERIFY`            | `false`                                                     | Skip TLS verification for RESP connection.                                                                                                                                                                                         |
 | `USAGE_QUOTA_COOLDOWN_ENABLED`          | `false`                                                     | Enable the provider quota cooldown worker for strict Codex usage-limit and xAI free-usage-exhausted signals.                                                                                                                       |
+| `USAGE_CODEX_AUTO_RESET_ENABLED`        | `true`                                                      | When a CPAMP-managed Codex cooldown account has exhausted quota, zero active requests, and a remaining reset credit, automatically run the idempotent reset flow and re-enable it after verification. |
 | `USAGE_ACCOUNT_ACTIONS_ENABLED`         | `false`                                                     | Enable the account action queue for auth issues that need review.                                                                                                                                                                  |
 | `USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE`    | `false`                                                     | Enable automatic disabling for auth issues. This only takes effect when the account action queue is enabled.                                                                                                                       |
 | `PANEL_PATH`                            | empty                                                       | Optional custom `management.html`.                                                                                                                                                                                                 |
@@ -256,7 +257,7 @@ After completion, the response-metadata backfill and both rollup workers continu
 
 See the [July 10, 2026 Performance Optimization Report](./performance-optimization-2026-07-10.md) for the causes, delivery stages, and complete 100k benchmark evidence.
 
-When `USAGE_QUOTA_COOLDOWN_ENABLED`, `USAGE_ACCOUNT_ACTIONS_ENABLED`, or `USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE` is set through the environment, the matching panel switch is shown as environment-sourced and locked. Remove the environment variable and restart Manager Server if you want the setting to be editable from the panel.
+When `USAGE_QUOTA_COOLDOWN_ENABLED`, `USAGE_CODEX_AUTO_RESET_ENABLED`, `USAGE_ACCOUNT_ACTIONS_ENABLED`, or `USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE` is set through the environment, the matching panel switch is shown as environment-sourced and locked. Remove the environment variable and restart Manager Server if you want the setting to be editable from the panel.
 
 ::: details Advanced: runtime endpoints
 
@@ -269,7 +270,7 @@ When `USAGE_QUOTA_COOLDOWN_ENABLED`, `USAGE_ACCOUNT_ACTIONS_ENABLED`, or `USAGE_
 | `GET /usage-service/info`                                        | Manager Server mode detection.                                                                               |
 | `GET /usage-service/config`                                      | Read CPAMP Manager Server config.                                                                            |
 | `PUT /usage-service/config`                                      | Save CPAMP config and restart collector if needed.                                                           |
-| `GET /usage-service/account-processing-policy`                   | Read quota cooldown, account action queue, and auto-disable policy.                                          |
+| `GET /usage-service/account-processing-policy`                   | Read Codex auto-reset, quota cooldown, account action queue, and auto-disable policy.                          |
 | `PATCH /usage-service/account-processing-policy`                 | Update account processing policy. Fields locked by environment variables cannot be modified through the API. |
 | `GET /usage-service/quota-cooldowns`                             | Read active quota cooldowns so the auth files page can show recovery hints.                                  |
 | `POST /setup`                                                    | First setup.                                                                                                 |

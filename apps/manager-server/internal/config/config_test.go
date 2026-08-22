@@ -27,6 +27,9 @@ func TestLoadCreatesDefaultConfig(t *testing.T) {
 	if !cfg.DashboardHourlyRollupEnabled {
 		t.Fatal("DashboardHourlyRollupEnabled = false by default")
 	}
+	if !cfg.CodexAutoResetEnabled {
+		t.Fatal("CodexAutoResetEnabled = false by default")
+	}
 	if cfg.UsageImportChunkBytes != DefaultUsageImportChunkBytes ||
 		cfg.UsageImportDiskQuotaBytes != DefaultUsageImportDiskQuotaBytes ||
 		cfg.UsageImportMaxSessions != DefaultUsageImportMaxSessions ||
@@ -83,8 +86,9 @@ func TestLoadReadsConfigAndResolvesRelativePaths(t *testing.T) {
 	  "pprofAddr": "127.0.0.1:6060",
 	  "panelPath": "panel.html",
   "corsOrigins": ["http://panel.local"],
-  "tlsSkipVerify": true,
-  "quotaCooldownEnabled": true,
+	  "tlsSkipVerify": true,
+	  "quotaCooldownEnabled": true,
+	  "codexAutoResetEnabled": false,
 	  "accountActionsEnabled": true,
 	  "accountActionsAutoDisable": true,
 	  "usageImportChunkBytes": 1048576,
@@ -132,6 +136,9 @@ func TestLoadReadsConfigAndResolvesRelativePaths(t *testing.T) {
 	}
 	if !cfg.QuotaCooldownEnabled {
 		t.Fatal("QuotaCooldownEnabled = false")
+	}
+	if cfg.CodexAutoResetEnabled {
+		t.Fatal("CodexAutoResetEnabled = true, want false from config")
 	}
 	if !cfg.AccountActionsEnabled {
 		t.Fatal("AccountActionsEnabled = false")

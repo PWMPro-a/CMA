@@ -4306,7 +4306,21 @@
     "show_full_credentials_hint": "Show full credential identifiers",
     "show_masked_credentials_hint": "Show masked credential identifiers",
     "observed_from_usage_headers": "Historical record from recent usage response headers, not a live quota query.",
-    "observed_from_usage_headers_at": "Historical record from recent usage response headers at {{time}}."
+    "observed_from_usage_headers_at": "Historical record from recent usage response headers at {{time}}.",
+    "codex_reset_credit_inspection_button": "Inspect reset credits",
+    "codex_reset_credit_batch_button": "Batch reset ({{count}})",
+    "codex_reset_credit_inspection_done": "Checked {{total}} Codex accounts; {{eligible}} are eligible for reset.",
+    "codex_reset_credit_batch_title": "Batch reset Codex quota",
+    "codex_reset_credit_batch_confirm": "Reset the {{count}} detected eligible accounts now?",
+    "codex_reset_credit_results_title": "Reset-credit inspection results",
+    "codex_reset_credit_count": "{{count}} remaining",
+    "codex_reset_credit_eligible": "Eligible",
+    "codex_reset_credit_reason_quota_not_exhausted": "Quota is not exhausted",
+    "codex_reset_credit_reason_no_reset_credit": "No reset credit remains",
+    "codex_reset_credit_reason_active_requests": "Requests are still active",
+    "codex_reset_credit_reason_usage_unavailable": "Quota query failed",
+    "codex_reset_credit_reason_reset_credits_unavailable": "Reset-credit query failed",
+    "codex_reset_credit_reason_unknown": "Not eligible"
   },
   "codex_reauth": {
     "title": "Codex Re-login",
@@ -4842,7 +4856,19 @@
     "advanced_summary": "Details",
     "env_locked_hint": "This switch is locked by the service startup environment. Update the environment variable and restart to change it.",
     "env_locked_reason": "Locked by the {{envKey}} environment variable. Update it and restart the service to change this switch.",
-    "gating_note": "Disabling a switch only affects new problems found later. Tasks already queued or in progress will continue to finish."
+    "gating_note": "Disabling a switch only affects new problems found later. Tasks already queued or in progress will continue to finish.",
+    "codexAutoReset_title": "Automatic Codex quota reset",
+    "codexAutoReset_summary": "When quota is exhausted and active requests reach zero, use a remaining reset credit to recover and re-enable the Codex account.",
+    "codexAutoReset_toggle": "Enable automatic Codex reset",
+    "codexAutoReset_description": "Only handles CPAMP-managed Codex quota cooldown accounts. It runs one idempotent reset after confirming exhausted quota, zero active requests, and an available reset credit.",
+    "codexAutoReset_behavior": [
+      "Enabled by default",
+      "Acts only on an explicitly exhausted quota window",
+      "Requires active requests to be exactly 0",
+      "Requires an available reset credit",
+      "Re-enables the account after reset verification succeeds",
+      "Preserves manually disabled account state"
+    ]
   },
   "container_ops": {
     "title": "Container Ops",

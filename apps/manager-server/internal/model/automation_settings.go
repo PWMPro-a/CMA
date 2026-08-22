@@ -9,6 +9,7 @@ package model
 // the HTTP route and UI. The underlying config.json keys and environment
 // variables keep their original names, which are surfaced separately.
 type AutomationSettings struct {
+	CodexAutoResetEnabled     *bool `json:"codexAutoResetEnabled,omitempty"`
 	QuotaCooldownEnabled      *bool `json:"codexQuotaCooldownEnabled,omitempty"`
 	AccountActionsEnabled     *bool `json:"authIssueQueueEnabled,omitempty"`
 	AccountActionsAutoDisable *bool `json:"authIssueAutoDisableEnabled,omitempty"`

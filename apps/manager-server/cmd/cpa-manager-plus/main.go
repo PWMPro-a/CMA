@@ -132,6 +132,7 @@ func runServer() {
 			ManagementKey:  cfg.ManagementKey,
 		},
 	)
+	rateLimitAutoDisableWorker.SetAutoResetter(serverApp.AppContext().CodexQuotaService)
 	accountActionWorker := worker.NewAccountActionCandidateWorkerWithMutationCoordinator(
 		db,
 		serverApp.AppContext().AuthFileMutationCoordinator,

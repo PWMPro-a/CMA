@@ -36,6 +36,7 @@ type CodexInspectionStatusPanelProps = {
   configOverviewTitle: string;
   configOverviewEditLabel: string;
   modeControl?: ReactNode;
+  extraActions?: ReactNode;
   showBackLink?: boolean;
   t: TFunction;
   onEditConfig: (field?: string) => void;
@@ -62,6 +63,7 @@ export function CodexInspectionStatusPanel({
   configOverviewTitle,
   configOverviewEditLabel,
   modeControl,
+  extraActions,
   showBackLink = true,
   t,
   onEditConfig,
@@ -75,6 +77,7 @@ export function CodexInspectionStatusPanel({
         <div className={styles.statusPanelHeader}>
           {modeControl ? <div className={styles.statusPanelTabs}>{modeControl}</div> : <div />}
           <div className={styles.statusPanelActions}>
+            {extraActions}
             {showBackLink ? (
               <Link to="/accounts" className={styles.quickLink}>
                 <IconExternalLink size={14} />

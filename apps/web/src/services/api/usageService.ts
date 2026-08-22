@@ -270,12 +270,14 @@ export interface AccountPolicyCapability {
 export interface AccountProcessingPolicy {
   source: string;
   updatedAtMs?: number;
+  codexAutoReset: AccountPolicyCapability;
   codexQuotaCooldown: AccountPolicyCapability;
   authIssueQueue: AccountPolicyCapability;
   authIssueAutoDisable: AccountPolicyCapability;
 }
 
 export interface AccountProcessingPolicyPatch {
+  codexAutoResetEnabled?: boolean;
   codexQuotaCooldownEnabled?: boolean;
   authIssueQueueEnabled?: boolean;
   authIssueAutoDisableEnabled?: boolean;
@@ -484,6 +486,27 @@ export interface CodexInspectionActionOutcome {
 export interface CodexInspectionActionsResponse {
   outcomes: CodexInspectionActionOutcome[];
   detail: CodexInspectionRunDetail;
+}
+
+export interface CodexResetCreditInspectionItem {
+  authIndex: string;
+  authFileName: string;
+  accountId?: string;
+  account?: string;
+  disabled: boolean;
+  currentRequests?: number;
+  availableCount: number;
+  exhausted: boolean;
+  eligible: boolean;
+  reason?: string;
+}
+
+export interface CodexBatchResetOutcome {
+  authIndex: string;
+  state?: string;
+  eligible: boolean;
+  reason?: string;
+  error?: string;
 }
 
 export interface CodexInspectionActionOverride {
@@ -2182,6 +2205,10 @@ const getDemoPatchedAccountProcessingPolicy = (
   return {
     ...policy,
     updatedAtMs: Date.now(),
+    codexAutoReset: {
+      ...policy.codexAutoReset,
+      enabled: patch.codexAutoResetEnabled ?? policy.codexAutoReset.enabled,
+    },
     codexQuotaCooldown: {
       ...policy.codexQuotaCooldown,
       enabled: patch.codexQuotaCooldownEnabled ?? policy.codexQuotaCooldown.enabled,
@@ -3102,6 +3129,53 @@ export const usageServiceApi = {
         }
       );
       return response.data.items ?? [];
+    });
+  },
+
+  inspectCodexResetCredits: async (
+    base: string,
+    managementKey?: string
+  ): Promise<CodexResetCreditInspectionItem[]> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.post<{ items: Array<Record<string, unknown>> }>(
+        buildUrl(base, '/v0/management/cpamp/codex-quota/reset-credit-inspection'),
+        undefined,
+        { timeout: CODEX_INSPECTION_RUN_TIMEOUT_MS, headers: authHeaders(managementKey) }
+      );
+      return (response.data.items ?? []).map((item) => ({
+        authIndex: String(item.auth_index ?? ''),
+        authFileName: String(item.auth_file_name ?? ''),
+        accountId: item.account_id ? String(item.account_id) : undefined,
+        account: item.account ? String(item.account) : undefined,
+        disabled: item.disabled === true,
+        currentRequests:
+          typeof item.current_requests === 'number' ? Number(item.current_requests) : undefined,
+        availableCount: Number(item.available_count ?? 0),
+        exhausted: item.exhausted === true,
+        eligible: item.eligible === true,
+        reason: item.reason ? String(item.reason) : undefined,
+      }));
+    });
+  },
+
+  batchResetCodexCredits: async (
+    base: string,
+    managementKey: string | undefined,
+    authIndexes: string[]
+  ): Promise<CodexBatchResetOutcome[]> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.post<{ items: Array<Record<string, unknown>> }>(
+        buildUrl(base, '/v0/management/cpamp/codex-quota/reset-credit-inspection/batch-reset'),
+        { auth_indexes: authIndexes },
+        { timeout: CODEX_INSPECTION_RUN_TIMEOUT_MS, headers: authHeaders(managementKey) }
+      );
+      return (response.data.items ?? []).map((item) => ({
+        authIndex: String(item.auth_index ?? ''),
+        state: item.state ? String(item.state) : undefined,
+        eligible: item.eligible === true,
+        reason: item.reason ? String(item.reason) : undefined,
+        error: item.error ? String(item.error) : undefined,
+      }));
     });
   },
 

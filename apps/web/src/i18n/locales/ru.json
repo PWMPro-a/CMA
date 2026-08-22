@@ -4306,7 +4306,21 @@
     "show_full_credentials_hint": "Показать полные идентификаторы учётных данных",
     "show_masked_credentials_hint": "Показать скрытые идентификаторы учётных данных",
     "observed_from_usage_headers": "Историческая запись из недавних ответов сервиса, а не новая проверка квоты.",
-    "observed_from_usage_headers_at": "Историческая запись из недавних ответов сервиса, время записи: {{time}}."
+    "observed_from_usage_headers_at": "Историческая запись из недавних ответов сервиса, время записи: {{time}}.",
+    "codex_reset_credit_inspection_button": "Проверить сбросы",
+    "codex_reset_credit_batch_button": "Массовый сброс ({{count}})",
+    "codex_reset_credit_inspection_done": "Проверено аккаунтов Codex: {{total}}; подходят для сброса: {{eligible}}.",
+    "codex_reset_credit_batch_title": "Массовый сброс квоты Codex",
+    "codex_reset_credit_batch_confirm": "Сбросить квоту у {{count}} подходящих аккаунтов?",
+    "codex_reset_credit_results_title": "Результаты проверки сбросов",
+    "codex_reset_credit_count": "Осталось: {{count}}",
+    "codex_reset_credit_eligible": "Можно сбросить",
+    "codex_reset_credit_reason_quota_not_exhausted": "Квота не исчерпана",
+    "codex_reset_credit_reason_no_reset_credit": "Нет оставшихся сбросов",
+    "codex_reset_credit_reason_active_requests": "Есть активные запросы",
+    "codex_reset_credit_reason_usage_unavailable": "Ошибка проверки квоты",
+    "codex_reset_credit_reason_reset_credits_unavailable": "Ошибка проверки сбросов",
+    "codex_reset_credit_reason_unknown": "Не подходит"
   },
   "codex_reauth": {
     "title": "Повторный вход Codex",
@@ -4842,7 +4856,19 @@
     "advanced_summary": "Подробнее",
     "env_locked_hint": "Этот переключатель зафиксирован переменной окружения. Измените переменную окружения сервиса и перезапустите его, чтобы изменить значение.",
     "env_locked_reason": "Зафиксировано переменной окружения {{envKey}}. Измените её и перезапустите сервис, чтобы изменить этот переключатель.",
-    "gating_note": "Отключение переключателя влияет только на новые проблемы, найденные мониторингом. Уже поставленные или выполняющиеся задачи продолжат работу."
+    "gating_note": "Отключение переключателя влияет только на новые проблемы, найденные мониторингом. Уже поставленные или выполняющиеся задачи продолжат работу.",
+    "codexAutoReset_title": "Автоматический сброс квоты Codex",
+    "codexAutoReset_summary": "Когда квота исчерпана, а активные запросы равны нулю, оставшийся кредит сброса восстанавливает и снова включает аккаунт Codex.",
+    "codexAutoReset_toggle": "Включить автоматический сброс Codex",
+    "codexAutoReset_description": "Обрабатывает только управляемые CPAMP аккаунты Codex в состоянии охлаждения квоты. Сброс выполняется один раз после подтверждения исчерпания квоты, нулевого числа запросов и доступного кредита.",
+    "codexAutoReset_behavior": [
+      "Включено по умолчанию",
+      "Обрабатывает только явно исчерпанное окно квоты",
+      "Требует ровно 0 активных запросов",
+      "Требует доступный кредит сброса",
+      "После успешной проверки сброса снова включает аккаунт",
+      "Сохраняет состояние аккаунтов, отключённых вручную"
+    ]
   },
   "container_ops": {
     "title": "Контейнеры",

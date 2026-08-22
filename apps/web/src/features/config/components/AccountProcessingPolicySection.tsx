@@ -22,6 +22,7 @@ import styles from './AccountProcessingPolicySection.module.scss';
 
 const patchKeyByCapability: Record<AccountPolicyCapabilityKey, keyof AccountProcessingPolicyPatch> =
   {
+    codexAutoReset: 'codexAutoResetEnabled',
     providerQuotaCooldown: 'codexQuotaCooldownEnabled',
     authIssueQueue: 'authIssueQueueEnabled',
     authIssueAutoDisable: 'authIssueAutoDisableEnabled',

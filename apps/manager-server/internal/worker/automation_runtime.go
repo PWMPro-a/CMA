@@ -12,6 +12,7 @@ import (
 type quotaAutomationWorker interface {
 	Start(ctx context.Context)
 	SetEnabled(enabled bool)
+	SetAutoReset(enabled bool)
 	HandleUsageEvents(ctx context.Context, cfg collectorpkg.RuntimeConfig, events []usage.Event)
 	UpdateRuntimeConfig(ctx context.Context, cfg collectorpkg.RuntimeConfig)
 }
@@ -55,6 +56,7 @@ func (r *AutomationRuntime) Start(ctx context.Context) {
 	}
 	if r.quotaWorker != nil {
 		r.quotaWorker.SetEnabled(settings.QuotaCooldownEnabled)
+		r.quotaWorker.SetAutoReset(settings.CodexAutoResetEnabled)
 		r.quotaWorker.Start(ctx)
 	}
 	if r.accountWorker != nil {
@@ -81,6 +83,7 @@ func (r *AutomationRuntime) Reload(ctx context.Context) error {
 	settings := r.settings.RuntimeSettings(ctx)
 	if r.quotaWorker != nil {
 		r.quotaWorker.SetEnabled(settings.QuotaCooldownEnabled)
+		r.quotaWorker.SetAutoReset(settings.CodexAutoResetEnabled)
 	}
 	if r.accountWorker != nil {
 		r.accountWorker.SetAutoDisable(settings.AccountActionsAutoDisable)
@@ -94,7 +97,7 @@ func (r *AutomationRuntime) logState(ctx context.Context, action string) {
 		return
 	}
 	settings := r.settings.RuntimeSettings(ctx)
-	log.Printf("[automation] runtime settings %s quotaCooldown=%t accountActions=%t accountActionsAutoDisable=%t", action, settings.QuotaCooldownEnabled, settings.AccountActionsEnabled, settings.AccountActionsAutoDisable)
+	log.Printf("[automation] runtime settings %s codexAutoReset=%t quotaCooldown=%t accountActions=%t accountActionsAutoDisable=%t", action, settings.CodexAutoResetEnabled, settings.QuotaCooldownEnabled, settings.AccountActionsEnabled, settings.AccountActionsAutoDisable)
 }
 
 type automationUsageHandler struct {
@@ -110,6 +113,7 @@ func (h *automationUsageHandler) HandleUsageEvents(ctx context.Context, cfg coll
 	settings := h.settings.RuntimeSettings(ctx)
 	if h.quotaWorker != nil {
 		h.quotaWorker.SetEnabled(settings.QuotaCooldownEnabled)
+		h.quotaWorker.SetAutoReset(settings.CodexAutoResetEnabled)
 	}
 	if settings.QuotaCooldownEnabled && h.quotaWorker != nil {
 		h.quotaWorker.HandleUsageEvents(ctx, cfg, events)

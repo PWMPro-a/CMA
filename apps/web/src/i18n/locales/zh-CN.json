@@ -4306,7 +4306,21 @@
     "show_full_credentials_hint": "显示完整凭证标识",
     "show_masked_credentials_hint": "显示脱敏凭证标识",
     "observed_from_usage_headers": "来自最近用量响应 Header 的历史记录，不代表实时额度查询。",
-    "observed_from_usage_headers_at": "来自最近用量响应 Header 的历史记录，记录时间：{{time}}。"
+    "observed_from_usage_headers_at": "来自最近用量响应 Header 的历史记录，记录时间：{{time}}。",
+    "codex_reset_credit_inspection_button": "巡检重置次数",
+    "codex_reset_credit_batch_button": "批量重置（{{count}}）",
+    "codex_reset_credit_inspection_done": "已检测 {{total}} 个 Codex 账号，其中 {{eligible}} 个符合重置条件。",
+    "codex_reset_credit_batch_title": "批量重置 Codex 额度",
+    "codex_reset_credit_batch_confirm": "确认重置检测到的 {{count}} 个符合条件账号？",
+    "codex_reset_credit_results_title": "重置次数巡检结果",
+    "codex_reset_credit_count": "剩余 {{count}} 次",
+    "codex_reset_credit_eligible": "可重置",
+    "codex_reset_credit_reason_quota_not_exhausted": "额度未耗尽",
+    "codex_reset_credit_reason_no_reset_credit": "没有剩余次数",
+    "codex_reset_credit_reason_active_requests": "仍有请求处理中",
+    "codex_reset_credit_reason_usage_unavailable": "额度查询失败",
+    "codex_reset_credit_reason_reset_credits_unavailable": "重置次数查询失败",
+    "codex_reset_credit_reason_unknown": "不符合条件"
   },
   "codex_reauth": {
     "title": "Codex 重新登录",
@@ -4842,7 +4856,19 @@
     "advanced_summary": "详情",
     "env_locked_hint": "该开关由服务启动环境锁定，请修改环境变量并重启。",
     "env_locked_reason": "由环境变量 {{envKey}} 锁定。修改该变量并重启服务后才能更改此开关。",
-    "gating_note": "关闭某项策略只会影响之后发现的新问题；已经排队或正在处理的任务会继续完成。"
+    "gating_note": "关闭某项策略只会影响之后发现的新问题；已经排队或正在处理的任务会继续完成。",
+    "codexAutoReset_title": "Codex 额度耗尽自动重置",
+    "codexAutoReset_summary": "余额耗尽且当前请求归零时，使用剩余重置次数恢复 Codex 账号并自动重新启用。",
+    "codexAutoReset_toggle": "启用 Codex 自动重置",
+    "codexAutoReset_description": "仅处理 CPAMP 自动管理的 Codex 额度冷却账号；检测到余额耗尽、请求数为零且存在重置次数后，执行一次幂等重置。",
+    "codexAutoReset_behavior": [
+      "默认开启",
+      "余额窗口明确耗尽时才处理",
+      "要求当前请求数明确为 0",
+      "要求存在剩余重置次数",
+      "重置验证成功后自动恢复并启用账号",
+      "不改变手动禁用账号状态"
+    ]
   },
   "container_ops": {
     "title": "容器运维",
