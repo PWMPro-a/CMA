@@ -210,6 +210,30 @@ func TestChooseMarketplaceSellerNeverLetsCheapBlockedSellerBypassGate(t *testing
 	}
 }
 
+func TestChooseMarketplaceSellerWaitsForImportedAccountCapacityEvidence(t *testing.T) {
+	enabled := true
+	platform := store.ManagerSupplyPlatformConfig{
+		Type: "nvtokens", SupplierQuotaGateEnabled: &enabled,
+		SupplierQuotaMinimumM: 90, SupplierQuotaTrialQuantity: 1,
+	}
+	candidates := []supplyclient.MarketplaceSellerCandidate{
+		{SellerID: "pending-seller", SelectionToken: "pending-token", Available: 20, MinUnitPriceFen: 1900},
+		{SellerID: "other-seller", SelectionToken: "other-token", Available: 20, MinUnitPriceFen: 2200},
+	}
+	scores := []SupplierQuotaScore{
+		{
+			SellerID: "pending-seller", Status: supplierQuotaStatusObserving,
+			Reason: "waiting_for_account_quota_evidence", ImportedAccounts: 1,
+		},
+		{SellerID: "other-seller", Status: supplierQuotaStatusApproved, ScoreM: 150},
+	}
+
+	selection, err := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
+	if err != nil || selection == nil || selection.candidate.SellerID != "other-seller" || selection.trial {
+		t.Fatalf("pending evidence seller should not be retried: selection=%#v err=%v", selection, err)
+	}
+}
+
 func TestSortSupplierQuotaScoresShowsLowestCostPerCapacityFirstWithinStatus(t *testing.T) {
 	scores := []SupplierQuotaScore{
 		{SellerID: "high-score-no-stock", SellerName: "High Score No Stock", Status: supplierQuotaStatusApproved, ScoreM: 150},

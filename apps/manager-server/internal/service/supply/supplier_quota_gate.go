@@ -219,6 +219,15 @@ func chooseMarketplaceSellerForAutomaticPurchase(
 		if !found {
 			continue
 		}
+		// An imported account without a 5%/exhaustion observation is already
+		// the seller's calibration trial. Keep waiting for that account's
+		// capacity evidence instead of buying another account from the same
+		// seller after the generic observation cooldown expires.
+		if score.Status == supplierQuotaStatusObserving &&
+			score.Reason == "waiting_for_account_quota_evidence" &&
+			score.ImportedAccounts > score.SampleCount+score.InvalidCredentialCount {
+			continue
+		}
 		selection := marketplaceSellerSelection{candidate: candidate, score: score, quantity: quantity}
 		switch score.Status {
 		case supplierQuotaStatusApproved:
