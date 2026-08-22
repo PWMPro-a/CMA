@@ -152,8 +152,13 @@ func credentialHistoryWhere(fileName, authIndex, accountID, provider, accountSna
 		or (trim(coalesce(auth_file_snapshot, '')) = '' and lower(trim(coalesce(source, ''))) = lower(trim(?))))`
 	args := []any{fileName, fileName}
 	if authIndex != "" {
-		return `lower(trim(coalesce(auth_index, ''))) = lower(trim(?)) and ` + fileWhere,
-			append([]any{authIndex}, args...)
+		indexWhere := `lower(trim(coalesce(auth_index, ''))) = lower(trim(?))`
+		fallbackWhere, fallbackArgs := credentialHistoryIdentityFallbackWhere(accountID, provider, accountSnapshot)
+		if fallbackWhere != "" {
+			return `(` + indexWhere + ` or (trim(coalesce(auth_index, '')) = '' and ` + fallbackWhere + `)) and ` + fileWhere,
+				append(append([]any{authIndex}, fallbackArgs...), args...)
+		}
+		return indexWhere + ` and ` + fileWhere, append([]any{authIndex}, args...)
 	}
 	if accountID != "" {
 		if provider != "" && accountSnapshot != "" {
@@ -170,10 +175,44 @@ func credentialHistoryWhere(fileName, authIndex, accountID, provider, accountSna
 		append([]any{provider, accountSnapshot}, args...)
 }
 
+func credentialIdentityFallbackWhere(accountID, provider, accountSnapshot string) (string, []any) {
+	return credentialIdentityFallbackWhereWithProvider(accountID, provider, accountSnapshot, "auth_provider_snapshot")
+}
+
+func credentialHistoryIdentityFallbackWhere(accountID, provider, accountSnapshot string) (string, []any) {
+	return credentialIdentityFallbackWhereWithProvider(accountID, provider, accountSnapshot, "coalesce(nullif(auth_provider_snapshot, ''), provider, '')")
+}
+
+func credentialIdentityFallbackWhereWithProvider(accountID, provider, accountSnapshot, providerExpression string) (string, []any) {
+	clauses := make([]string, 0, 2)
+	args := make([]any, 0, 3)
+	accountID = strings.TrimSpace(accountID)
+	provider = strings.TrimSpace(provider)
+	accountSnapshot = strings.TrimSpace(accountSnapshot)
+	if accountID != "" {
+		clauses = append(clauses, `lower(trim(coalesce(auth_project_id_snapshot, ''))) = lower(trim(?))`)
+		args = append(args, accountID)
+	}
+	if provider != "" && accountSnapshot != "" {
+		clauses = append(clauses, `(lower(trim(`+providerExpression+`)) = lower(trim(?))
+			and lower(trim(coalesce(account_snapshot, ''))) = lower(trim(?)))`)
+		args = append(args, provider, accountSnapshot)
+	}
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	return `(` + strings.Join(clauses, ` or `) + `)`, args
+}
+
 func credentialRollupWhere(fileName, authIndex, provider, accountSnapshot string) (string, []any) {
 	if authIndex != "" {
-		return `lower(trim(coalesce(auth_index, ''))) = lower(trim(?))
-			and lower(trim(coalesce(source, ''))) = lower(trim(?))`, []any{authIndex, fileName}
+		indexWhere := `lower(trim(coalesce(auth_index, ''))) = lower(trim(?))`
+		fallbackWhere, fallbackArgs := credentialIdentityFallbackWhere("", provider, accountSnapshot)
+		if fallbackWhere != "" {
+			return `(` + indexWhere + ` or (trim(coalesce(auth_index, '')) = '' and ` + fallbackWhere + `))
+			and lower(trim(coalesce(source, ''))) = lower(trim(?))`, append(append([]any{authIndex}, fallbackArgs...), fileName)
+		}
+		return indexWhere + ` and lower(trim(coalesce(source, ''))) = lower(trim(?))`, []any{authIndex, fileName}
 	}
 	if provider == "" || accountSnapshot == "" {
 		return "", nil
@@ -187,8 +226,13 @@ func credentialMonitoringWhere(fileName, authIndex, provider, accountSnapshot st
 	fileWhere := `(lower(trim(coalesce(auth_file_snapshot, ''))) = lower(trim(?))
 		or (trim(coalesce(auth_file_snapshot, '')) = '' and lower(trim(coalesce(source, ''))) = lower(trim(?))))`
 	if authIndex != "" {
-		return `lower(trim(coalesce(auth_index, ''))) = lower(trim(?)) and ` + fileWhere,
-			[]any{authIndex, fileName, fileName}
+		indexWhere := `lower(trim(coalesce(auth_index, ''))) = lower(trim(?))`
+		fallbackWhere, fallbackArgs := credentialIdentityFallbackWhere("", provider, accountSnapshot)
+		if fallbackWhere != "" {
+			return `(` + indexWhere + ` or (trim(coalesce(auth_index, '')) = '' and ` + fallbackWhere + `)) and ` + fileWhere,
+				append(append([]any{authIndex}, fallbackArgs...), fileName, fileName)
+		}
+		return indexWhere + ` and ` + fileWhere, []any{authIndex, fileName, fileName}
 	}
 	return `lower(trim(coalesce(provider, ''))) = lower(trim(?))
 		and lower(trim(coalesce(account_snapshot, ''))) = lower(trim(?)) and ` + fileWhere,

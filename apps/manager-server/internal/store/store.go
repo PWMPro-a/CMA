@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -1087,22 +1088,23 @@ func (s *Store) CleanupDeletedCredential(ctx context.Context, identity model.Cre
 	if s == nil {
 		return nil
 	}
+	var cleanupErr error
 	if s.UsageEvents != nil {
 		if _, err := s.UsageEvents.DeleteCredentialIdentityHistory(ctx, identity); err != nil {
-			return err
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
 	if s.QuotaCooldowns != nil {
 		if _, err := s.QuotaCooldowns.DeleteCredential(ctx, identity); err != nil {
-			return err
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
 	if s.AccountActions != nil {
 		if _, err := s.AccountActions.DeleteCredential(ctx, identity); err != nil {
-			return err
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
-	return nil
+	return cleanupErr
 }
 
 func (s *Store) AddDeadLetter(ctx context.Context, payload string, parseErr error) error {

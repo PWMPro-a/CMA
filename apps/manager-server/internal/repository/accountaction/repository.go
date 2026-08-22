@@ -456,8 +456,30 @@ func (r *repository) DeleteCredential(ctx context.Context, identity model.Creden
 	args := []any{fileName}
 	where := `auth_file_name = ?`
 	if authIndex := strings.TrimSpace(identity.AuthIndex); authIndex != "" {
-		where += ` and lower(trim(coalesce(auth_index, ''))) = lower(trim(?))`
+		where += ` and (lower(trim(coalesce(auth_index, ''))) = lower(trim(?))`
 		args = append(args, authIndex)
+		provider := normalizeProvider(identity.Provider)
+		snapshot := strings.TrimSpace(identity.AccountSnapshot)
+		accountID := strings.TrimSpace(identity.AccountID)
+		if accountID != "" || (provider != "" && snapshot != "") {
+			where += ` or (trim(coalesce(auth_index, '')) = '' and (`
+			fallbackAdded := false
+			if accountID != "" {
+				where += `lower(trim(coalesce(account_id_snapshot, ''))) = lower(trim(?))`
+				args = append(args, accountID)
+				fallbackAdded = true
+			}
+			if provider != "" && snapshot != "" {
+				if fallbackAdded {
+					where += ` or `
+				}
+				where += `(lower(trim(coalesce(provider, ''))) = lower(trim(?))
+					and lower(trim(coalesce(account_snapshot, ''))) = lower(trim(?)))`
+				args = append(args, provider, snapshot)
+			}
+			where += `))`
+		}
+		where += `)`
 	} else if accountID := strings.TrimSpace(identity.AccountID); accountID != "" {
 		where += ` and lower(trim(coalesce(account_id_snapshot, ''))) = lower(trim(?))`
 		args = append(args, accountID)

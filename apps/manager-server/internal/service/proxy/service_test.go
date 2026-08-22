@@ -1179,6 +1179,35 @@ func TestInspectAuthFileOwnershipMutationReadsMultipartUpload(t *testing.T) {
 	}
 }
 
+func TestCaptureDeletedCredentialIdentitiesIncludesClearAllFiles(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v0/management/auth-files" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"files": []map[string]any{
+			{"id": "runtime-a", "name": "a.json", "auth_index": "auth-a", "provider": "codex", "account_id": "account-a"},
+			{"id": "runtime-b", "name": "b.json", "auth_index": "auth-b", "provider": "xai", "account": "account-b"},
+		}})
+	}))
+	defer server.Close()
+
+	prepared, err := New(nil).captureDeletedCredentialIdentities(
+		context.Background(),
+		store.Setup{CPAUpstreamURL: server.URL, ManagementKey: "management-key"},
+		authFileOwnershipMutation{clearAll: true},
+	)
+	if err != nil {
+		t.Fatalf("capture clear-all identities: %v", err)
+	}
+	if len(prepared.deletedIdentities) != 2 {
+		t.Fatalf("captured identities = %#v, want both files", prepared.deletedIdentities)
+	}
+	if prepared.deletedIdentities[0].AuthFileName != "a.json" || prepared.deletedIdentities[1].AuthFileName != "b.json" {
+		t.Fatalf("captured identities = %#v, want a.json and b.json", prepared.deletedIdentities)
+	}
+}
+
 func TestPrepareAuthFileWriteMutationVerifiesCompleteSourceMembership(t *testing.T) {
 	sourceContent := []byte(`[{"auth_index":"auth-1"},{"auth_index":"auth-2"}]`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

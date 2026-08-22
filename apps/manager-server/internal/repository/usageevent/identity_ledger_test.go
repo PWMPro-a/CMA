@@ -150,6 +150,30 @@ func TestDeleteCredentialIdentityHistoryUsesAccountIDWhenAuthIndexMissing(t *tes
 	}
 }
 
+func TestDeleteCredentialIdentityHistoryWithAuthIndexAlsoRemovesLegacyFallbackEvent(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage-delete-legacy.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+	ctx := context.Background()
+	event := usage.Event{
+		EventHash: "legacy-fallback", TimestampMS: 1_800_000_010_000, Timestamp: "2027-01-15T00:00:10Z",
+		Model: "gpt-test", Provider: "codex", AuthProviderSnapshot: "codex",
+		AuthFileSnapshot: "shared.json", AccountSnapshot: "elise@example.com",
+	}
+	if _, err := repo.InsertBatch(ctx, []usage.Event{event}); err != nil {
+		t.Fatalf("insert legacy event: %v", err)
+	}
+	deleted, err := repo.DeleteCredentialIdentityHistory(ctx, model.CredentialIdentity{
+		AuthFileName: "shared.json", AuthIndex: "new-auth-index", Provider: "codex", AccountSnapshot: "elise@example.com",
+	})
+	if err != nil || deleted != 1 {
+		t.Fatalf("deleted=%d err=%v, want legacy fallback event removed", deleted, err)
+	}
+}
+
 func TestInsertBatchBackfillsLedgerForLegacyDuplicate(t *testing.T) {
 	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
