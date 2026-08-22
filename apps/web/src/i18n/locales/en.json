@@ -6290,7 +6290,7 @@
     "supplier_quota_reason_observed_quota_meets_threshold": "Observed quota meets the threshold",
     "supplier_quota_reason_provisional_quota_meets_threshold": "Initial evidence meets the threshold; provisionally approved while more evidence accumulates",
     "supplier_quota_reason_waiting_for_more_supplier_evidence": "Not enough representative evidence yet; continue single-account trials",
-    "supplier_quota_reason_observed_supplier_quality_below_threshold": "The combined pass rate is below 80% after at least 5 evidence items",
+    "supplier_quota_reason_observed_supplier_quality_below_threshold": "The combined pass rate is below 80% after at least 10 evidence items",
     "supplier_quota_reason_observed_quota_below_threshold": "Observed quota is below the threshold",
     "supplier_quota_reason_credential_invalidated": "A supplier credential was invalidated; further automatic purchases are blocked",
     "supplier_quota_reason_waiting_for_account_quota_evidence": "Purchased; waiting for account quota evidence",

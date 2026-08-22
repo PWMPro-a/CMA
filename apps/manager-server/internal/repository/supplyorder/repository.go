@@ -262,9 +262,9 @@ func (r *repository) ActivateNextLegacyRepair(ctx context.Context) (model.Supply
 	return order, true, nil
 }
 
-// ActivateNextUnsupportedRelease restores orders that an older manager version
-// marked released after the supplier rejected every cancellation endpoint. Those
-// orders remain reserved upstream and must stay available for a later pickup.
+// ActivateNextUnsupportedRelease restores orders that were only released in the
+// local database even though supplier inventory may still be reserved or paid.
+// Those orders must be reconciled with the supplier and picked up when ready.
 func (r *repository) ActivateNextUnsupportedRelease(ctx context.Context) (model.SupplyOrder, bool, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -276,8 +276,8 @@ func (r *repository) ActivateNextUnsupportedRelease(ctx context.Context) (model.
 	err = tx.QueryRowContext(ctx, `select o.order_id from supply_orders o
 		where o.automatic = 1
 			and o.status = 'released'
-			and o.remote_status = 'release_unsupported'
-			and o.charged_fen = 0
+			and (o.remote_status = 'release_unsupported'
+				or (o.remote_status = 'auto_release_pending' and o.charged_fen > o.released_fen))
 			and o.released_fen = 0
 			and o.item_count = 0
 			and o.imported_count = 0
@@ -294,13 +294,13 @@ func (r *repository) ActivateNextUnsupportedRelease(ctx context.Context) (model.
 		status = case when ready_quantity > 0 or progress >= 100 then 'ready' else 'waiting_inventory' end,
 		completed_at_ms = null,
 		next_poll_at_ms = null,
-		last_error = 'restored: supplier did not confirm cancellation; the order remains reserved upstream',
+		last_error = 'restored: locally released supplier order still requires reconciliation and pickup',
 		updated_at_ms = ?
 		where order_id = ?
 			and automatic = 1
 			and status = 'released'
-			and remote_status = 'release_unsupported'
-			and charged_fen = 0
+			and (remote_status = 'release_unsupported'
+				or (remote_status = 'auto_release_pending' and charged_fen > released_fen))
 			and released_fen = 0
 			and item_count = 0
 			and imported_count = 0`, now, orderID)

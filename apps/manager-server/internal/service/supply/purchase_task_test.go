@@ -89,6 +89,46 @@ func TestPurchaseTaskReadyTakeAllowedWhilePlannerSnapshotIsStale(t *testing.T) {
 	}
 }
 
+func TestPurchaseTaskReadyTakeAllowedSharesBudgetAcrossReadySiblings(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-ready-siblings.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	task, err := st.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
+		TaskID: "task-ready-siblings", Source: "automatic", SupplierID: "legacy", Product: "oauth_7d",
+		TargetQuantity: 10, Status: purchaseTaskStatusRunning, MaxConcurrentOrders: 2,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	createdAt := time.Now().UnixMilli()
+	earlier, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "task-ready-earlier", TaskID: task.TaskID, SupplierID: "legacy", Product: "oauth_7d",
+		RequestedQuantity: 8, ReadyQuantity: 8, Automatic: true, Status: "ready", CreatedAtMS: createdAt,
+	})
+	if err != nil {
+		t.Fatalf("create earlier ready order: %v", err)
+	}
+	later, err := st.CreateSupplyOrder(ctx, store.SupplyOrder{
+		OrderID: "task-ready-later", TaskID: task.TaskID, SupplierID: "legacy", Product: "oauth_7d",
+		RequestedQuantity: 8, ReadyQuantity: 8, Automatic: true, Status: "ready", CreatedAtMS: createdAt + 1,
+	})
+	if err != nil {
+		t.Fatalf("create later ready order: %v", err)
+	}
+	service := New(st, nil)
+	allowed, err := service.purchaseTaskReadyTakeAllowed(ctx, earlier)
+	if err != nil || !allowed {
+		t.Fatalf("earlier ready allowed=%v err=%v", allowed, err)
+	}
+	allowed, err = service.purchaseTaskReadyTakeAllowed(ctx, later)
+	if err != nil || allowed {
+		t.Fatalf("later ready allowed=%v err=%v, want shared task budget rejection", allowed, err)
+	}
+}
+
 func TestPurchaseTaskNextOrderQuantityShardsRemainingTarget(t *testing.T) {
 	tests := []struct {
 		remaining int

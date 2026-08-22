@@ -6290,7 +6290,7 @@
     "supplier_quota_reason_observed_quota_meets_threshold": "額度樣本達到門檻",
     "supplier_quota_reason_provisional_quota_meets_threshold": "初始樣本達到門檻，暫時放行並繼續累計綜合樣本",
     "supplier_quota_reason_waiting_for_more_supplier_evidence": "樣本未達綜合判斷數量，繼續單號試採觀察",
-    "supplier_quota_reason_observed_supplier_quality_below_threshold": "至少 5 個綜合證據中通過率低於 80%，暫時攔截",
+    "supplier_quota_reason_observed_supplier_quality_below_threshold": "至少 10 個綜合證據中通過率低於 80%，暫時攔截",
     "supplier_quota_reason_observed_quota_below_threshold": "額度樣本低於門檻",
     "supplier_quota_reason_credential_invalidated": "供應商帳號憑證已失效，停止後續自動採購",
     "supplier_quota_reason_waiting_for_account_quota_evidence": "已採購，等待帳號額度證據",

@@ -6290,7 +6290,7 @@
     "supplier_quota_reason_observed_quota_meets_threshold": "额度样本达到门槛",
     "supplier_quota_reason_provisional_quota_meets_threshold": "初始样本达到门槛，暂时放行并继续累计综合样本",
     "supplier_quota_reason_waiting_for_more_supplier_evidence": "样本未达到综合判断数量，继续单号试采观察",
-    "supplier_quota_reason_observed_supplier_quality_below_threshold": "至少 5 个综合证据中通过率低于 80%，暂时拦截",
+    "supplier_quota_reason_observed_supplier_quality_below_threshold": "至少 10 个综合证据中通过率低于 80%，暂时拦截",
     "supplier_quota_reason_observed_quota_below_threshold": "额度样本低于门槛",
     "supplier_quota_reason_credential_invalidated": "供应商账号凭证已失效，停止后续自动采购",
     "supplier_quota_reason_waiting_for_account_quota_evidence": "已采购，等待账号额度证据",

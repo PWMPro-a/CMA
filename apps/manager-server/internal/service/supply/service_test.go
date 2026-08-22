@@ -6105,6 +6105,38 @@ func TestNonSmartAutomaticOrderReleasesQuantityFarAboveLiveDeficit(t *testing.T)
 	}
 }
 
+func TestNVTokensPaidReadyOrderAlwaysContinuesToTake(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "nv-paid-ready.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	cfg := store.ManagerConfig{Supply: store.ManagerSupplyConfig{
+		Enabled: &enabled,
+		Platforms: []store.ManagerSupplyPlatformConfig{{
+			ID: "nv", Type: managerconfigsvc.SupplyPlatformNvtokens, Enabled: &enabled, Product: "plus",
+		}},
+	}}
+	order, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "nv-paid-ready", SupplierID: "nv", Product: "plus", RequestedQuantity: 1,
+		ReadyQuantity: 1, ChargedFen: 2500, Automatic: true, Status: "ready", RemoteStatus: "completed",
+	})
+	if err != nil {
+		t.Fatalf("create paid ready order: %v", err)
+	}
+	service := New(st, nil)
+	released, err := service.autoReleaseAutomaticOrderIfNotNeeded(context.Background(), cfg, &order, true)
+	if err != nil || released {
+		t.Fatalf("NV paid ready admission released=%v err=%v", released, err)
+	}
+	resource := service.currentSmartResource(cfg.Supply)
+	if resource.SuggestedAction != smartActionTakeLocked || resource.DecisionReason != "paid_ready_order_take" ||
+		resource.LockedOrderID != order.OrderID || !service.smartTakeAllowed(cfg.Supply, order.OrderID) {
+		t.Fatalf("NV paid ready resource = %#v", resource)
+	}
+}
+
 func TestStoreReactivatesLocallyReleasedUnsupportedOrder(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
 	if err != nil {
@@ -6125,6 +6157,25 @@ func TestStoreReactivatesLocallyReleasedUnsupportedOrder(t *testing.T) {
 	order, found, err := st.ActivateNextUnsupportedSupplyRelease(context.Background())
 	if err != nil || !found || order.Status != "ready" || order.CompletedAtMS != 0 {
 		t.Fatalf("legacy unsupported release was not reactivated: %#v found=%v err=%v", order, found, err)
+	}
+}
+
+func TestStoreReactivatesPaidAutomaticReleasePendingOrder(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "paid-auto-release", Product: "plus", RequestedQuantity: 1, Automatic: true,
+		Status: "released", RemoteStatus: remoteStatusAutomaticReleasePending,
+		ReadyQuantity: 1, Progress: 100, ChargedFen: 2500,
+	}); err != nil {
+		t.Fatalf("create paid local release: %v", err)
+	}
+	order, found, err := st.ActivateNextUnsupportedSupplyRelease(context.Background())
+	if err != nil || !found || order.Status != "ready" || order.CompletedAtMS != 0 || order.ChargedFen != 2500 {
+		t.Fatalf("paid local release was not reactivated: %#v found=%v err=%v", order, found, err)
 	}
 }
 

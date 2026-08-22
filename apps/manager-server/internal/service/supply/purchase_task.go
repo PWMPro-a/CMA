@@ -920,6 +920,26 @@ func (s *Service) purchaseTaskReadyTakeAllowed(ctx context.Context, order store.
 	if remaining <= 0 {
 		return false, nil
 	}
+	orders, err := s.store.ListSupplyOrdersByTaskID(ctx, task.TaskID)
+	if err != nil {
+		return false, err
+	}
+	// Reserve the earlier ready/taking siblings first. ListByTaskID is ordered by
+	// creation time and ID, so concurrent child orders receive one deterministic
+	// shared budget instead of each independently consuming the whole remainder.
+	for _, sibling := range orders {
+		if sibling.OrderID == order.OrderID || sibling.ID == order.ID && order.ID > 0 {
+			break
+		}
+		if !reportOpenOrderStatus(sibling.Status) {
+			continue
+		}
+		committed := purchaseTaskOrderCommittedQuantity(sibling) - purchaseTaskOrderDeliveredQuantity(sibling)
+		remaining = max(0, remaining-max(0, committed))
+	}
+	if remaining <= 0 {
+		return false, nil
+	}
 	quantity := max(order.ReadyQuantity, order.ItemCount)
 	if quantity <= 0 {
 		quantity = max(0, order.RequestedQuantity)

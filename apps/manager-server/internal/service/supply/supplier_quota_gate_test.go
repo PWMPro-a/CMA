@@ -283,7 +283,7 @@ func TestMarketplaceSupplierQuotaScoresUsesIndependentAccountEvidence(t *testing
 	}
 }
 
-func TestMarketplaceSupplierQuotaScoresDoesNotBlockSellerFromOneInvalidCredential(t *testing.T) {
+func TestMarketplaceSupplierQuotaScoresContinuesTrialAfterOneInvalidCredential(t *testing.T) {
 	ctx := context.Background()
 	st := testutil.NewStore(t, testutil.NewConfig(t))
 	service := New(st, nil)
@@ -322,8 +322,67 @@ func TestMarketplaceSupplierQuotaScoresDoesNotBlockSellerFromOneInvalidCredentia
 		t.Fatalf("invalid credential score = %#v", score)
 	}
 	selection, selectErr := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
-	if selection != nil || !errors.Is(selectErr, ErrSupplierQuotaGateNoEligibleSeller) {
-		t.Fatalf("invalid credential seller selected = %#v err=%v", selection, selectErr)
+	if selectErr != nil || selection == nil || selection.candidate.SellerID != "revoked-seller" ||
+		selection.quantity != 1 || !selection.trial {
+		t.Fatalf("invalid credential seller follow-up trial = %#v err=%v", selection, selectErr)
+	}
+}
+
+func TestMarketplaceSupplierQuotaScoresWaitsForTenEvidenceBeforeBlocking(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewStore(t, testutil.NewConfig(t))
+	service := New(st, nil)
+	now := time.Now()
+	results := make([]store.CodexInspectionResult, 0, 10)
+	for index := 0; index < 10; index++ {
+		fileName := fmt.Sprintf("decision-%02d.json", index)
+		seedMarketplaceQuotaAccount(t, st, fmt.Sprintf("decision-order-%02d", index), "decision-seller", "Decision Seller", fileName)
+		result := store.CodexInspectionResult{FileName: fileName, AccountKey: fileName, Provider: "codex"}
+		if index < 3 {
+			statusUnauthorized := 401
+			result.Action = "reauth"
+			result.StatusCode = &statusUnauthorized
+			result.ErrorDetail = `{"error":{"code":"token_revoked"}}`
+		} else {
+			service.smartQuotaState.directSamples["file:"+fileName] = smartQuotaCalibrationSample{
+				identity: "file:" + fileName, capacityM: 120, weight: 1, usedFraction: 0.2,
+				observedMS: now.UnixMilli(), completeWindow: true,
+			}
+		}
+		results = append(results, result)
+	}
+	service.quotaSnapshot = inspectionQuotaSnapshot{results: results[:9], generatedAt: now, attemptedAt: now}
+
+	enabled := true
+	platform := store.ManagerSupplyPlatformConfig{
+		ID: "nv", Name: "NV", Type: "nvtokens", Product: "plus",
+		SupplierQuotaGateEnabled: &enabled, SupplierQuotaMinimumM: 90,
+	}
+	candidate := supplyclient.MarketplaceSellerCandidate{
+		SellerID: "decision-seller", Name: "Decision Seller", SelectionToken: "decision-token",
+		Product: "plus", Available: 20, MinUnitPriceFen: 1200,
+	}
+	scores, err := service.marketplaceSupplierQuotaScores(ctx, platform, []supplyclient.MarketplaceSellerCandidate{candidate}, nil)
+	if err != nil || len(scores) != 1 {
+		t.Fatalf("nine-evidence scores = %#v err=%v", scores, err)
+	}
+	if score := scores[0]; score.Status != supplierQuotaStatusObserving || score.EvidenceCount != 9 || score.InvalidCredentialCount != 3 {
+		t.Fatalf("nine evidence must remain observing: %#v", score)
+	}
+	selection, selectErr := chooseMarketplaceSellerForAutomaticPurchase(platform, 5, []supplyclient.MarketplaceSellerCandidate{candidate}, scores)
+	if selectErr != nil || selection == nil || !selection.trial || selection.quantity != 1 {
+		t.Fatalf("nine-evidence follow-up trial = %#v err=%v", selection, selectErr)
+	}
+
+	service.supplierQuotaScores = nil
+	service.quotaSnapshot = inspectionQuotaSnapshot{results: results, generatedAt: now, attemptedAt: now}
+	scores, err = service.marketplaceSupplierQuotaScores(ctx, platform, []supplyclient.MarketplaceSellerCandidate{candidate}, nil)
+	if err != nil || len(scores) != 1 {
+		t.Fatalf("ten-evidence scores = %#v err=%v", scores, err)
+	}
+	if score := scores[0]; score.Status != supplierQuotaStatusBlocked || score.EvidenceCount != 10 ||
+		score.PassingSampleCount != 7 || score.PassRatePercent != 70 {
+		t.Fatalf("ten evidence with three failures must block: %#v", score)
 	}
 }
 

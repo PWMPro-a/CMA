@@ -3649,6 +3649,21 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 			return released, err
 		}
 	}
+	if platform, platformErr := resolveSupplyPlatform(cfg.Supply, order.SupplierID, order.Product); platformErr == nil && strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformNvtokens) &&
+		supplyOrderHasPaymentEvidence(*order) &&
+		(isReadyForTake(order.Status) || isReadyForTake(order.RemoteStatus)) {
+		// NV does not expose an order release/refund operation. Once the order is
+		// ready, the account already exists and the balance has been charged; a
+		// local "released" flag only hides paid inventory. Force the idempotent
+		// Take/import path regardless of a recovered capacity snapshot.
+		resource := s.currentSmartResource(cfg.Supply)
+		resource.LockedOrderID = order.OrderID
+		resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
+		resource.SuggestedAction = smartActionTakeLocked
+		resource.DecisionReason = "paid_ready_order_take"
+		s.setSmartResource(resource)
+		return false, nil
+	}
 	if smartSupplyEnabled(cfg.Supply) {
 		resource, err := s.smartResource(ctx, cfg, forceSmartRefresh)
 		if err != nil || !resource.SnapshotFresh {
@@ -3681,6 +3696,22 @@ func (s *Service) autoReleaseAutomaticOrderIfNotNeeded(ctx context.Context, cfg 
 		_, emergencyQuantity, emergencyReason, accountLoaded, err := s.smartEmergencyAvailability(ctx, cfg, &resource)
 		if err != nil {
 			return false, err
+		}
+		// A fresh planner snapshot may recover after the first child accounts are
+		// imported even though the durable purchase task still has an unmet target.
+		// Keep an already-paid ready child moving within that task budget instead of
+		// discarding it locally and making the task reserve another supplier order.
+		allowedByTask, taskErr := s.purchaseTaskReadyTakeAllowed(ctx, *order)
+		if taskErr != nil {
+			return false, taskErr
+		}
+		if allowedByTask {
+			resource.LockedOrderID = order.OrderID
+			resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
+			resource.SuggestedAction = smartActionTakeLocked
+			resource.DecisionReason = "purchase_task_ready_target_remaining"
+			s.setSmartResource(resource)
+			return false, nil
 		}
 		if release, accepted, reason, err := s.shouldReleaseOversizedOpenOrder(ctx, cfg.Supply, resource, order); err != nil {
 			return false, err
@@ -9436,7 +9467,7 @@ func (s *Service) smartTakeAllowed(cfg store.ManagerSupplyConfig, orderID string
 	}
 	if resource.SuggestedAction == smartActionTakeLocked {
 		switch resource.DecisionReason {
-		case "critical_take_confirmed", "critical_take_confirmed_stale_lower_bound", "supply_plenty_small_take", "low_water_take_ready", "low_water_take_ready_stale_lower_bound", "purchase_task_ready_stale_snapshot":
+		case "critical_take_confirmed", "critical_take_confirmed_stale_lower_bound", "supply_plenty_small_take", "low_water_take_ready", "low_water_take_ready_stale_lower_bound", "purchase_task_ready_stale_snapshot", "purchase_task_ready_target_remaining", "paid_ready_order_take":
 			return true
 		}
 	}

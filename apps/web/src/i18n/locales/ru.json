@@ -6290,7 +6290,7 @@
     "supplier_quota_reason_observed_quota_meets_threshold": "Наблюдаемая квота соответствует порогу",
     "supplier_quota_reason_provisional_quota_meets_threshold": "Начальная выборка соответствует порогу; временно разрешено с продолжением сбора данных",
     "supplier_quota_reason_waiting_for_more_supplier_evidence": "Недостаточно репрезентативных данных; продолжаются пробные покупки по одному аккаунту",
-    "supplier_quota_reason_observed_supplier_quality_below_threshold": "После как минимум 5 свидетельств общий процент успеха ниже 80%",
+    "supplier_quota_reason_observed_supplier_quality_below_threshold": "После как минимум 10 свидетельств общий процент успеха ниже 80%",
     "supplier_quota_reason_observed_quota_below_threshold": "Наблюдаемая квота ниже порога",
     "supplier_quota_reason_credential_invalidated": "Учетные данные поставщика недействительны; дальнейшие автозакупки заблокированы",
     "supplier_quota_reason_waiting_for_account_quota_evidence": "Закупка выполнена; ожидаются данные о квоте аккаунта",

@@ -51,7 +51,7 @@ const (
 	// Permanent supplier decisions need a representative batch. Before this
 	// point a weak or revoked account only keeps the seller in single-account
 	// observation; one unlucky delivery never blacklists the whole seller.
-	supplierQuotaMinimumDecisionSamples = 5
+	supplierQuotaMinimumDecisionSamples = 10
 	// Up to 20% weak/invalid deliveries are tolerated. Thus a batch of ten may
 	// contain one or two bad accounts while the seller remains eligible.
 	supplierQuotaMinimumPassRate = 0.80
@@ -497,9 +497,10 @@ func (s *Service) marketplaceSupplierQuotaScores(
 			} else {
 				score.Status = supplierQuotaStatusObserving
 				score.Reason = "waiting_for_more_supplier_evidence"
-				if entry.lastAttemptMS > 0 {
-					score.RetryAfterMS = entry.lastAttemptMS + supplierQuotaObservationRetryInterval.Milliseconds()
-				}
+				// The last account has already produced usable evidence. Keep the
+				// seller on bounded single-account trials, but do not impose the
+				// marketplace-failure cooldown: one weak/invalid delivery must not
+				// stop evidence collection before the representative batch is full.
 			}
 		case entry.imported > 0 || entry.inFlight || entry.attempted > 0 || entry.purchased > 0 || candidate.PurchasedBefore || candidate.PurchaseCount > 0:
 			score.Status = supplierQuotaStatusObserving
