@@ -30,14 +30,25 @@ const (
 	smartQuotaCalibrationMaxRepresentatives = 24
 	smartQuotaCalibrationDivergencePct      = 25.0
 
-	smartQuotaEstimateSourceDefault      = "default"
-	smartQuotaEstimateSourceGlobal       = "runtime_global"
-	smartQuotaEstimateSourcePlan         = "runtime_plan"
-	smartQuotaEstimateSourceIdentity     = "runtime_identity" // legacy API value
-	smartQuotaEstimateSourceCurrent      = "runtime_current"
-	smartQuotaEstimateSourceClassified   = "runtime_classified"
-	smartQuotaEstimateSourceRecentPlan   = "runtime_recent_plan"
-	smartQuotaEstimateSourceRecalibrated = "runtime_recalibrated"
+	// Supplier trials need a much faster account-scoped signal than the pool-wide
+	// capacity planner. Once one unchanged credential has consumed at least 5%
+	// of a quota window, its locally observed Token delta is sufficient for a
+	// provisional seller estimate. The same identity is updated in place and is
+	// finalized when the provider reports the quota as exhausted, so one account
+	// never becomes two supplier samples.
+	supplierQuotaEstimateMinUsedFraction   = 0.05
+	supplierQuotaEstimateExhaustedFraction = 0.999
+
+	smartQuotaEstimateSourceDefault       = "default"
+	smartQuotaEstimateSourceGlobal        = "runtime_global"
+	smartQuotaEstimateSourcePlan          = "runtime_plan"
+	smartQuotaEstimateSourceIdentity      = "runtime_identity" // legacy API value
+	smartQuotaEstimateSourceCurrent       = "runtime_current"
+	smartQuotaEstimateSourceClassified    = "runtime_classified"
+	smartQuotaEstimateSourceRecentPlan    = "runtime_recent_plan"
+	smartQuotaEstimateSourceRecalibrated  = "runtime_recalibrated"
+	smartQuotaEstimateSourceSupplierEarly = "supplier_5pct_estimate"
+	smartQuotaEstimateSourceSupplierFinal = "supplier_exhausted_final"
 )
 
 // smartQuotaCalibrationObservation follows one account inside one quota
@@ -60,6 +71,9 @@ type smartQuotaCalibrationObservation struct {
 	supplierID                string
 	planType                  string
 	windowTokens              int64
+	supplierBaselineFraction  float64
+	supplierBaselineTokens    int64
+	hasSupplierBaseline       bool
 }
 
 type smartQuotaCalibrationSample struct {
@@ -80,6 +94,7 @@ type smartQuotaCalibrationState struct {
 	samplesByIdentity  map[string][]smartQuotaCalibrationSample
 	directSamples      map[string]smartQuotaCalibrationSample
 	provisionalSamples map[string]smartQuotaCalibrationSample
+	supplierSamples    map[string]smartQuotaCalibrationSample
 }
 
 type smartQuotaEstimate struct {
@@ -187,6 +202,7 @@ func newSmartQuotaCalibrationState() smartQuotaCalibrationState {
 		samplesByIdentity:  make(map[string][]smartQuotaCalibrationSample),
 		directSamples:      make(map[string]smartQuotaCalibrationSample),
 		provisionalSamples: make(map[string]smartQuotaCalibrationSample),
+		supplierSamples:    make(map[string]smartQuotaCalibrationSample),
 	}
 }
 
@@ -202,6 +218,9 @@ func (s *Service) ensureSmartQuotaCalibrationStateLocked() {
 	}
 	if s.smartQuotaState.provisionalSamples == nil {
 		s.smartQuotaState.provisionalSamples = make(map[string]smartQuotaCalibrationSample)
+	}
+	if s.smartQuotaState.supplierSamples == nil {
+		s.smartQuotaState.supplierSamples = make(map[string]smartQuotaCalibrationSample)
 	}
 }
 
@@ -245,6 +264,36 @@ func (s *Service) assignSmartQuotaSupplierToIdentityLocked(identity, supplierID 
 		sample.supplierID = supplierID
 		s.smartQuotaState.provisionalSamples[identity] = sample
 	}
+	if sample, ok := s.smartQuotaState.supplierSamples[identity]; ok && normalizeSmartQuotaSupplierID(sample.supplierID) == "" {
+		sample.supplierID = supplierID
+		s.smartQuotaState.supplierSamples[identity] = sample
+	}
+}
+
+// upsertSmartQuotaSupplierSampleLocked keeps exactly one fast supplier sample
+// per account identity. It reports only lifecycle changes that should evict the
+// seller-score cache immediately: the first usable 5% estimate and the later
+// transition to an exhausted/final sample. Intermediate refinements remain
+// visible through the normal short-lived score cache without turning every
+// quota header into a database-heavy seller rescore.
+func (s *Service) upsertSmartQuotaSupplierSampleLocked(sample smartQuotaCalibrationSample) bool {
+	if sample.identity == "" || sample.capacityM < smartQuotaCalibrationMinCapacityM ||
+		sample.capacityM > smartQuotaCalibrationMaxCapacityM {
+		return false
+	}
+	s.ensureSmartQuotaCalibrationStateLocked()
+	previous, found := s.smartQuotaState.supplierSamples[sample.identity]
+	if found && !previous.completeWindow && !sample.completeWindow {
+		// Freeze the first >=5% estimate. Normal percentage movement must not
+		// continuously rewrite seller history; the next revision is the final
+		// exhausted-quota measurement requested by the operator.
+		return false
+	}
+	if found && previous.completeWindow && !sample.completeWindow {
+		return false
+	}
+	s.smartQuotaState.supplierSamples[sample.identity] = sample
+	return !found || (!previous.completeWindow && sample.completeWindow)
 }
 
 func (s *Service) removeSmartQuotaSamplesThroughLocked(identity string, observedMS int64) {
@@ -567,8 +616,8 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 		return
 	}
 	s.smartMu.Lock()
-	defer s.smartMu.Unlock()
 	s.ensureSmartQuotaCalibrationStateLocked()
+	supplierScoreChanged := false
 
 	for _, baseline := range baselines {
 		if baseline.identity == "" || baseline.windowTokens <= 0 ||
@@ -580,6 +629,8 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 		observation := s.smartQuotaState.observations[baseline.identity]
 		credentialGenerationChanged := baseline.credentialEffectiveFromMS > 0 &&
 			observation.credentialEffectiveFromMS != baseline.credentialEffectiveFromMS
+		supplierChanged := observation.supplierID != "" && baseline.supplierID != "" &&
+			observation.supplierID != baseline.supplierID
 		if credentialGenerationChanged {
 			// Warm replay can span two credentials that reused one filename. Drop
 			// the prior generation once, then retain deltas learned after this marker.
@@ -587,8 +638,14 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 			delete(s.smartQuotaState.directSamples, baseline.identity)
 			delete(s.smartQuotaState.provisionalSamples, baseline.identity)
 		}
+		if credentialGenerationChanged || supplierChanged {
+			if _, existed := s.smartQuotaState.supplierSamples[baseline.identity]; existed {
+				delete(s.smartQuotaState.supplierSamples, baseline.identity)
+				supplierScoreChanged = true
+			}
+		}
 		if (observation.recoverAtMS > 0 && baseline.recoverAtMS > 0 && observation.recoverAtMS != baseline.recoverAtMS) ||
-			(observation.supplierID != "" && baseline.supplierID != "" && observation.supplierID != baseline.supplierID) {
+			supplierChanged {
 			observation = resetSmartQuotaCalibrationObservation(observation)
 		}
 		observation.windowTokens = baseline.windowTokens
@@ -609,6 +666,20 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 		if baseline.supplierID != "" {
 			observation.supplierID = baseline.supplierID
 		}
+		completeCoverage := smartQuotaWindowBaselineHasCompleteCoverage(baseline)
+		if completeCoverage {
+			// The local aggregate starts at the provider window boundary, so the
+			// supplier estimate may continue to use the full cumulative numerator.
+			observation.supplierBaselineFraction = 0
+			observation.supplierBaselineTokens = 0
+			observation.hasSupplierBaseline = true
+		} else {
+			// Mid-window imports seed a safe delta baseline. The first supplier
+			// estimate is emitted only after another 5% has been consumed locally.
+			observation.supplierBaselineFraction = baseline.fraction
+			observation.supplierBaselineTokens = baseline.windowTokens
+			observation.hasSupplierBaseline = true
+		}
 		s.smartQuotaState.observations[baseline.identity] = observation
 
 		// Supplier credentials commonly arrive after their weekly quota window
@@ -618,7 +689,7 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 		// estimates and collapsed a 16 x 60M pool to roughly 250M. Keep the
 		// observation as the baseline for future percentage deltas. The configured
 		// fallback remains in use unless separately validated runtime deltas exist.
-		if !smartQuotaWindowBaselineHasCompleteCoverage(baseline) {
+		if !completeCoverage {
 			delete(s.smartQuotaState.directSamples, baseline.identity)
 			delete(s.smartQuotaState.provisionalSamples, baseline.identity)
 			continue
@@ -646,6 +717,15 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 			completeWindow:     true,
 			classificationOnly: !smartQuotaCalibrationUsedFractionEligible(baseline.fraction),
 		}
+		if baseline.fraction+1e-9 >= supplierQuotaEstimateMinUsedFraction {
+			supplierSample := sample
+			supplierSample.weight = baseline.fraction
+			supplierSample.classificationOnly = true
+			supplierSample.completeWindow = baseline.fraction+1e-9 >= supplierQuotaEstimateExhaustedFraction
+			if s.upsertSmartQuotaSupplierSampleLocked(supplierSample) {
+				supplierScoreChanged = true
+			}
+		}
 		if sample.classificationOnly {
 			s.smartQuotaState.provisionalSamples[baseline.identity] = sample
 		} else {
@@ -654,6 +734,10 @@ func (s *Service) recordSmartQuotaWindowBaselines(baselines []smartQuotaWindowBa
 		}
 	}
 	s.pruneSmartQuotaCalibrationLocked(now)
+	s.smartMu.Unlock()
+	if supplierScoreChanged {
+		s.invalidateAllMarketplaceSupplierQuotaScores()
+	}
 }
 
 func smartQuotaWindowBaselineHasCompleteCoverage(baseline smartQuotaWindowBaseline) bool {
@@ -667,9 +751,9 @@ func smartQuotaWindowBaselineHasCompleteCoverage(baseline smartQuotaWindowBaseli
 	return baseline.firstSeenMS <= coverageBoundaryMS
 }
 
-func (s *Service) recordSmartQuotaCalibrationEventsLocked(events []usage.Event, now time.Time) {
+func (s *Service) recordSmartQuotaCalibrationEventsLocked(events []usage.Event, now time.Time) bool {
 	if s == nil || len(events) == 0 {
-		return
+		return false
 	}
 	s.ensureSmartQuotaCalibrationStateLocked()
 	ordered := make([]usage.Event, 0, len(events))
@@ -690,16 +774,20 @@ func (s *Service) recordSmartQuotaCalibrationEventsLocked(events []usage.Event, 
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return ordered[i].TimestampMS < ordered[j].TimestampMS
 	})
+	supplierScoreChanged := false
 	for _, event := range ordered {
-		s.recordSmartQuotaCalibrationEventLocked(event, now)
+		if s.recordSmartQuotaCalibrationEventLocked(event, now) {
+			supplierScoreChanged = true
+		}
 	}
 	s.pruneSmartQuotaCalibrationLocked(now)
+	return supplierScoreChanged
 }
 
-func (s *Service) recordSmartQuotaCalibrationEventLocked(event usage.Event, now time.Time) {
+func (s *Service) recordSmartQuotaCalibrationEventLocked(event usage.Event, now time.Time) bool {
 	identity := smartQuotaCalibrationEventIdentity(event)
 	if identity == "" {
-		return
+		return false
 	}
 	ts := event.TimestampMS
 	if ts <= 0 {
@@ -721,7 +809,7 @@ func (s *Service) recordSmartQuotaCalibrationEventLocked(event usage.Event, now 
 		observation.windowTokens += tokens
 		observation.lastEventMS = ts
 		s.smartQuotaState.observations[identity] = observation
-		return
+		return false
 	}
 	fraction := evidence.fraction
 	planType := evidence.planType
@@ -749,8 +837,39 @@ func (s *Service) recordSmartQuotaCalibrationEventLocked(event usage.Event, now 
 		observation.lastSampleFraction = fraction
 		observation.lastSampleTokens = observation.windowTokens
 		observation.hasFraction = true
+		observation.supplierBaselineFraction = fraction
+		observation.supplierBaselineTokens = observation.windowTokens
+		observation.hasSupplierBaseline = true
 		s.smartQuotaState.observations[identity] = observation
-		return
+		return false
+	}
+
+	supplierScoreChanged := false
+	if !observation.hasSupplierBaseline {
+		observation.supplierBaselineFraction = observation.lastSampleFraction
+		observation.supplierBaselineTokens = observation.lastSampleTokens
+		observation.hasSupplierBaseline = true
+	}
+	supplierDelta := fraction - observation.supplierBaselineFraction
+	supplierTokens := observation.windowTokens - observation.supplierBaselineTokens
+	if supplierTokens > 0 && supplierDelta+1e-9 >= supplierQuotaEstimateMinUsedFraction {
+		capacityM := float64(supplierTokens) / supplierDelta / 1_000_000
+		if capacityM >= smartQuotaCalibrationMinCapacityM && capacityM <= smartQuotaCalibrationMaxCapacityM {
+			supplierSample := smartQuotaCalibrationSample{
+				identity:           identity,
+				supplierID:         observation.supplierID,
+				planType:           observation.planType,
+				capacityM:          capacityM,
+				weight:             supplierDelta,
+				usedFraction:       supplierDelta,
+				observedMS:         ts,
+				completeWindow:     fraction+1e-9 >= supplierQuotaEstimateExhaustedFraction,
+				classificationOnly: true,
+			}
+			if s.upsertSmartQuotaSupplierSampleLocked(supplierSample) {
+				supplierScoreChanged = true
+			}
+		}
 	}
 
 	delta := fraction - observation.lastSampleFraction
@@ -787,6 +906,7 @@ func (s *Service) recordSmartQuotaCalibrationEventLocked(event usage.Event, now 
 		observation.lastSampleTokens = observation.windowTokens
 	}
 	s.smartQuotaState.observations[identity] = observation
+	return supplierScoreChanged
 }
 
 func resetSmartQuotaCalibrationObservation(observation smartQuotaCalibrationObservation) smartQuotaCalibrationObservation {
@@ -826,6 +946,11 @@ func (s *Service) pruneSmartQuotaCalibrationLocked(now time.Time) {
 	for identity, sample := range s.smartQuotaState.provisionalSamples {
 		if sample.observedMS < cutoff {
 			delete(s.smartQuotaState.provisionalSamples, identity)
+		}
+	}
+	for identity, sample := range s.smartQuotaState.supplierSamples {
+		if sample.observedMS < cutoff {
+			delete(s.smartQuotaState.supplierSamples, identity)
 		}
 	}
 	for identity, observation := range s.smartQuotaState.observations {
@@ -1075,6 +1200,61 @@ func (s *Service) smartQuotaCurrentEstimateForAt(now time.Time, identities ...st
 	}
 	s.smartMu.RUnlock()
 	return estimateSmartQuotaCurrentSamplesAt(samples, now)
+}
+
+// smartQuotaSupplierEstimateForAt is deliberately account-scoped. It exposes a
+// provisional seller-gate estimate after 5% locally observed consumption while
+// leaving the pool-wide planning estimator on its stricter multi-sample rules.
+// When the quota reaches 100%, the same map entry becomes the final sample and
+// therefore updates, rather than increments, the seller's evidence count.
+func (s *Service) smartQuotaSupplierEstimateForAt(now time.Time, identities ...string) (smartQuotaEstimate, bool) {
+	if s == nil || len(identities) == 0 {
+		return smartQuotaEstimate{}, false
+	}
+	cutoff := now.Add(-smartQuotaCalibrationRecentWindow).UnixMilli()
+	var best smartQuotaCalibrationSample
+	found := false
+	s.smartMu.RLock()
+	for _, identity := range identities {
+		identity = strings.TrimSpace(identity)
+		if identity == "" {
+			continue
+		}
+		sample, ok := s.smartQuotaState.supplierSamples[identity]
+		if !ok || sample.observedMS < cutoff || sample.capacityM <= 0 {
+			continue
+		}
+		if !found || (sample.completeWindow && !best.completeWindow) ||
+			(sample.completeWindow == best.completeWindow && sample.observedMS > best.observedMS) ||
+			(sample.completeWindow == best.completeWindow && sample.observedMS == best.observedMS && sample.weight > best.weight) {
+			best = sample
+			found = true
+		}
+	}
+	s.smartMu.RUnlock()
+	if found {
+		source := smartQuotaEstimateSourceSupplierEarly
+		confidence := smartConfidenceLow
+		completeWindowAccounts := 0
+		if best.completeWindow {
+			source = smartQuotaEstimateSourceSupplierFinal
+			confidence = smartConfidenceHigh
+			completeWindowAccounts = 1
+		}
+		return smartQuotaEstimate{
+			CapacityM:              round2(best.capacityM),
+			Source:                 source,
+			SampleCount:            1,
+			EvidenceCount:          1,
+			ObservedPercent:        round2(best.weight * 100),
+			Confidence:             confidence,
+			UniqueAccounts:         1,
+			CompleteWindowAccounts: completeWindowAccounts,
+			IndependentAccount:     true,
+			Provisional:            !best.completeWindow,
+		}, true
+	}
+	return s.smartQuotaCurrentEstimateForAt(now, identities...)
 }
 
 func estimateSmartQuotaCurrentSamplesAt(samples []smartQuotaCalibrationSample, now time.Time) (smartQuotaEstimate, bool) {

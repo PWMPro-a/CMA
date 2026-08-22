@@ -470,14 +470,13 @@ func (s *Service) WarmSmartUsage(ctx context.Context) error {
 		}
 	}
 	if quotaWarmErr == nil {
-		s.recordSmartQuotaCalibrationEventsLocked(quotaEvents, now)
+		_ = s.recordSmartQuotaCalibrationEventsLocked(quotaEvents, now)
 	}
 	return quotaWarmErr
 }
 
 func (s *Service) recordSmartUsageEvents(events []usage.Event, now time.Time) {
 	s.smartMu.Lock()
-	defer s.smartMu.Unlock()
 	if s.smartBuckets == nil {
 		s.smartBuckets = make(map[int64]*smartUsageBucket)
 	}
@@ -519,7 +518,11 @@ func (s *Service) recordSmartUsageEvents(events []usage.Event, now time.Time) {
 			delete(s.smartBuckets, minute)
 		}
 	}
-	s.recordSmartQuotaCalibrationEventsLocked(events, now)
+	supplierScoreChanged := s.recordSmartQuotaCalibrationEventsLocked(events, now)
+	s.smartMu.Unlock()
+	if supplierScoreChanged {
+		s.invalidateAllMarketplaceSupplierQuotaScores()
+	}
 }
 
 func (s *Service) smartResource(ctx context.Context, cfg store.ManagerConfig, forceAuthRefresh bool) (SmartResource, error) {

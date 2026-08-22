@@ -641,6 +641,60 @@ func TestSmartQuotaCalibrationRequiresAtLeastTenPercentUsage(t *testing.T) {
 	}
 }
 
+func TestSmartQuotaSupplierEstimateStartsAtFivePercentAndFinalizesAtExhaustion(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	recoverAt := now.Add(7 * 24 * time.Hour).UnixMilli()
+	identity := "file:supplier-fast.json"
+
+	service.recordSmartUsageEvents([]usage.Event{
+		{
+			TimestampMS: now.Add(-2 * time.Minute).UnixMilli(), Provider: "codex", AuthFileSnapshot: "supplier-fast.json",
+			HeaderQuotaUsedPercent: floatPtr(0), HeaderQuotaRecoverAtMS: recoverAt,
+			HeaderQuotaPlanType: "plus", ResponseMetadata: smartQuotaWeeklyMetadata("plus", 0, recoverAt),
+		},
+		{
+			TimestampMS: now.Add(-time.Minute).UnixMilli(), Provider: "codex", AuthFileSnapshot: "supplier-fast.json",
+			TotalTokens: 6_000_000, HeaderQuotaUsedPercent: floatPtr(5), HeaderQuotaRecoverAtMS: recoverAt,
+			HeaderQuotaPlanType: "plus", ResponseMetadata: smartQuotaWeeklyMetadata("plus", 5, recoverAt),
+		},
+	}, now)
+
+	early, ok := service.smartQuotaSupplierEstimateForAt(now, identity)
+	if !ok || early.CapacityM != 120 || !early.Provisional || early.ObservedPercent != 5 ||
+		early.Source != smartQuotaEstimateSourceSupplierEarly || early.SampleCount != 1 {
+		t.Fatalf("5%% supplier estimate = %#v ok=%v", early, ok)
+	}
+	// The pool-wide planner intentionally keeps its stricter evidence rule.
+	if current, currentOK := service.smartQuotaCurrentEstimateForAt(now, identity); currentOK {
+		t.Fatalf("5%% supplier estimate leaked into global capacity planning: %#v", current)
+	}
+	service.recordSmartUsageEvents([]usage.Event{{
+		TimestampMS: now.Add(-30 * time.Second).UnixMilli(), Provider: "codex", AuthFileSnapshot: "supplier-fast.json",
+		TotalTokens: 34_000_000, HeaderQuotaUsedPercent: floatPtr(50), HeaderQuotaRecoverAtMS: recoverAt,
+		HeaderQuotaPlanType: "plus", ResponseMetadata: smartQuotaWeeklyMetadata("plus", 50, recoverAt),
+	}}, now)
+	if frozen, frozenOK := service.smartQuotaSupplierEstimateForAt(now, identity); !frozenOK || frozen.CapacityM != 120 {
+		t.Fatalf("supplier estimate changed before exhaustion: %#v ok=%v", frozen, frozenOK)
+	}
+
+	service.recordSmartUsageEvents([]usage.Event{{
+		TimestampMS: now.UnixMilli(), Provider: "codex", AuthFileSnapshot: "supplier-fast.json",
+		TotalTokens: 50_000_000, HeaderQuotaUsedPercent: floatPtr(100), HeaderQuotaRecoverAtMS: recoverAt,
+		HeaderQuotaPlanType: "plus", ResponseMetadata: smartQuotaWeeklyMetadata("plus", 100, recoverAt),
+	}}, now)
+
+	final, ok := service.smartQuotaSupplierEstimateForAt(now, identity)
+	if !ok || final.CapacityM != 90 || final.Provisional || final.ObservedPercent != 100 ||
+		final.Source != smartQuotaEstimateSourceSupplierFinal || final.CompleteWindowAccounts != 1 ||
+		final.SampleCount != 1 {
+		t.Fatalf("exhausted supplier estimate = %#v ok=%v", final, ok)
+	}
+	if len(service.smartQuotaState.supplierSamples) != 1 {
+		t.Fatalf("supplier sample was duplicated instead of updated: %#v", service.smartQuotaState.supplierSamples)
+	}
+}
+
 func TestSmartQuotaClassesSeparateStandardAndHighCapacityTeamAccounts(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	samples := []smartQuotaCalibrationSample{

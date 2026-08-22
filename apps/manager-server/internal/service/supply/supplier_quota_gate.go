@@ -415,19 +415,28 @@ func (s *Service) marketplaceSupplierQuotaScores(
 		entry.selectionToken = firstNonEmptyString(entry.selectionToken, item.MarketplaceSelectionToken, order.MarketplaceSelectionToken)
 		entry.channelID = firstNonEmptyString(entry.channelID, item.MarketplaceChannelID, order.MarketplaceChannelID)
 		entry.sellerName = firstNonEmptyString(entry.sellerName, item.MarketplaceSellerName, order.MarketplaceSellerName)
+		// The filename is enough to join an imported account with live quota
+		// headers. Do not wait for the next full inspection snapshot before using
+		// the account's 5% supplier estimate; inspection-only aliases are appended
+		// when available.
+		identities := smartQuotaCalibrationResultIdentities(item.FileName, "", "", "")
 		result, found := resultByFile[strings.TrimSpace(item.FileName)]
-		if !found {
-			continue
+		if found {
+			identities = append(identities, smartQuotaCalibrationResultIdentities(
+				result.FileName,
+				result.AuthIndex,
+				result.AccountKey,
+				result.AccountID,
+			)...)
 		}
 		// A revoked/invalid credential is a failed quality sample. It contributes
 		// to the seller's combined pass rate, but one isolated failure does not
 		// blacklist the seller before a representative evidence batch exists.
-		if inspectionResultCredentialInvalid(result) {
+		if found && inspectionResultCredentialInvalid(result) {
 			entry.invalid++
 			continue
 		}
-		identities := smartQuotaCalibrationResultIdentities(result.FileName, result.AuthIndex, result.AccountKey, result.AccountID)
-		estimate, ok := s.smartQuotaCurrentEstimateForAt(now, identities...)
+		estimate, ok := s.smartQuotaSupplierEstimateForAt(now, identities...)
 		if ok && estimate.CapacityM > 0 {
 			entry.capacities = append(entry.capacities, estimate.CapacityM)
 		}

@@ -10,6 +10,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/supplyclient"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
 func TestChooseMarketplaceSellerPrefersApprovedAndBoundsTrial(t *testing.T) {
@@ -283,6 +284,66 @@ func TestMarketplaceSupplierQuotaScoresUsesIndependentAccountEvidence(t *testing
 	}
 }
 
+func TestMarketplaceSupplierQuotaScoresUsesFivePercentEstimateBeforeInspectionAndUpdatesAtExhaustion(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewStore(t, testutil.NewConfig(t))
+	service := New(st, nil)
+	now := time.Now().Truncate(time.Second)
+	recoverAt := now.Add(7 * 24 * time.Hour).UnixMilli()
+	seedMarketplaceQuotaAccount(t, st, "fast-order", "fast-seller", "Fast Seller", "fast.json")
+
+	service.recordSmartUsageEvents([]usage.Event{
+		{
+			TimestampMS: now.Add(-2 * time.Minute).UnixMilli(), Provider: "codex", AuthFileSnapshot: "fast.json",
+			HeaderQuotaUsedPercent: floatPtr(0), HeaderQuotaRecoverAtMS: recoverAt,
+			HeaderQuotaPlanType: "plus", ResponseMetadata: smartQuotaWeeklyMetadata("plus", 0, recoverAt),
+		},
+		{
+			TimestampMS: now.Add(-time.Minute).UnixMilli(), Provider: "codex", AuthFileSnapshot: "fast.json",
+			TotalTokens: 6_000_000, HeaderQuotaUsedPercent: floatPtr(5), HeaderQuotaRecoverAtMS: recoverAt,
+			HeaderQuotaPlanType: "plus", ResponseMetadata: smartQuotaWeeklyMetadata("plus", 5, recoverAt),
+		},
+	}, now)
+
+	enabled := true
+	platform := store.ManagerSupplyPlatformConfig{
+		ID: "nv", Name: "NV", Type: "nvtokens", Product: "plus",
+		SupplierQuotaGateEnabled: &enabled, SupplierQuotaMinimumM: 90,
+	}
+	candidate := supplyclient.MarketplaceSellerCandidate{
+		SellerID: "fast-seller", Name: "Fast Seller", SelectionToken: "fast-token",
+		Product: "plus", Available: 20, MinUnitPriceFen: 1200,
+	}
+
+	// No inspection snapshot is seeded. The imported filename and live quota
+	// events must be enough to release a low-price seller provisionally.
+	scores, err := service.marketplaceSupplierQuotaScores(ctx, platform, []supplyclient.MarketplaceSellerCandidate{candidate}, nil)
+	if err != nil || len(scores) != 1 {
+		t.Fatalf("5%% seller scores = %#v err=%v", scores, err)
+	}
+	if score := scores[0]; score.Status != supplierQuotaStatusApproved || score.ScoreM != 120 ||
+		score.SampleCount != 1 || score.EvidenceCount != 1 || score.Reason != "provisional_quota_meets_threshold" {
+		t.Fatalf("5%% seller score = %#v", score)
+	}
+
+	// Finishing the same account revises its existing evidence from 120M to 80M.
+	// The seller therefore returns to bounded observation without gaining a
+	// second sample from the same credential.
+	service.recordSmartUsageEvents([]usage.Event{{
+		TimestampMS: now.UnixMilli(), Provider: "codex", AuthFileSnapshot: "fast.json",
+		TotalTokens: 74_000_000, HeaderQuotaUsedPercent: floatPtr(100), HeaderQuotaRecoverAtMS: recoverAt,
+		HeaderQuotaPlanType: "plus", ResponseMetadata: smartQuotaWeeklyMetadata("plus", 100, recoverAt),
+	}}, now)
+	scores, err = service.marketplaceSupplierQuotaScores(ctx, platform, []supplyclient.MarketplaceSellerCandidate{candidate}, nil)
+	if err != nil || len(scores) != 1 {
+		t.Fatalf("exhausted seller scores = %#v err=%v", scores, err)
+	}
+	if score := scores[0]; score.Status != supplierQuotaStatusObserving || score.ScoreM != 80 ||
+		score.SampleCount != 1 || score.EvidenceCount != 1 || score.Reason != "waiting_for_more_supplier_evidence" {
+		t.Fatalf("exhausted seller score did not replace its provisional sample: %#v", score)
+	}
+}
+
 func TestMarketplaceSupplierQuotaScoresContinuesTrialAfterOneInvalidCredential(t *testing.T) {
 	ctx := context.Background()
 	st := testutil.NewStore(t, testutil.NewConfig(t))
@@ -343,7 +404,7 @@ func TestMarketplaceSupplierQuotaScoresWaitsForTenEvidenceBeforeBlocking(t *test
 			result.Action = "reauth"
 			result.StatusCode = &statusUnauthorized
 			result.ErrorDetail = `{"error":{"code":"token_revoked"}}`
-		} else {
+		} else if index < 9 {
 			service.smartQuotaState.directSamples["file:"+fileName] = smartQuotaCalibrationSample{
 				identity: "file:" + fileName, capacityM: 120, weight: 1, usedFraction: 0.2,
 				observedMS: now.UnixMilli(), completeWindow: true,
@@ -375,6 +436,10 @@ func TestMarketplaceSupplierQuotaScoresWaitsForTenEvidenceBeforeBlocking(t *test
 	}
 
 	service.supplierQuotaScores = nil
+	service.smartQuotaState.directSamples["file:decision-09.json"] = smartQuotaCalibrationSample{
+		identity: "file:decision-09.json", capacityM: 120, weight: 1, usedFraction: 0.2,
+		observedMS: now.UnixMilli(), completeWindow: true,
+	}
 	service.quotaSnapshot = inspectionQuotaSnapshot{results: results, generatedAt: now, attemptedAt: now}
 	scores, err = service.marketplaceSupplierQuotaScores(ctx, platform, []supplyclient.MarketplaceSellerCandidate{candidate}, nil)
 	if err != nil || len(scores) != 1 {
