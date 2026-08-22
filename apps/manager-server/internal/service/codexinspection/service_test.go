@@ -789,6 +789,201 @@ func TestRefreshSupplySnapshotReturnsErrorWhenRunDoesNotComplete(t *testing.T) {
 	}
 }
 
+func TestRefreshSupplySnapshotReusesRunningFullCodexInspection(t *testing.T) {
+	probeStarted := make(chan struct{})
+	releaseProbe := make(chan struct{})
+	var startOnce sync.Once
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"files":[{"name":"auth-a.json","auth_index":"auth-1","provider":"codex","account":"alice@example.com","status":"ok","state":"ready"}]}`))
+		case r.URL.Path == "/v0/management/api-call" && r.Method == http.MethodPost:
+			startOnce.Do(func() { close(probeStarted) })
+			select {
+			case <-releaseProbe:
+				_, _ = w.Write([]byte(`{"status_code":200,"body":{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000},"secondary_window":{"used_percent":5,"limit_window_seconds":2592000}}}}`))
+			case <-r.Context().Done():
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	db := newCodexInspectionTestStore(t)
+	managerCfg := newCodexInspectionManagerConfig(upstream.URL)
+	managerCfg.CodexInspection.TargetTypes = []string{model.CodexInspectionTargetCodex}
+	managerCfg.CodexInspection.TargetType = model.CodexInspectionTargetCodex
+	managerCfg.CodexInspection.SampleSize = 0
+	if err := db.SaveManagerConfig(context.Background(), managerCfg); err != nil {
+		t.Fatalf("save manager config: %v", err)
+	}
+	svc := newCodexInspectionTestService(t, db)
+	if _, err := svc.Start(context.Background(), RunRequest{
+		TriggerType: model.CodexInspectionTriggerScheduled,
+		TriggerKey:  "interval:10:reuse",
+	}); err != nil {
+		t.Fatalf("start scheduled inspection: %v", err)
+	}
+	select {
+	case <-probeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("scheduled inspection did not reach the Codex probe")
+	}
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		refreshDone <- svc.RefreshSupplySnapshot(context.Background())
+	}()
+	select {
+	case err := <-refreshDone:
+		t.Fatalf("snapshot refresh returned before active inspection completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseProbe)
+	select {
+	case err := <-refreshDone:
+		if err != nil {
+			t.Fatalf("reuse scheduled inspection: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("snapshot refresh did not resume after scheduled inspection completed")
+	}
+
+	runs, err := db.ListCodexInspectionRuns(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("list inspection runs: %v", err)
+	}
+	if len(runs) != 1 || runs[0].TriggerType != model.CodexInspectionTriggerScheduled {
+		t.Fatalf("snapshot refresh created a duplicate run: %#v", runs)
+	}
+}
+
+func TestRefreshSupplySnapshotRejectsNonReusableActiveInspection(t *testing.T) {
+	tests := []struct {
+		name   string
+		detail RunDetail
+	}{
+		{
+			name: "non Codex",
+			detail: RunDetail{Run: model.CodexInspectionRun{
+				Status:        model.CodexInspectionStatusCompleted,
+				ProbeSetCount: 1,
+				SampledCount:  1,
+				Settings: model.ManagerCodexInspectionConfig{
+					TargetTypes: []string{model.CodexInspectionTargetXAI},
+					TargetType:  model.CodexInspectionTargetXAI,
+				},
+			}},
+		},
+		{
+			name: "sampled Codex",
+			detail: RunDetail{Run: model.CodexInspectionRun{
+				Status:        model.CodexInspectionStatusCompleted,
+				ProbeSetCount: 10,
+				SampledCount:  1,
+				Settings: model.ManagerCodexInspectionConfig{
+					TargetTypes: []string{model.CodexInspectionTargetCodex},
+					TargetType:  model.CodexInspectionTargetCodex,
+					SampleSize:  1,
+				},
+			}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			task := &localRun{done: make(chan struct{}), result: test.detail}
+			close(task.done)
+			svc := &Service{active: task}
+			if err := svc.RefreshSupplySnapshot(context.Background()); err == nil {
+				t.Fatal("non-reusable active inspection reported snapshot success")
+			}
+		})
+	}
+}
+
+func TestRefreshSupplySnapshotPropagatesActiveInspectionFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		runErr error
+		reason string
+	}{
+		{name: "worker error", status: model.CodexInspectionStatusFailed, runErr: errors.New("forced probe failure")},
+		{name: "cancelled", status: model.CodexInspectionStatusCancelled, reason: "cancelled for test"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			task := &localRun{
+				done: make(chan struct{}),
+				result: RunDetail{Run: model.CodexInspectionRun{
+					Status:        test.status,
+					Error:         test.reason,
+					ProbeSetCount: 1,
+					SampledCount:  1,
+					Settings: model.ManagerCodexInspectionConfig{
+						TargetTypes: []string{model.CodexInspectionTargetCodex},
+						TargetType:  model.CodexInspectionTargetCodex,
+					},
+				}},
+				err: test.runErr,
+			}
+			close(task.done)
+			svc := &Service{active: task}
+			if err := svc.RefreshSupplySnapshot(context.Background()); err == nil {
+				t.Fatal("failed active inspection reported snapshot success")
+			}
+		})
+	}
+}
+
+func TestRefreshSupplySnapshotStopsWaitingWhenContextExpires(t *testing.T) {
+	task := &localRun{done: make(chan struct{})}
+	svc := &Service{active: task}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := svc.RefreshSupplySnapshot(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("snapshot wait error = %v, want deadline exceeded", err)
+	}
+}
+
+func TestRefreshSupplySnapshotWaitsForStartingRunToBecomeActive(t *testing.T) {
+	startDone := make(chan struct{})
+	task := &localRun{done: make(chan struct{})}
+	svc := &Service{starting: true, startDone: startDone}
+	refreshDone := make(chan error, 1)
+	go func() {
+		refreshDone <- svc.RefreshSupplySnapshot(context.Background())
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	svc.mu.Lock()
+	svc.starting = false
+	svc.startDone = nil
+	svc.active = task
+	close(startDone)
+	svc.mu.Unlock()
+
+	task.result = RunDetail{Run: model.CodexInspectionRun{
+		Status:        model.CodexInspectionStatusCompleted,
+		ProbeSetCount: 1,
+		SampledCount:  1,
+		Settings: model.ManagerCodexInspectionConfig{
+			TargetTypes: []string{model.CodexInspectionTargetCodex},
+			TargetType:  model.CodexInspectionTargetCodex,
+		},
+	}}
+	close(task.done)
+	select {
+	case err := <-refreshDone:
+		if err != nil {
+			t.Fatalf("reuse starting inspection: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("snapshot refresh did not resume after starting run became active")
+	}
+}
+
 func TestRunXAISkipsInferenceWhenDisabled(t *testing.T) {
 	requestedURLs := make([]string, 0, 2)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

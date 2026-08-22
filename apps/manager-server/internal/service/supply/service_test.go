@@ -1216,6 +1216,16 @@ func TestAutomaticSupplyGuardRequiresFreshBaselineAndSettledImports(t *testing.T
 	if reason := service.automaticSupplyGuardReason(resource); reason != "pending_account_inspection" {
 		t.Fatalf("pending import guard reason = %q", reason)
 	}
+	resource.CapacitySource = smartCapacitySourceInspection
+	resource.PendingInspectionCapacityRCU = 600
+	if reason := service.automaticSupplyGuardReason(resource); reason != "" {
+		t.Fatalf("fresh historical snapshot with local import delta must not pause ordering, reason = %q", reason)
+	}
+	resource.SnapshotFresh = false
+	if reason := service.automaticSupplyGuardReason(resource); reason != "initial_capacity_snapshot_pending" {
+		t.Fatalf("stale historical snapshot must retain pending import guard, reason = %q", reason)
+	}
+	resource.SnapshotFresh = true
 	resource.EmergencyShortage = true
 	if reason := service.automaticSupplyGuardReason(resource); reason != "" {
 		t.Fatalf("emergency must bypass pending inspection guard, reason = %q", reason)

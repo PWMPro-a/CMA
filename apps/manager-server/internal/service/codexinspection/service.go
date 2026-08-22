@@ -1398,9 +1398,61 @@ func (s *Service) RefreshSupplySnapshot(ctx context.Context) error {
 		ReadOnly:    true,
 		TargetTypes: []string{model.CodexInspectionTargetCodex},
 	})
+	if errors.Is(err, ErrRunAlreadyActive) {
+		// A scheduled full-pool Codex inspection produces the same persisted
+		// quota evidence that smart supply needs. Joining it avoids treating the
+		// normal scheduler overlap as a failed refresh and backing purchases off
+		// for another 15 minutes after every imported account.
+		detail, err = s.waitForReusableActiveCodexRun(ctx)
+	}
 	if err != nil {
 		return err
 	}
+	return validateReusableSupplySnapshotRun(detail)
+}
+
+func (s *Service) waitForReusableActiveCodexRun(ctx context.Context) (RunDetail, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		s.mu.Lock()
+		task := s.active
+		starting := s.starting
+		startDone := s.startDone
+		s.mu.Unlock()
+
+		if task != nil {
+			select {
+			case <-task.done:
+				if task.err != nil {
+					return task.result, task.err
+				}
+				if err := validateReusableSupplySnapshotRun(task.result); err != nil {
+					return task.result, err
+				}
+				return task.result, nil
+			case <-ctx.Done():
+				return RunDetail{}, ctx.Err()
+			}
+		}
+
+		if starting && startDone != nil {
+			select {
+			case <-startDone:
+				continue
+			case <-ctx.Done():
+				return RunDetail{}, ctx.Err()
+			}
+		}
+
+		// An active database lease owned by another Manager instance or an
+		// auxiliary action cannot be joined through this process-local lifecycle.
+		return RunDetail{}, ErrRunAlreadyActive
+	}
+}
+
+func validateReusableSupplySnapshotRun(detail RunDetail) error {
 	// Run deliberately reports lifecycle cancellation through the persisted run
 	// state instead of its error return. The supply scheduler needs the stronger
 	// contract: only a completed snapshot may clear its failure backoff. Treat a
@@ -1412,6 +1464,16 @@ func (s *Service) RefreshSupplySnapshot(ctx context.Context) error {
 			reason = detail.Run.Status
 		}
 		return fmt.Errorf("supply snapshot %s: %s", detail.Run.Status, reason)
+	}
+	if !detail.Run.Settings.HasTargetProvider(model.CodexInspectionTargetCodex) {
+		return errors.New("active inspection does not include the Codex account pool")
+	}
+	if detail.Run.Settings.SampleSize > 0 || detail.Run.SampledCount != detail.Run.ProbeSetCount {
+		return fmt.Errorf(
+			"active Codex inspection is sampled (%d/%d) instead of full-pool",
+			detail.Run.SampledCount,
+			detail.Run.ProbeSetCount,
+		)
 	}
 	return nil
 }

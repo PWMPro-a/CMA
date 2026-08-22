@@ -9438,6 +9438,17 @@ func (s *Service) automaticSupplyGuardReason(resource SmartResource) string {
 	}
 	if resource.PendingInspectionAccounts > 0 {
 		s.requestStaleInspectionSnapshotRefresh()
+		// The latest completed inspection remains the verified historical base,
+		// while buildSmartResourceFromInspectionSnapshot overlays newly imported
+		// files with the persisted supplier/plan capacity estimate. That local
+		// delta is enough to make the next replenishment decision immediately;
+		// the background inspection only upgrades confidence and must not turn one
+		// imported account into a full-pool stop-the-world barrier.
+		if resource.SnapshotFresh &&
+			resource.CapacitySource == smartCapacitySourceInspection &&
+			resource.PendingInspectionCapacityRCU > 0 {
+			return ""
+		}
 		// Pending inspection must not strand a critical pool. The emergency
 		// quantity remains bounded by the verified live deficit and all persisted
 		// cooldown/in-flight-order guards still apply.
