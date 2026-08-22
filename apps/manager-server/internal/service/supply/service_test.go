@@ -4082,6 +4082,95 @@ func TestAutomaticReplenishmentDoesNotParallelizeOutsideSmartEmergency(t *testin
 	}
 }
 
+func TestAutomaticStartupFloorWithHistoricalCapacityQueuesOneAccount(t *testing.T) {
+	var createQuantity atomic.Int32
+	authFiles := make([]map[string]string, 0, 11)
+	results := make([]store.CodexInspectionResult, 0, 11)
+	for index := 0; index < 11; index++ {
+		name := fmt.Sprintf("capacity-%02d.json", index)
+		authFiles = append(authFiles, map[string]string{"name": name, "provider": "codex", "status": "ready"})
+		results = append(results, store.CodexInspectionResult{FileName: name, UsedPercent: floatPtr(0)})
+	}
+	authPayload, err := json.Marshal(map[string]any{"files": authFiles})
+	if err != nil {
+		t.Fatalf("marshal auth files: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/customer/login":
+			_, _ = w.Write([]byte(`{"token":"customer-token"}`))
+		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodGet:
+			_, _ = w.Write(authPayload)
+		case r.URL.Path == "/api/customer/inventory":
+			_, _ = w.Write([]byte(`{"available":100,"missing":0,"estimated_total_fen":2000,"estimated_unit_price_fen":2000}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
+		case r.URL.Path == "/api/customer/pickup/orders" && r.Method == http.MethodPost:
+			var request struct {
+				Quantity int `json:"quantity"`
+			}
+			if decodeErr := json.NewDecoder(r.Body).Decode(&request); decodeErr != nil {
+				t.Fatalf("decode create request: %v", decodeErr)
+			}
+			createQuantity.Store(int32(request.Quantity))
+			_, _ = fmt.Fprintf(w, `{"order":{"id":"progressive-startup","status":"waiting_inventory","quantity":%d}}`, request.Quantity)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "progressive-startup.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	startupAccounts := 15
+	cfg := store.ManagerSupplyConfig{
+		Enabled: &enabled, SmartEnabled: &enabled,
+		BaseURL: server.URL, Username: "customer", Password: "password", Product: "oauth_30d",
+		Strategy:                 managerconfigsvc.SupplyStrategyStrongSupply,
+		StartupAvailableAccounts: &startupAccounts, CriticalAvailableAccounts: 2, HealthyAvailableAccounts: 15,
+		HealthyMinutesTarget: 120, WarningMinutes: 100, CriticalMinutes: 80,
+		ReplenishBatchSize: 10, PrelockMinQuantity: 1, PrelockMaxQuantity: 10,
+		MaxConcurrentOrders: 3, CreateCooldownSeconds: 30,
+	}
+	if err := st.SaveManagerConfig(context.Background(), store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply:        cfg,
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	seedCompletedQuotaInspection(t, st, results...)
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	if err := service.RunAutomatic(context.Background()); err != nil {
+		t.Fatalf("run automatic: %v", err)
+	}
+	if createQuantity.Load() != 1 {
+		t.Fatalf("supplier create quantity = %d, want 1", createQuantity.Load())
+	}
+	task, found, err := st.GetActiveAutomaticSupplyPurchaseTask(context.Background())
+	if err != nil || !found {
+		t.Fatalf("active task: found=%v err=%v", found, err)
+	}
+	if task.TargetQuantity != 1 || task.MaxConcurrentOrders != 1 || task.TriggerReason != "startup_account_floor" {
+		t.Fatalf("progressive startup task = %#v", task)
+	}
+	resource := service.currentSmartResource(cfg)
+	if !smartProgressiveStartupFloorRecovery(resource) {
+		t.Fatalf("runtime resource lost historical progressive state: %#v", resource)
+	}
+	orders, err := st.ListOpenSupplyOrders(context.Background(), 10)
+	if err != nil || len(orders) != 1 || orders[0].RequestedQuantity != 1 {
+		t.Fatalf("progressive startup orders = %#v err=%v", orders, err)
+	}
+	eligible, err := service.automaticParallelCreateEligible(context.Background(), cfg, orders)
+	if err != nil || eligible {
+		t.Fatalf("progressive startup parallel eligible=%v err=%v", eligible, err)
+	}
+}
+
 func TestAutomaticEmergencyReplenishmentCreatesStrongParallelLadderAndStops(t *testing.T) {
 	var quantitiesMu sync.Mutex
 	quantities := make([]int, 0, 3)

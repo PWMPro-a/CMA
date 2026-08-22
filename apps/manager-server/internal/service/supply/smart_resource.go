@@ -1746,8 +1746,11 @@ func smartAvailableCapacity(resource SmartResource) float64 {
 // floor as an emergency would bypass just-in-time timing even when the pool has
 // more than enough available runway.
 func smartStartupAccountFloorEmergency(cfg store.ManagerSupplyConfig, resource SmartResource) bool {
-	return resource.ConsumeRCUPerMinute <= 0 &&
-		resource.AvailableAccounts < smartStartupAvailableAccounts(cfg)
+	if resource.ConsumeRCUPerMinute > 0 {
+		return false
+	}
+	_, recentDemandObserved := smartEmergencySizingResource(resource)
+	return !recentDemandObserved && resource.AvailableAccounts < smartStartupAvailableAccounts(cfg)
 }
 
 func smartAvailableCapacityEmergency(cfg store.ManagerSupplyConfig, resource SmartResource) bool {
@@ -2549,6 +2552,36 @@ func smartExtendedWaterlineProgressiveMode(resource SmartResource) bool {
 		resource.CriticalMinutes > max(1, useful/2)
 }
 
+// smartProgressiveStartupFloorRecovery distinguishes a warm pool rebuilding its
+// configured startup account floor from a real account-vacuum rescue. A fresh
+// completed capacity snapshot is the durable baseline; newly imported accounts
+// are already overlaid locally on that baseline. When several usable accounts
+// remain, the startup floor therefore needs only one incremental credential and
+// one observation cycle, not a concurrent batch created from an instantaneous
+// zero-traffic sample.
+func smartProgressiveStartupFloorRecovery(resource SmartResource) bool {
+	if resource.EmergencyReason != "startup_account_floor" && resource.DecisionReason != "startup_account_floor" {
+		return false
+	}
+	rescueFloor := max(2, resource.CriticalAvailableAccounts)
+	if resource.AvailableAccounts <= rescueFloor {
+		return false
+	}
+	runway := math.Max(resource.AvailableSustainMinutes, resource.EstimatedSustainMinutes)
+	if runway <= 0 {
+		demand := math.Max(resource.ConsumeRCUPerMinute, resource.DemandPlanningRCUPerMinute)
+		demand = math.Max(demand, math.Max(resource.DemandMemoryRCUPerMinute, resource.VirtualDemandRCUPerMinute))
+		if demand > 0 {
+			runway = smartAvailableCapacity(resource) / demand
+		}
+	}
+	shortRescueMinutes := float64(max(1, smartUsefulAccountLifetimeMinutes()/4))
+	if runway > 0 {
+		return runway > shortRescueMinutes
+	}
+	return resource.SnapshotFresh && resource.CurrentCapacityRCU > 0
+}
+
 // smartEmergencyShortage is narrower than merely being below the healthy
 // target. New credentials are short-lived, so a normal target deficit may
 // observe a falling one-minute sample. Extended waterlines keep their exact
@@ -2723,6 +2756,9 @@ const (
 // pools shorten the observation, while emergency pools retain the existing
 // fast cadence.
 func smartSuccessfulOrderCooldownForResource(cfg store.ManagerSupplyConfig, resource SmartResource) int {
+	if smartProgressiveStartupFloorRecovery(resource) {
+		return max(smartCreateCooldownSeconds(cfg), 120)
+	}
 	if smartResourceEmergency(resource) {
 		return smartCreateCooldownForResource(cfg, resource)
 	}
@@ -2783,6 +2819,9 @@ func smartSuccessfulOrderCooldownForDelivery(cfg store.ManagerSupplyConfig, reso
 // persisted automatic order, so a process restart cannot reset it.
 func smartCreateCooldownForResource(cfg store.ManagerSupplyConfig, resource SmartResource) int {
 	cooldown := smartCreateCooldownSeconds(cfg)
+	if smartProgressiveStartupFloorRecovery(resource) {
+		return max(cooldown, 120)
+	}
 	if smartResourceEmergency(resource) {
 		checkInterval := positiveOr(cfg.CheckIntervalSeconds, 60)
 		// During an emergency the automatic check cadence is also the maximum

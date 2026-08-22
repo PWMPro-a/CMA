@@ -2742,6 +2742,10 @@ func (s *Service) automaticParallelCreateEligible(
 		!openOrdersAllowParallelCreateAt(orders, time.Now()) || !smartSupplyEnabled(cfg) {
 		return false, nil
 	}
+	resource := s.currentSmartResource(cfg)
+	if smartProgressiveStartupFloorRecovery(resource) {
+		return false, nil
+	}
 	if eligible, err := s.activePurchaseTaskParallelContinuationEligible(ctx, cfg, orders); err != nil {
 		return false, err
 	} else if eligible {
@@ -2751,7 +2755,6 @@ func (s *Service) automaticParallelCreateEligible(
 		// fresh smart-resource pass later in run() remains the creation authority.
 		return true, nil
 	}
-	resource := s.currentSmartResource(cfg)
 	if !smartResourceEmergency(resource) && !isSmartEmergencyRetryReason(resource.DecisionReason) {
 		return false, nil
 	}
@@ -3278,7 +3281,7 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 	}
 	timing.next("task-enqueue")
 	maxConcurrent := 1
-	if manualQuantity == 0 && smartResourceEmergency(resource) {
+	if manualQuantity == 0 && smartResourceEmergency(resource) && !smartProgressiveStartupFloorRecovery(resource) {
 		maxConcurrent = maxConcurrentSupplyOrders(supplyCfg)
 	}
 	_, err = s.upsertAutomaticPurchaseTask(ctx, store.SupplyPurchaseTask{
@@ -8173,6 +8176,9 @@ func applySmartPurchaseTiming(resource *SmartResource, timing smartPurchaseTimin
 func smartPrelockQuantityForSupplyPressureWithTiming(cfg store.ManagerSupplyConfig, resource SmartResource, pressure smartSupplyPressure, quantity int) (int, string, smartPurchaseTiming) {
 	if quantity <= 0 {
 		return quantity, "", smartPurchaseTiming{}
+	}
+	if smartProgressiveStartupFloorRecovery(resource) {
+		return min(quantity, 1), "startup_account_floor", smartPurchaseTiming{eligibleQuantity: min(quantity, 1)}
 	}
 	if isSmartEmergencyRetryReason(resource.DecisionReason) {
 		// A retry quantity is already a descending ladder rung. Keep the normal

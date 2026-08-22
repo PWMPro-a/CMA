@@ -1725,6 +1725,98 @@ func TestStartupAccountFloorDoesNotOverrideActivePurchaseTiming(t *testing.T) {
 	}
 }
 
+func TestStartupAccountFloorUsesRecentDemandMemoryInsteadOfIdleEmergency(t *testing.T) {
+	startupAccounts := 15
+	cfg := store.ManagerSupplyConfig{
+		StartupAvailableAccounts:  &startupAccounts,
+		CriticalAvailableAccounts: 2,
+	}
+	resource := SmartResource{
+		AvailableAccounts:          11,
+		ConsumeRCUPerMinute:        0,
+		DemandPlanningRCUPerMinute: 10,
+		DemandMemoryRCUPerMinute:   10,
+		VirtualDemandRCUPerMinute:  10,
+		CurrentCapacityRCU:         410,
+		AvailableCapacityRCU:       267,
+		AvailableSustainMinutes:    26.7,
+		EstimatedSustainMinutes:    41,
+		EffectiveHealthyMinutes:    120,
+		WarningMinutes:             100,
+		CriticalMinutes:            80,
+		CriticalAvailableAccounts:  2,
+	}
+	if smartStartupAccountFloorEmergency(cfg, resource) {
+		t.Fatalf("recent demand history must keep startup floor on capacity timing: %#v", resource)
+	}
+	applySmartEmergencyAvailability(cfg, &resource, time.Now())
+	if resource.EmergencyShortage || resource.SuggestedAction == smartActionEmergencyReplenish {
+		t.Fatalf("recent demand history became an idle startup emergency: %#v", resource)
+	}
+}
+
+func TestProgressiveStartupFloorUsesOneOrderAndNormalCooldown(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		ReplenishBatchSize:    10,
+		PrelockMinQuantity:    1,
+		PrelockMaxQuantity:    10,
+		CreateCooldownSeconds: 30,
+		CheckIntervalSeconds:  10,
+	}
+	resource := SmartResource{
+		SnapshotFresh:             true,
+		CapacitySource:            smartCapacitySourceInspection,
+		CurrentCapacityRCU:        410,
+		AvailableAccounts:         11,
+		CriticalAvailableAccounts: 2,
+		EmergencyShortage:         true,
+		EmergencyReason:           "startup_account_floor",
+		DecisionReason:            "startup_account_floor",
+		EffectiveHealthyMinutes:   120,
+		WarningMinutes:            100,
+		CriticalMinutes:           80,
+	}
+	if !smartProgressiveStartupFloorRecovery(resource) {
+		t.Fatalf("historical capacity baseline must make startup recovery progressive: %#v", resource)
+	}
+	quantity, reason, timing := smartPrelockQuantityForSupplyPressureWithTiming(
+		cfg,
+		resource,
+		smartSupplyPressure{level: smartSupplyPressurePlenty},
+		4,
+	)
+	if quantity != 1 || reason != "startup_account_floor" || timing.eligibleQuantity != 1 {
+		t.Fatalf("progressive startup quantity = %d/%q %#v, want one", quantity, reason, timing)
+	}
+	if cooldown := smartCreateCooldownForResource(cfg, resource); cooldown != 120 {
+		t.Fatalf("progressive startup create cooldown = %d, want 120", cooldown)
+	}
+	if cooldown := smartSuccessfulOrderCooldownForResource(cfg, resource); cooldown != 120 {
+		t.Fatalf("progressive startup success cooldown = %d, want 120", cooldown)
+	}
+
+	resource.AvailableAccounts = 2
+	if smartProgressiveStartupFloorRecovery(resource) {
+		t.Fatalf("critical account floor must retain real rescue behavior: %#v", resource)
+	}
+	quantity, reason, _ = smartPrelockQuantityForSupplyPressureWithTiming(
+		cfg,
+		resource,
+		smartSupplyPressure{level: smartSupplyPressurePlenty},
+		4,
+	)
+	if quantity != 4 || reason != "startup_account_floor" {
+		t.Fatalf("critical rescue quantity = %d/%q, want unchanged emergency rung", quantity, reason)
+	}
+
+	resource.AvailableAccounts = 3
+	resource.AvailableSustainMinutes = 10
+	resource.EstimatedSustainMinutes = 10
+	if smartProgressiveStartupFloorRecovery(resource) {
+		t.Fatalf("short historical runway must retain real rescue behavior: %#v", resource)
+	}
+}
+
 func TestVirtualDemandSizesEmptyPoolEmergencyWithoutFixedBatchWaste(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		Strategy:                    managerconfigsvc.SupplyStrategyStrongSupply,
