@@ -92,6 +92,12 @@ type SmartResource struct {
 	CapacitySnapshotAtMS         int64   `json:"capacitySnapshotAtMs"`
 	CapacitySnapshotAgeSeconds   int     `json:"capacitySnapshotAgeSeconds"`
 	CapacitySnapshotRunID        int64   `json:"capacitySnapshotRunId,omitempty"`
+	// CapacityDeltaAtMS/CapacityDeltaAccounts describe the request-driven,
+	// account-scoped quota updates layered over the last completed inspection.
+	// The completed run remains the durable pool baseline; only credentials with
+	// newer response headers are recalculated on the hot path.
+	CapacityDeltaAtMS     int64 `json:"capacityDeltaAtMs,omitempty"`
+	CapacityDeltaAccounts int   `json:"capacityDeltaAccounts,omitempty"`
 	// These counts drive only the strategy waterline guard. Normal smart
 	// replenishment remains capacity- and burn-rate based.
 	AvailableAccounts   int `json:"availableAccounts"`
@@ -373,6 +379,23 @@ type inspectionQuotaSnapshot struct {
 	lastErr              error
 }
 
+// smartLiveQuotaObservation is the local delta layer above a completed
+// inspection snapshot. Usage collection already receives account-scoped quota
+// response headers, so rebuilding the whole pool to learn that one account
+// moved from 40% to 41% used is unnecessary. Observations are kept in memory,
+// keyed by the same credential identities used by quota calibration, and are
+// discarded naturally after a newer completed inspection supersedes them.
+type smartLiveQuotaObservation struct {
+	updatedAtMS int64
+	planType    string
+	windows     []model.CodexInspectionQuotaWindow
+}
+
+type smartLiveQuotaDelta struct {
+	updatedAtMS int64
+	accounts    int
+}
+
 type smartCapacityItem struct {
 	credentialKey     string
 	fileKey           string
@@ -471,6 +494,7 @@ func (s *Service) WarmSmartUsage(ctx context.Context) error {
 		}
 	}
 	if quotaWarmErr == nil {
+		_ = s.recordSmartLiveQuotaObservationsLocked(quotaEvents, now)
 		_ = s.recordSmartQuotaCalibrationEventsLocked(quotaEvents, now)
 	}
 	return quotaWarmErr
@@ -519,10 +543,18 @@ func (s *Service) recordSmartUsageEvents(events []usage.Event, now time.Time) {
 			delete(s.smartBuckets, minute)
 		}
 	}
+	liveQuotaChanged := s.recordSmartLiveQuotaObservationsLocked(events, now)
 	supplierScoreChanged := s.recordSmartQuotaCalibrationEventsLocked(events, now)
 	s.smartMu.Unlock()
 	if supplierScoreChanged {
 		s.invalidateAllMarketplaceSupplierQuotaScores()
+	}
+	if liveQuotaChanged {
+		// The next dashboard read and automatic decision can rebuild from the
+		// durable historical baseline plus only the changed credentials. No full
+		// inspection or database-wide quota aggregation is required here.
+		s.invalidateStatusCache()
+		s.signalAutomaticWorker()
 	}
 }
 
@@ -558,6 +590,8 @@ func (s *Service) smartResource(ctx context.Context, cfg store.ManagerConfig, fo
 }
 
 func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupplyConfig, snapshot inspectionQuotaSnapshot, now time.Time) (resource SmartResource) {
+	var liveDelta smartLiveQuotaDelta
+	snapshot, liveDelta = s.applySmartLiveQuotaDelta(snapshot, now)
 	resource = defaultSmartResource(cfg)
 	resource.quotaSupplierByFile = snapshot.supplierByFile
 	defer func() {
@@ -566,6 +600,8 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 	resource.GeneratedAtMS = now.UnixMilli()
 	resource.CapacitySource = smartCapacitySourceInspection
 	resource.CapacitySnapshotRunID = snapshot.run.ID
+	resource.CapacityDeltaAtMS = liveDelta.updatedAtMS
+	resource.CapacityDeltaAccounts = liveDelta.accounts
 	if !snapshot.generatedAt.IsZero() {
 		resource.CapacitySnapshotAtMS = snapshot.generatedAt.UnixMilli()
 		resource.CapacitySnapshotAgeSeconds = max(0, int(now.Sub(snapshot.generatedAt).Seconds()))
@@ -1858,7 +1894,13 @@ func (s *Service) cachedInspectionQuotaSnapshot(ctx context.Context, cfg store.M
 	if s == nil || s.store == nil {
 		return inspectionQuotaSnapshot{}, ErrCapacitySnapshotUnavailable
 	}
-	ttl := time.Duration(smartAuthFilesCacheTTLSeconds(cfg)) * time.Second
+	// The completed inspection is a durable historical baseline. Runtime quota
+	// headers are merged account-by-account in memory, so re-reading every
+	// result and re-aggregating the usage table every auth-file TTL defeats the
+	// local-update path. Keep the baseline for its freshness window; explicit
+	// inspection/import invalidation and the lightweight newer-run check still
+	// replace it sooner when needed.
+	ttl := smartInspectionSnapshotFreshTTL
 	now := time.Now()
 	s.quotaSnapshotMu.Lock()
 	if !force && inspectionSnapshotCacheUsable(s.quotaSnapshot, now, ttl) {

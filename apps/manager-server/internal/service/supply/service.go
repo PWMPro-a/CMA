@@ -601,6 +601,7 @@ type Service struct {
 	smartMu                  sync.RWMutex
 	smartBuckets             map[int64]*smartUsageBucket
 	smartQuotaState          smartQuotaCalibrationState
+	smartLiveQuota           map[string]smartLiveQuotaObservation
 	quotaPolicyMu            sync.Mutex
 	quotaPolicyState         map[string]smartQuotaPlanAdoptionState
 	authCacheMu              sync.Mutex
@@ -648,6 +649,7 @@ type Service struct {
 	supplyOrdersCacheMu     sync.Mutex
 	supplyOrdersCache       supplyOrdersCache
 	statusCache             supplyStatusCache
+	automaticWake           chan struct{}
 	purchaseTaskWake        chan struct{}
 	challengeClient         *http.Client
 	nvtokensRefreshMu       sync.Mutex
@@ -753,13 +755,36 @@ func New(st *store.Store, managerConfig *managerconfigsvc.Service, httpClient ..
 		authFiles:             cpaauthfiles.New(client),
 		smartBuckets:          make(map[int64]*smartUsageBucket),
 		smartQuotaState:       newSmartQuotaCalibrationState(),
+		smartLiveQuota:        make(map[string]smartLiveQuotaObservation),
 		criticalConfirmRounds: make(map[string]int),
+		automaticWake:         make(chan struct{}, 1),
 		purchaseTaskWake:      make(chan struct{}, 1),
 		nvtokensRefreshState:  make(map[string]*nvtokensRefreshState),
 		supplierQuotaScores:   make(map[string]supplierQuotaScoreCacheEntry),
 	}
 	service.supplyClient.SetNvtokensSessionRefresher(service.refreshNvtokensSession)
 	return service
+}
+
+// signalAutomaticWorker coalesces account-scoped quota changes. A quota header
+// can arrive between regular replenishment ticks; waking the worker lets the
+// capacity decision react immediately without shortening every idle poll or
+// launching a full credential inspection.
+func (s *Service) signalAutomaticWorker() {
+	if s == nil || s.automaticWake == nil {
+		return
+	}
+	select {
+	case s.automaticWake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Service) AutomaticWake() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.automaticWake
 }
 
 // SetInspectionSnapshotRefresher connects smart supply with the Codex

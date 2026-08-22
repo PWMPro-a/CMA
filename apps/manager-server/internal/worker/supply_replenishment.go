@@ -36,17 +36,24 @@ func (w *SupplyReplenishmentWorker) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			startedAt := time.Now()
-			err := w.service.RunAutomatic(ctx)
-			finishedAt := time.Now()
-			w.service.ScheduleWarrantyMetadataMigration(ctx)
-			// Recovery can scan and reconcile hundreds of records. Schedule it
-			// after the replenishment decision so it never extends the dashboard's
-			// "checking" state or delays an urgent order.
-			w.service.ScheduleRecoverySyncIfDue(ctx)
-			nextInterval := w.service.NextAutomaticInterval(ctx, err)
-			w.service.RecordAutomaticExecution(startedAt, finishedAt, finishedAt.Add(nextInterval), err)
-			timer.Reset(nextInterval)
+		case <-w.service.AutomaticWake():
 		}
+		startedAt := time.Now()
+		err := w.service.RunAutomatic(ctx)
+		finishedAt := time.Now()
+		w.service.ScheduleWarrantyMetadataMigration(ctx)
+		// Recovery can scan and reconcile hundreds of records. Schedule it
+		// after the replenishment decision so it never extends the dashboard's
+		// "checking" state or delays an urgent order.
+		w.service.ScheduleRecoverySyncIfDue(ctx)
+		nextInterval := w.service.NextAutomaticInterval(ctx, err)
+		w.service.RecordAutomaticExecution(startedAt, finishedAt, finishedAt.Add(nextInterval), err)
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(nextInterval)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
@@ -438,13 +439,7 @@ func smartQuotaCalibrationEventTokens(event usage.Event) int64 {
 }
 
 func smartQuotaCalibrationEventEvidence(event usage.Event) (smartQuotaWindowEvidence, bool) {
-	metadata := event.ResponseMetadata
-	if metadata == nil && strings.TrimSpace(event.ResponseMetadataJSON) != "" {
-		var decoded usage.ResponseHeaderMetadata
-		if err := json.Unmarshal([]byte(event.ResponseMetadataJSON), &decoded); err == nil {
-			metadata = &decoded
-		}
-	}
+	metadata := smartQuotaResponseMetadata(event)
 	if metadata != nil && metadata.Quota != nil {
 		quota := metadata.Quota
 		// Codex exposes a short primary window and a 7-day secondary window.
@@ -489,6 +484,254 @@ func smartQuotaCalibrationEventEvidence(event usage.Event) (smartQuotaWindowEvid
 		planType:    strings.ToLower(strings.TrimSpace(event.HeaderQuotaPlanType)),
 		concrete:    false,
 	}, true
+}
+
+func smartQuotaResponseMetadata(event usage.Event) *usage.ResponseHeaderMetadata {
+	metadata := event.ResponseMetadata
+	if metadata != nil || strings.TrimSpace(event.ResponseMetadataJSON) == "" {
+		return metadata
+	}
+	var decoded usage.ResponseHeaderMetadata
+	if err := json.Unmarshal([]byte(event.ResponseMetadataJSON), &decoded); err != nil {
+		return nil
+	}
+	return &decoded
+}
+
+func smartLiveQuotaEventIdentities(event usage.Event) []string {
+	credentialValues := []struct {
+		prefix string
+		value  string
+	}{
+		{prefix: "file:", value: event.AuthFileSnapshot},
+		{prefix: "auth:", value: event.AuthIndex},
+	}
+	identities := make([]string, 0, len(credentialValues))
+	seen := make(map[string]struct{}, len(credentialValues))
+	for _, item := range credentialValues {
+		value := normalizeSmartQuotaIdentity(item.value)
+		if value == "" {
+			continue
+		}
+		identity := item.prefix + value
+		if _, found := seen[identity]; found {
+			continue
+		}
+		seen[identity] = struct{}{}
+		identities = append(identities, identity)
+	}
+	if len(identities) > 0 {
+		return identities
+	}
+	if value := normalizeSmartQuotaIdentity(event.AccountSnapshot); value != "" {
+		return []string{"account:" + value}
+	}
+	return nil
+}
+
+func smartLiveQuotaObservationFromEvent(event usage.Event, now time.Time) (smartLiveQuotaObservation, bool) {
+	identities := smartLiveQuotaEventIdentities(event)
+	if len(identities) == 0 {
+		return smartLiveQuotaObservation{}, false
+	}
+	timestampMS := event.TimestampMS
+	if timestampMS <= 0 {
+		timestampMS = now.UnixMilli()
+	}
+	metadata := smartQuotaResponseMetadata(event)
+	if metadata != nil && metadata.Quota != nil {
+		quota := metadata.Quota
+		windows := make([]model.CodexInspectionQuotaWindow, 0, 2)
+		appendWindow := func(id string, window *usage.HeaderQuotaWindow, fallbackSeconds float64) {
+			if window == nil || window.UsedPercent == nil {
+				return
+			}
+			usedFraction, ok := normalizeSmartQuotaFraction(*window.UsedPercent)
+			if !ok {
+				return
+			}
+			seconds := fallbackSeconds
+			if window.WindowMinutes != nil && *window.WindowMinutes > 0 &&
+				!math.IsNaN(*window.WindowMinutes) && !math.IsInf(*window.WindowMinutes, 0) {
+				seconds = *window.WindowMinutes * 60
+			}
+			windows = append(windows, model.CodexInspectionQuotaWindow{
+				ID:                 id,
+				LabelKey:           id,
+				UsedPercent:        smartFloat64Ptr(usedFraction),
+				ResetAtMS:          smartQuotaWindowRecoverAtMS(window, timestampMS),
+				LimitWindowSeconds: smartFloat64Ptr(seconds),
+			})
+		}
+		appendWindow("runtime-primary", quota.Primary, smartQuotaFiveHourSeconds)
+		appendWindow("runtime-secondary", quota.Secondary, smartQuotaWeekSeconds)
+		if len(windows) == 0 && quota.UsedPercent != nil {
+			usedFraction, ok := normalizeSmartQuotaFraction(*quota.UsedPercent)
+			windowKind := strings.ToLower(strings.TrimSpace(quota.SummaryWindowKind))
+			if ok && windowKind != "" {
+				seconds := float64(smartQuotaWeekSeconds)
+				switch windowKind {
+				case "five_hour", "five-hour", "5h":
+					seconds = smartQuotaFiveHourSeconds
+				case "monthly", "month":
+					seconds = smartQuotaMonthSeconds
+				case "weekly", "week", "seven_day", "seven-day", "7d":
+				default:
+					return smartLiveQuotaObservation{}, false
+				}
+				windows = append(windows, model.CodexInspectionQuotaWindow{
+					ID:                 "runtime-summary",
+					LabelKey:           quota.SummaryWindowKind,
+					UsedPercent:        smartFloat64Ptr(usedFraction),
+					ResetAtMS:          quota.RecoverAtMS,
+					LimitWindowSeconds: smartFloat64Ptr(seconds),
+				})
+			}
+		}
+		if len(windows) > 0 {
+			return smartLiveQuotaObservation{
+				updatedAtMS: timestampMS,
+				planType:    strings.ToLower(strings.TrimSpace(quota.PlanType)),
+				windows:     windows,
+			}, true
+		}
+	}
+	// The legacy flattened percentage may switch between the short and weekly
+	// windows. It remains useful for supplier calibration, but without a concrete
+	// window identity it must not overwrite capacity for a specific horizon.
+	return smartLiveQuotaObservation{}, false
+}
+
+func smartFloat64Ptr(value float64) *float64 {
+	return &value
+}
+
+func (s *Service) recordSmartLiveQuotaObservationsLocked(events []usage.Event, now time.Time) bool {
+	if s == nil || len(events) == 0 {
+		return false
+	}
+	if s.smartLiveQuota == nil {
+		s.smartLiveQuota = make(map[string]smartLiveQuotaObservation)
+	}
+	changed := false
+	for _, event := range events {
+		observation, ok := smartLiveQuotaObservationFromEvent(event, now)
+		if !ok {
+			continue
+		}
+		for _, identity := range smartLiveQuotaEventIdentities(event) {
+			previous, found := s.smartLiveQuota[identity]
+			if found && observation.updatedAtMS < previous.updatedAtMS {
+				continue
+			}
+			if !found || smartLiveQuotaObservationMeaningfullyChanged(previous, observation) {
+				changed = true
+			}
+			s.smartLiveQuota[identity] = cloneSmartLiveQuotaObservation(observation)
+		}
+	}
+	cutoffMS := now.Add(-smartQuotaCalibrationWarmWindow).UnixMilli()
+	for identity, observation := range s.smartLiveQuota {
+		if observation.updatedAtMS < cutoffMS {
+			delete(s.smartLiveQuota, identity)
+		}
+	}
+	return changed
+}
+
+func smartLiveQuotaObservationMeaningfullyChanged(previous, current smartLiveQuotaObservation) bool {
+	previousRemaining, previousOK := smartLiveQuotaObservationRemaining(previous, time.UnixMilli(previous.updatedAtMS))
+	currentRemaining, currentOK := smartLiveQuotaObservationRemaining(current, time.UnixMilli(current.updatedAtMS))
+	if previousOK != currentOK || !previousOK {
+		return true
+	}
+	if math.Abs(previousRemaining-currentRemaining) >= 0.005 {
+		return true
+	}
+	return smartLiveQuotaObservationResetAtMS(previous) != smartLiveQuotaObservationResetAtMS(current)
+}
+
+func smartLiveQuotaObservationResetAtMS(observation smartLiveQuotaObservation) int64 {
+	resetAtMS := int64(0)
+	for _, window := range observation.windows {
+		if window.ResetAtMS > 0 && (resetAtMS == 0 || window.ResetAtMS < resetAtMS) {
+			resetAtMS = window.ResetAtMS
+		}
+	}
+	return resetAtMS
+}
+
+func cloneSmartLiveQuotaObservation(observation smartLiveQuotaObservation) smartLiveQuotaObservation {
+	observation.windows = append([]model.CodexInspectionQuotaWindow(nil), observation.windows...)
+	return observation
+}
+
+func smartLiveQuotaObservationWindowsAt(observation smartLiveQuotaObservation, now time.Time) []model.CodexInspectionQuotaWindow {
+	windows := append([]model.CodexInspectionQuotaWindow(nil), observation.windows...)
+	for index := range windows {
+		if windows[index].ResetAtMS > 0 && now.UnixMilli() >= windows[index].ResetAtMS {
+			used := 0.0
+			windows[index].UsedPercent = &used
+		}
+	}
+	return windows
+}
+
+func smartLiveQuotaObservationRemaining(observation smartLiveQuotaObservation, now time.Time) (float64, bool) {
+	result := store.CodexInspectionResult{QuotaWindows: smartLiveQuotaObservationWindowsAt(observation, now)}
+	return inspectionResultRemainingQuotaFraction(result)
+}
+
+// applySmartLiveQuotaDelta overlays only accounts whose request telemetry is
+// newer than the completed inspection. The returned snapshot owns its result
+// slice, so callers can safely adjust quota windows without mutating the cache.
+func (s *Service) applySmartLiveQuotaDelta(snapshot inspectionQuotaSnapshot, now time.Time) (inspectionQuotaSnapshot, smartLiveQuotaDelta) {
+	if s == nil || len(snapshot.results) == 0 || snapshot.generatedAt.IsZero() {
+		return snapshot, smartLiveQuotaDelta{}
+	}
+	snapshot.results = append([]store.CodexInspectionResult(nil), snapshot.results...)
+	baselineMS := snapshot.generatedAt.UnixMilli()
+	s.smartMu.RLock()
+	defer s.smartMu.RUnlock()
+	if len(s.smartLiveQuota) == 0 {
+		return snapshot, smartLiveQuotaDelta{}
+	}
+	delta := smartLiveQuotaDelta{}
+	for index := range snapshot.results {
+		result := snapshot.results[index]
+		var selected smartLiveQuotaObservation
+		for _, identity := range smartQuotaCalibrationResultIdentities(
+			result.FileName,
+			result.AuthIndex,
+			result.AccountKey,
+			result.AccountID,
+		) {
+			observation, found := s.smartLiveQuota[identity]
+			if !found || observation.updatedAtMS <= baselineMS || observation.updatedAtMS < selected.updatedAtMS {
+				continue
+			}
+			selected = observation
+		}
+		if selected.updatedAtMS <= baselineMS {
+			continue
+		}
+		windows := smartLiveQuotaObservationWindowsAt(selected, now)
+		if len(windows) == 0 {
+			continue
+		}
+		result.QuotaWindows = windows
+		result.QuotaWindowsJSON = ""
+		result.QuotaInventoryObserved = true
+		if selected.planType != "" {
+			result.PlanType = selected.planType
+		}
+		snapshot.results[index] = result
+		delta.accounts++
+		if selected.updatedAtMS > delta.updatedAtMS {
+			delta.updatedAtMS = selected.updatedAtMS
+		}
+	}
+	return snapshot, delta
 }
 
 func longestSmartQuotaWindow(windows ...*usage.HeaderQuotaWindow) *usage.HeaderQuotaWindow {

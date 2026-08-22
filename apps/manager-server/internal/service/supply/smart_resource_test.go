@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -86,6 +87,118 @@ func quotaWindow(id string, usedPercent, limitWindowSeconds float64) model.Codex
 		ID:                 id,
 		UsedPercent:        float64Ptr(usedPercent),
 		LimitWindowSeconds: float64Ptr(limitWindowSeconds),
+	}
+}
+
+func liveQuotaUsageEvent(fileName string, at time.Time, primaryUsed, secondaryUsed float64) usage.Event {
+	primaryMinutes := float64(5 * 60)
+	secondaryMinutes := float64(7 * 24 * 60)
+	return usage.Event{
+		TimestampMS:      at.UnixMilli(),
+		Provider:         "codex",
+		AuthFileSnapshot: fileName,
+		ResponseMetadata: &usage.ResponseHeaderMetadata{Quota: &usage.HeaderQuotaMetadata{
+			PlanType: "team",
+			Primary: &usage.HeaderQuotaWindow{
+				UsedPercent:   float64Ptr(primaryUsed),
+				WindowMinutes: float64Ptr(primaryMinutes),
+			},
+			Secondary: &usage.HeaderQuotaWindow{
+				UsedPercent:   float64Ptr(secondaryUsed),
+				WindowMinutes: float64Ptr(secondaryMinutes),
+			},
+		}},
+	}
+}
+
+func TestSmartLiveQuotaDeltaUpdatesOnlyChangedAccount(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Millisecond)
+	baselineAt := now.Add(-2 * time.Minute)
+	service.recordSmartUsageEvents([]usage.Event{
+		liveQuotaUsageEvent("changed.json", now, 20, 40),
+	}, now)
+	select {
+	case <-service.AutomaticWake():
+	default:
+		t.Fatal("account-scoped quota change did not wake automatic supply")
+	}
+
+	snapshot := inspectionQuotaSnapshot{
+		generatedAt: baselineAt,
+		results: []store.CodexInspectionResult{
+			{
+				FileName:  "changed.json",
+				AuthIndex: "changed",
+				QuotaWindows: []model.CodexInspectionQuotaWindow{
+					quotaWindow("five-hour", 10, smartQuotaFiveHourSeconds),
+					quotaWindow("weekly", 20, smartQuotaWeekSeconds),
+				},
+			},
+			{
+				FileName:  "stable.json",
+				AuthIndex: "stable",
+				QuotaWindows: []model.CodexInspectionQuotaWindow{
+					quotaWindow("five-hour", 30, smartQuotaFiveHourSeconds),
+					quotaWindow("weekly", 40, smartQuotaWeekSeconds),
+				},
+			},
+		},
+	}
+	overlaid, delta := service.applySmartLiveQuotaDelta(snapshot, now)
+	if delta.accounts != 1 || delta.updatedAtMS != now.UnixMilli() {
+		t.Fatalf("live quota delta = %#v, want one changed account", delta)
+	}
+	changedRemaining, ok := inspectionResultRemainingQuotaFraction(overlaid.results[0])
+	if !ok || math.Abs(changedRemaining-0.8) > 0.0001 {
+		t.Fatalf("changed account remaining = %v/%v, want 0.8/true", changedRemaining, ok)
+	}
+	stableRemaining, ok := inspectionResultRemainingQuotaFraction(overlaid.results[1])
+	if !ok || math.Abs(stableRemaining-0.7) > 0.0001 {
+		t.Fatalf("stable account remaining = %v/%v, want 0.7/true", stableRemaining, ok)
+	}
+	baselineRemaining, ok := inspectionResultRemainingQuotaFraction(snapshot.results[0])
+	if !ok || math.Abs(baselineRemaining-0.9) > 0.0001 {
+		t.Fatalf("cached baseline was mutated: remaining = %v/%v", baselineRemaining, ok)
+	}
+}
+
+func TestSmartLiveQuotaDeltaIgnoresEvidenceOlderThanCompletedSnapshot(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Millisecond)
+	service.recordSmartUsageEvents([]usage.Event{
+		liveQuotaUsageEvent("account.json", now.Add(-time.Minute), 90, 90),
+	}, now)
+	snapshot := inspectionQuotaSnapshot{
+		generatedAt: now,
+		results: []store.CodexInspectionResult{{
+			FileName: "account.json",
+			QuotaWindows: []model.CodexInspectionQuotaWindow{
+				quotaWindow("five-hour", 10, smartQuotaFiveHourSeconds),
+			},
+		}},
+	}
+	overlaid, delta := service.applySmartLiveQuotaDelta(snapshot, now)
+	remaining, ok := inspectionResultRemainingQuotaFraction(overlaid.results[0])
+	if delta.accounts != 0 || !ok || math.Abs(remaining-0.9) > 0.0001 {
+		t.Fatalf("older quota evidence overlaid completed snapshot: delta=%#v remaining=%v/%v", delta, remaining, ok)
+	}
+}
+
+func TestSmartLiveQuotaDeltaCoalescesSubPercentMovement(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Millisecond)
+	service.recordSmartUsageEvents([]usage.Event{
+		liveQuotaUsageEvent("account.json", now, 20, 40),
+	}, now)
+	<-service.AutomaticWake()
+	service.recordSmartUsageEvents([]usage.Event{
+		liveQuotaUsageEvent("account.json", now.Add(time.Second), 20.1, 40.1),
+	}, now.Add(time.Second))
+	select {
+	case <-service.AutomaticWake():
+		t.Fatal("sub-0.5% quota movement caused an unnecessary automatic wake")
+	default:
 	}
 }
 
