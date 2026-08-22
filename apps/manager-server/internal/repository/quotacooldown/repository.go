@@ -19,6 +19,7 @@ type Repository interface {
 	MarkRecovered(ctx context.Context, id int64, recoveredAtMS int64) error
 	MarkSkipped(ctx context.Context, id int64, reason string) error
 	RecordFailure(ctx context.Context, id int64, reason string) error
+	DeleteCredential(ctx context.Context, identity model.CredentialIdentity) (int64, error)
 }
 
 type repository struct {
@@ -283,6 +284,33 @@ func (r *repository) RecordFailure(ctx context.Context, id int64, reason string)
 	now := time.Now().UnixMilli()
 	_, err := r.db.ExecContext(ctx, `update quota_cooldowns set last_error = ?, updated_at_ms = ? where id = ? and status = ?`, nullString(reason), now, id, model.QuotaCooldownStatusActive)
 	return err
+}
+
+func (r *repository) DeleteCredential(ctx context.Context, identity model.CredentialIdentity) (int64, error) {
+	fileName := strings.TrimSpace(identity.AuthFileName)
+	if fileName == "" {
+		return 0, errors.New("quota cooldown credential file name is required")
+	}
+	args := []any{fileName}
+	where := `auth_file_name = ?`
+	if authIndex := strings.TrimSpace(identity.AuthIndex); authIndex != "" {
+		where += ` and lower(trim(coalesce(auth_index, ''))) = lower(trim(?))`
+		args = append(args, authIndex)
+	} else {
+		provider := normalizeProvider(identity.Provider)
+		snapshot := strings.TrimSpace(identity.AccountSnapshot)
+		if provider == "" || snapshot == "" {
+			return 0, nil
+		}
+		where += ` and lower(trim(coalesce(provider, ''))) = lower(trim(?))
+			and lower(trim(coalesce(account_snapshot, ''))) = lower(trim(?))`
+		args = append(args, provider, snapshot)
+	}
+	result, err := r.db.ExecContext(ctx, `delete from quota_cooldowns where `+where, args...)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const selectQuotaCooldowns = `select

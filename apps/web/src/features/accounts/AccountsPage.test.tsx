@@ -351,6 +351,7 @@ const { mocks } = vi.hoisted(() => {
         }> => ({ run: null, results: [] })
       ),
       getActiveQuotaCooldowns: vi.fn(async (): Promise<QuotaCooldownInfo[]> => []),
+      listCodexResetCounts: vi.fn(async () => [{ authFileName: 'codex.json', authIndex: 'auth-1', resetCount: 0 }]),
       listAccountActionCandidates: vi.fn(
         async (): Promise<AccountActionCandidatesResponse> => ({
           items: [],
@@ -440,6 +441,7 @@ const { mocks } = vi.hoisted(() => {
       },
       t: (key: string, options?: Record<string, unknown>) => {
         if (options && typeof options.name === 'string') return `${key}:${options.name}`;
+        if (options && options.count !== undefined) return `${key}:${String(options.count)}`;
         return key;
       },
     },
@@ -728,6 +730,7 @@ vi.mock('@/services/api', () => ({
     listCodexInspectionRuns: mocks.listCodexInspectionRuns,
     getCodexInspectionRun: mocks.getCodexInspectionRun,
     getActiveQuotaCooldowns: mocks.getActiveQuotaCooldowns,
+    listCodexResetCounts: mocks.listCodexResetCounts,
     listAccountActionCandidates: mocks.listAccountActionCandidates,
   },
   supplyApi: {
@@ -1077,6 +1080,8 @@ describe('AccountsPage replacement flows', () => {
     mocks.getCodexInspectionRun.mockResolvedValue({ run: null, results: [] });
     mocks.getActiveQuotaCooldowns.mockReset();
     mocks.getActiveQuotaCooldowns.mockResolvedValue([]);
+    mocks.listCodexResetCounts.mockReset();
+    mocks.listCodexResetCounts.mockResolvedValue([{ authFileName: 'codex.json', authIndex: 'auth-1', resetCount: 0 }]);
     mocks.listAccountActionCandidates.mockReset();
     mocks.listAccountActionCandidates.mockResolvedValue({ items: [], pendingCount: 0 });
     mocks.getAccountPoolSummary.mockReset();
@@ -3617,14 +3622,17 @@ describe('AccountsPage replacement flows', () => {
       rateLimitResetCreditsAvailableCount: 1,
       rateLimitResetCredits: [],
     });
+    mocks.listCodexResetCounts.mockResolvedValue([{ authFileName: 'codex.json', authIndex: 'auth-1', resetCount: 3 }]);
 
     const renderer = await renderAccountsPage();
     const resetCount = renderer.root.findByProps({ 'data-account-list-reset-count': 'true' });
+    const resetHistory = renderer.root.findByProps({ 'data-account-list-reset-history': 'true' });
     const resetAction = renderer.root.findByProps({ 'data-account-list-reset-action': 'true' });
 
     expect(readText(resetCount)).toContain('codex_quota.reset_credits_label');
     expect(readText(resetCount)).toContain('1');
     expect(readText(resetCount)).toContain('codex_quota.reset_credits_unit');
+    expect(readText(resetHistory)).toContain('3');
     expect(resetAction.props.disabled).toBe(false);
 
     const stopPropagation = vi.fn();
@@ -3653,6 +3661,38 @@ describe('AccountsPage replacement flows', () => {
 
     expect(readText(resetCount)).toContain('0');
     expect(resetAction.props.disabled).toBe(true);
+  });
+
+  it('refreshes reset history from the server after a manual reset', async () => {
+    const file = mocks.files[0];
+    mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      windows: [],
+      rateLimitResetCreditsAvailableCount: 1,
+      rateLimitResetCredits: [],
+    });
+    mocks.listCodexResetCounts
+      .mockResolvedValueOnce([{ authFileName: 'codex.json', authIndex: 'auth-1', resetCount: 2 }])
+      .mockResolvedValueOnce([{ authFileName: 'codex.json', authIndex: 'auth-1', resetCount: 2 }]);
+    vi.spyOn(CODEX_CONFIG, 'resetQuota').mockResolvedValue({
+      ...makeCodexQuotaData(),
+      rateLimitResetCreditsAvailableCount: 0,
+    });
+
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+    const resetAction = renderer.root.findByProps({ 'data-account-list-reset-action': 'true' });
+    await act(async () => resetAction.props.onClick({ stopPropagation: vi.fn() }));
+    const confirmation = mocks.showConfirmation.mock.calls[0]?.[0] as {
+      onConfirm: () => Promise<void>;
+    };
+    await act(async () => {
+      await confirmation.onConfirm();
+    });
+
+    const resetHistory = renderer.root.findByProps({ 'data-account-list-reset-history': 'true' });
+    expect(readText(resetHistory)).toContain('2');
+    expect(mocks.listCodexResetCounts).toHaveBeenCalledTimes(2);
   });
 
   it('allows a CPAMP quota-cooled Codex account to consume its reset credit', async () => {

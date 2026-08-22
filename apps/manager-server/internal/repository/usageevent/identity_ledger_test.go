@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
@@ -71,6 +72,81 @@ func TestInsertBatchUsesIdentityLedgerAfterRawDeletion(t *testing.T) {
 	}
 	if rawCount != 0 || ledgerCount != 1 {
 		t.Fatalf("counts after duplicate import = raw:%d ledger:%d", rawCount, ledgerCount)
+	}
+}
+
+func TestDeleteCredentialHistoryUsesFileAndAuthIndexIdentity(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage-delete.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+	ctx := context.Background()
+	base := usage.Event{TimestampMS: 1_800_000_010_000, Timestamp: "2027-01-15T00:00:10Z", Model: "gpt-test", Provider: "codex"}
+	first := base
+	first.EventHash, first.AuthFileSnapshot, first.AuthIndex = "delete-a", "shared.json", "auth-a"
+	second := base
+	second.EventHash, second.AuthFileSnapshot, second.AuthIndex = "delete-b", "shared.json", "auth-b"
+	if _, err := repo.InsertBatch(ctx, []usage.Event{first, second}); err != nil {
+		t.Fatalf("insert fixtures: %v", err)
+	}
+	deleted, err := repo.DeleteCredentialHistory(ctx, "shared.json", "auth-a")
+	if err != nil || deleted != 1 {
+		t.Fatalf("delete history: deleted=%d err=%v", deleted, err)
+	}
+	var remaining int
+	if err := db.QueryRow(`select count(*) from usage_events where auth_file_snapshot = ? and auth_index = ?`, "shared.json", "auth-a").Scan(&remaining); err != nil {
+		t.Fatalf("count deleted credential: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("deleted credential events remaining: %d", remaining)
+	}
+	if err := db.QueryRow(`select count(*) from usage_events where auth_file_snapshot = ? and auth_index = ?`, "shared.json", "auth-b").Scan(&remaining); err != nil {
+		t.Fatalf("count sibling credential: %v", err)
+	}
+	if remaining != 1 {
+		t.Fatalf("sibling credential was touched: %d", remaining)
+	}
+}
+
+func TestDeleteCredentialIdentityHistoryUsesAccountIDWhenAuthIndexMissing(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage-delete-account-id.sqlite"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repo := New(db)
+	ctx := context.Background()
+	base := usage.Event{
+		TimestampMS: 1_800_000_010_000, Timestamp: "2027-01-15T00:00:10Z", Model: "gpt-test", Provider: "codex",
+		AuthFileSnapshot: "reimport.json", AuthProviderSnapshot: "codex",
+	}
+	first := base
+	first.EventHash, first.AuthProjectIDSnapshot, first.AccountSnapshot = "delete-id-a", "account-a", "elise@example.com"
+	second := base
+	second.EventHash, second.AuthProjectIDSnapshot, second.AccountSnapshot = "delete-id-b", "account-b", "other@example.com"
+	if _, err := repo.InsertBatch(ctx, []usage.Event{first, second}); err != nil {
+		t.Fatalf("insert fixtures: %v", err)
+	}
+	deleted, err := repo.DeleteCredentialIdentityHistory(ctx, model.CredentialIdentity{
+		AuthFileName: "reimport.json", Provider: "codex", AccountID: "account-a", AccountSnapshot: "elise@example.com",
+	})
+	if err != nil || deleted != 1 {
+		t.Fatalf("delete history: deleted=%d err=%v", deleted, err)
+	}
+	var remaining int
+	if err := db.QueryRow(`select count(*) from usage_events where event_hash = ?`, "delete-id-a").Scan(&remaining); err != nil {
+		t.Fatalf("count deleted credential: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("deleted account history remaining: %d", remaining)
+	}
+	if err := db.QueryRow(`select count(*) from usage_events where event_hash = ?`, "delete-id-b").Scan(&remaining); err != nil {
+		t.Fatalf("count sibling credential: %v", err)
+	}
+	if remaining != 1 {
+		t.Fatalf("sibling account was touched: %d", remaining)
 	}
 }
 

@@ -763,6 +763,10 @@ export function AccountsPage() {
     managementKey,
   });
   const [quotaRefreshing, setQuotaRefreshing] = useState(false);
+  const [codexResetCountsByIdentity, setCodexResetCountsByIdentity] = useState<Map<string, number>>(
+    () => new Map()
+  );
+  const [codexResetCountsLoaded, setCodexResetCountsLoaded] = useState(false);
   const [historyRefreshing, setHistoryRefreshing] = useState(false);
   const [accountHistoryRefreshRevision, setAccountHistoryRefreshRevision] = useState(0);
   const [statusUpdating, setStatusUpdating] = useState(false);
@@ -2051,6 +2055,41 @@ export function AccountsPage() {
     if (!needsCodexStatusEvidence || featureAvailability.checking) return;
     void loadInspectionSummary();
   }, [featureAvailability.checking, loadInspectionSummary, needsCodexStatusEvidence]);
+
+  const loadCodexResetCounts = useCallback(async () => {
+    if (
+      !managerStorageAvailable ||
+      featureAvailability.checking ||
+      !featureAvailability.managerServiceBase ||
+      !managementKey
+    ) {
+      setCodexResetCountsByIdentity(new Map());
+      setCodexResetCountsLoaded(false);
+      return;
+    }
+    if (typeof usageServiceApi.listCodexResetCounts !== 'function') return;
+    try {
+      const items = await usageServiceApi.listCodexResetCounts(
+        featureAvailability.managerServiceBase,
+        managementKey
+      );
+      const next = new Map<string, number>();
+      items.forEach((item) => {
+        const authIndex = item.authIndex.trim();
+        const identity = `${item.authFileName.trim()}\u0000${authIndex}`;
+        if (authIndex) next.set(identity, Math.max(0, Math.trunc(item.resetCount)));
+      });
+      setCodexResetCountsByIdentity(next);
+      setCodexResetCountsLoaded(true);
+    } catch {
+      setCodexResetCountsByIdentity(new Map());
+      setCodexResetCountsLoaded(false);
+    }
+  }, [featureAvailability.checking, featureAvailability.managerServiceBase, managementKey, managerStorageAvailable]);
+
+  useEffect(() => {
+    void loadCodexResetCounts();
+  }, [loadCodexResetCounts]);
 
   useEffect(() => {
     if (activeView !== 'accounts' || detailTab !== 'models' || !selectedRow) {
@@ -3433,7 +3472,7 @@ export function AccountsPage() {
               return next;
             });
             setQuotaResetRevision((current) => current + 1);
-            await Promise.allSettled([loadFiles(), loadQuotaCooldowns()]);
+            await Promise.allSettled([loadFiles(), loadQuotaCooldowns(), loadCodexResetCounts()]);
             showNotification(t('codex_quota.reset_success', { name: displayName }), 'success');
           } catch (err: unknown) {
             if (!isCurrent()) return;
@@ -3471,6 +3510,7 @@ export function AccountsPage() {
       getDisplayAccount,
       getDisplayCodexQuota,
       loadFiles,
+      loadCodexResetCounts,
       loadQuotaCooldowns,
       quotaSnapshotWindowsByRowKey,
       setCodexQuota,
@@ -4555,6 +4595,9 @@ export function AccountsPage() {
               Number.isFinite(rowCodexQuota.rateLimitResetCreditsAvailableCount)
                 ? Math.max(0, Math.trunc(rowCodexQuota.rateLimitResetCreditsAvailableCount))
                 : null;
+            const resetCount = codexResetCountsLoaded
+              ? (codexResetCountsByIdentity.get(`${row.fileName}\u0000${row.authIndex}`) ?? 0)
+              : null;
             const quotaCooldown = quotaCooldownsByRowKey.get(row.selectionKey)?.[0] ?? null;
             const codexStatus = codexStatusBySelectionKey.get(row.selectionKey) ?? null;
             const poolStatus = accountPoolStatusByRowKey.get(row.selectionKey) ?? null;
@@ -4950,6 +4993,13 @@ export function AccountsPage() {
                         </strong>
                         <span>{t('codex_quota.reset_credits_unit')}</span>
                       </div>
+                      <span
+                        className={styles.accountQuotaResetHistory}
+                        data-account-list-reset-history="true"
+                        title={t('codex_quota.reset_credits_history_title')}
+                      >
+                        {t('codex_quota.reset_credits_history', { count: resetCount ?? '—' })}
+                      </span>
                       <Button
                         variant="ghost"
                         size="xs"

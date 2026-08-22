@@ -28,6 +28,7 @@ type ResetResult struct {
 	LocalResetResponse   json.RawMessage `json:"local_reset_response,omitempty"`
 	Verified             bool            `json:"verified"`
 	VerificationAttempts int             `json:"verification_attempts"`
+	HistoryDeleted       int64           `json:"history_deleted,omitempty"`
 }
 
 type OperationResponse struct {
@@ -61,9 +62,16 @@ type ResetCreditInspectionItem struct {
 	Disabled        bool   `json:"disabled"`
 	CurrentRequests *int64 `json:"current_requests,omitempty"`
 	AvailableCount  int64  `json:"available_count"`
+	ResetCount      int64  `json:"reset_count"`
 	Exhausted       bool   `json:"exhausted"`
 	Eligible        bool   `json:"eligible"`
 	Reason          string `json:"reason,omitempty"`
+}
+
+type ResetCountItem struct {
+	AuthFileName string `json:"auth_file_name"`
+	AuthIndex    string `json:"auth_index"`
+	ResetCount   int64  `json:"reset_count"`
 }
 
 type BatchResetRequest struct {

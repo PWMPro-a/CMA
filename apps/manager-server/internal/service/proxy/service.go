@@ -13,6 +13,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httputil"
+	"net/textproto"
 	"net/url"
 	"sort"
 	"strings"
@@ -31,14 +32,15 @@ type Service struct {
 }
 
 type authFileOwnershipMutation struct {
-	fileNames        []string
-	ownershipTargets []model.CodexInspectionDisableOwnershipTarget
-	clearAll         bool
-	lockAll          bool
-	statusMutation   *authFileStatusMutation
-	fieldsMutation   *authFileFieldsMutation
-	deleteMutation   *authFileDeleteMutation
-	writeMutation    *authFileWriteMutation
+	fileNames         []string
+	ownershipTargets  []model.CodexInspectionDisableOwnershipTarget
+	clearAll          bool
+	lockAll           bool
+	statusMutation    *authFileStatusMutation
+	fieldsMutation    *authFileFieldsMutation
+	deleteMutation    *authFileDeleteMutation
+	writeMutation     *authFileWriteMutation
+	deletedIdentities []model.CredentialIdentity
 }
 
 type authFileStatusMutation struct {
@@ -278,6 +280,12 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 		writeError(w, status, err)
 		return
 	}
+	if r.Method == http.MethodPost && strings.TrimRight(r.URL.Path, "/") == "/v0/management/auth-files" {
+		if err := refreshAuthFileImportMetadata(r); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
 	revokedOwnership, err := s.revokeInspectionOwnershipDetached(r.Context(), ownershipMutation)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -343,9 +351,33 @@ func (s *Service) proxyToSavedSetup(w http.ResponseWriter, r *http.Request, writ
 			// recovery could overwrite the user's manual auth-file mutation.
 			return err
 		}
+		// CPA has already committed the deletion. Local cleanup is best effort so
+		// a transient analytics database error cannot turn a successful delete
+		// into a client-visible failure.
+		_ = s.cleanupDeletedCredentialState(r.Context(), mutation.deletedIdentities)
 		return s.restoreInspectionOwnershipDetached(r.Context(), ownershipItemsNotMutated(revokedOwnership, mutation))
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+func (s *Service) cleanupDeletedCredentialState(ctx context.Context, identities []model.CredentialIdentity) error {
+	if s == nil || s.store == nil || len(identities) == 0 {
+		return nil
+	}
+	cleanupCtx, cancel := detachedAuthFileOwnershipContext(ctx)
+	defer cancel()
+	seen := make(map[string]struct{}, len(identities))
+	for _, identity := range identities {
+		key := strings.Join([]string{identity.AuthFileName, identity.AuthIndex, identity.AccountID, identity.Provider, identity.AccountSnapshot}, "\x00")
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if err := s.store.CleanupDeletedCredential(cleanupCtx, identity); err != nil {
+			return fmt.Errorf("cleanup deleted credential %q: %w", identity.AuthFileName, err)
+		}
+	}
+	return nil
 }
 
 func isClientCanceledProxyRequest(r *http.Request, proxyErr error) bool {
@@ -484,7 +516,54 @@ func (s *Service) prepareAuthFileMutation(
 	if err != nil {
 		return authFileOwnershipMutation{}, err
 	}
+	if r != nil && r.Method == http.MethodDelete && len(prepared.deletedIdentities) == 0 && len(prepared.fileNames) > 0 {
+		prepared, err = s.captureDeletedCredentialIdentities(ctx, setup, prepared)
+		if err != nil {
+			return authFileOwnershipMutation{}, err
+		}
+	}
 	return s.prepareAuthFileWriteMutation(ctx, setup, prepared)
+}
+
+func (s *Service) captureDeletedCredentialIdentities(
+	ctx context.Context,
+	setup store.Setup,
+	mutation authFileOwnershipMutation,
+) (authFileOwnershipMutation, error) {
+	files, err := cpaauthfiles.New(nil).Fetch(ctx, setup.CPAUpstreamURL, setup.ManagementKey)
+	if err != nil {
+		// Deletion itself remains authoritative; cleanup is best effort when the
+		// pre-delete status snapshot is unavailable.
+		return mutation, nil
+	}
+	selectors := make(map[string]struct{}, len(mutation.fileNames))
+	for _, name := range mutation.fileNames {
+		if name = strings.TrimSpace(name); name != "" {
+			selectors[name] = struct{}{}
+		}
+	}
+	seen := make(map[string]struct{})
+	for _, file := range files {
+		if _, ok := selectors[strings.TrimSpace(file.Name)]; !ok {
+			if _, ok = selectors[strings.TrimSpace(file.ID)]; !ok {
+				continue
+			}
+		}
+		identity := model.CredentialIdentity{
+			AuthFileName:    file.Name,
+			AuthIndex:       file.AuthIndex,
+			Provider:        file.Provider,
+			AccountSnapshot: file.AccountSnapshot,
+			AccountID:       file.AccountID,
+		}
+		key := strings.Join([]string{identity.AuthFileName, identity.AuthIndex, identity.AccountID, identity.Provider, identity.AccountSnapshot}, "\x00")
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		mutation.deletedIdentities = append(mutation.deletedIdentities, identity)
+	}
+	return mutation, nil
 }
 
 func (s *Service) revokeInspectionOwnership(ctx context.Context, mutation authFileOwnershipMutation) ([]store.CodexInspectionDisableOwnership, error) {
@@ -654,6 +733,19 @@ func (s *Service) prepareAuthFileDeleteMutation(
 	r.URL.RawQuery = query.Encode()
 	mutation.fileNames = []string{strings.TrimSpace(target.File.Name)}
 	mutation.ownershipTargets = nil
+	mutation.deletedIdentities = make([]model.CredentialIdentity, 0, len(target.AffectedFiles))
+	for _, file := range target.AffectedFiles {
+		mutation.deletedIdentities = append(mutation.deletedIdentities, model.CredentialIdentity{
+			AuthFileName: file.Name, AuthIndex: file.AuthIndex, Provider: file.Provider,
+			AccountSnapshot: file.AccountSnapshot, AccountID: file.AccountID,
+		})
+	}
+	if len(mutation.deletedIdentities) == 0 {
+		mutation.deletedIdentities = append(mutation.deletedIdentities, model.CredentialIdentity{
+			AuthFileName: target.File.Name, AuthIndex: target.File.AuthIndex, Provider: target.File.Provider,
+			AccountSnapshot: target.File.AccountSnapshot, AccountID: target.File.AccountID,
+		})
+	}
 	return mutation, nil
 }
 
@@ -1167,6 +1259,110 @@ func readMultipartAuthFileNames(r *http.Request) ([]string, error) {
 	return normalizeFileNames(fileNames), nil
 }
 
+// refreshAuthFileImportMetadata advances the import generation embedded in an
+// uploaded credential. A downloaded credential can contain the timestamp from
+// its previous import; keeping that timestamp lets a persisted quota event from
+// the old credential version disable the newly imported credential.
+func refreshAuthFileImportMetadata(r *http.Request) error {
+	if r == nil || r.Body == nil || r.Method != http.MethodPost {
+		return nil
+	}
+	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || !strings.HasPrefix(strings.ToLower(mediaType), "multipart/") || params["boundary"] == "" {
+		return nil
+	}
+	raw, err := readAndRestoreRequestBody(r, maxAuthFileMutationRequestBytes)
+	if err != nil {
+		return err
+	}
+	reader := multipart.NewReader(bytes.NewReader(raw), params["boundary"])
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	importedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	changed := false
+	for {
+		part, partErr := reader.NextPart()
+		if errors.Is(partErr, io.EOF) {
+			break
+		}
+		if partErr != nil {
+			return partErr
+		}
+		partBody, readErr := io.ReadAll(io.LimitReader(part, maxAuthFileMutationRequestBytes+1))
+		_ = part.Close()
+		if readErr != nil {
+			return readErr
+		}
+		if int64(len(partBody)) > maxAuthFileMutationRequestBytes {
+			return errAuthFileMutationBodyTooLarge
+		}
+		if part.FileName() != "" {
+			if refreshed, ok := refreshAuthFileJSONImportMetadata(partBody, importedAt); ok {
+				partBody = refreshed
+				changed = true
+			}
+		}
+		partHeader := make(textproto.MIMEHeader)
+		for key, values := range part.Header {
+			partHeader[key] = append([]string(nil), values...)
+		}
+		partWriter, createErr := writer.CreatePart(partHeader)
+		if createErr != nil {
+			return createErr
+		}
+		if _, writeErr := partWriter.Write(partBody); writeErr != nil {
+			return writeErr
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	if changed {
+		r.Header.Set("Content-Type", writer.FormDataContentType())
+		restoreRequestBody(r, body.Bytes())
+	}
+	return nil
+}
+
+func refreshAuthFileJSONImportMetadata(raw []byte, importedAt string) ([]byte, bool) {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, false
+	}
+	changed := false
+	stamp := func(item map[string]any) {
+		marker, ok := item["cpamp_import"].(map[string]any)
+		if !ok || marker == nil {
+			marker = map[string]any{"source": "manual"}
+			item["cpamp_import"] = marker
+		}
+		if marker["imported_at"] != importedAt {
+			marker["imported_at"] = importedAt
+			changed = true
+		}
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		stamp(typed)
+	case []any:
+		for _, entry := range typed {
+			if item, ok := entry.(map[string]any); ok {
+				stamp(item)
+			}
+		}
+	default:
+		return nil, false
+	}
+	if !changed {
+		return nil, false
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, false
+	}
+	return encoded, true
+}
+
 func successfulAuthFileOwnershipMutation(response *http.Response, mutation authFileOwnershipMutation) (authFileOwnershipMutation, error) {
 	if !mutation.clearAll && len(mutation.fileNames) == 0 && len(mutation.ownershipTargets) == 0 {
 		return mutation, nil
@@ -1269,10 +1465,17 @@ func filterAuthFileOwnershipMutation(mutation authFileOwnershipMutation, fileNam
 			ownershipTargets = append(ownershipTargets, target)
 		}
 	}
+	deletedIdentities := make([]model.CredentialIdentity, 0, len(mutation.deletedIdentities))
+	for _, identity := range mutation.deletedIdentities {
+		if _, ok := allowed[strings.TrimSpace(identity.AuthFileName)]; ok {
+			deletedIdentities = append(deletedIdentities, identity)
+		}
+	}
 	return authFileOwnershipMutation{
-		fileNames:        filteredFileNames,
-		ownershipTargets: ownershipTargets,
-		statusMutation:   mutation.statusMutation,
+		fileNames:         filteredFileNames,
+		ownershipTargets:  ownershipTargets,
+		statusMutation:    mutation.statusMutation,
+		deletedIdentities: deletedIdentities,
 	}
 }
 

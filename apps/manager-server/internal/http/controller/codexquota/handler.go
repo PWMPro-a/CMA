@@ -15,6 +15,7 @@ import (
 
 const resetCreditPath = "/v0/management/cpamp/codex-quota/reset-credit"
 const resetCreditInspectionPath = "/v0/management/cpamp/codex-quota/reset-credit-inspection"
+const resetCountPath = "/v0/management/cpamp/codex-quota/reset-counts"
 
 type Handler struct {
 	App *app.Context
@@ -26,6 +27,17 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.TrimRight(strings.TrimSpace(r.URL.Path), "/")
 	switch {
+	case path == resetCountPath:
+		if r.Method != http.MethodPost {
+			response.MethodNotAllowed(w)
+			return
+		}
+		items, err := h.App.CodexQuotaService.ListResetCounts(r.Context())
+		if err != nil {
+			response.Error(w, errorStatus(err), err)
+			return
+		}
+		response.JSON(w, http.StatusOK, map[string]any{"items": items})
 	case path == resetCreditInspectionPath:
 		if r.Method != http.MethodPost {
 			response.MethodNotAllowed(w)

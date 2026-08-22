@@ -127,6 +127,34 @@ func TestCurrentConcurrencyZeroAcceptsJSONNumber(t *testing.T) {
 	}
 }
 
+func TestQuotaAutoDisableSkipsEventObservedBeforeCredentialReimport(t *testing.T) {
+	observedAt := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	importedAt := observedAt.Add(time.Hour)
+	if !credentialImportedAfter(map[string]any{
+		"cpamp_import": map[string]any{"imported_at": importedAt.Format(time.RFC3339Nano)},
+	}, observedAt.UnixMilli()) {
+		t.Fatal("re-import marker should invalidate older quota events")
+	}
+	if credentialImportedAfter(map[string]any{
+		"cpamp_import": map[string]any{"imported_at": observedAt.Add(-time.Minute).Format(time.RFC3339Nano)},
+	}, observedAt.UnixMilli()) {
+		t.Fatal("older import marker should not invalidate newer quota events")
+	}
+}
+
+func TestQuotaCooldownStaleForCredentialAfterReimport(t *testing.T) {
+	importedAt := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	file := cpaauthfiles.File{Raw: map[string]any{
+		"cpamp_import": map[string]any{"imported_at": importedAt.Format(time.RFC3339Nano)},
+	}}
+	if !quotaCooldownStaleForCredential(file, store.QuotaCooldown{CreatedAtMS: importedAt.Add(-time.Hour).UnixMilli(), DisabledAtMS: importedAt.Add(-time.Hour).UnixMilli()}) {
+		t.Fatal("cooldown created before re-import should be stale")
+	}
+	if quotaCooldownStaleForCredential(file, store.QuotaCooldown{CreatedAtMS: importedAt.Add(time.Hour).UnixMilli(), DisabledAtMS: importedAt.Add(time.Hour).UnixMilli()}) {
+		t.Fatal("cooldown created after re-import should remain current")
+	}
+}
+
 func TestRateLimitAutoDisableWorkerReconcilesPersistedQuotaEventWhenEnabled(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {

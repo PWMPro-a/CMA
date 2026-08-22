@@ -23,6 +23,7 @@ type Repository interface {
 	UpdatePendingStatus(ctx context.Context, id int64, status string) (model.AccountActionCandidate, error)
 	RecordFailure(ctx context.Context, id int64, reason string) error
 	MarkAutoDisabled(ctx context.Context, id int64, disabledAtMS int64) error
+	DeleteCredential(ctx context.Context, identity model.CredentialIdentity) (int64, error)
 }
 
 type repository struct {
@@ -445,6 +446,37 @@ func (r *repository) MarkAutoDisabled(ctx context.Context, id int64, disabledAtM
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+func (r *repository) DeleteCredential(ctx context.Context, identity model.CredentialIdentity) (int64, error) {
+	fileName := strings.TrimSpace(identity.AuthFileName)
+	if fileName == "" {
+		return 0, errors.New("account action credential file name is required")
+	}
+	args := []any{fileName}
+	where := `auth_file_name = ?`
+	if authIndex := strings.TrimSpace(identity.AuthIndex); authIndex != "" {
+		where += ` and lower(trim(coalesce(auth_index, ''))) = lower(trim(?))`
+		args = append(args, authIndex)
+	} else if accountID := strings.TrimSpace(identity.AccountID); accountID != "" {
+		where += ` and lower(trim(coalesce(account_id_snapshot, ''))) = lower(trim(?))`
+		args = append(args, accountID)
+	} else {
+		provider := normalizeProvider(identity.Provider)
+		snapshot := strings.TrimSpace(identity.AccountSnapshot)
+		if provider == "" || snapshot == "" {
+			return 0, nil
+		}
+		where += ` and lower(trim(coalesce(provider, ''))) = lower(trim(?))
+			and lower(trim(coalesce(account_snapshot, ''))) = lower(trim(?))`
+		args = append(args, provider, snapshot)
+	}
+	result, err := r.db.ExecContext(ctx, `delete from account_action_candidates where status = ? and `+where,
+		append([]any{model.AccountActionStatusPending}, args...)...)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func (r *repository) mustGet(ctx context.Context, id int64) (model.AccountActionCandidate, error) {

@@ -1900,6 +1900,8 @@
     "reset_credits_available_label": "Осталось",
     "reset_credits_unit": "сбросов",
     "reset_credits_card_subtitle": "Доступные сбросы квоты Codex",
+    "reset_credits_history": "Использовано сбросов: {{count}}",
+    "reset_credits_history_title": "Успешные сбросы для этой учётной записи",
     "reset_credits_expected_expiry_label": "Ожидаемый срок действия",
     "reset_credits_unavailable_label": "Нет доступных сбросов квоты",
     "reset_credits_unknown": "—",

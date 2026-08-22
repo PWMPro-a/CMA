@@ -111,6 +111,29 @@ func TestUpsertMergesPendingCandidateByAuthFileAndAction(t *testing.T) {
 	}
 }
 
+func TestDeleteCredentialRemovesOnlyMatchingCandidate(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewStore(t, testutil.NewConfig(t))
+	for _, account := range []string{"elise@example.com", "other@example.com"} {
+		if _, err := st.AccountActions.Upsert(ctx, model.AccountActionCandidateUpsert{
+			ActionType: model.AccountActionTypeReauth, Provider: "codex", AuthFileName: "shared.json",
+			AccountSnapshot: account, ReasonCode: "invalid_401", Reason: "expired",
+		}); err != nil {
+			t.Fatalf("seed candidate %s: %v", account, err)
+		}
+	}
+	deleted, err := st.AccountActions.DeleteCredential(ctx, model.CredentialIdentity{
+		AuthFileName: "shared.json", AccountSnapshot: "elise@example.com", Provider: "codex",
+	})
+	if err != nil || deleted != 1 {
+		t.Fatalf("deleted=%d err=%v", deleted, err)
+	}
+	items, err := st.AccountActions.List(ctx, model.AccountActionStatusPending, 10)
+	if err != nil || len(items) != 1 || items[0].AccountSnapshot != "other@example.com" {
+		t.Fatalf("remaining candidates=%#v err=%v", items, err)
+	}
+}
+
 func TestUpsertKeepsDifferentReasonCodesSeparate(t *testing.T) {
 	ctx := context.Background()
 	cfg := testutil.NewConfig(t)

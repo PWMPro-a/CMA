@@ -1081,6 +1081,30 @@ func (s *Store) RecordQuotaCooldownFailure(ctx context.Context, id int64, reason
 	return s.QuotaCooldowns.RecordFailure(ctx, id, reason)
 }
 
+// CleanupDeletedCredential removes local automation and usage state after CPA
+// confirms that a credential has been deleted.
+func (s *Store) CleanupDeletedCredential(ctx context.Context, identity model.CredentialIdentity) error {
+	if s == nil {
+		return nil
+	}
+	if s.UsageEvents != nil {
+		if _, err := s.UsageEvents.DeleteCredentialIdentityHistory(ctx, identity); err != nil {
+			return err
+		}
+	}
+	if s.QuotaCooldowns != nil {
+		if _, err := s.QuotaCooldowns.DeleteCredential(ctx, identity); err != nil {
+			return err
+		}
+	}
+	if s.AccountActions != nil {
+		if _, err := s.AccountActions.DeleteCredential(ctx, identity); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) AddDeadLetter(ctx context.Context, payload string, parseErr error) error {
 	return s.DeadLetters.Insert(ctx, payload, parseErr.Error())
 }

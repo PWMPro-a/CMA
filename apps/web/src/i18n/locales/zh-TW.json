@@ -1900,6 +1900,8 @@
     "reset_credits_available_label": "剩餘",
     "reset_credits_unit": "次",
     "reset_credits_card_subtitle": "可用的 Codex 重置配額",
+    "reset_credits_history": "已重置 {{count}} 次",
+    "reset_credits_history_title": "此帳號累計成功重置次數",
     "reset_credits_expected_expiry_label": "預計到期時間",
     "reset_credits_unavailable_label": "目前沒有可用的重置配額",
     "reset_credits_unknown": "—",

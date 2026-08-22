@@ -57,6 +57,8 @@ type Repository interface {
 	ActiveDaysWithFilter(ctx context.Context, filter AnalyticsFilter, location *time.Location) (int64, error)
 	ZeroTokenModelsWithFilter(ctx context.Context, filter AnalyticsFilter) ([]string, error)
 	RoutingDiagnosticsWithFilter(ctx context.Context, filter AnalyticsFilter) (RoutingDiagnostics, error)
+	DeleteCredentialHistory(ctx context.Context, authFileSnapshot, authIndex string) (int64, error)
+	DeleteCredentialIdentityHistory(ctx context.Context, identity model.CredentialIdentity) (int64, error)
 }
 
 // SupplyUsageMinute is the small restart-recovery snapshot consumed by smart

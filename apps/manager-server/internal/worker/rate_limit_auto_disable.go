@@ -82,6 +82,7 @@ type quotaAutoDisableCandidate struct {
 	Reason          string
 	Owner           string
 	EvidenceJSON    string
+	ObservedAtMS    int64
 }
 
 type authFile = cpaauthfiles.File
@@ -381,6 +382,10 @@ func (w *RateLimitAutoDisableWorker) handleCandidateLocked(ctx context.Context, 
 		return false
 	}
 	current := target.File
+	if credentialImportedAfter(current.Raw, candidate.ObservedAtMS) {
+		log.Printf("[quota-auto-disable] skip stale quota event for re-imported auth file %q event=%q", candidate.FileName, candidate.EventHash)
+		return true
+	}
 	resolvedAuthIndex := firstNonEmpty(candidate.AuthIndex, current.AuthIndex)
 	resolvedAccountSnapshot := firstNonEmpty(
 		quotaActionAccountSnapshot(candidate.FileName, candidate.AccountSnapshot),
@@ -509,6 +514,10 @@ func (w *RateLimitAutoDisableWorker) reconcileActiveCooldowns(ctx context.Contex
 		if !ok {
 			continue
 		}
+		if quotaCooldownStaleForCredential(current, item) {
+			_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, "credential was re-imported after quota cooldown")
+			continue
+		}
 		if current.Disabled {
 			if normalizeQuotaProvider(current.Provider) == "codex" && w.autoResetEnabled() && currentConcurrencyZero(current.Raw) {
 				w.operationMu.Lock()
@@ -578,6 +587,10 @@ func (w *RateLimitAutoDisableWorker) enforceActiveCooldown(ctx context.Context, 
 		return false
 	}
 	if !ok || target.File.Disabled {
+		return false
+	}
+	if quotaCooldownStaleForCredential(target.File, item) {
+		_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, "credential was re-imported after quota cooldown")
 		return false
 	}
 	if err := w.patchAuthFileTarget(ctx, baseURL, managementKey, target, true); err != nil {
@@ -853,6 +866,11 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 		log.Printf("[quota-auto-disable] auth file %q authIndex=%q missing/mismatched, skip auto-enable", item.AuthFileName, item.AuthIndex)
 		return
 	}
+	if quotaCooldownStaleForCredential(target.File, item) {
+		_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, "credential was re-imported after quota cooldown")
+		log.Printf("[quota-auto-disable] skip cooldown recovery id=%d authFile=%q because credential was re-imported", item.ID, item.AuthFileName)
+		return
+	}
 	if !target.File.Disabled {
 		if err := w.store.MarkQuotaCooldownRecovered(ctx, item.ID, now.UnixMilli()); err != nil {
 			_ = w.store.RecordQuotaCooldownFailure(ctx, item.ID, fmt.Sprintf("mark already-enabled cooldown recovered: %v", err))
@@ -1023,6 +1041,7 @@ func quotaAutoDisableCandidateFromEvent(event usage.Event, baseURL string, manag
 			Reason:          event.FailSummary,
 			Owner:           model.QuotaCooldownOwnerXAIFreeUsage,
 			EvidenceJSON:    xaiProviderUsageEvidenceJSON(event, resetAt, now),
+			ObservedAtMS:    quotaEventObservedAtMS(event, now),
 		}, true
 	}
 	resetAt, ok := codexUsageLimitResetTimeFromEvent(event, now)
@@ -1048,7 +1067,54 @@ func quotaAutoDisableCandidateFromEvent(event usage.Event, baseURL string, manag
 		EventHash:       event.EventHash,
 		Reason:          event.FailSummary,
 		Owner:           model.QuotaCooldownOwnerUsage429,
+		ObservedAtMS:    quotaEventObservedAtMS(event, now),
 	}, true
+}
+
+func quotaEventObservedAtMS(event usage.Event, fallback time.Time) int64 {
+	if event.TimestampMS > 0 {
+		return event.TimestampMS
+	}
+	if event.CreatedAtMS > 0 {
+		return event.CreatedAtMS
+	}
+	return fallback.UnixMilli()
+}
+
+func credentialImportedAfter(raw map[string]any, observedAtMS int64) bool {
+	if observedAtMS <= 0 || raw == nil {
+		return false
+	}
+	marker, ok := raw["cpamp_import"].(map[string]any)
+	if !ok {
+		return false
+	}
+	importedAt, ok := marker["imported_at"].(string)
+	if !ok {
+		return false
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(importedAt))
+	return err == nil && parsed.UnixMilli() > observedAtMS
+}
+
+func quotaCooldownStaleForCredential(file cpaauthfiles.File, item store.QuotaCooldown) bool {
+	marker, ok := file.Raw["cpamp_import"].(map[string]any)
+	if !ok || marker == nil {
+		return false
+	}
+	value, ok := marker["imported_at"].(string)
+	if !ok {
+		return false
+	}
+	importedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
+	if err != nil {
+		return false
+	}
+	anchorMS := item.DisabledAtMS
+	if item.CreatedAtMS > anchorMS {
+		anchorMS = item.CreatedAtMS
+	}
+	return anchorMS > 0 && importedAt.UnixMilli() > anchorMS
 }
 
 func xaiFreeUsageResetTimeFromEvent(event usage.Event, now time.Time) (time.Time, bool) {

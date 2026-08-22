@@ -64,6 +64,33 @@ func TestUpsertActiveUsesCredentialIdentity(t *testing.T) {
 	}
 }
 
+func TestDeleteCredentialRemovesOnlyMatchingCooldown(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "cleanup.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	for _, account := range []string{"elise@example.com", "other@example.com"} {
+		if _, err := st.QuotaCooldowns.UpsertActive(ctx, model.QuotaCooldownUpsert{
+			AuthFileName: "shared.json", AccountSnapshot: account, Provider: "codex",
+			RecoverAtMS: 10_000, Owner: model.QuotaCooldownOwnerUsage429,
+		}); err != nil {
+			t.Fatalf("seed cooldown %s: %v", account, err)
+		}
+	}
+	deleted, err := st.QuotaCooldowns.DeleteCredential(ctx, model.CredentialIdentity{
+		AuthFileName: "shared.json", AccountSnapshot: "elise@example.com", Provider: "codex",
+	})
+	if err != nil || deleted != 1 {
+		t.Fatalf("deleted=%d err=%v", deleted, err)
+	}
+	active, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil || len(active) != 1 || active[0].AccountSnapshot != "other@example.com" {
+		t.Fatalf("remaining cooldowns=%#v err=%v", active, err)
+	}
+}
+
 func TestUpsertActiveUpgradesFallbackIdentityAndPreservesOwnershipOrigin(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {

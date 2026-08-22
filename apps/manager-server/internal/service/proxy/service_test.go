@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -74,6 +75,102 @@ func TestAuthFileRuntimeStatusRequestRequiresExactReadView(t *testing.T) {
 	request.Method = http.MethodPatch
 	if isAuthFileRuntimeStatusRequest(request) {
 		t.Fatal("mutation request must not use the runtime status view")
+	}
+}
+
+func TestRefreshAuthFileJSONImportMetadataAdvancesImportGeneration(t *testing.T) {
+	const importedAt = "2026-08-22T15:04:05.123456Z"
+	raw := []byte(`{"type":"codex","email":"account@example.com","cpamp_import":{"source":"supply","imported_at":"2026-08-20T12:00:00Z"}}`)
+
+	refreshed, changed := refreshAuthFileJSONImportMetadata(raw, importedAt)
+	if !changed {
+		t.Fatal("expected import metadata to change")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(refreshed, &payload); err != nil {
+		t.Fatalf("decode refreshed payload: %v", err)
+	}
+	marker, ok := payload["cpamp_import"].(map[string]any)
+	if !ok || marker["imported_at"] != importedAt || marker["source"] != "supply" {
+		t.Fatalf("refreshed import marker = %#v", payload["cpamp_import"])
+	}
+	if payload["email"] != "account@example.com" {
+		t.Fatalf("credential fields changed: %#v", payload)
+	}
+	if _, changed := refreshAuthFileJSONImportMetadata(refreshed, importedAt); changed {
+		t.Fatal("same import generation should be stable")
+	}
+}
+
+func TestRefreshAuthFileJSONImportMetadataAddsMarkerToLegacyCredential(t *testing.T) {
+	refreshed, changed := refreshAuthFileJSONImportMetadata([]byte(`{"type":"codex"}`), "2026-08-22T15:04:05Z")
+	if !changed {
+		t.Fatal("expected legacy credential to receive import marker")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(refreshed, &payload); err != nil {
+		t.Fatalf("decode refreshed payload: %v", err)
+	}
+	marker, ok := payload["cpamp_import"].(map[string]any)
+	if !ok || marker["source"] != "manual" || marker["imported_at"] != "2026-08-22T15:04:05Z" {
+		t.Fatalf("legacy import marker = %#v", payload["cpamp_import"])
+	}
+}
+
+func TestRefreshAuthFileImportMetadataRewritesMultipartFile(t *testing.T) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "codex.json")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := part.Write([]byte(`{"type":"codex","email":"account@example.com"}`)); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.WriteField("source", "manual"); err != nil {
+		t.Fatalf("write multipart field: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart body: %v", err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v0/management/auth-files", bytes.NewReader(body.Bytes()))
+	r.Header.Set("Content-Type", writer.FormDataContentType())
+	if err := refreshAuthFileImportMetadata(r); err != nil {
+		t.Fatalf("refresh multipart metadata: %v", err)
+	}
+	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/form-data" {
+		t.Fatalf("content type = %q err=%v", r.Header.Get("Content-Type"), err)
+	}
+	reader := multipart.NewReader(r.Body, params["boundary"])
+	var filePayload map[string]any
+	var source string
+	for {
+		part, nextErr := reader.NextPart()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			t.Fatalf("read multipart body: %v", nextErr)
+		}
+		partBody, readErr := io.ReadAll(part)
+		if readErr != nil {
+			t.Fatalf("read multipart part: %v", readErr)
+		}
+		if part.FileName() != "" {
+			if err := json.Unmarshal(partBody, &filePayload); err != nil {
+				t.Fatalf("decode uploaded credential: %v", err)
+			}
+		} else if part.FormName() == "source" {
+			source = string(partBody)
+		}
+	}
+	marker, ok := filePayload["cpamp_import"].(map[string]any)
+	if !ok || strings.TrimSpace(fmt.Sprint(marker["imported_at"])) == "" {
+		t.Fatalf("multipart credential missing import generation: %#v", filePayload)
+	}
+	if source != "manual" {
+		t.Fatalf("multipart form field source = %q", source)
 	}
 }
 
@@ -184,6 +281,28 @@ func TestInspectAuthFileOwnershipMutationUsesPhysicalNameForRuntimeDeleteSelecto
 	}
 	if len(mutation.fileNames) != 1 || mutation.fileNames[0] != "shared.json" {
 		t.Fatalf("runtime delete mutation = %#v, want physical file ownership", mutation)
+	}
+}
+
+func TestRefreshAuthFileJSONImportMetadataAdvancesCredentialGeneration(t *testing.T) {
+	importedAt := "2026-08-22T12:00:00.123Z"
+	input := []byte(`[{"type":"codex","email":"first@example.com","cpamp_import":{"imported_at":"2026-08-20T12:00:00Z","source":"manual"}},{"type":"codex","email":"second@example.com"}]`)
+	updated, changed := refreshAuthFileJSONImportMetadata(input, importedAt)
+	if !changed {
+		t.Fatal("expected import metadata to change")
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(updated, &items); err != nil {
+		t.Fatalf("decode updated auth file: %v", err)
+	}
+	if got := items[0]["cpamp_import"].(map[string]any)["imported_at"]; got != importedAt {
+		t.Fatalf("first imported_at = %#v, want %q", got, importedAt)
+	}
+	if got := items[0]["cpamp_import"].(map[string]any)["source"]; got != "manual" {
+		t.Fatalf("existing import provenance was not preserved: %#v", got)
+	}
+	if got := items[1]["cpamp_import"].(map[string]any)["imported_at"]; got != importedAt {
+		t.Fatalf("second imported_at = %#v, want %q", got, importedAt)
 	}
 }
 

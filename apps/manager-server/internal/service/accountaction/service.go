@@ -192,6 +192,16 @@ func (s *Service) DeleteAuthFile(ctx context.Context, id int64) (model.AccountAc
 		model.AccountActionStatusDeleted,
 	)
 	if persistErr == nil {
+		// The CPA delete is already committed and the candidate status is now
+		// durable. Clear local cooldown/history state so a later re-import of the
+		// same file cannot inherit the deleted credential's automation records.
+		_ = s.store.CleanupDeletedCredential(ctx, model.CredentialIdentity{
+			AuthFileName:    item.AuthFileName,
+			AuthIndex:       item.AuthIndex,
+			Provider:        item.Provider,
+			AccountSnapshot: item.AccountSnapshot,
+			AccountID:       item.AccountIDSnapshot,
+		})
 		return updated, nil
 	}
 	resultErr := fmt.Errorf(

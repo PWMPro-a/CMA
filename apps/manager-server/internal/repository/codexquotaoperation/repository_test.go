@@ -3,6 +3,7 @@ package codexquotaoperation_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -53,5 +54,32 @@ func TestRepositoryEnforcesOperationAndActiveAccountIdempotency(t *testing.T) {
 	})
 	if err != nil || !created {
 		t.Fatalf("create next operation after completion: created=%v err=%v", created, err)
+	}
+}
+
+func TestCountCompletedByAccountCountsOnlyConsumedResets(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "quota-reset-count.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	accountKey := "codex:account-id:counted"
+	for index, consumed := range []bool{true, false, true} {
+		value := consumed
+		_, created, err := st.CodexQuotaOperations.Create(ctx, model.CodexQuotaOperation{
+			OperationID: fmt.Sprintf("operation-%d", index),
+			AccountKey:  accountKey,
+			AuthIndex:   "auth-1",
+			State:       model.CodexQuotaOperationStateCompleted,
+			Consumed:    &value,
+		})
+		if err != nil || !created {
+			t.Fatalf("create operation %d: created=%v err=%v", index, created, err)
+		}
+	}
+	count, err := st.CodexQuotaOperations.CountCompletedByAccount(ctx, accountKey)
+	if err != nil || count != 2 {
+		t.Fatalf("reset count=%d err=%v", count, err)
 	}
 }

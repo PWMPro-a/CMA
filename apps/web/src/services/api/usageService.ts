@@ -496,6 +496,7 @@ export interface CodexResetCreditInspectionItem {
   disabled: boolean;
   currentRequests?: number;
   availableCount: number;
+  resetCount: number;
   exhausted: boolean;
   eligible: boolean;
   reason?: string;
@@ -3151,9 +3152,28 @@ export const usageServiceApi = {
         currentRequests:
           typeof item.current_requests === 'number' ? Number(item.current_requests) : undefined,
         availableCount: Number(item.available_count ?? 0),
+        resetCount: Number(item.reset_count ?? 0),
         exhausted: item.exhausted === true,
         eligible: item.eligible === true,
         reason: item.reason ? String(item.reason) : undefined,
+      }));
+    });
+  },
+
+  listCodexResetCounts: async (
+    base: string,
+    managementKey?: string
+  ): Promise<Array<{ authFileName: string; authIndex: string; resetCount: number }>> => {
+    return withUsageServiceError(async () => {
+      const response = await axios.post<{ items: Array<Record<string, unknown>> }>(
+        buildUrl(base, '/v0/management/cpamp/codex-quota/reset-counts'),
+        undefined,
+        { timeout: 15_000, headers: authHeaders(managementKey) }
+      );
+      return (response.data.items ?? []).map((item) => ({
+        authFileName: String(item.auth_file_name ?? ''),
+        authIndex: String(item.auth_index ?? ''),
+        resetCount: Math.max(0, Math.trunc(Number(item.reset_count ?? 0))),
       }));
     });
   },

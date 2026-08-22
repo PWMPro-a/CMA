@@ -47,6 +47,10 @@ type quotaGateway interface {
 	resetLocalQuota(ctx context.Context, setup store.Setup, authIndex string) (json.RawMessage, int, error)
 }
 
+type credentialHistoryRepository interface {
+	DeleteCredentialHistory(ctx context.Context, authFileSnapshot, authIndex string) (int64, error)
+}
+
 type setupResolver interface {
 	ResolveSetup(ctx context.Context) (store.Setup, bool, error)
 }
@@ -60,6 +64,7 @@ type Service struct {
 	quotaCooldowns    quotaCooldownRepository
 	authFileMutations *cpaauthfiles.MutationCoordinator
 	locks             *accountLocks
+	history           credentialHistoryRepository
 }
 
 func New(st *store.Store, setupService *managerconfig.Service, clients ...*http.Client) *Service {
@@ -99,6 +104,7 @@ func NewWithMutationCoordinator(
 		quotaCooldowns:    st.QuotaCooldowns,
 		authFileMutations: coordinator,
 		locks:             newAccountLocks(),
+		history:           st.UsageEvents,
 	}
 }
 
@@ -259,11 +265,48 @@ func (s *Service) InspectResetCredits(ctx context.Context) ([]ResetCreditInspect
 	return items, nil
 }
 
+// ListResetCounts returns durable reset totals without making provider quota
+// requests. It is used by the account list and is intentionally lightweight.
+func (s *Service) ListResetCounts(ctx context.Context) ([]ResetCountItem, error) {
+	setup, ok, err := s.resolveSetup(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrNotConfigured
+	}
+	fetcher, ok := s.authFiles.(authFileFetcher)
+	if !ok {
+		return nil, ErrNotConfigured
+	}
+	files, err := fetcher.Fetch(ctx, setup.CPAUpstreamURL, setup.ManagementKey)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]ResetCountItem, 0, len(files))
+	for _, file := range files {
+		if !strings.EqualFold(strings.TrimSpace(file.Provider), "codex") || strings.TrimSpace(file.AuthIndex) == "" {
+			continue
+		}
+		count, err := s.operations.CountCompletedByAccount(ctx, stableAccountKey(file))
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, ResetCountItem{AuthFileName: file.Name, AuthIndex: file.AuthIndex, ResetCount: count})
+	}
+	return items, nil
+}
+
 func (s *Service) inspectResetCreditItem(ctx context.Context, setup store.Setup, file cpaauthfiles.File) ResetCreditInspectionItem {
 	usage, credits := s.fetchBefore(ctx, setup, file)
 	item := ResetCreditInspectionItem{
 		AuthIndex: file.AuthIndex, AuthFileName: file.Name, AccountID: file.AccountID,
 		Account: file.AccountSnapshot, Disabled: file.Disabled,
+	}
+	if s.operations != nil {
+		if count, err := s.operations.CountCompletedByAccount(ctx, stableAccountKey(file)); err == nil {
+			item.ResetCount = count
+		}
 	}
 	if usage.err != nil || !successfulStatus(usage.response.StatusCode) {
 		item.Reason = "usage_unavailable"

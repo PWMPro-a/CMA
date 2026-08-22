@@ -253,6 +253,19 @@ func (s *Service) finishAfterLocalReset(
 		}
 		return operationResponse(operation), nil
 	}
+	if s.history != nil && operation.Consumed != nil && *operation.Consumed {
+		deleted, cleanupErr := s.history.DeleteCredentialHistory(ctx, file.Name, file.AuthIndex)
+		if cleanupErr != nil {
+			operation.State = model.CodexQuotaOperationStateLocallyRecovered
+			operation.LastError = truncate(cleanupErr.Error(), 2048)
+			operation, err = s.persist(ctx, operation, result, addWarning(warnings, "history_cleanup_failed"))
+			if err != nil {
+				return OperationResponse{}, err
+			}
+			return operationResponse(operation), nil
+		}
+		result.HistoryDeleted = deleted
+	}
 	operation.State = model.CodexQuotaOperationStateCompleted
 	operation.LastError = ""
 	operation, err = s.persist(ctx, operation, result, warnings)

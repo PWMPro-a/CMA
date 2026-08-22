@@ -20,6 +20,7 @@ type Repository interface {
 	GetActiveByAccount(ctx context.Context, accountKey string) (model.CodexQuotaOperation, bool, error)
 	Update(ctx context.Context, operation model.CodexQuotaOperation) (model.CodexQuotaOperation, error)
 	UpdateIfState(ctx context.Context, operation model.CodexQuotaOperation, expectedState string) (model.CodexQuotaOperation, bool, error)
+	CountCompletedByAccount(ctx context.Context, accountKey string) (int64, error)
 }
 
 type repository struct {
@@ -98,6 +99,14 @@ func (r *repository) GetActiveByAccount(ctx context.Context, accountKey string) 
 		return model.CodexQuotaOperation{}, false, nil
 	}
 	return operation, err == nil, err
+}
+
+func (r *repository) CountCompletedByAccount(ctx context.Context, accountKey string) (int64, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx, `select count(*) from codex_quota_operations
+		where account_key = ? and state = ? and consumed = true`,
+		strings.TrimSpace(accountKey), model.CodexQuotaOperationStateCompleted).Scan(&count)
+	return count, err
 }
 
 func (r *repository) Get(ctx context.Context, operationID string) (model.CodexQuotaOperation, bool, error) {

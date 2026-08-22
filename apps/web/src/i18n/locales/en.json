@@ -1900,6 +1900,8 @@
     "reset_credits_available_label": "Remaining",
     "reset_credits_unit": "resets",
     "reset_credits_card_subtitle": "Available Codex reset credits",
+    "reset_credits_history": "{{count}} resets used",
+    "reset_credits_history_title": "Successful reset count for this account",
     "reset_credits_expected_expiry_label": "Expected expiry",
     "reset_credits_unavailable_label": "No reset credits available",
     "reset_credits_unknown": "—",
