@@ -604,6 +604,9 @@ func (s *Service) createPurchaseTaskOrder(
 	if task == nil || quantity <= 0 {
 		return nil
 	}
+	if stopped, err := s.stopOrdinaryAutomaticTaskOnRecoveredTiming(ctx, cfg.Supply, task, activeTaskOrders); stopped || err != nil {
+		return err
+	}
 	requestedSupplierID := ""
 	if task.Source == "manual" {
 		requestedSupplierID = task.SupplierID
@@ -666,6 +669,14 @@ func (s *Service) createPurchaseTaskOrder(
 	if cfg.Supply.MinBalanceReserveFen > 0 && inventory.EstimatedTotalFen > 0 &&
 		balance.AvailableFen-inventory.EstimatedTotalFen < cfg.Supply.MinBalanceReserveFen {
 		return s.recordPurchaseTaskError(ctx, task, ErrInsufficientBalance)
+	}
+	// Exact supplier selection can take several seconds. Real request quota
+	// headers may recover the pool above its just-in-time purchase line while
+	// that quote is in flight. Re-check the current local capacity decision at
+	// the last reversible boundary so a durable task planned from the previous
+	// sample cannot create an already-unnecessary supplier order.
+	if stopped, err := s.stopOrdinaryAutomaticTaskOnRecoveredTiming(ctx, cfg.Supply, task, activeTaskOrders); stopped || err != nil {
+		return err
 	}
 
 	triggerReason := strings.TrimSpace(task.TriggerReason)
@@ -1134,6 +1145,60 @@ func (s *Service) reconcileAutomaticPurchaseTaskCancellation(ctx context.Context
 		_, _, err = s.cancelPurchaseTaskAndChildren(ctx, task.TaskID, time.Now().UnixMilli())
 	}
 	return err
+}
+
+func (s *Service) stopOrdinaryAutomaticTaskOnRecoveredTiming(
+	ctx context.Context,
+	cfg store.ManagerSupplyConfig,
+	task *store.SupplyPurchaseTask,
+	activeTaskOrders int,
+) (bool, error) {
+	if s == nil || s.store == nil || task == nil || task.Source != "automatic" ||
+		isLowPriceReserveTrigger(task.TriggerReason) {
+		return false, nil
+	}
+	resource := s.currentSmartResource(cfg)
+	if !smartResourceOrdinaryPurchaseTimingWait(resource) {
+		return false, nil
+	}
+
+	now := time.Now()
+	if activeTaskOrders > 0 {
+		// Existing reservations retain their normal lifecycle, but this worker
+		// must not fill another slot from an obsolete shortage. Delay the intent
+		// until the next automatic capacity cycle has had time to reconcile it.
+		delay := time.Duration(max(3, cfg.CheckIntervalSeconds)) * time.Second
+		task.NextAttemptAtMS = now.Add(delay).UnixMilli()
+		if err := s.store.UpdateSupplyPurchaseTask(ctx, *task); err != nil {
+			return true, err
+		}
+		s.invalidateStatusCache()
+		return true, nil
+	}
+
+	// With no child reservation there is nothing supplier-side to release. End
+	// the stale intent without recording a normal timing wait as an error.
+	task.Status = purchaseTaskStatusCancelled
+	task.CancelledAtMS = now.UnixMilli()
+	task.NextAttemptAtMS = 0
+	task.LastError = ""
+	if err := s.store.UpdateSupplyPurchaseTask(ctx, *task); err != nil {
+		return true, err
+	}
+	s.invalidateStatusCache()
+	return true, nil
+}
+
+func smartResourceOrdinaryPurchaseTimingWait(resource SmartResource) bool {
+	if !resource.Enabled || !resource.SnapshotFresh || smartResourceEmergency(resource) {
+		return false
+	}
+	switch strings.TrimSpace(resource.DecisionReason) {
+	case "purchase_timing_wait", "supply_lifetime_capacity_wait":
+		return true
+	}
+	return resource.SuggestedQuantity <= 0 && resource.PurchaseTimingEligibleQuantity <= 0 &&
+		(resource.PurchaseTimingWaitMinutes > 0 || resource.PurchaseLifetimeLimited)
 }
 
 func (s *Service) signalPurchaseTaskWorker() {

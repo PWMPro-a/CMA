@@ -362,6 +362,110 @@ func TestPurchaseTaskStopsOrdinaryOrderWhenAccountTargetIsAlreadyReached(t *test
 	}
 }
 
+func TestPurchaseTaskRechecksRecoveredTimingAfterSupplierQuote(t *testing.T) {
+	var quoteCalls atomic.Int32
+	var createCalls atomic.Int32
+	var service *Service
+	var supplyCfg store.ManagerSupplyConfig
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		case r.URL.Path == "/api/customer/inventory":
+			quoteCalls.Add(1)
+			resource := service.currentSmartResource(supplyCfg)
+			resource.HealthLevel = smartHealthWarning
+			resource.EmergencyShortage = false
+			resource.EmergencyReason = ""
+			resource.CurrentCapacityRCU = 26770
+			resource.AvailableCapacityRCU = 26770
+			resource.TotalCapacityRCU = 26770
+			resource.TargetCapacityRCU = 31658
+			resource.CapacityGapRCU = 4888
+			resource.EstimatedSustainMinutes = 101.5
+			resource.AvailableSustainMinutes = 101.5
+			resource.PurchaseTimingTriggerMinutes = 93.3
+			resource.PurchaseTimingWaitMinutes = 8.2
+			resource.PurchaseTimingEligibleQuantity = 0
+			resource.SuggestedAction = smartActionObserveDemand
+			resource.SuggestedQuantity = 0
+			resource.DecisionReason = "purchase_timing_wait"
+			service.setSmartResource(resource)
+			_, _ = w.Write([]byte(`{"available":10,"missing":0,"estimated_total_fen":2486,"estimated_unit_price_fen":2486}`))
+		case r.URL.Path == "/api/customer/balance":
+			_, _ = w.Write([]byte(`{"available_fen":100000,"balance_fen":100000}`))
+		case r.URL.Path == "/api/customer/pickup/orders" && r.Method == http.MethodPost:
+			createCalls.Add(1)
+			_, _ = w.Write([]byte(`{"order":{"id":"too-late-order","status":"waiting_inventory","quantity":1}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-recovered-timing.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	supplyCfg = store.ManagerSupplyConfig{
+		Enabled: &enabled, SmartEnabled: &enabled, TargetAvailableAccounts: 45, CheckIntervalSeconds: 30,
+		Product: "oauth_7d",
+		Platforms: []store.ManagerSupplyPlatformConfig{{
+			ID: "legacy", Type: managerconfigsvc.SupplyPlatformLegacy, Enabled: &enabled,
+			BaseURL: server.URL, Token: "supplier-token", Product: "oauth_7d",
+		}},
+	}
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply:        supplyCfg,
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	task, err := st.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
+		TaskID: "ordinary-recovered-during-quote", Source: "automatic", Product: "oauth_7d",
+		TargetQuantity: 1, Status: purchaseTaskStatusPending, TriggerReason: "low_water_staged_batch",
+		MaxConcurrentOrders: 1,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	service = New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	service.setSmartResource(SmartResource{
+		Enabled: true, GeneratedAtMS: time.Now().UnixMilli(), SnapshotFresh: true,
+		CapacitySource: smartCapacitySourceInspection, CapacitySnapshotAtMS: time.Now().UnixMilli(),
+		AvailableAccounts: 13, HealthLevel: smartHealthWarning, SuggestedAction: smartActionPrelock,
+		SuggestedQuantity: 1, CapacityGapRCU: 2305, UnitCapacityRCU: 40,
+		ConsumeRCUPerMinute: 264, EstimatedSustainMinutes: 90, AvailableSustainMinutes: 90,
+		ConfiguredHealthyMinutes: 120, EffectiveHealthyMinutes: 120, HealthyMinutesTarget: 120,
+		WarningMinutes: 60, CriticalMinutes: 30, DecisionReason: "low_water_staged_batch",
+		PurchaseTimingEligibleQuantity: 1,
+	})
+
+	if err := service.RunPurchaseTasks(ctx); err != nil {
+		t.Fatalf("run purchase tasks: %v", err)
+	}
+	if quoteCalls.Load() == 0 {
+		t.Fatal("supplier quote was not reached; test did not exercise the in-flight recovery race")
+	}
+	if createCalls.Load() != 0 {
+		t.Fatalf("supplier create calls = %d, want 0; resource=%#v", createCalls.Load(), service.currentSmartResource(supplyCfg))
+	}
+	task, found, err := st.GetSupplyPurchaseTask(ctx, task.TaskID)
+	if err != nil || !found {
+		t.Fatalf("get task found=%v err=%v", found, err)
+	}
+	if task.Status != purchaseTaskStatusCancelled || task.CancelledAtMS == 0 || task.LastError != "" {
+		t.Fatalf("cancelled timing task = %#v", task)
+	}
+	orders, err := st.ListSupplyOrdersByTaskID(ctx, task.TaskID)
+	if err != nil || len(orders) != 0 {
+		t.Fatalf("orders = %#v err=%v", orders, err)
+	}
+}
+
 func TestManualNvtokensOrderIgnoresAutomaticPriceCeiling(t *testing.T) {
 	var estimateMaxUnitPrice any = "missing"
 	var createMaxUnitPrice any = "missing"
