@@ -3700,6 +3700,14 @@ describe('AccountsPage replacement flows', () => {
       await confirmation.onConfirm();
     });
 
+    expect(mocks.quotaState.setCodexQuota).toHaveBeenCalledTimes(1);
+    const updateQuota = mocks.quotaState.setCodexQuota.mock.calls[0]?.[0] as (
+      current: Record<string, CodexQuotaState>
+    ) => Record<string, CodexQuotaState>;
+    const updatedQuota = updateQuota(mocks.quotaState.codexQuota as Record<string, CodexQuotaState>)[
+      getQuotaCredentialStoreKey(file)
+    ];
+    expect(updatedQuota.rateLimitResetCreditsAvailableCount).toBe(0);
     expect(mocks.loadFiles).toHaveBeenCalledTimes(loadFilesBeforeReset + 1);
     expect(mocks.getActiveQuotaCooldowns).toHaveBeenCalledTimes(cooldownLoadsBeforeReset + 1);
   });
@@ -5381,8 +5389,8 @@ describe('AccountsPage replacement flows', () => {
     expect(renderer.root.findAllByProps({ 'data-quota-window-group': 'standard' })).toHaveLength(1);
     expect(renderer.root.findAllByProps({ 'data-quota-card-mode': 'standard' })).toHaveLength(1);
     expect(treeText(renderer)).toContain('accounts.detail_quota_standard_title');
-    expect(renderer.root.findAllByProps({ 'data-account-quota-evidence': 'true' })).toHaveLength(0);
-    expect(renderer.root.findAllByProps({ 'data-quota-evidence-panel': 'reset' })).toHaveLength(0);
+    expect(renderer.root.findAllByProps({ 'data-account-quota-evidence': 'true' })).toHaveLength(1);
+    expect(renderer.root.findAllByProps({ 'data-quota-evidence-panel': 'reset' })).toHaveLength(1);
     const windowUsageRequest = mocks.getAccountWindowUsage.mock.calls[0]?.[2] as
       | AccountWindowUsageRequestForTest
       | undefined;
@@ -6701,6 +6709,37 @@ describe('AccountsPage replacement flows', () => {
     expect(resetAction.props.disabled).toBe(true);
     expect(treeText(renderer)).toContain('codex_quota.reset_credits_unavailable_label');
     expect(mocks.showConfirmation).not.toHaveBeenCalled();
+  });
+
+  it('keeps the Codex reset card visible when the provider count is unknown', async () => {
+    const file = mocks.files[0];
+    mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      windows: [],
+      rateLimitResetCreditsAvailableCount: null,
+      rateLimitResetCredits: [],
+    });
+
+    const renderer = await renderAccountsPage();
+
+    await act(async () => {
+      findDetailButtonByName(renderer, 'codex.json').props.onClick();
+    });
+    await flushPromises();
+    await act(async () => {
+      findHostButtonByText(renderer, 'accounts.detail_tab_quota').props.onClick();
+    });
+    await flushPromises();
+
+    expect(
+      renderer.root.findAllByProps({ 'data-account-quota-reset-records': 'true' })
+    ).toHaveLength(1);
+    expect(readText(renderer.root.findByProps({ 'data-quota-reset-count': 'true' }))).toContain(
+      'codex_quota.reset_credits_unknown'
+    );
+    expect(renderer.root.findByProps({ 'data-quota-reset-action': 'true' }).props.disabled).toBe(
+      true
+    );
   });
 
   it('loads detail events filtered by auth file and auth index', async () => {

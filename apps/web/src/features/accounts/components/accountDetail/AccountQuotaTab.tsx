@@ -142,10 +142,10 @@ export function AccountQuotaTab({
         }).format(value)
       : '-';
 
-  const hasResetRecords =
-    detailView.quota.resetCreditsAvailableCount !== null ||
-    detailView.quota.resetCreditExpiries.length > 0;
-  const shouldShowResetRecords = detailView.identity.provider === 'codex' && hasResetRecords;
+  // Keep the Codex reset card visible even while the provider count is
+  // unavailable. A missing count is different from zero and should be shown
+  // as an explicit unknown value instead of making the whole control vanish.
+  const shouldShowResetRecords = detailView.identity.provider === 'codex';
 
   return (
     <div className={styles.quotaTab} data-account-quota-tab="true">
@@ -311,15 +311,16 @@ export function AccountQuotaTab({
                 </div>
               </div>
               <div className={styles.quotaResetHeaderActions}>
-                {detailView.quota.resetCreditsAvailableCount !== null ? (
-                  <div className={styles.quotaResetCount} data-quota-reset-count="true">
-                    <span>{t('codex_quota.reset_credits_available_label')}</span>
-                    <strong>{detailView.quota.resetCreditsAvailableCount}</strong>
-                    <span className={styles.quotaResetCountUnit}>
-                      {t('codex_quota.reset_credits_unit')}
-                    </span>
-                  </div>
-                ) : null}
+                <div className={styles.quotaResetCount} data-quota-reset-count="true">
+                  <span>{t('codex_quota.reset_credits_available_label')}</span>
+                  <strong>
+                    {detailView.quota.resetCreditsAvailableCount ??
+                      t('codex_quota.reset_credits_unknown')}
+                  </strong>
+                  <span className={styles.quotaResetCountUnit}>
+                    {t('codex_quota.reset_credits_unit')}
+                  </span>
+                </div>
                 <Button
                   variant="secondary"
                   size="sm"

@@ -829,6 +829,7 @@ export function AccountsPage() {
   const [quotaSnapshotWindowsByRowKey, setQuotaSnapshotWindowsByRowKey] = useState<
     Map<string, AccountQuotaSnapshotWindow[]>
   >(() => new Map());
+  const [quotaResetRevision, setQuotaResetRevision] = useState(0);
   const [accountActionCandidates, setAccountActionCandidates] = useState<AccountActionCandidate[]>(
     []
   );
@@ -2229,6 +2230,7 @@ export function AccountsPage() {
         selectedRowKey: selectedRow?.selectionKey ?? selectedRowKey,
         selectedHeaderSnapshotRevision,
         historyRevision: accountHistoryRefreshRevision,
+        quotaResetRevision,
       }),
     [
       accountHistoryRefreshRevision,
@@ -2236,6 +2238,7 @@ export function AccountsPage() {
       featureAvailability.managerServiceBase,
       featureAvailability.requestMonitoringAvailable,
       managementKey,
+      quotaResetRevision,
       selectedRow,
       selectedHeaderSnapshotRevision,
       selectedRowKey,
@@ -3416,6 +3419,20 @@ export function AccountsPage() {
               }));
             });
             if (!committed) return;
+            // A window-usage request may still be carrying a snapshot from
+            // before the reset. Invalidate it before refreshing the account
+            // list so the old reset count cannot overwrite the new result.
+            accountWindowUsageAbortRef.current?.abort();
+            accountWindowUsageAbortRef.current = null;
+            accountWindowUsageReqIdRef.current += 1;
+            accountWindowUsageAutoLoadKeyRef.current = null;
+            setQuotaSnapshotWindowsByRowKey((current) => {
+              if (!current.has(row.selectionKey)) return current;
+              const next = new Map(current);
+              next.delete(row.selectionKey);
+              return next;
+            });
+            setQuotaResetRevision((current) => current + 1);
             await Promise.allSettled([loadFiles(), loadQuotaCooldowns()]);
             showNotification(t('codex_quota.reset_success', { name: displayName }), 'success');
           } catch (err: unknown) {
