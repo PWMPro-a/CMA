@@ -546,7 +546,10 @@ func (s *Service) smartResource(ctx context.Context, cfg store.ManagerConfig, fo
 		// error or falling back to credential counts.
 		return resource, nil
 	}
-	resource := s.buildSmartResourceFromInspectionSnapshot(cfg.Supply, quotaSnapshot, time.Now())
+	now := time.Now()
+	previous := s.currentSmartResource(cfg.Supply)
+	resource := s.buildSmartResourceFromInspectionSnapshot(cfg.Supply, quotaSnapshot, now)
+	applyHistoricalCapacityStartupObservation(cfg.Supply, &resource, previous, now)
 	if err != nil {
 		resource.SnapshotFresh = false
 		resource.DecisionReason = "using_stale_inspection_snapshot"
@@ -2579,7 +2582,62 @@ func smartProgressiveStartupFloorRecovery(resource SmartResource) bool {
 	if runway > 0 {
 		return runway > shortRescueMinutes
 	}
-	return resource.SnapshotFresh && resource.CurrentCapacityRCU > 0
+	// Missing demand telemetry is not evidence of a short rescue. With several
+	// verified accounts still serving, default to the one-account path and let
+	// the next local usage/capacity update decide whether the pool has crossed
+	// the explicit short-runway boundary.
+	return true
+}
+
+// applyHistoricalCapacityStartupObservation prevents one transient empty usage
+// bucket from overriding the immediately preceding verified capacity decision.
+// The full inspection snapshot remains the durable capacity history; this
+// process-local record only supplies its recent demand denominator. Imported
+// credentials have already been overlaid on resource, so the calculation is a
+// local delta and does not wait for another full-pool inspection.
+func applyHistoricalCapacityStartupObservation(cfg store.ManagerSupplyConfig, resource *SmartResource, previous SmartResource, now time.Time) bool {
+	if resource == nil || !smartProgressiveStartupFloorRecovery(*resource) ||
+		!resource.SnapshotFresh || resource.CurrentCapacityRCU <= 0 ||
+		!previous.SnapshotFresh || previous.GeneratedAtMS <= 0 {
+		return false
+	}
+	maxAge := max(120, positiveOr(cfg.CheckIntervalSeconds, 60)*3)
+	if age := int(now.Sub(time.UnixMilli(previous.GeneratedAtMS)).Seconds()); age < 0 || age > maxAge {
+		return false
+	}
+	demand := math.Max(previous.ConsumeRCUPerMinute, previous.DemandPlanningRCUPerMinute)
+	demand = math.Max(demand, math.Max(previous.DemandMemoryRCUPerMinute, previous.VirtualDemandRCUPerMinute))
+	if demand <= 0 {
+		return false
+	}
+	availableRunway := smartAvailableCapacity(*resource) / demand
+	if availableRunway <= float64(max(1, smartUsefulAccountLifetimeMinutes()/4)) {
+		return false
+	}
+	resource.DemandPlanningRCUPerMinute = round2(math.Max(resource.DemandPlanningRCUPerMinute, demand))
+	resource.DemandMemoryRCUPerMinute = round2(math.Max(resource.DemandMemoryRCUPerMinute, previous.DemandMemoryRCUPerMinute))
+	resource.DemandMemoryLastSeenMS = max(resource.DemandMemoryLastSeenMS, previous.DemandMemoryLastSeenMS)
+	if resource.DemandMemoryLastSeenMS > 0 {
+		resource.DemandMemoryAgeSeconds = max(0, int(now.Sub(time.UnixMilli(resource.DemandMemoryLastSeenMS)).Seconds()))
+	}
+	resource.VirtualDemandRCUPerMinute = round2(math.Max(resource.VirtualDemandRCUPerMinute, previous.VirtualDemandRCUPerMinute))
+	resource.EmergencyShortage = false
+	resource.EmergencyReason = ""
+	resource.PoolVacuumActive = false
+	resource.PoolVacuumStartedAtMS = 0
+	resource.PoolVacuumDurationSeconds = 0
+	resource.TargetCapacityRCU = round2(demand * float64(resource.EffectiveHealthyMinutes))
+	resource.RecommendedCapacityRCU = resource.TargetCapacityRCU
+	resource.EstimatedSustainMinutes = round1(resource.CurrentCapacityRCU / demand)
+	resource.AvailableSustainMinutes = round1(availableRunway)
+	resource.CapacityGapRCU = round2(math.Max(0, resource.TargetCapacityRCU-resource.CurrentCapacityRCU-resource.PrelockedCapacityRCU))
+	resource.HealthLevel = smartHealthHealthy
+	resource.SuggestedAction = smartActionObserveDemand
+	resource.SuggestedQuantity = 0
+	resource.DecisionReason = "historical_capacity_observe"
+	applySmartRefillProjection(cfg, resource)
+	applySmartTokenMetrics(resource)
+	return true
 }
 
 // smartEmergencyShortage is narrower than merely being below the healthy

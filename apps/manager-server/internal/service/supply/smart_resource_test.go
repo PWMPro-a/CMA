@@ -1815,6 +1815,71 @@ func TestProgressiveStartupFloorUsesOneOrderAndNormalCooldown(t *testing.T) {
 	if smartProgressiveStartupFloorRecovery(resource) {
 		t.Fatalf("short historical runway must retain real rescue behavior: %#v", resource)
 	}
+
+	resource.AvailableSustainMinutes = 0
+	resource.EstimatedSustainMinutes = 0
+	if !smartProgressiveStartupFloorRecovery(resource) {
+		t.Fatalf("missing runway telemetry with several accounts must default to progressive recovery: %#v", resource)
+	}
+}
+
+func TestHistoricalCapacitySuppressesTransientStartupFloorPurchase(t *testing.T) {
+	now := time.Now().Truncate(time.Millisecond)
+	cfg := store.ManagerSupplyConfig{
+		CheckIntervalSeconds: 30,
+		HealthyMinutesTarget: 120,
+		WarningMinutes:       100,
+		CriticalMinutes:      80,
+	}
+	resource := SmartResource{
+		GeneratedAtMS:             now.UnixMilli(),
+		SnapshotFresh:             true,
+		CapacitySource:            smartCapacitySourceInspection,
+		CurrentCapacityRCU:        39_000,
+		AvailableCapacityRCU:      33_000,
+		AvailableAccounts:         12,
+		CriticalAvailableAccounts: 2,
+		EffectiveHealthyMinutes:   120,
+		WarningMinutes:            100,
+		CriticalMinutes:           80,
+		EmergencyShortage:         true,
+		EmergencyReason:           "startup_account_floor",
+		DecisionReason:            "startup_account_floor",
+		SuggestedAction:           smartActionEmergencyReplenish,
+		SuggestedQuantity:         3,
+	}
+	previous := SmartResource{
+		GeneratedAtMS:              now.Add(-30 * time.Second).UnixMilli(),
+		SnapshotFresh:              true,
+		CapacitySource:             smartCapacitySourceInspection,
+		ConsumeRCUPerMinute:        280,
+		DemandPlanningRCUPerMinute: 280,
+		DemandMemoryRCUPerMinute:   290,
+		DemandMemoryLastSeenMS:     now.Add(-45 * time.Second).UnixMilli(),
+		AvailableSustainMinutes:    118,
+		EstimatedSustainMinutes:    142,
+		AvailableAccounts:          12,
+		CriticalAvailableAccounts:  2,
+	}
+	if !applyHistoricalCapacityStartupObservation(cfg, &resource, previous, now) {
+		t.Fatalf("recent verified capacity history was not applied: %#v", resource)
+	}
+	if resource.EmergencyShortage || resource.EmergencyReason != "" ||
+		resource.SuggestedAction != smartActionObserveDemand || resource.SuggestedQuantity != 0 ||
+		resource.DecisionReason != "historical_capacity_observe" || resource.AvailableSustainMinutes <= 100 {
+		t.Fatalf("historical capacity observation = %#v", resource)
+	}
+
+	short := resource
+	short.EmergencyShortage = true
+	short.EmergencyReason = "startup_account_floor"
+	short.DecisionReason = "startup_account_floor"
+	short.SuggestedAction = smartActionEmergencyReplenish
+	short.SuggestedQuantity = 3
+	short.AvailableCapacityRCU = 3_000
+	if applyHistoricalCapacityStartupObservation(cfg, &short, previous, now) {
+		t.Fatalf("short verified runway must retain rescue behavior: %#v", short)
+	}
 }
 
 func TestVirtualDemandSizesEmptyPoolEmergencyWithoutFixedBatchWaste(t *testing.T) {
