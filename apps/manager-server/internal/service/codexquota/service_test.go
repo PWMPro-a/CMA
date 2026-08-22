@@ -156,6 +156,7 @@ func TestAutoResetCreditChecksEligibilityBeforeCreatingOperation(t *testing.T) {
 				setupService: staticSetupResolver{setup: store.Setup{CPAUpstreamURL: "http://cpa", ManagementKey: "key"}},
 				authFiles: staticAuthFiles{file: cpaauthfiles.File{
 					Name: "codex.json", AuthIndex: "auth-1", Provider: "codex", AccountID: "ACCOUNT-1",
+					Raw: map[string]any{"runtime_current_concurrency": float64(0)},
 				}},
 				gateway: gateway,
 				locks:   newAccountLocks(),
@@ -173,6 +174,37 @@ func TestAutoResetCreditChecksEligibilityBeforeCreatingOperation(t *testing.T) {
 				t.Fatalf("response state=%q, want completed", response.State)
 			}
 		})
+	}
+}
+
+func TestAutoResetCreditRejectsActiveRequests(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "auto-reset-active-requests.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	gateway := &recordingGateway{resetCreditsAvailable: 2}
+	service := &Service{
+		operations:   st.CodexQuotaOperations,
+		setupService: staticSetupResolver{setup: store.Setup{CPAUpstreamURL: "http://cpa", ManagementKey: "key"}},
+		authFiles: staticAuthFiles{file: cpaauthfiles.File{
+			Name: "codex.json", AuthIndex: "auth-active", Provider: "codex", AccountID: "ACCOUNT-ACTIVE",
+			Raw: map[string]any{"runtime_current_concurrency": float64(1)},
+		}},
+		gateway: gateway,
+		locks:   newAccountLocks(),
+	}
+	response, eligibility, err := service.AutoResetCredit(context.Background(), ResetRequest{
+		AuthIndex: "auth-active", OperationID: "d8b34d78-cfe5-5ad2-9f45-d8a5d5f1b530",
+	})
+	if err != nil {
+		t.Fatalf("auto reset: %v", err)
+	}
+	if response.State != "" || eligibility.Eligible || eligibility.Reason != "active_requests" {
+		t.Fatalf("response=%#v eligibility=%#v", response, eligibility)
+	}
+	if gateway.consumeCalls != 0 || gateway.usageCalls != 0 || gateway.resetCreditCalls != 0 {
+		t.Fatalf("gateway calls usage=%d credits=%d consume=%d, want none", gateway.usageCalls, gateway.resetCreditCalls, gateway.consumeCalls)
 	}
 }
 

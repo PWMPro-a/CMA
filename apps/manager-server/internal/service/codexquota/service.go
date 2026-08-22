@@ -190,6 +190,9 @@ func (s *Service) AutoResetCredit(ctx context.Context, request ResetRequest) (Op
 	if !found || !strings.EqualFold(strings.TrimSpace(file.Provider), "codex") {
 		return OperationResponse{}, AutoResetResult{Reason: "auth_not_found"}, ErrAuthNotFound
 	}
+	if currentRequests, ok := currentRequestCount(file.Raw); !ok || currentRequests != 0 {
+		return OperationResponse{}, AutoResetResult{Reason: "active_requests"}, nil
+	}
 	usage, credits := s.fetchBefore(ctx, setup, file)
 	if usage.err != nil || !successfulStatus(usage.response.StatusCode) {
 		return OperationResponse{}, AutoResetResult{Reason: "usage_unavailable"}, nil
