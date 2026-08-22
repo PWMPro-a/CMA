@@ -21,6 +21,7 @@ type Repository interface {
 	Update(ctx context.Context, operation model.CodexQuotaOperation) (model.CodexQuotaOperation, error)
 	UpdateIfState(ctx context.Context, operation model.CodexQuotaOperation, expectedState string) (model.CodexQuotaOperation, bool, error)
 	CountCompletedByAccount(ctx context.Context, accountKey string) (int64, error)
+	CountCompletedByCredential(ctx context.Context, accountKey string, authIndex string) (int64, error)
 }
 
 type repository struct {
@@ -106,6 +107,22 @@ func (r *repository) CountCompletedByAccount(ctx context.Context, accountKey str
 	err := r.db.QueryRowContext(ctx, `select count(*) from codex_quota_operations
 		where account_key = ? and state = ? and consumed = true`,
 		strings.TrimSpace(accountKey), model.CodexQuotaOperationStateCompleted).Scan(&count)
+	return count, err
+}
+
+// CountCompletedByCredential keeps reset history visible when a credential is
+// deleted and imported again. The account key may change with a fresh import,
+// while the CPA auth index remains the stable credential identifier.
+func (r *repository) CountCompletedByCredential(ctx context.Context, accountKey string, authIndex string) (int64, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx, `select count(*) from codex_quota_operations
+		where state = ? and consumed = true and (
+			account_key = ? or auth_index = ?
+		)`,
+		model.CodexQuotaOperationStateCompleted,
+		strings.TrimSpace(accountKey),
+		strings.TrimSpace(authIndex),
+	).Scan(&count)
 	return count, err
 }
 

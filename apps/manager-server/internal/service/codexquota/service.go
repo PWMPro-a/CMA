@@ -202,11 +202,17 @@ func (s *Service) AutoResetCredit(ctx context.Context, request ResetRequest) (Op
 		return OperationResponse{}, AutoResetResult{Reason: "usage_unavailable"}, nil
 	}
 	if !exhausted {
-		response, err := s.ResetCredit(ctx, request)
-		if err != nil {
+		// A recovered quota needs no credit consumption. Still clear a stale
+		// CPAMP quota-preempt disable so the worker can finish the cooldown
+		// recovery path immediately.
+		if err := s.recoverRuntimeQuotaPreempt(ctx, setup, file); err != nil {
 			return OperationResponse{}, AutoResetResult{Eligible: true, Reason: "recovery_failed"}, err
 		}
-		return response, AutoResetResult{Eligible: true, Reason: "quota_already_recovered"}, nil
+		return OperationResponse{
+			OperationID: operationID,
+			AuthIndex:   authIndex,
+			State:       model.CodexQuotaOperationStateCompleted,
+		}, AutoResetResult{Eligible: true, Reason: "quota_already_recovered"}, nil
 	}
 	if credits.err != nil || !successfulStatus(credits.response.StatusCode) || !hasAvailableResetCredit(credits.response.Body) {
 		return OperationResponse{}, AutoResetResult{Reason: "no_reset_credit"}, nil
@@ -291,7 +297,11 @@ func (s *Service) ListResetCounts(ctx context.Context) ([]ResetCountItem, error)
 		if !strings.EqualFold(strings.TrimSpace(file.Provider), "codex") || strings.TrimSpace(file.AuthIndex) == "" {
 			continue
 		}
-		count, err := s.operations.CountCompletedByAccount(ctx, stableAccountKey(file))
+		count, err := s.operations.CountCompletedByCredential(
+			ctx,
+			stableAccountKey(file),
+			file.AuthIndex,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -307,7 +317,11 @@ func (s *Service) inspectResetCreditItem(ctx context.Context, setup store.Setup,
 		Account: file.AccountSnapshot, Disabled: file.Disabled,
 	}
 	if s.operations != nil {
-		if count, err := s.operations.CountCompletedByAccount(ctx, stableAccountKey(file)); err == nil {
+		if count, err := s.operations.CountCompletedByCredential(
+			ctx,
+			stableAccountKey(file),
+			file.AuthIndex,
+		); err == nil {
 			item.ResetCount = count
 		}
 	}
@@ -370,36 +384,59 @@ func hasAvailableResetCredit(body json.RawMessage) bool {
 }
 
 func availableResetCreditCount(body json.RawMessage) int64 {
-	var payload map[string]any
+	var payload any
 	if len(body) == 0 || json.Unmarshal(body, &payload) != nil {
 		return 0
 	}
-	if value, ok := payload["available_count"]; ok {
-		if count, ok := numberValue(value); ok {
-			return int64(count)
+	return availableResetCreditValue(payload)
+}
+
+func availableResetCreditValue(value any) int64 {
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"available_count", "availableCount", "available", "count"} {
+			if raw, ok := typed[key]; ok {
+				if count, ok := numberValue(raw); ok {
+					return maxNonNegativeInt64(count)
+				}
+			}
 		}
-	}
-	for _, key := range []string{"credits", "reset_credits", "resetCredits"} {
-		items, ok := payload[key].([]any)
-		if !ok {
-			continue
+		for _, key := range []string{
+			"rate_limit_reset_credits",
+			"rateLimitResetCredits",
+			"reset_credits",
+			"resetCredits",
+			"credits",
+			"data",
+		} {
+			if nested, ok := typed[key]; ok {
+				if count := availableResetCreditValue(nested); count > 0 {
+					return count
+				}
+			}
 		}
+	case []any:
 		available := int64(0)
-		for _, item := range items {
+		for _, item := range typed {
 			record, ok := item.(map[string]any)
 			if !ok {
 				continue
 			}
 			status, _ := record["status"].(string)
-			if strings.EqualFold(strings.TrimSpace(status), "available") || status == "" {
+			if strings.EqualFold(strings.TrimSpace(status), "available") || strings.TrimSpace(status) == "" {
 				available++
 			}
 		}
-		if available > 0 {
-			return available
-		}
+		return available
 	}
 	return 0
+}
+
+func maxNonNegativeInt64(value float64) int64 {
+	if value <= 0 {
+		return 0
+	}
+	return int64(value)
 }
 
 func currentRequestCountZero(raw map[string]any) bool {
@@ -408,15 +445,26 @@ func currentRequestCountZero(raw map[string]any) bool {
 }
 
 func currentRequestCount(raw map[string]any) (int64, bool) {
+	var maxCount int64
+	found := false
 	for _, key := range []string{"runtime_current_concurrency", "runtimeCurrentConcurrency", "current_concurrency", "currentConcurrency", "active_requests", "activeRequests", "in_flight_requests", "inFlightRequests"} {
 		value, ok := raw[key]
 		if !ok {
 			continue
 		}
 		count, ok := numberValue(value)
-		return int64(count), ok
+		if !ok {
+			continue
+		}
+		if count < 0 {
+			count = 0
+		}
+		if !found || int64(count) > maxCount {
+			maxCount = int64(count)
+		}
+		found = true
 	}
-	return 0, false
+	return maxCount, found
 }
 
 func (s *Service) GetOperation(ctx context.Context, operationID string) (OperationResponse, error) {

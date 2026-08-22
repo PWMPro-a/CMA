@@ -1006,6 +1006,8 @@ func Migrate(db *sql.DB) error {
 		)`,
 		`create index if not exists idx_codex_quota_operations_account_updated
 			on codex_quota_operations(account_key, updated_at_ms desc)`,
+		`create index if not exists idx_codex_quota_operations_credential_identity
+			on codex_quota_operations(auth_index, auth_file_name, state, consumed)`,
 		`create index if not exists idx_codex_quota_operations_state_updated
 			on codex_quota_operations(state, updated_at_ms desc)`,
 		`create unique index if not exists idx_codex_quota_operations_account_active

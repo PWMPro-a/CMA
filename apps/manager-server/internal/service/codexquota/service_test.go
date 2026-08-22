@@ -269,6 +269,31 @@ func TestAvailableResetCreditCountAcceptsCreditInventory(t *testing.T) {
 	if got := availableResetCreditCount(body); got != 2 {
 		t.Fatalf("availableResetCreditCount=%d, want 2", got)
 	}
+	for _, test := range []struct {
+		name string
+		body string
+		want int64
+	}{
+		{name: "camel case count", body: `{"availableCount":"3"}`, want: 3},
+		{name: "nested inventory", body: `{"rate_limit_reset_credits":{"available_count":4}}`, want: 4},
+		{name: "nested credits array", body: `{"data":{"credits":[{"status":"available"},{"status":"consumed"}]}}`, want: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := availableResetCreditCount(json.RawMessage(test.body)); got != test.want {
+				t.Fatalf("availableResetCreditCount=%d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCurrentRequestCountUsesHighestObservedConcurrency(t *testing.T) {
+	count, ok := currentRequestCount(map[string]any{
+		"runtime_current_concurrency": float64(0),
+		"active_requests":             json.Number("2"),
+	})
+	if !ok || count != 2 {
+		t.Fatalf("currentRequestCount=%d, ok=%v, want 2,true", count, ok)
+	}
 }
 
 func TestInspectResetCreditsRequiresExhaustedQuotaCreditAndZeroRequests(t *testing.T) {

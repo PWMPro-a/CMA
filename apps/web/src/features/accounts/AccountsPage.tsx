@@ -1248,14 +1248,73 @@ export function AccountsPage() {
     []
   );
 
+  const loadCodexResetCounts = useCallback(async () => {
+    if (
+      !managerStorageAvailable ||
+      featureAvailability.checking ||
+      !featureAvailability.managerServiceBase ||
+      !managementKey
+    ) {
+      setCodexResetCounts(EMPTY_CODEX_RESET_COUNT_LOOKUP);
+      setCodexResetCountsLoaded(false);
+      return;
+    }
+    if (typeof usageServiceApi.listCodexResetCounts !== 'function') return;
+    try {
+      const items = await usageServiceApi.listCodexResetCounts(
+        featureAvailability.managerServiceBase,
+        managementKey
+      );
+      const byIdentity = new Map<string, number>();
+      const byAuthIndex = new Map<string, number>();
+      const authIndexIdentities = new Map<string, Set<string>>();
+      items.forEach((item) => {
+        const authIndex = item.authIndex.trim();
+        const identity = `${item.authFileName.trim()}\u0000${authIndex}`;
+        if (!authIndex) return;
+        const resetCount = Math.max(0, Math.trunc(item.resetCount));
+        byIdentity.set(identity, resetCount);
+        const identities = authIndexIdentities.get(authIndex) ?? new Set<string>();
+        identities.add(identity);
+        authIndexIdentities.set(authIndex, identities);
+      });
+      authIndexIdentities.forEach((identities, authIndex) => {
+        if (identities.size !== 1) return;
+        const identity = identities.values().next().value as string | undefined;
+        if (identity === undefined) return;
+        const count = byIdentity.get(identity);
+        if (count !== undefined) byAuthIndex.set(authIndex, count);
+      });
+      setCodexResetCounts({ byIdentity, byUniqueAuthIndex: byAuthIndex });
+      setCodexResetCountsLoaded(true);
+    } catch {
+      setCodexResetCounts(EMPTY_CODEX_RESET_COUNT_LOOKUP);
+      setCodexResetCountsLoaded(false);
+    }
+  }, [
+    featureAvailability.checking,
+    featureAvailability.managerServiceBase,
+    managementKey,
+    managerStorageAvailable,
+  ]);
+
+  useEffect(() => {
+    void loadCodexResetCounts();
+  }, [loadCodexResetCounts]);
+
   const loadOauthExcluded = oauthState.loadExcluded;
   const loadOauthModelAlias = oauthState.loadModelAlias;
   const refreshOauthWorkspace = useCallback(async () => {
     await Promise.all([loadOauthExcluded(), loadOauthModelAlias()]);
   }, [loadOauthExcluded, loadOauthModelAlias]);
   const refreshAccountsWorkspace = useCallback(async () => {
-    await Promise.all([loadFiles(), loadHeaderSnapshots(), loadAccountPoolSummary()]);
-  }, [loadAccountPoolSummary, loadFiles, loadHeaderSnapshots]);
+    await Promise.all([
+      loadFiles(),
+      loadHeaderSnapshots(),
+      loadAccountPoolSummary(),
+      loadCodexResetCounts(),
+    ]);
+  }, [loadAccountPoolSummary, loadCodexResetCounts, loadFiles, loadHeaderSnapshots]);
   const refreshActiveWorkspace = useAccountsWorkspaceRefresh(activeView, {
     refreshAccounts: refreshAccountsWorkspace,
     refreshHealth: loadInspectionSummary,
@@ -2114,60 +2173,6 @@ export function AccountsPage() {
     if (!needsCodexStatusEvidence || featureAvailability.checking) return;
     void loadInspectionSummary();
   }, [featureAvailability.checking, loadInspectionSummary, needsCodexStatusEvidence]);
-
-  const loadCodexResetCounts = useCallback(async () => {
-    if (
-      !managerStorageAvailable ||
-      featureAvailability.checking ||
-      !featureAvailability.managerServiceBase ||
-      !managementKey
-    ) {
-      setCodexResetCounts(EMPTY_CODEX_RESET_COUNT_LOOKUP);
-      setCodexResetCountsLoaded(false);
-      return;
-    }
-    if (typeof usageServiceApi.listCodexResetCounts !== 'function') return;
-    try {
-      const items = await usageServiceApi.listCodexResetCounts(
-        featureAvailability.managerServiceBase,
-        managementKey
-      );
-      const byIdentity = new Map<string, number>();
-      const byAuthIndex = new Map<string, number>();
-      const authIndexIdentities = new Map<string, Set<string>>();
-      items.forEach((item) => {
-        const authIndex = item.authIndex.trim();
-        const identity = `${item.authFileName.trim()}\u0000${authIndex}`;
-        if (!authIndex) return;
-        const resetCount = Math.max(0, Math.trunc(item.resetCount));
-        byIdentity.set(identity, resetCount);
-        const identities = authIndexIdentities.get(authIndex) ?? new Set<string>();
-        identities.add(identity);
-        authIndexIdentities.set(authIndex, identities);
-      });
-      authIndexIdentities.forEach((identities, authIndex) => {
-        if (identities.size !== 1) return;
-        const identity = identities.values().next().value as string | undefined;
-        if (identity === undefined) return;
-        const count = byIdentity.get(identity);
-        if (count !== undefined) byAuthIndex.set(authIndex, count);
-      });
-      setCodexResetCounts({ byIdentity, byUniqueAuthIndex: byAuthIndex });
-      setCodexResetCountsLoaded(true);
-    } catch {
-      setCodexResetCounts(EMPTY_CODEX_RESET_COUNT_LOOKUP);
-      setCodexResetCountsLoaded(false);
-    }
-  }, [
-    featureAvailability.checking,
-    featureAvailability.managerServiceBase,
-    managementKey,
-    managerStorageAvailable,
-  ]);
-
-  useEffect(() => {
-    void loadCodexResetCounts();
-  }, [loadCodexResetCounts]);
 
   useEffect(() => {
     if (activeView !== 'accounts' || detailTab !== 'models' || !selectedRow) {

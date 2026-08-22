@@ -83,3 +83,43 @@ func TestCountCompletedByAccountCountsOnlyConsumedResets(t *testing.T) {
 		t.Fatalf("reset count=%d err=%v", count, err)
 	}
 }
+
+func TestCountCompletedByCredentialIncludesReimportedAuthIndex(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "quota-reset-reimport.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	consumed := true
+	for index, operation := range []model.CodexQuotaOperation{
+		{
+			OperationID:  "old-generation",
+			AccountKey:   "codex:account-id:old",
+			AuthIndex:    "auth-stable",
+			AuthFileName: "codex.json",
+			State:        model.CodexQuotaOperationStateCompleted,
+			Consumed:     &consumed,
+		},
+		{
+			OperationID:  "other-file",
+			AccountKey:   "codex:account-id:other",
+			AuthIndex:    "auth-stable",
+			AuthFileName: "other.json",
+			State:        model.CodexQuotaOperationStateCompleted,
+			Consumed:     &consumed,
+		},
+	} {
+		if _, created, createErr := st.CodexQuotaOperations.Create(ctx, operation); createErr != nil || !created {
+			t.Fatalf("create operation %d: created=%v err=%v", index, created, createErr)
+		}
+	}
+	count, err := st.CodexQuotaOperations.CountCompletedByCredential(
+		ctx,
+		"codex:account-id:new",
+		"auth-stable",
+	)
+	if err != nil || count != 2 {
+		t.Fatalf("reimport reset count=%d err=%v, want 2", count, err)
+	}
+}
