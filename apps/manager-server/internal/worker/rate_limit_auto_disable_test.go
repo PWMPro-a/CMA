@@ -106,6 +106,15 @@ func TestQuotaAutoDisableCandidateRequiresStrictCodexUsageLimit(t *testing.T) {
 	}
 }
 
+func TestCurrentConcurrencyZeroAcceptsJSONNumber(t *testing.T) {
+	if !currentConcurrencyZero(map[string]any{"runtime_current_concurrency": json.Number("0")}) {
+		t.Fatal("json.Number zero concurrency should be treated as zero")
+	}
+	if currentConcurrencyZero(map[string]any{"runtime_current_concurrency": json.Number("1")}) {
+		t.Fatal("json.Number non-zero concurrency should not be treated as zero")
+	}
+}
+
 func TestRateLimitAutoDisableWorkerReconcilesPersistedQuotaEventWhenEnabled(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {

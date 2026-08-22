@@ -416,6 +416,10 @@ func boolValue(value any) (bool, bool) {
 
 func numberValue(value any) (float64, bool) {
 	switch typed := value.(type) {
+	case json.Number:
+		trimmed := strings.TrimSuffix(strings.TrimSpace(typed.String()), "%")
+		parsed, err := strconv.ParseFloat(trimmed, 64)
+		return parsed, err == nil
 	case float64:
 		return typed, true
 	case string:

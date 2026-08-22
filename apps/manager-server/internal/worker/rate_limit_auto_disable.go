@@ -947,6 +947,9 @@ func currentConcurrencyZero(raw map[string]any) bool {
 
 func numberValue(value any) (float64, bool) {
 	switch typed := value.(type) {
+	case json.Number:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(typed.String()), 64)
+		return parsed, err == nil
 	case float64:
 		return typed, true
 	case float32:

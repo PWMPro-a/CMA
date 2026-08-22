@@ -209,6 +209,31 @@ func TestInspectResetCreditsRequiresExhaustedQuotaCreditAndZeroRequests(t *testi
 	}
 }
 
+func TestInspectResetCreditsAcceptsJSONNumberZeroConcurrency(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "reset-inspection-json-number.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	service := &Service{
+		operations:   st.CodexQuotaOperations,
+		setupService: staticSetupResolver{setup: store.Setup{CPAUpstreamURL: "http://cpa", ManagementKey: "key"}},
+		authFiles: staticAuthFiles{file: cpaauthfiles.File{
+			Name: "codex.json", AuthIndex: "auth-json-number", Provider: "codex", AccountID: "ACCOUNT-JSON-NUMBER",
+			Raw: map[string]any{"runtime_current_concurrency": json.Number("0")},
+		}},
+		gateway: &recordingGateway{resetCreditsAvailable: 1},
+		locks:   newAccountLocks(),
+	}
+	items, err := service.InspectResetCredits(context.Background())
+	if err != nil {
+		t.Fatalf("inspect reset credits: %v", err)
+	}
+	if len(items) != 1 || !items[0].Eligible || items[0].CurrentRequests == nil || *items[0].CurrentRequests != 0 {
+		t.Fatalf("inspection items=%#v", items)
+	}
+}
+
 func (g *recordingGateway) consumeResetCredit(context.Context, store.Setup, string, string, string) (apiCallResult, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
