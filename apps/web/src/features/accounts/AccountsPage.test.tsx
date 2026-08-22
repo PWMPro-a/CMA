@@ -3723,6 +3723,39 @@ describe('AccountsPage replacement flows', () => {
     }
   );
 
+  it.each(['quota_preempt', 'usage_limit_reached', 'codex_usage_limit_reached'])(
+    'allows quota refresh for Codex accounts disabled by %s',
+    async (reason) => {
+      const file = {
+        ...makeCodexFile(
+          `codex-refresh-${reason}.json`,
+          `auth-refresh-${reason}`,
+          `${reason}-refresh@example.com`
+        ),
+        disabled: true,
+        runtime_last_skip_reason: reason,
+        runtime_current_concurrency: 0,
+      } as AuthFileItem;
+      mocks.files = [file];
+      const quotaFetch = vi
+        .spyOn(CODEX_CONFIG, 'fetchQuota')
+        .mockResolvedValue(makeCodexQuotaData());
+
+      const renderer = await renderAccountsPage();
+      const refreshButton = findAccountCardButtonByAriaLabel(
+        renderer,
+        `${file.name}\u0000${file.authIndex}`,
+        'accounts.refresh_quota'
+      );
+
+      expect(refreshButton.props.disabled).toBe(false);
+      await act(async () => {
+        await refreshButton.props.onClick();
+      });
+      expect(quotaFetch).toHaveBeenCalledTimes(1);
+    }
+  );
+
   it('refreshes reset history from the server after a manual reset', async () => {
     const file = mocks.files[0];
     mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {

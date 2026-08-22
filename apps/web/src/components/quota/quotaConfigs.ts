@@ -433,7 +433,13 @@ const isCodexQuotaPreemptRecoveryCandidate = (file: AuthFileItem): boolean => {
     (value) => typeof value === 'string' && value.trim()
   );
   const reason = typeof reasonValue === 'string' ? reasonValue.trim().toLowerCase() : '';
-  if (reason !== 'quota_preempt') return false;
+  if (
+    reason !== 'quota_preempt' &&
+    reason !== 'usage_limit_reached' &&
+    reason !== 'codex_usage_limit_reached'
+  ) {
+    return false;
+  }
   const concurrency = [
     file['runtime_current_concurrency'],
     file['runtimeCurrentConcurrency'],

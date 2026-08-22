@@ -4542,7 +4542,11 @@ export function AccountsPage() {
           iconOnly
           className={`${styles.accountIconButton} ${styles.accountIconButtonRefresh}`}
           onClick={() => void refreshAccountQuota(row)}
-          disabled={quotaRefreshing || row.disabled || row.runtimeOnly}
+          disabled={
+            quotaRefreshing ||
+            (row.disabled && !isQuotaPreemptDisabledCodexRow(row)) ||
+            row.runtimeOnly
+          }
           title={t('accounts.refresh_quota')}
           aria-label={t('accounts.refresh_quota')}
         >
