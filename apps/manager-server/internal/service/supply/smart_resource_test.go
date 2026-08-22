@@ -2871,6 +2871,7 @@ func TestExtendedConfiguredWaterlinesRecoverProgressively(t *testing.T) {
 	resource.SnapshotFresh = true
 	resource.CurrentCapacityRCU = 240
 	resource.AvailableCapacityRCU = 240
+	resource.AvailableAccounts = 5
 	resource.ConsumeRCUPerMinute = 10
 	resource.DemandPlanningRCUPerMinute = 10
 	resource.DemandTrend = smartDemandTrendStable
@@ -2879,6 +2880,9 @@ func TestExtendedConfiguredWaterlinesRecoverProgressively(t *testing.T) {
 	if resource.HealthLevel != smartHealthCritical || resource.EmergencyShortage ||
 		resource.SuggestedAction != smartActionTakeLocked || resource.SuggestedQuantity <= 1 {
 		t.Fatalf("extended critical waterline must stay visible without burst mode: %#v", resource)
+	}
+	if smartAvailableCapacityEmergency(cfg, resource) {
+		t.Fatalf("configured 80-minute critical line must not bypass progressive recovery at 24 minutes: %#v", resource)
 	}
 	quantity, reason, timing := smartPrelockQuantityForSupplyPressureWithTiming(
 		cfg,
@@ -2894,8 +2898,9 @@ func TestExtendedConfiguredWaterlinesRecoverProgressively(t *testing.T) {
 	}
 
 	resource.EstimatedSustainMinutes = 12
+	resource.AvailableCapacityRCU = 120
 	resource.CapacityGapRCU = 1
-	if !smartEmergencyShortage(resource) {
+	if !smartEmergencyShortage(resource) || !smartAvailableCapacityEmergency(cfg, resource) {
 		t.Fatalf("twelve-minute rescue runway must still bypass pacing: %#v", resource)
 	}
 }

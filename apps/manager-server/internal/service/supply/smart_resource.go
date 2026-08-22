@@ -1761,7 +1761,11 @@ func smartAvailableCapacityEmergency(cfg store.ManagerSupplyConfig, resource Sma
 	if resource.ConsumeRCUPerMinute <= 0 || resource.CriticalMinutes <= 0 {
 		return false
 	}
-	return smartAvailableCapacity(resource)/resource.ConsumeRCUPerMinute <= float64(resource.CriticalMinutes)
+	criticalMinutes := resource.CriticalMinutes
+	if smartExtendedWaterlineProgressiveMode(resource) {
+		criticalMinutes = min(criticalMinutes, max(1, smartUsefulAccountLifetimeMinutes()/4))
+	}
+	return smartAvailableCapacity(resource)/resource.ConsumeRCUPerMinute <= float64(criticalMinutes)
 }
 
 // smartMinimumAvailableRefillQuantity buys only enough immediately usable
@@ -1779,6 +1783,9 @@ func smartMinimumAvailableRefillQuantity(cfg store.ManagerSupplyConfig, resource
 		return 1
 	}
 	criticalMinutes := max(1, resource.CriticalMinutes)
+	if smartExtendedWaterlineProgressiveMode(resource) {
+		criticalMinutes = min(criticalMinutes, max(1, smartUsefulAccountLifetimeMinutes()/4))
+	}
 	targetCapacity := resource.ConsumeRCUPerMinute * float64(criticalMinutes+1)
 	capacityGap := math.Max(0, targetCapacity-smartAvailableCapacity(resource)-resource.PrelockedCapacityRCU)
 	capacityQuantity := int(math.Ceil(capacityGap / unit))
