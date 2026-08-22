@@ -286,6 +286,82 @@ func TestLowPriceReserveOrderUsesDedicatedHardPriceCeiling(t *testing.T) {
 	}
 }
 
+func TestPurchaseTaskStopsOrdinaryOrderWhenAccountTargetIsAlreadyReached(t *testing.T) {
+	var supplierCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v0/management/auth-files":
+			files := make([]map[string]any, 0, 51)
+			for index := 0; index < 51; index++ {
+				files = append(files, map[string]any{
+					"name": fmt.Sprintf("available-%d.json", index), "provider": "codex", "status": "active",
+					"auth_index": fmt.Sprintf("available-%d", index), "access_token": "token",
+				})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"files": files})
+		default:
+			supplierCalls.Add(1)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-account-target.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	enabled := true
+	if err := st.SaveManagerConfig(ctx, store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+		Supply: store.ManagerSupplyConfig{
+			Enabled: &enabled, SmartEnabled: &enabled, TargetAvailableAccounts: 45,
+			BaseURL: server.URL, Username: "customer", Password: "password", Product: "plus",
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	created, err := st.CreateSupplyPurchaseTask(ctx, store.SupplyPurchaseTask{
+		TaskID: "ordinary-capacity-drift", Source: "automatic", Product: "plus", TargetQuantity: 1,
+		Status: purchaseTaskStatusPending, TriggerReason: "supply_plenty_small_batch", MaxConcurrentOrders: 1,
+	})
+	if err != nil {
+		t.Fatalf("create ordinary task: %v", err)
+	}
+	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
+	stats, countErr := service.countAccountPoolStats(ctx, store.ManagerConfig{
+		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
+	})
+	if countErr != nil || stats.schedulable != 51 {
+		t.Fatalf("account stats=%#v err=%v", stats, countErr)
+	}
+	service.setSmartResource(SmartResource{
+		Enabled: true, GeneratedAtMS: time.Now().UnixMilli(), SnapshotFresh: true,
+		CapacitySource: smartCapacitySourceInspection, CapacitySnapshotAtMS: time.Now().UnixMilli(),
+		AvailableAccounts: 51, HealthLevel: smartHealthWarning, SuggestedAction: smartActionPrelock,
+		SuggestedQuantity: 1, CapacityGapRCU: 17.3,
+	})
+
+	if err := service.RunPurchaseTasks(ctx); err != nil {
+		t.Fatalf("run purchase tasks: %v", err)
+	}
+	task, found, err := st.GetSupplyPurchaseTask(ctx, created.TaskID)
+	if err != nil || !found {
+		t.Fatalf("get task found=%v err=%v", found, err)
+	}
+	if task.Status != purchaseTaskStatusCancelled || task.LastError != "ordinary account target reached; normal procurement stopped" {
+		t.Fatalf("task = %#v", task)
+	}
+	if supplierCalls.Load() != 0 {
+		t.Fatalf("supplier calls = %d, want 0", supplierCalls.Load())
+	}
+	orders, err := st.ListSupplyOrders(ctx, 10)
+	if err != nil || len(orders) != 0 {
+		t.Fatalf("orders = %#v err=%v", orders, err)
+	}
+}
+
 func TestManualNvtokensOrderIgnoresAutomaticPriceCeiling(t *testing.T) {
 	var estimateMaxUnitPrice any = "missing"
 	var createMaxUnitPrice any = "missing"

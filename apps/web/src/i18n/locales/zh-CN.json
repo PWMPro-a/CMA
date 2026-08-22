@@ -5691,6 +5691,7 @@
     "smart_reason_capacity_critical": "容量低于紧急水位",
     "smart_reason_low_water_staged_batch": "容量低于预警水位，按已验证实际缺口补货；计入在途并在导入巡检后重新计算",
     "smart_reason_capacity_healthy": "容量可支撑健康水位",
+    "smart_reason_account_target_reached_reserve_only": "可用账号已达到普通目标，停止常规补池，仅保留低价备用账号抢购",
     "smart_reason_concurrency_capacity_shortage": "当前并发槽位低于请求承载需求",
     "smart_reason_capacity_recovered_before_take": "提货前容量已恢复",
     "smart_reason_critical_take_confirm_pending": "紧急水位确认中",

@@ -2500,6 +2500,32 @@ func smartResourceEmergency(resource SmartResource) bool {
 	return resource.EmergencyShortage || smartEmergencyShortage(resource) || resource.SuggestedAction == smartActionEmergencyReplenish
 }
 
+// ordinaryAccountTargetReached keeps the regular capacity planner from buying
+// another full-price credential for a small healthy-waterline drift after the
+// configured account pool has already been filled. True warning/emergency
+// shortages still bypass this gate. Low-price reserve purchasing is evaluated
+// by its dedicated worker and does not use this decision.
+func ordinaryAccountTargetReached(cfg store.ManagerSupplyConfig, resource SmartResource, available int) bool {
+	return cfg.TargetAvailableAccounts > 0 &&
+		available >= cfg.TargetAvailableAccounts &&
+		resource.SnapshotFresh &&
+		!smartResourceEmergency(resource)
+}
+
+func applyOrdinaryAccountTargetGate(cfg store.ManagerSupplyConfig, resource *SmartResource, available int) bool {
+	if resource == nil || !ordinaryAccountTargetReached(cfg, *resource, available) {
+		return false
+	}
+	resource.AvailableAccounts = max(resource.AvailableAccounts, available)
+	resource.EmergencyShortage = false
+	resource.EmergencyReason = ""
+	resource.SuggestedAction = smartActionObserveDemand
+	resource.SuggestedQuantity = 0
+	resource.DecisionReason = "account_target_reached_reserve_only"
+	applySmartRefillProjection(cfg, resource)
+	return true
+}
+
 // smartPartialInspectionCapacityDeficitAllowed permits a bounded purchase
 // from the verified capacity lower bound when usability/quota evidence is
 // incomplete. It deliberately excludes missing snapshots and old evidence;

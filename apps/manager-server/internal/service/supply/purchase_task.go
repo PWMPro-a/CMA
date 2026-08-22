@@ -282,6 +282,31 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	resource := s.currentSmartResource(cfg.Supply)
+	if resource.SnapshotFresh && !smartResourceEmergency(resource) {
+		if active, found, activeErr := s.store.GetActiveAutomaticSupplyPurchaseTask(ctx); activeErr != nil {
+			return activeErr
+		} else if found && !isLowPriceReserveTrigger(active.TriggerReason) {
+			available, countErr := s.countAvailableAccounts(ctx, cfg)
+			if countErr != nil {
+				return countErr
+			}
+			if applyOrdinaryAccountTargetGate(cfg.Supply, &resource, available) {
+				cancelled, cancelErr := s.cancelSatisfiedOrdinaryAutomaticTask(ctx, cfg, resource, available)
+				if cancelErr != nil {
+					return cancelErr
+				}
+				if cancelled {
+					s.setSmartResource(resource)
+					s.updateCPAOverview(available, cfg.Supply.TargetAvailableAccounts)
+					openOrders, err = s.store.ListOpenSupplyOrders(ctx, maxTrackedOpenSupplyOrders)
+					if err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
 	openOrders, err = s.reconcileUnavailableSupplyOrders(ctx, cfg.Supply, openOrders)
 	if err != nil {
 		return err
@@ -416,6 +441,42 @@ func (s *Service) RunPurchaseTasks(ctx context.Context) error {
 		return s.createPurchaseTaskOrder(ctx, cfg, &task, quantity, openOrders, stats.activeOrderCount)
 	}
 	return nil
+}
+
+// cancelSatisfiedOrdinaryAutomaticTask runs while the caller already owns
+// runMu. It cancels only the ordinary automatic intent and reversible,
+// uncharged child reservations. Paid/importing orders remain intact so supplier
+// funds and delivered credentials are never discarded. The dedicated bargain
+// reserve task is intentionally left active.
+func (s *Service) cancelSatisfiedOrdinaryAutomaticTask(
+	ctx context.Context,
+	cfg store.ManagerConfig,
+	resource SmartResource,
+	available int,
+) (bool, error) {
+	if s == nil || s.store == nil || !ordinaryAccountTargetReached(cfg.Supply, resource, available) {
+		return false, nil
+	}
+	task, found, err := s.store.GetActiveAutomaticSupplyPurchaseTask(ctx)
+	if err != nil || !found {
+		return false, err
+	}
+	if task.Source != "automatic" || isLowPriceReserveTrigger(task.TriggerReason) {
+		return false, nil
+	}
+	nowMS := time.Now().UnixMilli()
+	task.Status = purchaseTaskStatusCancelled
+	task.CancelledAtMS = nowMS
+	task.NextAttemptAtMS = 0
+	task.LastError = "ordinary account target reached; normal procurement stopped"
+	if err := s.store.UpdateSupplyPurchaseTask(ctx, task); err != nil {
+		return false, err
+	}
+	if err := s.cancelReversiblePurchaseTaskOrders(ctx, task.TaskID, nowMS); err != nil {
+		return false, err
+	}
+	s.invalidateStatusCache()
+	return true, nil
 }
 
 // reconcileUnavailableSupplyOrders closes local reservations whose configured

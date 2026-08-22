@@ -5691,6 +5691,7 @@
     "smart_reason_capacity_critical": "Ёмкость ниже критического запаса",
     "smart_reason_low_water_staged_batch": "Ёмкость ниже порога предупреждения; пополняется подтверждённый расчётный дефицит, учитываются активные заказы, затем расчёт повторяется после импорта и проверки",
     "smart_reason_capacity_healthy": "Ёмкость покрывает целевой запас",
+    "smart_reason_account_target_reached_reserve_only": "Обычная цель по числу аккаунтов достигнута; стандартное пополнение остановлено, активно только резервное пополнение по низкой цене",
     "smart_reason_concurrency_capacity_shortage": "Число слотов параллелизма ниже текущей нагрузки",
     "smart_reason_capacity_recovered_before_take": "Ёмкость восстановилась перед получением",
     "smart_reason_critical_take_confirm_pending": "Ожидается подтверждение критического уровня",

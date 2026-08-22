@@ -5691,6 +5691,7 @@
     "smart_reason_capacity_critical": "Capacity is below the critical runway",
     "smart_reason_low_water_staged_batch": "Capacity is below the warning line; replenish the verified measured shortage, count in-flight supply, and recalculate after import inspection",
     "smart_reason_capacity_healthy": "Capacity covers the healthy runway",
+    "smart_reason_account_target_reached_reserve_only": "The regular account target is filled; normal replenishment is stopped and only bargain reserve purchasing remains active",
     "smart_reason_concurrency_capacity_shortage": "Concurrency slots are below current serving demand",
     "smart_reason_capacity_recovered_before_take": "Capacity recovered before pickup",
     "smart_reason_critical_take_confirm_pending": "Critical runway confirmation pending",

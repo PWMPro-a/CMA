@@ -1243,6 +1243,9 @@ func (s *Service) buildStatus(ctx context.Context, limit int) (Status, error) {
 	} else {
 		overview.CPADeficit = 0
 	}
+	if applyOrdinaryAccountTargetGate(cfg.Supply, &resource, overview.CPAAvailable) {
+		s.setSmartResource(resource)
+	}
 	applySmartTokenMetrics(&resource)
 	status := Status{
 		Config:          sanitizeConfig(cfg.Supply),
@@ -2963,6 +2966,14 @@ func (s *Service) run(ctx context.Context, allowCreate bool, manualQuantity int,
 				resource.SuggestedAction = smartActionSnapshotStale
 				resource.SuggestedQuantity = 0
 				resource.DecisionReason = reason
+				s.setSmartResource(resource)
+				s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
+				return nil
+			}
+			if applyOrdinaryAccountTargetGate(supplyCfg, &resource, available) {
+				if _, cancelErr := s.cancelSatisfiedOrdinaryAutomaticTask(ctx, cfg, resource, available); cancelErr != nil {
+					return cancelErr
+				}
 				s.setSmartResource(resource)
 				s.updateCPAOverview(available, supplyCfg.TargetAvailableAccounts)
 				return nil

@@ -3125,7 +3125,7 @@ func TestSmartAutomaticPurchaseTimingWaitDoesNotCreateOrder(t *testing.T) {
 		CPAConnection: store.ManagerCPAConnectionConfig{CPABaseURL: server.URL, ManagementKey: "management-key"},
 		Supply: store.ManagerSupplyConfig{
 			Enabled: &enabled, BaseURL: server.URL, Username: "customer", Password: "password",
-			Product: "oauth_30d", TargetAvailableAccounts: 1, ReplenishBatchSize: 10,
+			Product: "oauth_30d", TargetAvailableAccounts: 20, ReplenishBatchSize: 10,
 			PrelockMinQuantity: 1, PrelockMaxQuantity: 10,
 			HealthyMinutesTarget: 55, WarningMinutes: 40, CriticalMinutes: 25,
 			CriticalAvailableAccounts: 1, HealthyAvailableAccounts: 3,
@@ -4116,6 +4116,51 @@ func TestSmartPlentySmallBatchFollowsCapacityGap(t *testing.T) {
 		if got := smartPlentySmallBatchQuantity(cfg, test.quantity); got != test.want {
 			t.Fatalf("quantity=%d batch=%d, want %d", test.quantity, got, test.want)
 		}
+	}
+}
+
+func TestOrdinaryAccountTargetGateStopsOnlyNonEmergencyCapacityPurchases(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{TargetAvailableAccounts: 45}
+	resource := SmartResource{
+		SnapshotFresh:           true,
+		AvailableAccounts:       51,
+		HealthLevel:             smartHealthWarning,
+		SuggestedAction:         smartActionPrelock,
+		SuggestedQuantity:       1,
+		CapacityGapRCU:          17.3,
+		ConsumeRCUPerMinute:     8.33,
+		EstimatedSustainMinutes: 52.9,
+		EffectiveHealthyMinutes: 55,
+	}
+	if !applyOrdinaryAccountTargetGate(cfg, &resource, 51) {
+		t.Fatal("filled account pool should stop an ordinary non-emergency purchase")
+	}
+	if resource.SuggestedAction != smartActionObserveDemand || resource.SuggestedQuantity != 0 ||
+		resource.DecisionReason != "account_target_reached_reserve_only" || resource.CapacityGapRCU != 17.3 {
+		t.Fatalf("gated resource = %#v", resource)
+	}
+
+	belowTarget := resource
+	belowTarget.SuggestedAction = smartActionPrelock
+	belowTarget.SuggestedQuantity = 1
+	if applyOrdinaryAccountTargetGate(cfg, &belowTarget, 44) {
+		t.Fatal("account deficit must retain ordinary replenishment")
+	}
+
+	emergency := resource
+	emergency.EmergencyShortage = true
+	emergency.SuggestedAction = smartActionEmergencyReplenish
+	emergency.SuggestedQuantity = 5
+	if applyOrdinaryAccountTargetGate(cfg, &emergency, 51) {
+		t.Fatal("a real emergency shortage must bypass the account-target gate")
+	}
+
+	stale := resource
+	stale.SnapshotFresh = false
+	stale.SuggestedAction = smartActionPrelock
+	stale.SuggestedQuantity = 1
+	if applyOrdinaryAccountTargetGate(cfg, &stale, 51) {
+		t.Fatal("a stale snapshot must not cancel procurement")
 	}
 }
 
