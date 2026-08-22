@@ -6179,6 +6179,45 @@ func TestStoreReactivatesPaidAutomaticReleasePendingOrder(t *testing.T) {
 	}
 }
 
+func TestStoreReactivatesPaidNvtokensOrderCancelledByMissingDetailRoute(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "supply.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.CreateSupplyOrder(context.Background(), store.SupplyOrder{
+		OrderID: "paid-nv-ledger-order", SupplierID: "nv", Product: "plus", RequestedQuantity: 1,
+		Automatic: true, Status: "cancelled", RemoteStatus: "cancelled", ReadyQuantity: 1,
+		Progress: 100, ChargedFen: 2500, CompletedAtMS: time.Now().UnixMilli(),
+		LastError: "supply API returned HTTP 404: GET /api/workspace/extractions/paid-nv-ledger-order",
+	}); err != nil {
+		t.Fatalf("create cancelled paid NV order: %v", err)
+	}
+	order, found, err := st.ActivateNextUnsupportedSupplyRelease(context.Background())
+	if err != nil || !found || order.Status != "ready" || order.CompletedAtMS != 0 ||
+		order.ChargedFen != 2500 || order.ReadyQuantity != 1 {
+		t.Fatalf("paid NV ledger order was not reactivated: %#v found=%v err=%v", order, found, err)
+	}
+}
+
+func TestNvtokensPaidOrder404RemainsReconcilable(t *testing.T) {
+	enabled := true
+	platform := store.ManagerSupplyPlatformConfig{
+		ID: "nv", Type: managerconfigsvc.SupplyPlatformNvtokens, Enabled: &enabled, Product: "plus",
+	}
+	paid := store.SupplyOrder{
+		OrderID: "paid", SupplierID: "nv", Product: "plus", Status: "ready", RemoteStatus: "completed",
+		ReadyQuantity: 1, Progress: 100, ChargedFen: 2500,
+	}
+	if !nvtokensPaidOrderLookupUncertain(platform, paid) {
+		t.Fatal("paid ready NV order must remain open when the detail route returns 404")
+	}
+	paid.ChargedFen = 0
+	if nvtokensPaidOrderLookupUncertain(platform, paid) {
+		t.Fatal("unpaid NV order must not use paid-ledger reconciliation")
+	}
+}
+
 func TestLegacySupplyImportRepairConvertsAndVerifiesCPAFile(t *testing.T) {
 	var uploadCalls atomic.Int32
 	var uploadedName string

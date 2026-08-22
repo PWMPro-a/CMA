@@ -952,7 +952,7 @@ func (c *Client) nvtokensGetOrder(ctx context.Context, credentials Credentials, 
 	if len(statusURL) > 0 && strings.TrimSpace(statusURL[0]) != "" {
 		endpoint = strings.TrimSpace(statusURL[0])
 	}
-	value, status, err := c.doAuthenticated(ctx, credentials, http.MethodGet, endpoint, nil)
+	value, status, err := c.nvtokensReadExtraction(ctx, credentials, strings.TrimSpace(orderID), endpoint, defaultTimeout)
 	if err != nil {
 		return Order{}, err
 	}
@@ -1013,7 +1013,7 @@ func (c *Client) nvtokensTake(ctx context.Context, credentials Credentials, orde
 	if len(takeURL) > 0 && strings.TrimSpace(takeURL[0]) != "" {
 		endpoint = strings.TrimSpace(takeURL[0])
 	}
-	value, _, err := c.doAuthenticatedWithTimeout(ctx, credentials, http.MethodGet, endpoint, nil, nvtokensBatchTimeout)
+	value, _, err := c.nvtokensReadExtraction(ctx, credentials, strings.TrimSpace(orderID), endpoint, nvtokensBatchTimeout)
 	if err != nil {
 		return TakeResult{}, err
 	}
@@ -1045,6 +1045,116 @@ func (c *Client) nvtokensTake(ctx context.Context, credentials Credentials, orde
 	return result, nil
 }
 
+// nvtokensReadExtraction first uses the historical single-order route and then
+// falls back to the workspace purchase ledger. NV exposes paid accounts through
+// GET /api/workspace/extractions, but does not expose a compatible
+// /extractions/{id} route. Treating that route's 404 as a cancelled order hides
+// already-paid inventory, so both status reconciliation and Take share this
+// lookup path.
+func (c *Client) nvtokensReadExtraction(
+	ctx context.Context,
+	credentials Credentials,
+	orderID string,
+	endpoint string,
+	requestTimeout time.Duration,
+) (any, int, error) {
+	value, status, err := c.doAuthenticatedWithTimeout(ctx, credentials, http.MethodGet, endpoint, nil, requestTimeout)
+	if err == nil || !httpErrorStatus(err, http.StatusNotFound) || strings.TrimSpace(orderID) == "" {
+		return value, status, err
+	}
+	directErr := err
+	if recovered, recoveredStatus, found, lookupErr := c.nvtokensLookupExtraction(ctx, credentials, orderID, requestTimeout); lookupErr != nil {
+		return nil, recoveredStatus, lookupErr
+	} else if found {
+		return recovered, recoveredStatus, nil
+	}
+	return nil, status, directErr
+}
+
+func (c *Client) nvtokensLookupExtraction(
+	ctx context.Context,
+	credentials Credentials,
+	orderID string,
+	requestTimeout time.Duration,
+) (any, int, bool, error) {
+	orderID = strings.TrimSpace(orderID)
+	queryEndpoint := "/api/workspace/extractions?page=1&limit=100&q=" + url.QueryEscape(orderID)
+	value, status, err := c.doAuthenticatedWithTimeout(ctx, credentials, http.MethodGet, queryEndpoint, nil, requestTimeout)
+	if err != nil {
+		return nil, status, false, err
+	}
+	if matches := nvtokensMatchingExtractions(value, orderID, false); len(matches) > 0 {
+		return map[string]any{"orders": matches}, status, true, nil
+	}
+
+	// Multi-account NV purchases are represented by several extraction rows
+	// sharing one extraction_batch_id. The list API supports batch_id even though
+	// its free-text q filter does not, so a persisted batch ID can be recovered
+	// after a Manager restart without purchasing the accounts again.
+	batchEndpoint := "/api/workspace/extractions?page=1&limit=100&batch_id=" + url.QueryEscape(orderID)
+	value, status, err = c.doAuthenticatedWithTimeout(ctx, credentials, http.MethodGet, batchEndpoint, nil, requestTimeout)
+	if err != nil {
+		return nil, status, false, err
+	}
+	matches := nvtokensMatchingExtractions(value, orderID, true)
+	for page := 2; page <= 10 && nvtokensExtractionPageHasNext(value, page-1); page++ {
+		pageEndpoint := "/api/workspace/extractions?page=" + strconv.Itoa(page) +
+			"&limit=100&batch_id=" + url.QueryEscape(orderID)
+		pageValue, pageStatus, pageErr := c.doAuthenticatedWithTimeout(ctx, credentials, http.MethodGet, pageEndpoint, nil, requestTimeout)
+		status = pageStatus
+		if pageErr != nil {
+			return nil, status, false, pageErr
+		}
+		matches = append(matches, nvtokensMatchingExtractions(pageValue, orderID, true)...)
+		value = pageValue
+	}
+	if len(matches) == 0 {
+		return nil, status, false, nil
+	}
+	return map[string]any{"orders": matches}, status, true, nil
+}
+
+func nvtokensExtractionPageHasNext(value any, currentPage int) bool {
+	root, ok := nvtokensObject(value)
+	if !ok {
+		return false
+	}
+	pagination, ok := nvtokensObject(root["pagination"])
+	if !ok {
+		return false
+	}
+	if hasBoolField(pagination, "has_next") {
+		return boolValue(pagination, "has_next")
+	}
+	totalPages := intValue(pagination, "total_pages", "totalPages")
+	return totalPages > currentPage
+}
+
+func nvtokensMatchingExtractions(value any, orderID string, matchBatch bool) []any {
+	orderID = strings.TrimSpace(orderID)
+	if orderID == "" {
+		return nil
+	}
+	objects := nvtokensResultObjects(value)
+	result := make([]any, 0, len(objects))
+	for _, object := range objects {
+		candidate := strings.TrimSpace(stringValue(object, "id", "order_id", "orderId", "extraction_id", "extractionId"))
+		if matchBatch {
+			candidate = strings.TrimSpace(stringValue(object,
+				"extraction_batch_id", "extractionBatchId", "batch_id", "batchId"))
+		}
+		if candidate == orderID {
+			result = append(result, object)
+		}
+	}
+	return result
+}
+
+func httpErrorStatus(err error, status int) bool {
+	var httpErr *HTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == status
+}
+
 func nvtokensResultAccounts(value any) []json.RawMessage {
 	collector := nvtokensAccountCollector{seen: make(map[string]struct{})}
 	collectNvtokensResultEntries(value, &collector)
@@ -1058,6 +1168,7 @@ func nvtokensResultAccounts(value any) []json.RawMessage {
 func nvtokensBatchOrderID(value any) string {
 	results := nvtokensResultObjects(value)
 	unique := make(map[string]struct{})
+	batchIDs := make(map[string]struct{})
 	for _, result := range results {
 		if nvtokensResultFailed(result) {
 			continue
@@ -1067,12 +1178,28 @@ func nvtokensBatchOrderID(value any) string {
 		if id != "" {
 			unique[id] = struct{}{}
 		}
+		batchID := strings.TrimSpace(stringValue(order,
+			"extraction_batch_id", "extractionBatchId", "batch_id", "batchId"))
+		if batchID == "" {
+			batchID = strings.TrimSpace(stringValue(result,
+				"extraction_batch_id", "extractionBatchId", "batch_id", "batchId"))
+		}
+		if batchID != "" {
+			batchIDs[batchID] = struct{}{}
+		}
 	}
-	if len(unique) != 1 {
-		return ""
+	if len(unique) == 1 {
+		for id := range unique {
+			return id
+		}
 	}
-	for id := range unique {
-		return id
+	// A multi-account purchase has one remote extraction per account. Persist
+	// the shared batch identifier rather than a local create-* id so the paid
+	// delivery remains discoverable through the ledger after a restart.
+	if len(batchIDs) == 1 {
+		for id := range batchIDs {
+			return id
+		}
 	}
 	return ""
 }
@@ -1149,6 +1276,12 @@ func nvtokensResultOrderItems(value any, fallbackChargedFen int64, accountCount 
 			remaining, hasRemaining = int64ValueOK(result,
 				"remaining_seconds", "remainingSeconds", "remaining_valid_seconds", "remainingValidSeconds")
 		}
+		if !hasRemaining {
+			remaining, hasRemaining = nvtokensWarrantyRemainingSeconds(order)
+		}
+		if !hasRemaining {
+			remaining, hasRemaining = nvtokensWarrantyRemainingSeconds(result)
+		}
 		items = append(items, OrderItem{
 			RemainingSeconds: remaining,
 			HasRemaining:     hasRemaining,
@@ -1185,6 +1318,26 @@ func nvtokensResultOrderItems(value any, fallbackChargedFen int64, accountCount 
 	return nil
 }
 
+func nvtokensWarrantyRemainingSeconds(value map[string]any) (int64, bool) {
+	if value == nil {
+		return 0, false
+	}
+	if expiresAtMS, ok := int64ValueOK(value,
+		"warranty_expires_at_ms", "warrantyExpiresAtMs", "warranty_until_ms", "warrantyUntilMs"); ok {
+		return max(int64(0), (expiresAtMS-time.Now().UnixMilli()+999)/1000), true
+	}
+	text := strings.TrimSpace(stringValue(value,
+		"warranty_until", "warrantyUntil", "warranty_expires_at", "warrantyExpiresAt"))
+	if text == "" {
+		return 0, false
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, text)
+	if err != nil {
+		return 0, false
+	}
+	return max(int64(0), (expiresAt.UnixMilli()-time.Now().UnixMilli()+999)/1000), true
+}
+
 func splitFenShare(total int64, count int, ordinal int) int64 {
 	if total <= 0 || count <= 0 || ordinal < 0 || ordinal >= count {
 		return 0
@@ -1201,7 +1354,7 @@ func nvtokensResultObjects(value any) []map[string]any {
 	if !ok {
 		return nil
 	}
-	for _, key := range []string{"results", "items"} {
+	for _, key := range []string{"results", "items", "orders"} {
 		list, ok := root[key].([]any)
 		if !ok {
 			continue
@@ -1266,7 +1419,7 @@ func collectNvtokensResultEntries(value any, collector *nvtokensAccountCollector
 		return
 	}
 	collectNvtokensResultObject(root, collector)
-	for _, key := range []string{"results", "items"} {
+	for _, key := range []string{"results", "items", "orders"} {
 		list, ok := root[key].([]any)
 		if !ok {
 			continue

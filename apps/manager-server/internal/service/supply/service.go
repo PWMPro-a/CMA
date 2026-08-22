@@ -1601,7 +1601,8 @@ func (s *Service) refreshActiveOrderRemoteStatus(ctx context.Context, cfg store.
 	credentials := marketplaceSellerCredentials(platform, marketplaceSellerSelectionFromOrder(*order))
 	remote, err := s.supplyClient.GetOrder(ctx, credentials, order.OrderID, order.StatusURL)
 	if err != nil {
-		if isHTTPStatus(err, http.StatusConflict) || isHTTPStatus(err, http.StatusNotFound) {
+		if isHTTPStatus(err, http.StatusConflict) ||
+			(isHTTPStatus(err, http.StatusNotFound) && !nvtokensPaidOrderLookupUncertain(platform, *order)) {
 			return s.cancelOrder(ctx, order, err)
 		}
 		return s.updateOrderError(ctx, order, err, cfg.Supply)
@@ -3330,7 +3331,8 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	credentials := marketplaceSellerCredentials(platform, marketplaceSellerSelectionFromOrder(order))
 	remote, err := s.supplyClient.GetOrder(ctx, credentials, order.OrderID, order.StatusURL)
 	if err != nil {
-		if isHTTPStatus(err, http.StatusConflict) || isHTTPStatus(err, http.StatusNotFound) {
+		if isHTTPStatus(err, http.StatusConflict) ||
+			(isHTTPStatus(err, http.StatusNotFound) && !nvtokensPaidOrderLookupUncertain(platform, order)) {
 			return s.cancelOrder(ctx, &order, err)
 		}
 		return s.updateOrderError(ctx, &order, err, cfg.Supply)
@@ -10579,6 +10581,17 @@ func (s *Service) cancelOrder(ctx context.Context, order *store.SupplyOrder, err
 	order.NextPollAtMS = 0
 	order.CompletedAtMS = time.Now().UnixMilli()
 	return s.store.UpdateSupplyOrder(ctx, *order)
+}
+
+// NV's paid purchase ledger is authoritative even when an order-shaped route
+// returns 404. A charged order with ready quantity must remain open for ledger
+// reconciliation; marking it cancelled would allow another purchase while the
+// original account is still sitting in the supplier workspace.
+func nvtokensPaidOrderLookupUncertain(platform store.ManagerSupplyPlatformConfig, order store.SupplyOrder) bool {
+	return strings.EqualFold(strings.TrimSpace(platform.Type), managerconfigsvc.SupplyPlatformNvtokens) &&
+		supplyOrderHasPaymentEvidence(order) &&
+		(order.ReadyQuantity > 0 || order.Progress >= 100 || isReadyForTake(order.RemoteStatus)) &&
+		order.ReleasedFen < order.ChargedFen && order.ItemCount == 0 && order.ImportedCount == 0
 }
 
 // failUndeliverableOrder keeps a paid or fulfilled supplier delivery open for

@@ -136,6 +136,88 @@ func TestNvtokensUsesSessionCookieAndImportsCPABundle(t *testing.T) {
 	}
 }
 
+func TestNvtokensPaidExtractionFallsBackToWorkspaceLedger(t *testing.T) {
+	const orderID = "paid-order-ledger"
+	var directCalls atomic.Int32
+	var ledgerCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if cookie, _ := r.Cookie(nvtokensSessionCookie); cookie == nil || cookie.Value != "session-token" {
+			t.Fatalf("session cookie = %#v", cookie)
+		}
+		switch r.URL.Path {
+		case "/api/workspace/extractions/" + orderID:
+			directCalls.Add(1)
+			http.NotFound(w, r)
+		case "/api/workspace/extractions":
+			ledgerCalls.Add(1)
+			if got := r.URL.Query().Get("q"); got != orderID {
+				t.Fatalf("ledger q = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"orders":[{"id":"paid-order-ledger","amount_cents":2500,"status":"paid","warranty_until":"2099-01-01T00:00:00Z","card_payload":{"sub2api_account":{"type":"oauth","platform":"openai","credentials":{"email":"paid@example.com","access_token":"access-paid","refresh_token":"refresh-paid","account_id":"account-paid"}}}}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	credentials := Credentials{PlatformType: nvtokensPlatform, BaseURL: server.URL, Token: "session-token"}
+	order, err := client.GetOrder(context.Background(), credentials, orderID)
+	if err != nil || order.ID != orderID || order.Status != "completed" || order.ReadyQuantity != 1 || order.ChargedFen != 2500 {
+		t.Fatalf("ledger order = %#v err=%v", order, err)
+	}
+	taken, err := client.Take(context.Background(), credentials, orderID)
+	if err != nil || len(taken.Accounts) != 1 || len(taken.OrderItems) != 1 ||
+		taken.OrderItems[0].ChargedFen != 2500 || !taken.OrderItems[0].HasRemaining {
+		t.Fatalf("ledger take = %#v err=%v", taken, err)
+	}
+	if directCalls.Load() != 1 || ledgerCalls.Load() != 1 {
+		t.Fatalf("calls direct=%d ledger=%d", directCalls.Load(), ledgerCalls.Load())
+	}
+}
+
+func TestNvtokensPaidBatchFallsBackToBatchLedgerFilter(t *testing.T) {
+	const batchID = "batch-paid-ledger"
+	var batchFilterCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/workspace/extractions/"+batchID:
+			http.NotFound(w, r)
+		case r.URL.Path == "/api/workspace/extractions" && r.URL.Query().Get("q") == batchID:
+			_, _ = w.Write([]byte(`{"orders":[],"pagination":{"total":0}}`))
+		case r.URL.Path == "/api/workspace/extractions" && r.URL.Query().Get("batch_id") == batchID:
+			batchFilterCalls.Add(1)
+			if r.URL.Query().Get("page") == "1" {
+				_, _ = w.Write([]byte(`{"orders":[
+					{"id":"order-a","extraction_batch_id":"batch-paid-ledger","amount_cents":2588,"status":"paid","card_payload":{"sub2api_account":{"type":"oauth","platform":"openai","credentials":{"access_token":"access-a","refresh_token":"refresh-a","account_id":"account-a"}}}}
+				],"pagination":{"page":1,"total_pages":2,"has_next":true}}`))
+			} else {
+				_, _ = w.Write([]byte(`{"orders":[
+					{"id":"order-b","extraction_batch_id":"batch-paid-ledger","amount_cents":2588,"status":"paid","card_payload":{"sub2api_account":{"type":"oauth","platform":"openai","credentials":{"access_token":"access-b","refresh_token":"refresh-b","account_id":"account-b"}}}}
+				],"pagination":{"page":2,"total_pages":2,"has_next":false}}`))
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.Client())
+	credentials := Credentials{PlatformType: nvtokensPlatform, BaseURL: server.URL, Token: "session-token"}
+	order, err := client.GetOrder(context.Background(), credentials, batchID)
+	if err != nil || order.ID != batchID || order.Status != "completed" || order.ReadyQuantity != 2 || order.ChargedFen != 5176 {
+		t.Fatalf("batch ledger order = %#v err=%v", order, err)
+	}
+	taken, err := client.Take(context.Background(), credentials, batchID)
+	if err != nil || len(taken.Accounts) != 2 || len(taken.OrderItems) != 2 ||
+		taken.OrderItems[0].ChargedFen != 2588 || taken.OrderItems[1].ChargedFen != 2588 {
+		t.Fatalf("batch ledger take = %#v err=%v", taken, err)
+	}
+	if batchFilterCalls.Load() != 2 {
+		t.Fatalf("batch filter calls = %d", batchFilterCalls.Load())
+	}
+}
+
 func TestNvtokensInventoryUsesMatchedQuantityForPartialQuote(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/workspace/extractions/estimate" {
@@ -229,15 +311,15 @@ func TestNvtokensBatchResultsCaptureRemoteOrderIDsAndActualPrices(t *testing.T) 
 	if err := json.Unmarshal([]byte(`{
 		"summary":{"requested":3,"extracted":2,"failed":1},
 		"results":[
-			{"status":"extracted","order":{"id":"order-a","amount_cents":1680},"account_json":{"type":"codex","access_token":"access-a","refresh_token":"refresh-a"}},
+			{"status":"extracted","order":{"id":"order-a","extraction_batch_id":"batch-a","amount_cents":1680},"account_json":{"type":"codex","access_token":"access-a","refresh_token":"refresh-a"}},
 			{"status":"failed","message":"inventory changed"},
-			{"status":"extracted","order":{"id":"order-b","buyer_total_cents":2250},"account_json":{"type":"codex","access_token":"access-b","refresh_token":"refresh-b"}}
+			{"status":"extracted","order":{"id":"order-b","extraction_batch_id":"batch-a","buyer_total_cents":2250},"account_json":{"type":"codex","access_token":"access-b","refresh_token":"refresh-b"}}
 		]
 	}`), &batch); err != nil {
 		t.Fatalf("decode batch result: %v", err)
 	}
-	if got := nvtokensBatchOrderID(batch); got != "" {
-		t.Fatalf("multi-order batch id = %q, want local idempotency id", got)
+	if got := nvtokensBatchOrderID(batch); got != "batch-a" {
+		t.Fatalf("multi-order batch id = %q, want shared extraction batch id", got)
 	}
 	if got := nvtokensBatchChargedFen(batch); got != 3930 {
 		t.Fatalf("multi-order batch charged = %d", got)

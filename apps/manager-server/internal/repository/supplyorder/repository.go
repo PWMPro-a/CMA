@@ -264,7 +264,10 @@ func (r *repository) ActivateNextLegacyRepair(ctx context.Context) (model.Supply
 
 // ActivateNextUnsupportedRelease restores orders that were only released in the
 // local database even though supplier inventory may still be reserved or paid.
-// Those orders must be reconciled with the supplier and picked up when ready.
+// It also repairs the historical NV failure mode where a paid ledger entry was
+// marked cancelled because the unsupported /extractions/{id} route returned
+// 404. Those orders must be reconciled with the supplier and picked up when
+// ready.
 func (r *repository) ActivateNextUnsupportedRelease(ctx context.Context) (model.SupplyOrder, bool, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -275,9 +278,14 @@ func (r *repository) ActivateNextUnsupportedRelease(ctx context.Context) (model.
 	var orderID string
 	err = tx.QueryRowContext(ctx, `select o.order_id from supply_orders o
 		where o.automatic = 1
-			and o.status = 'released'
-			and (o.remote_status = 'release_unsupported'
-				or (o.remote_status = 'auto_release_pending' and o.charged_fen > o.released_fen))
+			and ((o.status = 'released'
+				and (o.remote_status = 'release_unsupported'
+					or (o.remote_status = 'auto_release_pending' and o.charged_fen > o.released_fen)))
+				or (o.status = 'cancelled'
+					and o.remote_status = 'cancelled'
+					and o.charged_fen > o.released_fen
+					and o.ready_quantity > 0
+					and o.last_error like '%/api/workspace/extractions/%'))
 			and o.released_fen = 0
 			and o.item_count = 0
 			and o.imported_count = 0
@@ -298,9 +306,14 @@ func (r *repository) ActivateNextUnsupportedRelease(ctx context.Context) (model.
 		updated_at_ms = ?
 		where order_id = ?
 			and automatic = 1
-			and status = 'released'
-			and (remote_status = 'release_unsupported'
-				or (remote_status = 'auto_release_pending' and charged_fen > released_fen))
+			and ((status = 'released'
+				and (remote_status = 'release_unsupported'
+					or (remote_status = 'auto_release_pending' and charged_fen > released_fen)))
+				or (status = 'cancelled'
+					and remote_status = 'cancelled'
+					and charged_fen > released_fen
+					and ready_quantity > 0
+					and last_error like '%/api/workspace/extractions/%'))
 			and released_fen = 0
 			and item_count = 0
 			and imported_count = 0`, now, orderID)
