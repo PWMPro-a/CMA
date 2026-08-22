@@ -516,7 +516,8 @@ func (s *Service) prepareAuthFileMutation(
 	if err != nil {
 		return authFileOwnershipMutation{}, err
 	}
-	if r != nil && r.Method == http.MethodDelete && len(prepared.deletedIdentities) == 0 && len(prepared.fileNames) > 0 {
+	if r != nil && r.Method == http.MethodDelete && len(prepared.deletedIdentities) == 0 &&
+		(prepared.clearAll || len(prepared.fileNames) > 0) {
 		prepared, err = s.captureDeletedCredentialIdentities(ctx, setup, prepared)
 		if err != nil {
 			return authFileOwnershipMutation{}, err
@@ -544,9 +545,11 @@ func (s *Service) captureDeletedCredentialIdentities(
 	}
 	seen := make(map[string]struct{})
 	for _, file := range files {
-		if _, ok := selectors[strings.TrimSpace(file.Name)]; !ok {
-			if _, ok = selectors[strings.TrimSpace(file.ID)]; !ok {
-				continue
+		if !mutation.clearAll {
+			if _, ok := selectors[strings.TrimSpace(file.Name)]; !ok {
+				if _, ok = selectors[strings.TrimSpace(file.ID)]; !ok {
+					continue
+				}
 			}
 		}
 		identity := model.CredentialIdentity{

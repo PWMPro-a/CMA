@@ -91,6 +91,30 @@ func TestDeleteCredentialRemovesOnlyMatchingCooldown(t *testing.T) {
 	}
 }
 
+func TestDeleteCredentialWithAuthIndexAlsoRemovesLegacyFallbackCooldown(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "cleanup-legacy.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	now := int64(1_800_000_000_000)
+	if _, err := st.SQLDB().ExecContext(ctx, `insert into quota_cooldowns (
+		auth_file_name, account_snapshot, provider, recover_at_ms, owner, pre_disabled_state, status,
+		disabled_at_ms, created_at_ms, updated_at_ms
+	) values (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+		"shared.json", "elise@example.com", "codex", now+60_000,
+		model.QuotaCooldownOwnerUsage429, model.QuotaCooldownStatusActive, now, now, now); err != nil {
+		t.Fatalf("seed legacy cooldown: %v", err)
+	}
+	deleted, err := st.QuotaCooldowns.DeleteCredential(ctx, model.CredentialIdentity{
+		AuthFileName: "shared.json", AuthIndex: "new-auth-index", Provider: "codex", AccountSnapshot: "elise@example.com",
+	})
+	if err != nil || deleted != 1 {
+		t.Fatalf("deleted=%d err=%v, want legacy fallback cooldown removed", deleted, err)
+	}
+}
+
 func TestUpsertActiveUpgradesFallbackIdentityAndPreservesOwnershipOrigin(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {

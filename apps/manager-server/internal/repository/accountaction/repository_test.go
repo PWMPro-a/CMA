@@ -134,6 +134,23 @@ func TestDeleteCredentialRemovesOnlyMatchingCandidate(t *testing.T) {
 	}
 }
 
+func TestDeleteCredentialWithAuthIndexAlsoRemovesLegacyFallbackCandidate(t *testing.T) {
+	ctx := context.Background()
+	st := testutil.NewStore(t, testutil.NewConfig(t))
+	if _, err := st.AccountActions.Upsert(ctx, model.AccountActionCandidateUpsert{
+		ActionType: model.AccountActionTypeReauth, Provider: "codex", AuthFileName: "shared.json",
+		AccountSnapshot: "elise@example.com", ReasonCode: "invalid_401", Reason: "expired",
+	}); err != nil {
+		t.Fatalf("seed legacy candidate: %v", err)
+	}
+	deleted, err := st.AccountActions.DeleteCredential(ctx, model.CredentialIdentity{
+		AuthFileName: "shared.json", AuthIndex: "new-auth-index", Provider: "codex", AccountSnapshot: "elise@example.com",
+	})
+	if err != nil || deleted != 1 {
+		t.Fatalf("deleted=%d err=%v, want legacy fallback candidate removed", deleted, err)
+	}
+}
+
 func TestUpsertKeepsDifferentReasonCodesSeparate(t *testing.T) {
 	ctx := context.Background()
 	cfg := testutil.NewConfig(t)

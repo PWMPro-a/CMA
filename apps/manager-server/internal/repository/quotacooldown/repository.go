@@ -294,8 +294,17 @@ func (r *repository) DeleteCredential(ctx context.Context, identity model.Creden
 	args := []any{fileName}
 	where := `auth_file_name = ?`
 	if authIndex := strings.TrimSpace(identity.AuthIndex); authIndex != "" {
-		where += ` and lower(trim(coalesce(auth_index, ''))) = lower(trim(?))`
+		where += ` and (lower(trim(coalesce(auth_index, ''))) = lower(trim(?))`
 		args = append(args, authIndex)
+		provider := normalizeProvider(identity.Provider)
+		snapshot := strings.TrimSpace(identity.AccountSnapshot)
+		if provider != "" && snapshot != "" {
+			where += ` or (trim(coalesce(auth_index, '')) = ''
+				and lower(trim(coalesce(provider, ''))) = lower(trim(?))
+				and lower(trim(coalesce(account_snapshot, ''))) = lower(trim(?)))`
+			args = append(args, provider, snapshot)
+		}
+		where += `)`
 	} else {
 		provider := normalizeProvider(identity.Provider)
 		snapshot := strings.TrimSpace(identity.AccountSnapshot)
