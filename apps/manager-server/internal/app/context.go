@@ -176,7 +176,11 @@ func fromExisting(
 			managerConfigService,
 			codexinspectionsvc.ServiceOptions{AuthFileMutationCoordinator: authFileMutationCoordinator},
 		),
-		CodexQuotaService: codexquotasvc.New(st, managerConfigService),
+		CodexQuotaService: codexquotasvc.NewWithMutationCoordinator(
+			st,
+			managerConfigService,
+			authFileMutationCoordinator,
+		),
 		ContainerOpsService: containeropssvc.New(containeropssvc.Options{
 			AgentURL:   cfg.ContainerOpsAgentURL,
 			AgentToken: cfg.ContainerOpsAgentToken,

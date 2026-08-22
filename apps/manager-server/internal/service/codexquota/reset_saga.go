@@ -34,7 +34,14 @@ func (s *Service) consume(
 				result.UsageBefore = usage.response.Body
 				observed, needsReset := codexUsageLimitState(usage.response.Body, codexQuotaRecoveryThreshold)
 				if observed && !needsReset {
-					return s.finishAlreadyAvailable(ctx, operation, result, addWarning(warnings, "quota_already_available"))
+					return s.finishAlreadyAvailable(
+						ctx,
+						setup,
+						file,
+						operation,
+						result,
+						addWarning(warnings, "quota_already_available"),
+					)
 				}
 			}
 		}
@@ -111,6 +118,8 @@ func (s *Service) consume(
 
 func (s *Service) finishAlreadyAvailable(
 	ctx context.Context,
+	setup store.Setup,
+	file cpaauthfiles.File,
 	operation model.CodexQuotaOperation,
 	result ResetResult,
 	warnings []string,
@@ -119,14 +128,14 @@ func (s *Service) finishAlreadyAvailable(
 	operation.Consumed = &consumed
 	result.Verified = true
 	result.UsageAfter = result.UsageBefore
-	operation.State = model.CodexQuotaOperationStateCompleted
+	operation.State = model.CodexQuotaOperationStateUpstreamAccepted
 	operation.LastError = ""
 	var err error
 	operation, err = s.persist(ctx, operation, result, warnings)
 	if err != nil {
 		return OperationResponse{}, err
 	}
-	return operationResponse(operation), nil
+	return s.completePostConsume(ctx, setup, file, operation, result, warnings)
 }
 
 func (s *Service) resumeUnknownConsume(
@@ -234,6 +243,15 @@ func (s *Service) finishAfterLocalReset(
 		warnings = addWarning(warnings, "reset_credits_after_unavailable")
 	} else {
 		result.ResetCreditsAfter = credits.Body
+	}
+	if err := s.releaseOwnedQuotaCooldown(ctx, setup, file); err != nil {
+		operation.State = model.CodexQuotaOperationStateLocallyRecovered
+		operation.LastError = truncate(err.Error(), 2048)
+		operation, err = s.persist(ctx, operation, result, addWarning(warnings, "quota_cooldown_release_failed"))
+		if err != nil {
+			return OperationResponse{}, err
+		}
+		return operationResponse(operation), nil
 	}
 	operation.State = model.CodexQuotaOperationStateCompleted
 	operation.LastError = ""

@@ -3655,6 +3655,76 @@ describe('AccountsPage replacement flows', () => {
     expect(resetAction.props.disabled).toBe(true);
   });
 
+  it('allows a CPAMP quota-cooled Codex account to consume its reset credit', async () => {
+    const file = {
+      ...makeCodexFile('codex-cooldown.json', 'auth-cooldown', 'cooldown@example.com'),
+      disabled: true,
+    } as AuthFileItem;
+    mocks.files = [file];
+    mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      windows: [],
+      rateLimitResetCreditsAvailableCount: 1,
+      rateLimitResetCredits: [],
+    });
+    mocks.getActiveQuotaCooldowns.mockResolvedValue([
+      {
+        authFileName: file.name,
+        authIndex: 'auth-cooldown',
+        provider: 'codex',
+        owner: 'cpamp_usage_429',
+        recoverAtMs: Date.now() + 60 * 60 * 1000,
+      },
+    ]);
+    vi.spyOn(CODEX_CONFIG, 'resetQuota').mockResolvedValue({
+      ...makeCodexQuotaData(),
+      rateLimitResetCreditsAvailableCount: 0,
+    });
+
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+
+    const resetAction = renderer.root.findByProps({ 'data-account-list-reset-action': 'true' });
+    expect(mocks.getActiveQuotaCooldowns).toHaveBeenCalledTimes(1);
+    expect(resetAction.props.disabled).toBe(false);
+
+    await act(async () => {
+      resetAction.props.onClick({ stopPropagation: vi.fn() });
+    });
+    const confirmation = mocks.showConfirmation.mock.calls[0]?.[0] as {
+      onConfirm: () => Promise<void>;
+    };
+    const loadFilesBeforeReset = mocks.loadFiles.mock.calls.length;
+    const cooldownLoadsBeforeReset = mocks.getActiveQuotaCooldowns.mock.calls.length;
+    await act(async () => {
+      await confirmation.onConfirm();
+    });
+
+    expect(mocks.loadFiles).toHaveBeenCalledTimes(loadFilesBeforeReset + 1);
+    expect(mocks.getActiveQuotaCooldowns).toHaveBeenCalledTimes(cooldownLoadsBeforeReset + 1);
+  });
+
+  it('keeps manually disabled Codex accounts protected from quota reset', async () => {
+    const file = {
+      ...makeCodexFile('codex-manual-disabled.json', 'auth-manual', 'manual@example.com'),
+      disabled: true,
+    } as AuthFileItem;
+    mocks.files = [file];
+    mocks.quotaState.codexQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      windows: [],
+      rateLimitResetCreditsAvailableCount: 1,
+      rateLimitResetCredits: [],
+    });
+
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+
+    const resetAction = renderer.root.findByProps({ 'data-account-list-reset-action': 'true' });
+    expect(mocks.getActiveQuotaCooldowns).toHaveBeenCalledTimes(1);
+    expect(resetAction.props.disabled).toBe(true);
+  });
+
   it('selects account cards by row click while selection mode is active', async () => {
     const renderer = await renderAccountsPage();
 

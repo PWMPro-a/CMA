@@ -24,6 +24,16 @@ type authFileFinder interface {
 	Find(ctx context.Context, baseURL string, managementKey string, fileName string, authIndex string) (cpaauthfiles.File, bool, error)
 }
 
+type authFileStatusMutator interface {
+	ResolveVerifiedStatusMutationTarget(ctx context.Context, baseURL string, managementKey string, identity cpaauthfiles.Identity) (cpaauthfiles.StatusMutationTarget, error)
+	PatchDisabledTarget(ctx context.Context, baseURL string, managementKey string, target cpaauthfiles.StatusMutationTarget, disabled bool) error
+}
+
+type quotaCooldownRepository interface {
+	ListActive(ctx context.Context) ([]model.QuotaCooldown, error)
+	MarkRecovered(ctx context.Context, id int64, recoveredAtMS int64) error
+}
+
 type quotaGateway interface {
 	usage(ctx context.Context, setup store.Setup, authIndex string, accountID string) (apiCallResult, error)
 	resetCredits(ctx context.Context, setup store.Setup, authIndex string, accountID string) (apiCallResult, error)
@@ -36,24 +46,53 @@ type setupResolver interface {
 }
 
 type Service struct {
-	operations   quotaoperationrepo.Repository
-	setupService setupResolver
-	authFiles    authFileFinder
-	gateway      quotaGateway
-	locks        *accountLocks
+	operations        quotaoperationrepo.Repository
+	setupService      setupResolver
+	authFiles         authFileFinder
+	authStatuses      authFileStatusMutator
+	gateway           quotaGateway
+	quotaCooldowns    quotaCooldownRepository
+	authFileMutations *cpaauthfiles.MutationCoordinator
+	locks             *accountLocks
 }
 
 func New(st *store.Store, setupService *managerconfig.Service, clients ...*http.Client) *Service {
+	return NewWithMutationCoordinator(st, setupService, nil, clients...)
+}
+
+func NewWithMutationCoordinator(
+	st *store.Store,
+	setupService *managerconfig.Service,
+	coordinator *cpaauthfiles.MutationCoordinator,
+	clients ...*http.Client,
+) *Service {
+	if st == nil {
+		if coordinator == nil {
+			coordinator = cpaauthfiles.NewMutationCoordinator()
+		}
+		return &Service{
+			setupService:      setupService,
+			authFileMutations: coordinator,
+			locks:             newAccountLocks(),
+		}
+	}
 	var client *http.Client
 	if len(clients) > 0 {
 		client = clients[0]
 	}
+	if coordinator == nil {
+		coordinator = cpaauthfiles.NewMutationCoordinator()
+	}
+	authFiles := cpaauthfiles.New(client, defaultOperationTimeout)
 	return &Service{
-		operations:   st.CodexQuotaOperations,
-		setupService: setupService,
-		authFiles:    cpaauthfiles.New(client, defaultOperationTimeout),
-		gateway:      newCPAAdapter(client),
-		locks:        newAccountLocks(),
+		operations:        st.CodexQuotaOperations,
+		setupService:      setupService,
+		authFiles:         authFiles,
+		authStatuses:      authFiles,
+		gateway:           newCPAAdapter(client),
+		quotaCooldowns:    st.QuotaCooldowns,
+		authFileMutations: coordinator,
+		locks:             newAccountLocks(),
 	}
 }
 

@@ -78,6 +78,7 @@ import {
   writeAuthFileImportDefaults,
 } from '@/features/authFiles/importDefaults';
 import { getAuthFileImportMethodLabelKey } from '@/features/authFiles/model/authFileImportMetadata';
+import { QUOTA_COOLDOWN_OWNER_CODEX_USAGE } from '@/features/authFiles/model/quotaCooldownPresentation';
 import { useAuthFilesOauth } from '@/features/authFiles/hooks/useAuthFilesOauth';
 import { useAuthFilesModels } from '@/features/authFiles/hooks/useAuthFilesModels';
 import { useAuthFileConfigurationEditor } from '@/features/authFiles/hooks/useAuthFileConfigurationEditor';
@@ -301,6 +302,10 @@ const MAX_CONCURRENT_QUOTA_REFRESH_PROVIDERS = 3;
 const PASSIVE_HEADER_SNAPSHOT_REFRESH_MS = 60_000;
 const PASSIVE_RUNTIME_CONCURRENCY_REFRESH_MS = 15_000;
 const PASSIVE_ACCOUNT_POOL_REFRESH_MS = 30_000;
+
+const isManagedCodexQuotaCooldown = (cooldown: QuotaCooldownInfo): boolean =>
+  cooldown.owner === QUOTA_COOLDOWN_OWNER_CODEX_USAGE &&
+  (!cooldown.provider || cooldown.provider.trim().toLowerCase() === CODEX_CONFIG.type);
 
 const isCodexHeaderQuotaLimitSnapshot = (snapshot: UsageHeaderSnapshot | undefined): boolean => {
   const usedPercent = getHeaderSnapshotUsedPercent(snapshot);
@@ -1939,10 +1944,19 @@ export function AccountsPage() {
   const hasSelectedAccountDetail = activeView === 'accounts' && Boolean(selectedRowKey);
   const needsCodexStatusEvidence =
     activeView === 'accounts' && isAccountCodexStatusFilter(statusFilter);
+  const hasDisabledCodexResetCredits = rows.some((row) => {
+    if (row.provider !== CODEX_CONFIG.type || !row.disabled || row.runtimeOnly) return false;
+    const quota = mergeCodexResetCreditsFromQuotaSnapshots(
+      getDisplayCodexQuota(row.raw),
+      quotaSnapshotWindowsByRowKey.get(row.selectionKey) ?? []
+    );
+    return (quota?.rateLimitResetCreditsAvailableCount ?? 0) > 0;
+  });
   const needsQuotaCooldowns =
     managerStorageAvailable &&
     activeView === 'accounts' &&
-    (effectiveOperationalFilter === 'cooldown' ||
+    (hasDisabledCodexResetCredits ||
+      effectiveOperationalFilter === 'cooldown' ||
       (hasSelectedAccountDetail && (detailTab === 'overview' || detailTab === 'quota')));
   const needsActionCandidates =
     managerStorageAvailable &&
@@ -3281,14 +3295,19 @@ export function AccountsPage() {
 
   const canResetCodexQuota = useCallback(
     (row: AccountRow) => {
-      if (row.provider !== CODEX_CONFIG.type || row.disabled || row.runtimeOnly) return false;
+      if (row.provider !== CODEX_CONFIG.type || row.runtimeOnly) return false;
+      const hasManagedCooldown =
+        quotaCooldownsByRowKey
+          .get(row.selectionKey)
+          ?.some(isManagedCodexQuotaCooldown) === true;
+      if (row.disabled && !hasManagedCooldown) return false;
       const quota = mergeCodexResetCreditsFromQuotaSnapshots(
         getDisplayCodexQuota(row.raw),
         quotaSnapshotWindowsByRowKey.get(row.selectionKey) ?? []
       );
       return CODEX_CONFIG.canResetQuota?.(row.raw, quota) === true;
     },
-    [getDisplayCodexQuota, quotaSnapshotWindowsByRowKey]
+    [getDisplayCodexQuota, quotaCooldownsByRowKey, quotaSnapshotWindowsByRowKey]
   );
 
   const resetCodexQuotaForRow = useCallback(
@@ -3335,6 +3354,7 @@ export function AccountsPage() {
               }));
             });
             if (!committed) return;
+            await Promise.allSettled([loadFiles(), loadQuotaCooldowns()]);
             showNotification(t('codex_quota.reset_success', { name: displayName }), 'success');
           } catch (err: unknown) {
             if (!isCurrent()) return;
@@ -3371,6 +3391,8 @@ export function AccountsPage() {
       canResetCodexQuota,
       getDisplayAccount,
       getDisplayCodexQuota,
+      loadFiles,
+      loadQuotaCooldowns,
       quotaSnapshotWindowsByRowKey,
       setCodexQuota,
       showConfirmation,
