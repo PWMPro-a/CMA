@@ -80,7 +80,7 @@ func TestAuthFileRuntimeStatusRequestRequiresExactReadView(t *testing.T) {
 
 func TestRefreshAuthFileJSONImportMetadataAdvancesImportGeneration(t *testing.T) {
 	const importedAt = "2026-08-22T15:04:05.123456Z"
-	raw := []byte(`{"type":"codex","email":"account@example.com","cpamp_import":{"source":"supply","imported_at":"2026-08-20T12:00:00Z"}}`)
+	raw := []byte(`{"type":"codex","email":"account@example.com","disabled":true,"runtime_last_skip_reason":"quota_preempt","runtime_current_concurrency":0,"cpamp_import":{"source":"supply","imported_at":"2026-08-20T12:00:00Z"}}`)
 
 	refreshed, changed := refreshAuthFileJSONImportMetadata(raw, importedAt)
 	if !changed {
@@ -97,8 +97,29 @@ func TestRefreshAuthFileJSONImportMetadataAdvancesImportGeneration(t *testing.T)
 	if payload["email"] != "account@example.com" {
 		t.Fatalf("credential fields changed: %#v", payload)
 	}
+	for _, key := range []string{"disabled", "runtime_last_skip_reason", "runtime_current_concurrency"} {
+		if _, exists := payload[key]; exists {
+			t.Fatalf("stale runtime field %q survived import: %#v", key, payload)
+		}
+	}
 	if _, changed := refreshAuthFileJSONImportMetadata(refreshed, importedAt); changed {
 		t.Fatal("same import generation should be stable")
+	}
+}
+
+func TestRefreshAuthFileJSONImportMetadataKeepsRuntimeStateForVerifiedWrite(t *testing.T) {
+	const importedAt = "2026-08-22T15:04:05Z"
+	raw := []byte(`{"type":"codex","disabled":true,"runtime_last_skip_reason":"manual"}`)
+	refreshed, changed := refreshAuthFileJSONImportMetadataWithOptions(raw, importedAt, false)
+	if !changed {
+		t.Fatal("expected import metadata to change")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(refreshed, &payload); err != nil {
+		t.Fatalf("decode refreshed payload: %v", err)
+	}
+	if payload["disabled"] != true || payload["runtime_last_skip_reason"] != "manual" {
+		t.Fatalf("verified write runtime fields changed: %#v", payload)
 	}
 }
 

@@ -1182,39 +1182,74 @@ func quotaEventObservedAtMS(event usage.Event, fallback time.Time) int64 {
 }
 
 func credentialImportedAfter(raw map[string]any, observedAtMS int64) bool {
-	if observedAtMS <= 0 || raw == nil {
-		return false
-	}
-	marker, ok := raw["cpamp_import"].(map[string]any)
-	if !ok {
-		return false
-	}
-	importedAt, ok := marker["imported_at"].(string)
-	if !ok {
-		return false
-	}
-	parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(importedAt))
-	return err == nil && parsed.UnixMilli() > observedAtMS
+	importedAtMS := credentialImportedAtMS(raw)
+	return observedAtMS > 0 && importedAtMS > observedAtMS
 }
 
 func quotaCooldownStaleForCredential(file cpaauthfiles.File, item store.QuotaCooldown) bool {
-	marker, ok := file.Raw["cpamp_import"].(map[string]any)
-	if !ok || marker == nil {
-		return false
-	}
-	value, ok := marker["imported_at"].(string)
-	if !ok {
-		return false
-	}
-	importedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
-	if err != nil {
+	importedAtMS := credentialImportedAtMS(file.Raw)
+	if importedAtMS <= 0 {
 		return false
 	}
 	anchorMS := item.DisabledAtMS
 	if item.CreatedAtMS > anchorMS {
 		anchorMS = item.CreatedAtMS
 	}
-	return anchorMS > 0 && importedAt.UnixMilli() > anchorMS
+	return anchorMS > 0 && importedAtMS > anchorMS
+}
+
+// credentialImportedAtMS accepts both the canonical snake_case marker emitted
+// by CPAMP and camelCase variants returned by older CPA/plugin runtimes.
+func credentialImportedAtMS(raw map[string]any) int64 {
+	if raw == nil {
+		return 0
+	}
+	for _, markerKey := range []string{"cpamp_import", "cpampImport"} {
+		marker, ok := raw[markerKey].(map[string]any)
+		if !ok || marker == nil {
+			continue
+		}
+		for _, timestampKey := range []string{"imported_at", "importedAt"} {
+			if timestamp := parseCredentialImportTimestamp(marker[timestampKey]); timestamp > 0 {
+				return timestamp
+			}
+		}
+	}
+	return 0
+}
+
+func parseCredentialImportTimestamp(value any) int64 {
+	switch typed := value.(type) {
+	case string:
+		parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(typed))
+		if err != nil {
+			return 0
+		}
+		return parsed.UnixMilli()
+	case json.Number:
+		if milliseconds, err := typed.Int64(); err == nil {
+			return normalizeCredentialImportTimestamp(milliseconds)
+		}
+	case float64:
+		if typed > 0 && typed < float64(^uint64(0)>>1) {
+			return normalizeCredentialImportTimestamp(int64(typed))
+		}
+	case int64:
+		return normalizeCredentialImportTimestamp(typed)
+	case int:
+		return normalizeCredentialImportTimestamp(int64(typed))
+	}
+	return 0
+}
+
+func normalizeCredentialImportTimestamp(value int64) int64 {
+	if value <= 0 {
+		return 0
+	}
+	if value < 100_000_000_000 {
+		return value * 1000
+	}
+	return value
 }
 
 func xaiFreeUsageResetTimeFromEvent(event usage.Event, now time.Time) (time.Time, bool) {

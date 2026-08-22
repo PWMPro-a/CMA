@@ -140,6 +140,16 @@ func TestQuotaAutoDisableSkipsEventObservedBeforeCredentialReimport(t *testing.T
 	}, observedAt.UnixMilli()) {
 		t.Fatal("older import marker should not invalidate newer quota events")
 	}
+	if !credentialImportedAfter(map[string]any{
+		"cpampImport": map[string]any{"importedAt": importedAt.Format(time.RFC3339Nano)},
+	}, observedAt.UnixMilli()) {
+		t.Fatal("camelCase re-import marker should invalidate older quota events")
+	}
+	if !credentialImportedAfter(map[string]any{
+		"cpamp_import": map[string]any{"imported_at": importedAt.UnixMilli()},
+	}, observedAt.UnixMilli()) {
+		t.Fatal("numeric re-import marker should invalidate older quota events")
+	}
 }
 
 func TestQuotaCooldownStaleForCredentialAfterReimport(t *testing.T) {

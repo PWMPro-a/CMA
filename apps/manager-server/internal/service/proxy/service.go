@@ -1279,6 +1279,7 @@ func refreshAuthFileImportMetadata(r *http.Request) error {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	importedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	resetRuntimeState := strings.TrimSpace(r.Header.Get(authFileWriteIdentitiesHeader)) == ""
 	changed := false
 	for {
 		part, partErr := reader.NextPart()
@@ -1297,7 +1298,7 @@ func refreshAuthFileImportMetadata(r *http.Request) error {
 			return errAuthFileMutationBodyTooLarge
 		}
 		if part.FileName() != "" {
-			if refreshed, ok := refreshAuthFileJSONImportMetadata(partBody, importedAt); ok {
+			if refreshed, ok := refreshAuthFileJSONImportMetadataWithOptions(partBody, importedAt, resetRuntimeState); ok {
 				partBody = refreshed
 				changed = true
 			}
@@ -1325,12 +1326,52 @@ func refreshAuthFileImportMetadata(r *http.Request) error {
 }
 
 func refreshAuthFileJSONImportMetadata(raw []byte, importedAt string) ([]byte, bool) {
+	return refreshAuthFileJSONImportMetadataWithOptions(raw, importedAt, true)
+}
+
+// refreshAuthFileJSONImportMetadataWithOptions creates a new credential
+// generation for an uploaded auth file. Runtime status is owned by CPA rather
+// than the credential JSON; clearing it prevents a downloaded disabled file
+// from carrying its previous generation's freeze into a re-import.
+func refreshAuthFileJSONImportMetadataWithOptions(raw []byte, importedAt string, resetRuntimeState bool) ([]byte, bool) {
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {
 		return nil, false
 	}
 	changed := false
 	stamp := func(item map[string]any) {
+		if resetRuntimeState {
+			for _, key := range []string{
+				"disabled",
+				"unavailable",
+				"status",
+				"status_message",
+				"statusMessage",
+				"runtime_current_concurrency",
+				"runtimeCurrentConcurrency",
+				"current_concurrency",
+				"currentConcurrency",
+				"active_requests",
+				"activeRequests",
+				"in_flight_requests",
+				"inFlightRequests",
+				"runtime_frozen_until",
+				"runtimeFrozenUntil",
+				"runtime_rate_limited_until",
+				"runtimeRateLimitedUntil",
+				"runtime_last_skip_reason",
+				"runtimeLastSkipReason",
+				"updated_at",
+				"updatedAt",
+				"updated_at_ms",
+				"updatedAtMs",
+			} {
+				if _, exists := item[key]; exists {
+					delete(item, key)
+					changed = true
+				}
+			}
+		}
 		marker, ok := item["cpamp_import"].(map[string]any)
 		if !ok || marker == nil {
 			marker = map[string]any{"source": "manual"}
