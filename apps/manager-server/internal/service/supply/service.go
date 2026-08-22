@@ -7351,7 +7351,7 @@ func (s *Service) reconcileSmartNormalCapacityFloor(
 		if capacity <= 0 {
 			continue
 		}
-		remainingMinutes := smartAccountRemainingMinutes(file.Raw, now, smartAccountLifetimeMinutes())
+		remainingMinutes := smartAccountRemainingMinutes(file.Raw, now, smartCapacityPlanningHorizonMinutes(cfg))
 		item := smartCapacityItem{
 			credentialKey:    credentialKey,
 			fileKey:          fileKey,
@@ -8356,7 +8356,7 @@ func smartSupplyInventoryLifetimeMinutes(pressure smartSupplyPressure) (float64,
 		return 0, false
 	}
 	minutes := float64(remainingSeconds) / 60
-	return clampFloat(minutes, 0, float64(smartUsefulAccountLifetimeMinutes())), true
+	return math.Max(0, minutes), true
 }
 
 func smartSupplyDeliveryLeadMinutes(cfg store.ManagerSupplyConfig, pressure smartSupplyPressure) float64 {
@@ -8438,7 +8438,7 @@ func (s *Service) smartSuggestedCreateQuantity(cfg store.ManagerSupplyConfig, re
 	if quantity <= 0 && resource.CapacityGapRCU > 0 && resource.UnitCapacityRCU > 0 {
 		unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
 		if unit <= 0 {
-			unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
+			unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartCapacityPlanningHorizonMinutes(cfg)))
 		}
 		quantity = int(math.Ceil(resource.CapacityGapRCU / unit))
 	}
@@ -9194,7 +9194,7 @@ func recentAutomaticOrderCoversCurrentShortage(
 	required := math.Max(0, resource.CapacityGapRCU)
 	unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
 	if unit <= 0 && resource.UnitCapacityRCU > 0 {
-		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
+		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartCapacityPlanningHorizonMinutes(cfg)))
 	}
 	accountDeficit := max(0, resource.AccountQuantityDeficit)
 	accountDeficit = max(accountDeficit, max(0, resource.ConcurrencyAccountDeficit))

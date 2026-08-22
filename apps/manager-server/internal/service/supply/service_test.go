@@ -2471,8 +2471,8 @@ func TestSupplyAccountLeaseMetadataKeepsDeadlineAsRoutingHint(t *testing.T) {
 		t.Fatalf("supplier lease = %d, want %d", got, leaseExpiresAtMS)
 	}
 	remaining := smartAccountRemainingMinutes(metadata, time.Now(), smartAccountLifetimeMinutes())
-	if remaining != float64(smartAccountLifetimeMinutes()) {
-		t.Fatalf("capacity horizon = %.2f minutes, want health-based fallback %d", remaining, smartAccountLifetimeMinutes())
+	if remaining <= float64(smartAccountLifetimeMinutes()) {
+		t.Fatalf("upstream expires_at must remain the capacity horizon, got %.2f minutes", remaining)
 	}
 }
 
@@ -2665,8 +2665,8 @@ func TestLiveAccountPoolCapsStaleInspectionCapacityAndRecalculatesShortage(t *te
 	}
 
 	recalculateSmartResourceCapacityPlan(cfg, &resource)
-	if resource.HealthLevel != smartHealthCritical || resource.EstimatedRequiredAccounts != 920 ||
-		resource.AccountQuantityDeficit != 915 || resource.SuggestedQuantity != 20 {
+	if resource.HealthLevel != smartHealthCritical || resource.EstimatedRequiredAccounts != 1005 ||
+		resource.AccountQuantityDeficit != 1000 || resource.SuggestedQuantity != 20 {
 		t.Fatalf("live five-account shortage plan = %#v", resource)
 	}
 	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 20 {

@@ -361,15 +361,16 @@ type authFileSnapshot struct {
 // list contains transient scheduler state and is too volatile to drive a
 // purchasing decision.
 type inspectionQuotaSnapshot struct {
-	run                store.CodexInspectionRun
-	results            []store.CodexInspectionResult
-	quotaWindowUsage   []smartQuotaWindowBaseline
-	leaseExpiresByFile map[string]int64
-	supplierByFile     map[string]string
-	activeImportItems  []store.SupplyImportItem
-	generatedAt        time.Time
-	attemptedAt        time.Time
-	lastErr            error
+	run                  store.CodexInspectionRun
+	results              []store.CodexInspectionResult
+	quotaWindowUsage     []smartQuotaWindowBaseline
+	leaseExpiresByFile   map[string]int64
+	accountExpiresByFile map[string]int64
+	supplierByFile       map[string]string
+	activeImportItems    []store.SupplyImportItem
+	generatedAt          time.Time
+	attemptedAt          time.Time
+	lastErr              error
 }
 
 type smartCapacityItem struct {
@@ -399,7 +400,7 @@ func defaultSmartResource(cfg store.ManagerSupplyConfig) SmartResource {
 		TargetAvailableAccounts:     cfg.TargetAvailableAccounts,
 		ConfiguredHealthyMinutes:    configuredTarget,
 		EffectiveHealthyMinutes:     effectiveTarget,
-		AccountLifetimeMinutes:      smartAccountLifetimeMinutes(),
+		AccountLifetimeMinutes:      smartCapacityPlanningHorizonMinutes(cfg),
 		HealthyMinutesTarget:        effectiveTarget,
 		WarningMinutes:              smartWarningMinutes(cfg),
 		CriticalMinutes:             smartCriticalMinutes(cfg),
@@ -659,7 +660,11 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		withVerifiedUsability++
 		resource.SchedulableAccounts++
 		resource.AvailableAccounts++
-		remainingMinutes := float64(smartUsefulAccountLifetimeMinutes())
+		remainingMinutes := float64(smartCapacityPlanningHorizonMinutes(cfg))
+		accountExpiresAtMS := snapshot.accountExpiresByFile[fileName]
+		if accountExpiresAtMS > 0 {
+			remainingMinutes = math.Max(0, time.UnixMilli(accountExpiresAtMS).Sub(now).Minutes())
+		}
 		if !hasCapacityQuota && suppliedAccount {
 			withQuotaEvidence++
 		}
@@ -690,7 +695,9 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			continue
 		}
 		expiryHintMinutes := remainingMinutes
-		if suppliedAccount {
+		if accountExpiresAtMS > 0 {
+			expiryHintMinutes = time.UnixMilli(accountExpiresAtMS).Sub(now).Minutes()
+		} else if suppliedAccount {
 			expiryHintMinutes = time.UnixMilli(leaseExpiresAtMS).Sub(now).Minutes()
 		}
 		resource.recordExpiringAccount(expiryHintMinutes, capacity)
@@ -706,7 +713,9 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			capacityRCU:      capacity,
 			remainingMinutes: remainingMinutes,
 		}
-		if suppliedAccount {
+		if accountExpiresAtMS > 0 {
+			capacityItem.expiresAtMS = accountExpiresAtMS
+		} else if suppliedAccount {
 			capacityItem.expiresAtMS = leaseExpiresAtMS
 		}
 		capacityItems = append(capacityItems, capacityItem)
@@ -737,7 +746,11 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 			continue
 		}
 		overlaidFiles[fileName] = struct{}{}
-		remainingMinutes := float64(smartUsefulAccountLifetimeMinutes())
+		remainingMinutes := float64(smartCapacityPlanningHorizonMinutes(cfg))
+		accountExpiresAtMS := snapshot.accountExpiresByFile[fileName]
+		if accountExpiresAtMS > 0 {
+			remainingMinutes = math.Max(0, time.UnixMilli(accountExpiresAtMS).Sub(now).Minutes())
+		}
 		supplierID := normalizeSmartQuotaSupplierID(snapshot.supplierByFile[fileName])
 		if supplierID == "" && len(platforms) == 1 {
 			supplierID = normalizeSmartQuotaSupplierID(platforms[0].ID)
@@ -747,11 +760,15 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		if capacity <= 0 {
 			continue
 		}
+		expiresAtMS := accountExpiresAtMS
+		if expiresAtMS <= 0 {
+			expiresAtMS = item.LeaseExpiresAtMS
+		}
 		capacityItems = append(capacityItems, smartCapacityItem{
 			fileKey:          operatorFileCredentialKey(fileName),
 			capacityRCU:      capacity,
 			remainingMinutes: remainingMinutes,
-			expiresAtMS:      item.LeaseExpiresAtMS,
+			expiresAtMS:      expiresAtMS,
 		})
 		resource.TotalAccounts++
 		resource.EnabledAccounts++
@@ -760,7 +777,11 @@ func (s *Service) buildSmartResourceFromInspectionSnapshot(cfg store.ManagerSupp
 		resource.AvailableAccounts++
 		resource.PendingInspectionAccounts++
 		resource.PendingInspectionCapacityRCU += capacity
-		resource.recordExpiringAccount(time.UnixMilli(item.LeaseExpiresAtMS).Sub(now).Minutes(), capacity)
+		expiryHintMinutes := remainingMinutes
+		if expiresAtMS > 0 {
+			expiryHintMinutes = time.UnixMilli(expiresAtMS).Sub(now).Minutes()
+		}
+		resource.recordExpiringAccount(expiryHintMinutes, capacity)
 	}
 	resource.DisabledAccounts = max(0, resource.TotalAccounts-resource.AvailableAccounts)
 	applySmartAccountCountBreakdown(&resource)
@@ -905,7 +926,7 @@ func (s *Service) buildSmartResourceFromSnapshots(cfg store.ManagerSupplyConfig,
 		resource.AvailableAccounts++
 		resource.HealthyAccounts++
 		resource.NormalAccounts++
-		remainingMinutes := smartAccountRemainingMinutes(file.Raw, now, smartAccountLifetimeMinutes())
+		remainingMinutes := smartAccountRemainingMinutes(file.Raw, now, smartCapacityPlanningHorizonMinutes(cfg))
 		planType := strings.ToLower(strings.TrimSpace(textField(
 			file.Raw,
 			"plan_type",
@@ -1141,9 +1162,9 @@ func recalculateSmartResourceCapacityPlan(cfg store.ManagerSupplyConfig, resourc
 
 	unitForNew := smartEstimatedNewAccountCapacityForResource(cfg, *resource)
 	if unitForNew <= 0 {
-		unitForNew = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
+		unitForNew = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartCapacityPlanningHorizonMinutes(cfg)))
 	}
-	maxUsefulNewCapacity := math.Max(0, resource.ConsumeRCUPerMinute*float64(smartUsefulAccountLifetimeMinutes())-resource.CurrentCapacityRCU-resource.PrelockedCapacityRCU)
+	maxUsefulNewCapacity := math.Max(0, resource.ConsumeRCUPerMinute*float64(smartCapacityPlanningHorizonMinutes(cfg))-resource.CurrentCapacityRCU-resource.PrelockedCapacityRCU)
 	gapForOrder := math.Min(resource.CapacityGapRCU, maxUsefulNewCapacity)
 	if gapForOrder <= 0 {
 		resource.HealthLevel = smartHealthWarning
@@ -1166,7 +1187,7 @@ func applySmartRefillProjection(cfg store.ManagerSupplyConfig, resource *SmartRe
 	}
 	unit := smartEstimatedNewAccountCapacityForResource(cfg, *resource)
 	if unit <= 0 && resource.UnitCapacityRCU > 0 {
-		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
+		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartCapacityPlanningHorizonMinutes(cfg)))
 	}
 	projectedSupply := math.Max(0, resource.PrelockedCapacityRCU)
 	if resource.SuggestedQuantity > 0 && unit > 0 {
@@ -1199,7 +1220,7 @@ func applySmartAccountQuantityEstimate(cfg store.ManagerSupplyConfig, resource *
 	// not become an RCU conversion factor or cap the pool-wide waterline.
 	unit := smartEstimatedNewAccountCapacityForResource(cfg, *resource)
 	if unit <= 0 && resource.UnitCapacityRCU > 0 {
-		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
+		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartCapacityPlanningHorizonMinutes(cfg)))
 	}
 	if unit > 0 && resource.PrelockedCapacityRCU > 0 {
 		projected += int(math.Ceil(resource.PrelockedCapacityRCU / unit))
@@ -1752,7 +1773,7 @@ func smartMinimumAvailableRefillQuantity(cfg store.ManagerSupplyConfig, resource
 	}
 	unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
 	if unit <= 0 && resource.UnitCapacityRCU > 0 {
-		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
+		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartCapacityPlanningHorizonMinutes(cfg)))
 	}
 	if unit <= 0 {
 		return 1
@@ -1987,26 +2008,41 @@ func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context, configs
 			}
 		}
 		leaseExpiresByFile := make(map[string]int64, len(importItems))
+		accountExpiresByFile := make(map[string]int64, len(importItems))
+		accountExpiryEffectiveByFile := make(map[string]int64, len(importItems))
+		snapshotNow := time.Now()
 		for _, item := range importItems {
 			fileName := strings.TrimSpace(item.FileName)
-			if fileName == "" || item.LeaseExpiresAtMS <= 0 {
+			if fileName == "" {
 				continue
 			}
-			leaseExpiresByFile[fileName] = maxInt64(leaseExpiresByFile[fileName], item.LeaseExpiresAtMS)
 			currentImportItems = append(currentImportItems, item)
+			if item.LeaseExpiresAtMS > 0 {
+				leaseExpiresByFile[fileName] = maxInt64(leaseExpiresByFile[fileName], item.LeaseExpiresAtMS)
+			}
+			effectiveAtMS := maxInt64(item.EffectiveFromMS, item.ImportedAtMS)
+			if previousEffectiveAtMS, exists := accountExpiryEffectiveByFile[fileName]; !exists || effectiveAtMS >= previousEffectiveAtMS {
+				accountExpiryEffectiveByFile[fileName] = effectiveAtMS
+				if expiresAtMS := supplyAccountExpiryAtMS(nil, item.PayloadJSON, snapshotNow); expiresAtMS > 0 {
+					accountExpiresByFile[fileName] = expiresAtMS
+				} else {
+					delete(accountExpiresByFile, fileName)
+				}
+			}
 		}
 		generatedAt := time.UnixMilli(run.FinishedAtMS)
 		if run.FinishedAtMS <= 0 {
 			generatedAt = time.UnixMilli(run.UpdatedAtMS)
 		}
 		return inspectionQuotaSnapshot{
-			run:                run,
-			results:            filtered,
-			quotaWindowUsage:   quotaWindowUsage,
-			leaseExpiresByFile: leaseExpiresByFile,
-			supplierByFile:     supplierByFile,
-			activeImportItems:  currentImportItems,
-			generatedAt:        generatedAt,
+			run:                  run,
+			results:              filtered,
+			quotaWindowUsage:     quotaWindowUsage,
+			leaseExpiresByFile:   leaseExpiresByFile,
+			accountExpiresByFile: accountExpiresByFile,
+			supplierByFile:       supplierByFile,
+			activeImportItems:    currentImportItems,
+			generatedAt:          generatedAt,
 		}, nil
 	}
 	return inspectionQuotaSnapshot{}, ErrCapacitySnapshotUnavailable
@@ -2034,6 +2070,11 @@ func cloneInspectionQuotaSnapshot(snapshot inspectionQuotaSnapshot) inspectionQu
 		leases[fileName] = expiresAtMS
 	}
 	snapshot.leaseExpiresByFile = leases
+	expires := make(map[string]int64, len(snapshot.accountExpiresByFile))
+	for fileName, expiresAtMS := range snapshot.accountExpiresByFile {
+		expires[fileName] = expiresAtMS
+	}
+	snapshot.accountExpiresByFile = expires
 	suppliers := make(map[string]string, len(snapshot.supplierByFile))
 	for fileName, supplierID := range snapshot.supplierByFile {
 		suppliers[fileName] = supplierID
@@ -2274,7 +2315,7 @@ func (s *Service) currentSmartResource(cfg store.ManagerSupplyConfig) SmartResou
 	resource.Enabled = smartSupplyEnabled(cfg)
 	resource.ConfiguredHealthyMinutes = smartHealthyMinutesTarget(cfg)
 	resource.EffectiveHealthyMinutes = smartEffectiveHealthyMinutesTarget(cfg)
-	resource.AccountLifetimeMinutes = smartAccountLifetimeMinutes()
+	resource.AccountLifetimeMinutes = smartCapacityPlanningHorizonMinutes(cfg)
 	if resource.CapacitySource == smartCapacitySourceInspection {
 		resource.CapacitySnapshotAgeSeconds = max(0, int(time.Since(time.UnixMilli(resource.CapacitySnapshotAtMS)).Seconds()))
 		if resource.CapacitySnapshotAgeSeconds > 20*60 {
@@ -2330,13 +2371,20 @@ func smartUsefulAccountLifetimeMinutes() int {
 	return 55
 }
 
+// smartCapacityPlanningHorizonMinutes is the forecast horizon for credentials
+// that do not carry an upstream expiry. It must cover the configured pool
+// waterline; otherwise a 120-minute target is silently reduced to the old
+// single-account 55-minute estimate. Explicit credential expiry always wins.
+func smartCapacityPlanningHorizonMinutes(cfg store.ManagerSupplyConfig) int {
+	return max(smartHealthyMinutesTarget(cfg), smartUsefulAccountLifetimeMinutes())
+}
+
 func smartEffectiveHealthyMinutesTarget(cfg store.ManagerSupplyConfig) int {
 	// The configured waterline describes how many minutes the whole pool should
-	// sustain current demand. A single credential's observed 401 age is only a
-	// churn warning and must not cap that pool-wide reserve. Otherwise the
-	// default 120-second warning incorrectly turns a configured 60-minute
-	// waterline into two minutes and suppresses replenishment.
-	return min(smartHealthyMinutesTarget(cfg), smartUsefulAccountLifetimeMinutes())
+	// sustain current demand. A single credential's fallback lifetime or
+	// observed 401 age must not cap that pool-wide reserve. Credentials with a
+	// real upstream expiry are still limited individually by that timestamp.
+	return smartHealthyMinutesTarget(cfg)
 }
 
 func smartWarningMinutes(cfg store.ManagerSupplyConfig) int {
@@ -2618,7 +2666,7 @@ func smartRisingObservationQuantity(cfg store.ManagerSupplyConfig, resource Smar
 	// decide whether another batch is justified.
 	unit := smartEstimatedNewAccountCapacityForResource(cfg, resource)
 	if unit <= 0 {
-		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartUsefulAccountLifetimeMinutes()))
+		unit = smartEstimatedAccountCapacityRCU(resource.UnitCapacityRCU, float64(smartCapacityPlanningHorizonMinutes(cfg)))
 	}
 	needed := 1
 	if unit > 0 && resource.CapacityGapRCU > 0 {
@@ -2768,7 +2816,7 @@ func smartEstimatedAccountCapacityRCU(unitPerMinute float64, remainingMinutes fl
 	if unitPerMinute <= 0 {
 		unitPerMinute = 1
 	}
-	remainingMinutes = clampFloat(remainingMinutes, 0, float64(smartAccountLifetimeMinutes()))
+	remainingMinutes = math.Max(0, remainingMinutes)
 	return unitPerMinute * remainingMinutes
 }
 
@@ -2806,7 +2854,7 @@ func smartAccountQuotaCapacityRCU(unit, accountQuotaM, remainingFraction float64
 
 func smartEstimatedNewAccountCapacityRCU(cfg store.ManagerSupplyConfig) float64 {
 	unit := smartProductUnitCapacity(cfg.Product)
-	capacity := smartEstimatedAccountCapacityRCU(unit, float64(smartUsefulAccountLifetimeMinutes()))
+	capacity := smartEstimatedAccountCapacityRCU(unit, float64(smartCapacityPlanningHorizonMinutes(cfg)))
 	confidence := smartNewAccountConfidence(cfg)
 	if confidence <= 0 {
 		confidence = 1
@@ -3035,7 +3083,7 @@ func smartExpiryLimitedCapacity(items []smartCapacityItem, consumeRCUPerMinute f
 		if item.capacityRCU <= 0 {
 			continue
 		}
-		item.remainingMinutes = math.Max(0, math.Min(float64(smartAccountLifetimeMinutes()), item.remainingMinutes))
+		item.remainingMinutes = math.Max(0, item.remainingMinutes)
 		ordered = append(ordered, item)
 	}
 	sort.Slice(ordered, func(i, j int) bool {
@@ -3096,7 +3144,7 @@ func applySmartExpiryCapacity(resource *SmartResource, items []smartCapacityItem
 			items[index].usableCapacityRCU = 0
 			continue
 		}
-		items[index].remainingMinutes = math.Max(0, math.Min(float64(smartAccountLifetimeMinutes()), item.remainingMinutes))
+		items[index].remainingMinutes = math.Max(0, item.remainingMinutes)
 		ordered = append(ordered, index)
 	}
 	sort.SliceStable(ordered, func(i, j int) bool {
@@ -3150,13 +3198,13 @@ func smartAccountRemainingMinutes(values map[string]any, now time.Time, fallback
 		"remaining_seconds", "remainingSeconds", "remaining_valid_seconds", "remainingValidSeconds",
 		"minimum_remaining_seconds", "minimumRemainingSeconds", "ttl_seconds", "ttlSeconds",
 	); ok {
-		return clampFloat(seconds/60, 0, float64(smartAccountLifetimeMinutes()))
+		return math.Max(0, seconds/60)
 	}
 	if minutes, ok := numberFieldOK(values, "remaining_minutes", "remainingMinutes", "ttl_minutes", "ttlMinutes"); ok {
-		return clampFloat(minutes, 0, float64(smartAccountLifetimeMinutes()))
+		return math.Max(0, minutes)
 	}
 	if seconds, ok := numberFieldOK(values, "expires_in", "expiresIn", "expire_in", "expireIn"); ok {
-		return clampFloat(seconds/60, 0, float64(smartAccountLifetimeMinutes()))
+		return math.Max(0, seconds/60)
 	}
 	for _, key := range []string{"expired", "expires_at", "expiresAt", "expire_at", "expireAt", "valid_until", "validUntil"} {
 		raw, ok := values[key]
@@ -3164,7 +3212,7 @@ func smartAccountRemainingMinutes(values map[string]any, now time.Time, fallback
 			continue
 		}
 		if expiry, ok := parseSmartExpiryTime(raw, now); ok {
-			return clampFloat(expiry.Sub(now).Minutes(), 0, float64(smartAccountLifetimeMinutes()))
+			return math.Max(0, expiry.Sub(now).Minutes())
 		}
 	}
 	return float64(fallbackMinutes)

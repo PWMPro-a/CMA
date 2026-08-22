@@ -214,14 +214,15 @@ func TestSmartResourceRecommendsPrelockFromUsageCapacity(t *testing.T) {
 	service.recordSmartUsageEvents(events, now)
 
 	resource := service.buildSmartResourceFromSnapshots(store.ManagerSupplyConfig{
-		Product:                 "oauth_30d",
-		TargetAvailableAccounts: 2,
-		HealthyMinutesTarget:    120,
-		WarningMinutes:          60,
-		CriticalMinutes:         30,
-		PrelockMinQuantity:      1,
-		PrelockMaxQuantity:      10,
-		NewAccountConfidence:    0.7,
+		Product:                     "oauth_30d",
+		TargetAvailableAccounts:     2,
+		DefaultEmergencyMinAccounts: 1,
+		HealthyMinutesTarget:        120,
+		WarningMinutes:              60,
+		CriticalMinutes:             30,
+		PrelockMinQuantity:          1,
+		PrelockMaxQuantity:          10,
+		NewAccountConfidence:        0.7,
 	}, authFileSnapshot{
 		generatedAt: now,
 		files: []cpaauthfiles.File{
@@ -230,7 +231,7 @@ func TestSmartResourceRecommendsPrelockFromUsageCapacity(t *testing.T) {
 		},
 	}, now)
 
-	if resource.HealthLevel != smartHealthWarning || resource.SuggestedQuantity < 1 {
+	if resource.HealthLevel != smartHealthCritical || !resource.EmergencyShortage || resource.SuggestedQuantity < 1 {
 		t.Fatalf("resource = %#v", resource)
 	}
 	if resource.RPM30M <= 0 || resource.CurrentCapacityRCU <= 0 || resource.CapacityGapRCU <= 0 {
@@ -934,19 +935,19 @@ func TestEmergencyCapacityGapRefillsToHealthyWaterline(t *testing.T) {
 
 	recalculateSmartResourceCapacityPlan(cfg, &resource)
 
-	if !resource.EmergencyShortage || resource.SuggestedQuantity != 16 {
-		t.Fatalf("emergency healthy-water refill = %#v, want 16 accounts", resource)
+	if !resource.EmergencyShortage || resource.SuggestedQuantity != 19 {
+		t.Fatalf("emergency healthy-water refill = %#v, want 19 accounts", resource)
 	}
-	if resource.CapacityGapRCU != 1_400 || resource.CapacityGapTokenM != 112 {
-		t.Fatalf("capacity gap = %.2f RCU / %.2fM, want 1400 RCU / 112M", resource.CapacityGapRCU, resource.CapacityGapTokenM)
+	if resource.CapacityGapRCU != 1_600 || resource.CapacityGapTokenM != 128 {
+		t.Fatalf("capacity gap = %.2f RCU / %.2fM, want 1600 RCU / 128M", resource.CapacityGapRCU, resource.CapacityGapTokenM)
 	}
-	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); got != 16 {
-		t.Fatalf("create quantity = %d, want 16", got)
+	if got := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); got != 19 {
+		t.Fatalf("create quantity = %d, want 19", got)
 	}
-	if got, reason := smartPrelockQuantityForSupplyPressure(cfg, resource, smartSupplyPressure{level: smartSupplyPressurePlenty}, 16); got != 16 || reason != "emergency_refill_to_healthy" {
-		t.Fatalf("pressure adjustment = %d/%q, want 16/healthy", got, reason)
+	if got, reason := smartPrelockQuantityForSupplyPressure(cfg, resource, smartSupplyPressure{level: smartSupplyPressurePlenty}, 19); got != 19 || reason != "emergency_refill_to_healthy" {
+		t.Fatalf("pressure adjustment = %d/%q, want 19/healthy", got, reason)
 	}
-	if resource.ProjectedSustainAfterRefillMin < 55 {
+	if resource.ProjectedSustainAfterRefillMin < 60 {
 		t.Fatalf("projected runway = %.1f minutes, want healthy waterline", resource.ProjectedSustainAfterRefillMin)
 	}
 }
@@ -1839,11 +1840,11 @@ func TestSmartResourceKeepsTransientErrorsInCapacity(t *testing.T) {
 	if resource.SchedulableAccounts != 2 || resource.HealthyAccounts != 2 || resource.WeakAccounts != 0 {
 		t.Fatalf("transient runtime errors must not reduce credential health: %#v", resource)
 	}
-	if resource.AvailableAccounts != 2 || resource.RawCapacityRCU != 160 || resource.CurrentCapacityRCU != 120 {
-		t.Fatalf("transient runtime errors must retain capacity before the normal expiry cap, got %#v", resource)
+	if resource.AvailableAccounts != 2 || resource.RawCapacityRCU != 160 || resource.CurrentCapacityRCU != 160 {
+		t.Fatalf("transient runtime errors must retain all capacity without an upstream expiry, got %#v", resource)
 	}
-	if resource.ConsumeRCUPerMinute <= 0 || resource.HealthLevel != smartHealthHealthy || resource.CapacityGapRCU != 0 {
-		t.Fatalf("restored cooldown capacity should produce a healthy no-replenishment decision: %#v", resource)
+	if resource.ConsumeRCUPerMinute <= 0 || resource.HealthLevel != smartHealthWarning || resource.CapacityGapRCU != 80 {
+		t.Fatalf("restored cooldown capacity should still honor the configured 120-minute target: %#v", resource)
 	}
 }
 
@@ -2409,11 +2410,11 @@ func TestSmartResourceLimitsCapacityByOneHourExpiry(t *testing.T) {
 	if resource.ExpiryWasteRiskRCU != 740 {
 		t.Fatalf("waste risk should report capacity that cannot be consumed before expiry, got %#v", resource)
 	}
-	if resource.EffectiveHealthyMinutes != 55 || resource.TargetCapacityRCU != 55 {
-		t.Fatalf("healthy target should be capped by useful account lifetime, got %#v", resource)
+	if resource.EffectiveHealthyMinutes != 120 || resource.TargetCapacityRCU != 120 {
+		t.Fatalf("configured healthy target must remain effective, got %#v", resource)
 	}
-	if resource.HealthLevel != smartHealthHealthy || resource.SuggestedQuantity != 0 {
-		t.Fatalf("low burn with enough expiry-limited capacity should not replenish, got %#v", resource)
+	if resource.HealthLevel != smartHealthCritical || !resource.EmergencyShortage || resource.SuggestedQuantity != 1 {
+		t.Fatalf("one-hour credential expiry must trigger a refill toward the 120-minute target, got %#v", resource)
 	}
 }
 
@@ -2830,11 +2831,76 @@ func Test401ChurnThresholdsDoNotChangeQuotaCapacityOrPoolWaterline(t *testing.T)
 	if got := smartEstimatedNewAccountCapacityForResource(otherThresholds, defaultSmartResource(otherThresholds)); got != 87.5 {
 		t.Fatalf("401 warning thresholds must not change quota capacity, got %f", got)
 	}
-	if got := smartEffectiveHealthyMinutesTarget(cfg); got != 55 {
-		t.Fatalf("pool-wide healthy runway = %d, want 55", got)
+	if got := smartEffectiveHealthyMinutesTarget(cfg); got != 120 {
+		t.Fatalf("pool-wide healthy runway = %d, want 120", got)
 	}
-	if got := smartEffectiveHealthyMinutesTarget(otherThresholds); got != 55 {
+	if got := smartEffectiveHealthyMinutesTarget(otherThresholds); got != 120 {
 		t.Fatalf("401 warning thresholds must not change pool waterline, got %d", got)
+	}
+}
+
+func TestConfiguredWaterlinesRemainExactAtRuntime(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		HealthyMinutesTarget: 120,
+		WarningMinutes:       100,
+		CriticalMinutes:      80,
+	}
+	resource := defaultSmartResource(cfg)
+	if resource.ConfiguredHealthyMinutes != 120 || resource.EffectiveHealthyMinutes != 120 ||
+		resource.HealthyMinutesTarget != 120 || resource.WarningMinutes != 100 || resource.CriticalMinutes != 80 {
+		t.Fatalf("configured/runtime waterlines diverged: %#v", resource)
+	}
+	if resource.AccountLifetimeMinutes != 120 {
+		t.Fatalf("no-expiry planning horizon = %d, want 120", resource.AccountLifetimeMinutes)
+	}
+}
+
+func TestInspectionCapacityUsesConfiguredHorizonUnlessUpstreamExpiresEarlier(t *testing.T) {
+	service := New(nil, nil)
+	now := time.Now().Truncate(time.Second)
+	events := make([]usage.Event, 0, 30)
+	for minute := 0; minute < 30; minute++ {
+		events = append(events, usage.Event{
+			TimestampMS: now.Add(-time.Duration(minute) * time.Minute).UnixMilli(),
+			Provider:    "codex",
+			AuthIndex:   "waterline-account",
+			TotalTokens: 100,
+		})
+	}
+	service.recordSmartUsageEvents(events, now)
+	unused := 0.0
+	cfg := store.ManagerSupplyConfig{
+		Product:              "oauth_30d",
+		HealthyMinutesTarget: 120,
+		WarningMinutes:       100,
+		CriticalMinutes:      80,
+	}
+	snapshot := inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{
+			ProbeSetCount: 1,
+			SampledCount:  1,
+			StartedAtMS:   now.Add(-time.Minute).UnixMilli(),
+			FinishedAtMS:  now.UnixMilli(),
+		},
+		results: []store.CodexInspectionResult{{
+			AccountKey: "waterline-account", FileName: "waterline.json", Provider: "codex",
+			Status: "active", Action: "keep", PlanType: "team", UsedPercent: &unused,
+		}},
+		generatedAt: now,
+	}
+
+	withoutExpiry := service.buildSmartResourceFromInspectionSnapshot(cfg, snapshot, now)
+	if withoutExpiry.CurrentCapacityRCU != 120 || withoutExpiry.ExpiryLimitedSustainMinutes != 120 {
+		t.Fatalf("no-expiry capacity must cover the configured horizon: %#v", withoutExpiry)
+	}
+
+	snapshot.accountExpiresByFile = map[string]int64{
+		"waterline.json": now.Add(30 * time.Minute).UnixMilli(),
+	}
+	withExpiry := service.buildSmartResourceFromInspectionSnapshot(cfg, snapshot, now)
+	if withExpiry.CurrentCapacityRCU != 30 || withExpiry.ExpiryLimitedSustainMinutes != 30 ||
+		withExpiry.NearestExpiryAtMS != snapshot.accountExpiresByFile["waterline.json"] {
+		t.Fatalf("real upstream expiry must cap credential capacity: %#v", withExpiry)
 	}
 }
 
@@ -2893,10 +2959,10 @@ func TestLowQuotaRunwayStagesSmallRefillInsteadOfReportingTwoMinuteHealthy(t *te
 
 	recalculateSmartResourceCapacityPlan(cfg, &resource)
 
-	if resource.EffectiveHealthyMinutes != 55 || resource.WarningMinutes != 30 || resource.CriticalMinutes != 20 {
-		t.Fatalf("pool waterlines = effective:%d warning:%d critical:%d, want 55/30/20", resource.EffectiveHealthyMinutes, resource.WarningMinutes, resource.CriticalMinutes)
+	if resource.EffectiveHealthyMinutes != 60 || resource.WarningMinutes != 30 || resource.CriticalMinutes != 20 {
+		t.Fatalf("pool waterlines = effective:%d warning:%d critical:%d, want 60/30/20", resource.EffectiveHealthyMinutes, resource.WarningMinutes, resource.CriticalMinutes)
 	}
-	if resource.EstimatedSustainMinutes != 5 || resource.TargetCapacityRCU != 55_000 || resource.CapacityGapRCU != 50_000 {
+	if resource.EstimatedSustainMinutes != 5 || resource.TargetCapacityRCU != 60_000 || resource.CapacityGapRCU != 55_000 {
 		t.Fatalf("capacity plan = %#v", resource)
 	}
 	if resource.HealthLevel != smartHealthCritical || !resource.EmergencyShortage || resource.SuggestedQuantity != 20 {
@@ -2973,7 +3039,7 @@ func TestStrongSupplyUsesQuotaCapacityForPlanning(t *testing.T) {
 
 	recalculateSmartResourceCapacityPlan(cfg, &resource)
 
-	if resource.EffectiveHealthyMinutes != 55 || resource.EstimatedSustainMinutes <= 55 ||
+	if resource.EffectiveHealthyMinutes != 60 || resource.EstimatedSustainMinutes <= 60 ||
 		resource.HealthLevel != smartHealthHealthy ||
 		resource.SuggestedQuantity != 0 || resource.AccountQuantityDeficit != 0 ||
 		resource.EstimatedRequiredAccounts != 21 {
@@ -2985,10 +3051,10 @@ func TestStrongSupplyUsesQuotaCapacityForPlanning(t *testing.T) {
 	resource.HealthyAccounts = 5
 	resource.CurrentCapacityRCU = 5 * unit
 	recalculateSmartResourceCapacityPlan(cfg, &resource)
-	if resource.HealthLevel != smartHealthCritical || resource.AccountQuantityDeficit != 9 || resource.SuggestedQuantity != 9 {
+	if resource.HealthLevel != smartHealthCritical || resource.AccountQuantityDeficit != 10 || resource.SuggestedQuantity != 10 {
 		t.Fatalf("five-account quota capacity plan = %#v", resource)
 	}
-	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 9 {
+	if quantity := New(nil, nil).smartSuggestedCreateQuantity(cfg, resource); quantity != 10 {
 		t.Fatalf("five-account quota shortage should refill to healthy, got %d", quantity)
 	}
 }
@@ -3020,7 +3086,7 @@ func TestStrongSupplyRunwayUsesActualPoolQuotaInsteadOfRequestThreshold(t *testi
 		t.Fatalf("actual quota runway was altered by 401 thresholds: %#v", resource)
 	}
 	if resource.HealthLevel != smartHealthCritical || resource.SuggestedQuantity != 10 ||
-		resource.EstimatedRequiredAccounts != 93 || resource.AccountQuantityDeficit != 55 {
+		resource.EstimatedRequiredAccounts != 98 || resource.AccountQuantityDeficit != 60 {
 		t.Fatalf("38-account quota plan = %#v", resource)
 	}
 }
@@ -3351,7 +3417,7 @@ func TestSmartReadySmallOrderReleasesWhenQuotaCapacityIsHealthy(t *testing.T) {
 				_, _ = w.Write([]byte(`{"files":[{"name":"` + name + `","provider":"codex","status":"ready"}]}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex","status":"ready","remaining_rcu":80},{"name":"b.json","provider":"codex","status":"ready","remaining_rcu":80},{"name":"c.json","provider":"codex","status":"ready","remaining_rcu":80}]}`))
+			_, _ = w.Write([]byte(`{"files":[{"name":"a.json","provider":"codex","status":"ready","remaining_rcu":80},{"name":"b.json","provider":"codex","status":"ready","remaining_rcu":80},{"name":"c.json","provider":"codex","status":"ready","remaining_rcu":80},{"name":"d.json","provider":"codex","status":"ready","remaining_rcu":80}]}`))
 		case r.URL.Path == "/v0/management/auth-files" && r.Method == http.MethodPost:
 			uploadCalls.Add(1)
 			part, err := r.MultipartReader()
@@ -3400,7 +3466,10 @@ func TestSmartReadySmallOrderReleasesWhenQuotaCapacityIsHealthy(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create order: %v", err)
 	}
-	seedCompletedQuotaInspection(t, st, quotaInspectionResult(0), quotaInspectionResult(0))
+	seedCompletedQuotaInspection(t, st,
+		quotaInspectionResult(0), quotaInspectionResult(0),
+		quotaInspectionResult(0), quotaInspectionResult(0),
+	)
 	service := New(st, managerconfigsvc.New(config.Config{}, st, nil), server.Client())
 	now := time.Now()
 	events := make([]usage.Event, 0, 120)
