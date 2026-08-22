@@ -2530,17 +2530,32 @@ func smartResourceAtOrBelowWarning(resource SmartResource) bool {
 		resource.EstimatedSustainMinutes <= float64(resource.WarningMinutes)
 }
 
+// smartExtendedWaterlineProgressiveMode identifies configurations whose
+// warning/critical lines extend beyond the old no-expiry forecast horizon.
+// Those configured lines remain the exact runtime health thresholds, but the
+// newly exposed reserve must be accumulated progressively rather than turning
+// one rollout/config refresh into an emergency burst.
+func smartExtendedWaterlineProgressiveMode(resource SmartResource) bool {
+	useful := smartUsefulAccountLifetimeMinutes()
+	return resource.EffectiveHealthyMinutes > useful &&
+		resource.WarningMinutes > useful &&
+		resource.CriticalMinutes > max(1, useful/2)
+}
+
 // smartEmergencyShortage is narrower than merely being below the healthy
 // target. New credentials are short-lived, so a normal target deficit may
-// observe a falling one-minute sample. At or below half of the usable health
-// runway, or an explicitly higher critical line, there is too little buffer to
-// wait for that observation.
+// observe a falling one-minute sample. Extended waterlines keep their exact
+// configured health classification, while only a much shorter rescue runway
+// bypasses progressive order pacing.
 func smartEmergencyShortage(resource SmartResource) bool {
 	if resource.ConsumeRCUPerMinute <= 0 || resource.CapacityGapRCU <= 0 ||
 		resource.EffectiveHealthyMinutes <= 0 || resource.EstimatedSustainMinutes < 0 {
 		return false
 	}
 	threshold := max(resource.CriticalMinutes, max(1, resource.EffectiveHealthyMinutes/2))
+	if smartExtendedWaterlineProgressiveMode(resource) {
+		threshold = min(threshold, max(1, smartUsefulAccountLifetimeMinutes()/4))
+	}
 	return resource.EstimatedSustainMinutes <= float64(threshold)
 }
 

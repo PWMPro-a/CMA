@@ -231,7 +231,7 @@ func TestSmartResourceRecommendsPrelockFromUsageCapacity(t *testing.T) {
 		},
 	}, now)
 
-	if resource.HealthLevel != smartHealthCritical || !resource.EmergencyShortage || resource.SuggestedQuantity < 1 {
+	if resource.HealthLevel != smartHealthWarning || resource.EmergencyShortage || resource.SuggestedQuantity < 1 {
 		t.Fatalf("resource = %#v", resource)
 	}
 	if resource.RPM30M <= 0 || resource.CurrentCapacityRCU <= 0 || resource.CapacityGapRCU <= 0 {
@@ -2413,8 +2413,8 @@ func TestSmartResourceLimitsCapacityByOneHourExpiry(t *testing.T) {
 	if resource.EffectiveHealthyMinutes != 120 || resource.TargetCapacityRCU != 120 {
 		t.Fatalf("configured healthy target must remain effective, got %#v", resource)
 	}
-	if resource.HealthLevel != smartHealthCritical || !resource.EmergencyShortage || resource.SuggestedQuantity != 1 {
-		t.Fatalf("one-hour credential expiry must trigger a refill toward the 120-minute target, got %#v", resource)
+	if resource.HealthLevel != smartHealthWarning || resource.EmergencyShortage || resource.SuggestedQuantity != 1 {
+		t.Fatalf("one-hour credential expiry must trigger a paced refill toward the 120-minute target, got %#v", resource)
 	}
 }
 
@@ -2852,6 +2852,51 @@ func TestConfiguredWaterlinesRemainExactAtRuntime(t *testing.T) {
 	}
 	if resource.AccountLifetimeMinutes != 120 {
 		t.Fatalf("no-expiry planning horizon = %d, want 120", resource.AccountLifetimeMinutes)
+	}
+}
+
+func TestExtendedConfiguredWaterlinesRecoverProgressively(t *testing.T) {
+	cfg := store.ManagerSupplyConfig{
+		Product:               "oauth_30d",
+		HealthyMinutesTarget:  120,
+		WarningMinutes:        100,
+		CriticalMinutes:       80,
+		PrelockMinQuantity:    1,
+		PrelockMaxQuantity:    16,
+		ReplenishBatchSize:    26,
+		CreateCooldownSeconds: 120,
+		NewAccountConfidence:  0.7,
+	}
+	resource := defaultSmartResource(cfg)
+	resource.SnapshotFresh = true
+	resource.CurrentCapacityRCU = 240
+	resource.AvailableCapacityRCU = 240
+	resource.ConsumeRCUPerMinute = 10
+	resource.DemandPlanningRCUPerMinute = 10
+	resource.DemandTrend = smartDemandTrendStable
+
+	recalculateSmartResourceCapacityPlan(cfg, &resource)
+	if resource.HealthLevel != smartHealthCritical || resource.EmergencyShortage ||
+		resource.SuggestedAction != smartActionTakeLocked || resource.SuggestedQuantity <= 1 {
+		t.Fatalf("extended critical waterline must stay visible without burst mode: %#v", resource)
+	}
+	quantity, reason, timing := smartPrelockQuantityForSupplyPressureWithTiming(
+		cfg,
+		resource,
+		smartSupplyPressure{level: smartSupplyPressurePlenty},
+		resource.SuggestedQuantity,
+	)
+	if quantity != 1 || reason != "low_water_staged_batch" || timing.eligibleQuantity != 1 {
+		t.Fatalf("extended waterline refill = %d/%q %#v, want one staged account", quantity, reason, timing)
+	}
+	if cooldown := smartSuccessfulOrderCooldownForResource(cfg, resource); cooldown < 120 {
+		t.Fatalf("successful progressive cooldown = %d, want at least 120", cooldown)
+	}
+
+	resource.EstimatedSustainMinutes = 12
+	resource.CapacityGapRCU = 1
+	if !smartEmergencyShortage(resource) {
+		t.Fatalf("twelve-minute rescue runway must still bypass pacing: %#v", resource)
 	}
 }
 

@@ -8206,6 +8206,15 @@ func smartPrelockQuantityForSupplyPressureWithTiming(cfg store.ManagerSupplyConf
 	}
 	timing := smartJustInTimePurchase(cfg, resource, pressure, quantity)
 	quantity = timing.eligibleQuantity
+	if smartExtendedWaterlineProgressiveMode(resource) &&
+		smartResourceAtOrBelowWarning(resource) && !smartResourceEmergency(resource) {
+		// When an old 55-minute implicit ceiling is removed, the configured
+		// 120/100/80 reserve can expose several accounts of backlog at once.
+		// Fill that reserve one verified account per successful observation
+		// cycle; low-price reserve purchasing remains independent.
+		quantity = min(quantity, 1)
+		timing.eligibleQuantity = quantity
+	}
 	if quantity <= 0 {
 		if timing.lifetimeLimited {
 			return 0, "supply_lifetime_capacity_wait", timing
