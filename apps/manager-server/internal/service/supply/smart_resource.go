@@ -1864,7 +1864,7 @@ func (s *Service) cachedInspectionQuotaSnapshot(ctx context.Context, cfg store.M
 	if !force && inspectionSnapshotCacheUsable(s.quotaSnapshot, now, ttl) {
 		snapshot := cloneInspectionQuotaSnapshot(s.quotaSnapshot)
 		s.quotaSnapshotMu.Unlock()
-		return snapshot, snapshot.lastErr
+		return snapshot, inspectionSnapshotReadError(snapshot, now)
 	}
 	s.quotaSnapshotMu.Unlock()
 
@@ -1874,7 +1874,7 @@ func (s *Service) cachedInspectionQuotaSnapshot(ctx context.Context, cfg store.M
 	if !force && inspectionSnapshotCacheUsable(s.quotaSnapshot, now, ttl) {
 		snapshot := cloneInspectionQuotaSnapshot(s.quotaSnapshot)
 		s.quotaSnapshotMu.Unlock()
-		return snapshot, snapshot.lastErr
+		return snapshot, inspectionSnapshotReadError(snapshot, now)
 	}
 	s.quotaSnapshotMu.Unlock()
 
@@ -1894,7 +1894,21 @@ func (s *Service) cachedInspectionQuotaSnapshot(ctx context.Context, cfg store.M
 	}
 	snapshot := cloneInspectionQuotaSnapshot(s.quotaSnapshot)
 	s.quotaSnapshotMu.Unlock()
-	return snapshot, err
+	return snapshot, inspectionSnapshotReadError(snapshot, attemptedAt)
+}
+
+// inspectionSnapshotReadError keeps a recent completed capacity baseline
+// usable when only an optional refresh attempt times out. lastErr remains on
+// the cached snapshot for diagnostics and retry pacing, but it must not turn a
+// still-fresh historical baseline into a stale decision. Doing so can make one
+// empty usage bucket fall through to startup_account_floor and purchase a
+// full-price credential while the prior capacity decision is explicitly
+// waiting for the just-in-time trigger.
+func inspectionSnapshotReadError(snapshot inspectionQuotaSnapshot, now time.Time) error {
+	if !snapshot.generatedAt.IsZero() && smartInspectionSnapshotFresh(snapshot, now) {
+		return nil
+	}
+	return snapshot.lastErr
 }
 
 func (s *Service) loadLatestInspectionQuotaSnapshot(ctx context.Context, configs ...store.ManagerSupplyConfig) (inspectionQuotaSnapshot, error) {

@@ -3,6 +3,7 @@ package supply
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1193,6 +1194,49 @@ func TestCachedInspectionSnapshotSeedsCompleteIndependentQuotaUsage(t *testing.T
 	estimate := service.smartQuotaEstimateForInspectionResult(snapshot.results[0], defaultSmartQuotaEstimate(), time.Now())
 	if estimate.CapacityM != 40 || !estimate.IndependentAccount || estimate.Source != smartQuotaEstimateSourceCurrent {
 		t.Fatalf("independent snapshot estimate = %#v", estimate)
+	}
+}
+
+func TestCachedInspectionSnapshotKeepsFreshBaselineAfterRefreshTimeout(t *testing.T) {
+	now := time.Now().Truncate(time.Millisecond)
+	snapshot := inspectionQuotaSnapshot{
+		run: store.CodexInspectionRun{
+			Status:        model.CodexInspectionStatusCompleted,
+			ProbeSetCount: 1,
+			SampledCount:  1,
+		},
+		results: []store.CodexInspectionResult{{
+			Provider: "codex",
+			Status:   "active",
+			Action:   "keep",
+		}},
+		generatedAt: now.Add(-time.Minute),
+		attemptedAt: now,
+		lastErr:     context.DeadlineExceeded,
+	}
+	service := &Service{
+		store:         &store.Store{},
+		quotaSnapshot: snapshot,
+	}
+
+	loaded, err := service.cachedInspectionQuotaSnapshot(
+		context.Background(),
+		store.ManagerSupplyConfig{AuthFilesCacheTTLSeconds: 60},
+		false,
+	)
+	if err != nil {
+		t.Fatalf("fresh historical snapshot inherited refresh timeout: %v", err)
+	}
+	if loaded.lastErr != context.DeadlineExceeded {
+		t.Fatalf("refresh diagnostic was not retained: %v", loaded.lastErr)
+	}
+	if !smartInspectionSnapshotFresh(loaded, now) {
+		t.Fatalf("loaded historical snapshot is not fresh: %#v", loaded)
+	}
+
+	loaded.generatedAt = now.Add(-smartInspectionSnapshotFreshTTL - time.Second)
+	if err := inspectionSnapshotReadError(loaded, now); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("stale historical snapshot hid refresh timeout: %v", err)
 	}
 }
 
