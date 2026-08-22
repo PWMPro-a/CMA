@@ -114,8 +114,21 @@ func TestMarketplaceSellerProvenancePersistsOnOrderAndImportItem(t *testing.T) {
 	if err := st.MarkSupplyImportItemImported(ctx, items[0].ID, time.Now().UnixMilli()); err != nil {
 		t.Fatalf("mark imported: %v", err)
 	}
+	provisionalAtMS := time.Now().UnixMilli()
+	finalAtMS := provisionalAtMS + time.Minute.Milliseconds()
+	if err := st.UpdateSupplyImportItemQuotaCapacity(ctx, items[0].ID, 120, provisionalAtMS, false); err != nil {
+		t.Fatalf("persist provisional capacity: %v", err)
+	}
+	if err := st.UpdateSupplyImportItemQuotaCapacity(ctx, items[0].ID, 80, finalAtMS, true); err != nil {
+		t.Fatalf("persist final capacity: %v", err)
+	}
+	// A later provisional estimate must not overwrite the exhausted final sample.
+	if err := st.UpdateSupplyImportItemQuotaCapacity(ctx, items[0].ID, 140, finalAtMS+time.Minute.Milliseconds(), false); err != nil {
+		t.Fatalf("ignore later provisional capacity: %v", err)
+	}
 	current, err := st.ListCurrentImportedSupplyItems(ctx)
-	if err != nil || len(current) != 1 || current[0].MarketplaceSellerID != "seller-a" || current[0].MarketplaceChannelID != "channel-a" || current[0].MarketplaceSelectionToken != "select-a" {
+	if err != nil || len(current) != 1 || current[0].MarketplaceSellerID != "seller-a" || current[0].MarketplaceChannelID != "channel-a" || current[0].MarketplaceSelectionToken != "select-a" ||
+		current[0].QuotaCapacityM != 80 || current[0].QuotaCapacityObservedAtMS != finalAtMS || !current[0].QuotaCapacityComplete {
 		t.Fatalf("current seller items = %#v err=%v", current, err)
 	}
 }

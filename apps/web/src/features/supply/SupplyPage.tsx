@@ -335,9 +335,9 @@ const reportRangeForPreset = (preset: ReportRangePreset, now = new Date()) => {
 
 const formatMoney = (fen?: number) => `¥${((fen ?? 0) / 100).toFixed(2)}`;
 
-const formatCapacityCost = (fenPerM?: number) =>
-  typeof fenPerM === 'number' && Number.isFinite(fenPerM) && fenPerM > 0
-    ? `¥${(fenPerM / 100).toFixed(3)} / M`
+const formatCostMultiplier = (value?: number) =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? `¥${value.toFixed(3)} / M`
     : '-';
 
 const hasSupplierCost = (basePriceFen?: number, chargedFen?: number) =>
@@ -3447,8 +3447,8 @@ export function SupplyPage() {
                                                   : '-'}
                                               </td>
                                               <td>
-                                                {(score.costPerCapacityFen ?? 0) > 0
-                                                  ? formatCapacityCost(score.costPerCapacityFen)
+                                                {(score.costMultiplier ?? 0) > 0
+                                                  ? formatCostMultiplier(score.costMultiplier)
                                                   : t('supply.supplier_quota_cost_price_fallback')}
                                               </td>
                                               <td>
@@ -3630,8 +3630,8 @@ export function SupplyPage() {
                           </span>
                           <span>
                             {t('supply.platform_cost_per_quota')}:{' '}
-                            {live?.costPerCapacityFen
-                              ? formatCapacityCost(live.costPerCapacityFen)
+                            {live?.costMultiplier
+                              ? formatCostMultiplier(live.costMultiplier)
                               : t('supply.supplier_quota_cost_price_fallback')}
                           </span>
                           {live?.lastError ? <strong>{live.lastError}</strong> : null}
@@ -3803,11 +3803,15 @@ export function SupplyPage() {
                       <div>
                         <span>{t('supply.low_price_reserve_quote')}</span>
                         <strong>
-                          {lowPriceReserve?.lastQuotedUnitPriceFen
-                            ? formatMoney(lowPriceReserve.lastQuotedUnitPriceFen)
+                          {lowPriceReserve?.lastQuotedCostMultiplier
+                            ? formatCostMultiplier(lowPriceReserve.lastQuotedCostMultiplier)
                             : '-'}
                         </strong>
-                        <small>{lowPriceReserve?.selectedPlatformId || '-'}</small>
+                        <small>
+                          {lowPriceReserve?.lastQuotedUnitPriceFen
+                            ? `${formatMoney(lowPriceReserve.lastQuotedUnitPriceFen)} · ${lowPriceReserve.selectedPlatformId || '-'}`
+                            : lowPriceReserve?.selectedPlatformId || '-'}
+                        </small>
                       </div>
                       <div>
                         <span>{t('supply.low_price_reserve_next_check')}</span>

@@ -23,6 +23,23 @@ func TestLowPriceReserveLadderTargetThirty(t *testing.T) {
 	}
 }
 
+func TestLowPriceReserveQuoteSnapshotUsesCostMultiplierWithPriceFallback(t *testing.T) {
+	withCapacity := supplyPlatformTestOverview("high-price-high-capacity", 10, 1800, 10_000, 60, 170, 0)
+	withCapacity.CostMultiplier, _ = supplierCostMultiplier(1800, 170)
+	lowPriceUnknown := supplyPlatformTestOverview("low-price-unknown", 10, 1700, 10_000, 60, 0, 0)
+
+	price, multiplier, platformID, ok := lowPriceReserveQuoteSnapshot([]PlatformOverview{withCapacity, lowPriceUnknown})
+	if !ok || platformID != lowPriceUnknown.ID || price != 1700 || multiplier != 0 {
+		t.Fatalf("unknown fallback snapshot = price=%d multiplier=%.6f platform=%q ok=%v", price, multiplier, platformID, ok)
+	}
+
+	lowPriceUnknown.Inventory.EstimatedUnitPriceFen = 1900
+	price, multiplier, platformID, ok = lowPriceReserveQuoteSnapshot([]PlatformOverview{withCapacity, lowPriceUnknown})
+	if !ok || platformID != withCapacity.ID || price != 1800 || multiplier != 0.105882 {
+		t.Fatalf("capacity snapshot = price=%d multiplier=%.6f platform=%q ok=%v", price, multiplier, platformID, ok)
+	}
+}
+
 func TestLowPriceReserveNextStageUsesCumulativeThreshold(t *testing.T) {
 	for _, test := range []struct {
 		reserve int

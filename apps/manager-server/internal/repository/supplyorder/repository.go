@@ -45,6 +45,7 @@ type Repository interface {
 	UpdateItemImportPlan(ctx context.Context, id int64, accountName string, nameKey string, fileName string, importAction string, replacedFileName string) error
 	UpdateItemAccountMetadata(ctx context.Context, id int64, accountName string, nameKey string) error
 	UpdateItemWarrantyMetadata(ctx context.Context, id int64, leaseExpiresAtMS int64, warrantyExpiresAtMS int64) error
+	UpdateItemQuotaCapacity(ctx context.Context, id int64, capacityM float64, observedAtMS int64, complete bool) error
 	ListItemsMissingAccountMetadata(ctx context.Context, limit int) ([]model.SupplyImportItem, error)
 	ListCurrentItemsByItemKey(ctx context.Context, itemKey string) ([]model.SupplyImportItem, error)
 	ListCurrentItemsByNameKey(ctx context.Context, nameKey string) ([]model.SupplyImportItem, error)
@@ -605,13 +606,13 @@ func (r *repository) InsertItems(ctx context.Context, orderID string, items []mo
 			result, err := tx.ExecContext(ctx, `insert or ignore into supply_import_items (
 			order_id, item_key, account_name, name_key, file_name, import_action, replaced_file_name,
 				status, payload_json, attempt_count, lease_expires_at_ms, warranty_expires_at_ms,
-				marketplace_seller_id, marketplace_seller_name, marketplace_channel_id, marketplace_selection_token,
-				base_price_fen, charged_fen, created_at_ms, updated_at_ms
-			) values (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, orderID, item.ItemKey,
+			marketplace_seller_id, marketplace_seller_name, marketplace_channel_id, marketplace_selection_token,
+			base_price_fen, charged_fen, quota_capacity_m, quota_capacity_observed_at_ms, quota_capacity_complete, created_at_ms, updated_at_ms
+			) values (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, orderID, item.ItemKey,
 				nullString(item.AccountName), nullString(item.NameKey), item.FileName, nullString(item.ImportAction), nullString(item.ReplacedFileName), payload,
 				nullPositive(item.LeaseExpiresAtMS), nullPositive(item.WarrantyExpiresAtMS), nullString(item.MarketplaceSellerID),
 				nullString(item.MarketplaceSellerName), nullString(item.MarketplaceChannelID), nullString(item.MarketplaceSelectionToken),
-				item.BasePriceFen, item.ChargedFen, now, now)
+				item.BasePriceFen, item.ChargedFen, item.QuotaCapacityM, nullPositive(item.QuotaCapacityObservedAtMS), boolInt(item.QuotaCapacityComplete), now, now)
 			if err != nil {
 				return err
 			}
@@ -931,6 +932,30 @@ func (r *repository) UpdateItemWarrantyMetadata(ctx context.Context, id int64, l
 	})
 }
 
+func (r *repository) UpdateItemQuotaCapacity(ctx context.Context, id int64, capacityM float64, observedAtMS int64, complete bool) error {
+	if capacityM <= 0 || observedAtMS <= 0 {
+		return nil
+	}
+	return sqliterepo.WithBusyRetry(ctx, func() error {
+		// Keep provisional and exhausted updates as separate conditional writes.
+		// MySQL evaluates multi-column assignments left-to-right, so a single
+		// CASE-based UPDATE can observe the newly assigned capacity and skip the
+		// timestamp update. These predicates are deterministic on all databases.
+		if complete {
+			_, err := r.db.ExecContext(ctx, `update supply_import_items set
+				quota_capacity_m = ?, quota_capacity_observed_at_ms = ?, quota_capacity_complete = 1,
+				updated_at_ms = ? where id = ? and quota_capacity_complete = 0`,
+				capacityM, observedAtMS, time.Now().UnixMilli(), id)
+			return err
+		}
+		_, err := r.db.ExecContext(ctx, `update supply_import_items set
+			quota_capacity_m = ?, quota_capacity_observed_at_ms = ?, updated_at_ms = ?
+			where id = ? and quota_capacity_m <= 0`,
+			capacityM, observedAtMS, time.Now().UnixMilli(), id)
+		return err
+	})
+}
+
 func (r *repository) ListItemsMissingAccountMetadata(ctx context.Context, limit int) ([]model.SupplyImportItem, error) {
 	if limit <= 0 || limit > 5000 {
 		limit = 1000
@@ -1007,7 +1032,7 @@ const importItemSelect = `select id, order_id, item_key, account_name, name_key,
 	import_action, replaced_file_name, supersedes_item_id, status,
 	payload_json, last_error, attempt_count, next_retry_at_ms, imported_at_ms, effective_from_ms, superseded_at_ms,
 	lease_expires_at_ms, warranty_expires_at_ms, marketplace_seller_id, marketplace_seller_name, marketplace_channel_id, marketplace_selection_token,
-	base_price_fen, charged_fen, created_at_ms, updated_at_ms`
+	base_price_fen, charged_fen, quota_capacity_m, quota_capacity_observed_at_ms, quota_capacity_complete, created_at_ms, updated_at_ms`
 
 type scanner interface{ Scan(...any) error }
 
@@ -1064,12 +1089,14 @@ func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {
 	var lastError sql.NullString
 	var accountName, nameKey, importAction, replacedFileName sql.NullString
 	var marketplaceSellerID, marketplaceSellerName, marketplaceChannelID, marketplaceSelectionToken sql.NullString
-	var supersedesItemID, nextRetryAtMS, importedAtMS, effectiveFromMS, supersededAtMS, leaseExpiresAtMS, warrantyExpiresAtMS sql.NullInt64
+	var supersedesItemID, nextRetryAtMS, importedAtMS, effectiveFromMS, supersededAtMS, leaseExpiresAtMS, warrantyExpiresAtMS, quotaCapacityObservedAtMS sql.NullInt64
+	var quotaCapacityM sql.NullFloat64
+	var quotaCapacityComplete int
 	if err := row.Scan(&item.ID, &item.OrderID, &item.ItemKey, &accountName, &nameKey, &item.FileName,
 		&importAction, &replacedFileName, &supersedesItemID, &item.Status,
 		&payload, &lastError, &item.AttemptCount, &nextRetryAtMS, &importedAtMS, &effectiveFromMS, &supersededAtMS, &leaseExpiresAtMS, &warrantyExpiresAtMS,
 		&marketplaceSellerID, &marketplaceSellerName, &marketplaceChannelID, &marketplaceSelectionToken,
-		&item.BasePriceFen, &item.ChargedFen, &item.CreatedAtMS, &item.UpdatedAtMS); err != nil {
+		&item.BasePriceFen, &item.ChargedFen, &quotaCapacityM, &quotaCapacityObservedAtMS, &quotaCapacityComplete, &item.CreatedAtMS, &item.UpdatedAtMS); err != nil {
 		return model.SupplyImportItem{}, err
 	}
 	unprotected, err := r.unprotect(payload)
@@ -1089,6 +1116,9 @@ func (r *repository) scanItem(row scanner) (model.SupplyImportItem, error) {
 	item.SupersededAtMS = supersededAtMS.Int64
 	item.LeaseExpiresAtMS = leaseExpiresAtMS.Int64
 	item.WarrantyExpiresAtMS = warrantyExpiresAtMS.Int64
+	item.QuotaCapacityM = quotaCapacityM.Float64
+	item.QuotaCapacityObservedAtMS = quotaCapacityObservedAtMS.Int64
+	item.QuotaCapacityComplete = quotaCapacityComplete != 0
 	item.MarketplaceSellerID = marketplaceSellerID.String
 	item.MarketplaceSellerName = marketplaceSellerName.String
 	item.MarketplaceChannelID = marketplaceChannelID.String

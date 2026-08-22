@@ -651,6 +651,10 @@ func (s *Store) UpdateSupplyImportItemWarrantyMetadata(ctx context.Context, id i
 	return s.SupplyOrders.UpdateItemWarrantyMetadata(ctx, id, leaseExpiresAtMS, warrantyExpiresAtMS)
 }
 
+func (s *Store) UpdateSupplyImportItemQuotaCapacity(ctx context.Context, id int64, capacityM float64, observedAtMS int64, complete bool) error {
+	return s.SupplyOrders.UpdateItemQuotaCapacity(ctx, id, capacityM, observedAtMS, complete)
+}
+
 func (s *Store) ListSupplyImportItemsMissingAccountMetadata(ctx context.Context, limit int) ([]SupplyImportItem, error) {
 	return s.SupplyOrders.ListItemsMissingAccountMetadata(ctx, limit)
 }

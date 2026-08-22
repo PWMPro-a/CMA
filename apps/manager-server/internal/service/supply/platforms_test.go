@@ -120,6 +120,9 @@ func TestSupplyPlatformEconomicsUsesSupplierQuotaAndLifetimeDemand(t *testing.T)
 	if status.CostPerCapacityFen != 0.5 {
 		t.Fatalf("capacity cost = %.2f fen/M, want 0.5", status.CostPerCapacityFen)
 	}
+	if status.CostMultiplier != 0.005 {
+		t.Fatalf("cost multiplier = %.6f, want 0.005", status.CostMultiplier)
+	}
 }
 
 func TestSupplyPlatformSelectionPrefersLowerCostPerCapacity(t *testing.T) {

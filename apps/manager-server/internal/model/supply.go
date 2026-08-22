@@ -87,8 +87,14 @@ type SupplyImportItem struct {
 	MarketplaceSelectionToken string `json:"marketplaceSelectionToken,omitempty"`
 	BasePriceFen              int64  `json:"basePriceFen,omitempty"`
 	ChargedFen                int64  `json:"chargedFen,omitempty"`
-	CreatedAtMS               int64  `json:"createdAtMs"`
-	UpdatedAtMS               int64  `json:"updatedAtMs"`
+	// QuotaCapacityM is the durable per-account capacity sample used for
+	// supplier cost-ratio ranking. It is populated from the first 5% estimate
+	// and replaced only when the same account reaches an exhausted final window.
+	QuotaCapacityM            float64 `json:"-"`
+	QuotaCapacityObservedAtMS int64   `json:"-"`
+	QuotaCapacityComplete     bool    `json:"-"`
+	CreatedAtMS               int64   `json:"createdAtMs"`
+	UpdatedAtMS               int64   `json:"updatedAtMs"`
 }
 
 type SupplyRecovery struct {

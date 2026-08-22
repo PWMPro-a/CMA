@@ -922,6 +922,9 @@ func Migrate(db *sql.DB) error {
 			marketplace_selection_token text,
 			base_price_fen integer not null default 0,
 			charged_fen integer not null default 0,
+			quota_capacity_m real not null default 0,
+			quota_capacity_observed_at_ms integer,
+			quota_capacity_complete integer not null default 0,
 			created_at_ms integer not null,
 			updated_at_ms integer not null,
 			foreign key(order_id) references supply_orders(order_id) on delete cascade
@@ -1302,6 +1305,21 @@ func ensureSupplyImportItemColumns(db *sql.DB) error {
 	}
 	if _, ok := existing["charged_fen"]; !ok {
 		if _, err := db.Exec(`alter table supply_import_items add column charged_fen integer not null default 0`); err != nil {
+			return err
+		}
+	}
+	if _, ok := existing["quota_capacity_m"]; !ok {
+		if _, err := db.Exec(`alter table supply_import_items add column quota_capacity_m real not null default 0`); err != nil {
+			return err
+		}
+	}
+	if _, ok := existing["quota_capacity_observed_at_ms"]; !ok {
+		if _, err := db.Exec(`alter table supply_import_items add column quota_capacity_observed_at_ms integer`); err != nil {
+			return err
+		}
+	}
+	if _, ok := existing["quota_capacity_complete"]; !ok {
+		if _, err := db.Exec(`alter table supply_import_items add column quota_capacity_complete integer not null default 0`); err != nil {
 			return err
 		}
 	}

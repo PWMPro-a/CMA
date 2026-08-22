@@ -21,23 +21,24 @@ const (
 )
 
 type LowPriceReserveExecution struct {
-	Enabled                   bool   `json:"enabled"`
-	Running                   bool   `json:"running"`
-	ReserveAccounts           int    `json:"reserveAccounts"`
-	TargetAccounts            int    `json:"targetAccounts"`
-	Gap                       int    `json:"gap"`
-	Ladder                    []int  `json:"ladder,omitempty"`
-	NextStageQuantity         int    `json:"nextStageQuantity"`
-	CheckIntervalMilliseconds int    `json:"checkIntervalMilliseconds"`
-	MaxUnitPriceFen           int64  `json:"maxUnitPriceFen"`
-	LastCheckedAtMS           int64  `json:"lastCheckedAtMs,omitempty"`
-	NextCheckAtMS             int64  `json:"nextCheckAtMs,omitempty"`
-	LastQuotedUnitPriceFen    int64  `json:"lastQuotedUnitPriceFen,omitempty"`
-	SelectedPlatformID        string `json:"selectedPlatformId,omitempty"`
-	ActiveTaskID              string `json:"activeTaskId,omitempty"`
-	RetryAfterMS              int64  `json:"retryAfterMs,omitempty"`
-	LastResult                string `json:"lastResult,omitempty"`
-	LastError                 string `json:"lastError,omitempty"`
+	Enabled                   bool    `json:"enabled"`
+	Running                   bool    `json:"running"`
+	ReserveAccounts           int     `json:"reserveAccounts"`
+	TargetAccounts            int     `json:"targetAccounts"`
+	Gap                       int     `json:"gap"`
+	Ladder                    []int   `json:"ladder,omitempty"`
+	NextStageQuantity         int     `json:"nextStageQuantity"`
+	CheckIntervalMilliseconds int     `json:"checkIntervalMilliseconds"`
+	MaxUnitPriceFen           int64   `json:"maxUnitPriceFen"`
+	LastCheckedAtMS           int64   `json:"lastCheckedAtMs,omitempty"`
+	NextCheckAtMS             int64   `json:"nextCheckAtMs,omitempty"`
+	LastQuotedUnitPriceFen    int64   `json:"lastQuotedUnitPriceFen,omitempty"`
+	LastQuotedCostMultiplier  float64 `json:"lastQuotedCostMultiplier,omitempty"`
+	SelectedPlatformID        string  `json:"selectedPlatformId,omitempty"`
+	ActiveTaskID              string  `json:"activeTaskId,omitempty"`
+	RetryAfterMS              int64   `json:"retryAfterMs,omitempty"`
+	LastResult                string  `json:"lastResult,omitempty"`
+	LastError                 string  `json:"lastError,omitempty"`
 
 	accountCountObserved bool
 	quoteObserved        bool
@@ -119,21 +120,39 @@ func (s *Service) countLowPriceReserveAccounts(ctx context.Context, cfg store.Ma
 	return countLowPriceReserveFiles(snapshot.files), err
 }
 
-func lowPriceReserveQuoteSnapshot(statuses []PlatformOverview) (int64, string, bool) {
-	var price int64
-	platformID := ""
-	observed := false
-	for _, status := range statuses {
+func lowPriceReserveQuoteSnapshot(statuses []PlatformOverview) (int64, float64, string, bool) {
+	bestKnown := -1
+	bestUnknown := -1
+	for index, status := range statuses {
 		if status.Inventory == nil || status.Inventory.Available <= 0 || status.Inventory.EstimatedUnitPriceFen <= 0 {
 			continue
 		}
-		if !observed || status.Inventory.EstimatedUnitPriceFen < price {
-			price = status.Inventory.EstimatedUnitPriceFen
-			platformID = status.ID
-			observed = true
+		if cost, known := platformOverviewCostMultiplier(status); known {
+			if bestKnown < 0 {
+				bestKnown = index
+				continue
+			}
+			bestCost, _ := platformOverviewCostMultiplier(statuses[bestKnown])
+			bestPrice := platformOverviewUnitPrice(statuses[bestKnown])
+			if cost < bestCost || (cost == bestCost && status.Inventory.EstimatedUnitPriceFen < bestPrice) {
+				bestKnown = index
+			}
+			continue
+		}
+		if bestUnknown < 0 || status.Inventory.EstimatedUnitPriceFen < platformOverviewUnitPrice(statuses[bestUnknown]) {
+			bestUnknown = index
 		}
 	}
-	return price, platformID, observed
+	selected := bestKnown
+	if bestUnknown >= 0 && (bestKnown < 0 ||
+		platformOverviewUnitPrice(statuses[bestUnknown]) < platformOverviewUnitPrice(statuses[bestKnown])) {
+		selected = bestUnknown
+	}
+	if selected < 0 {
+		return 0, 0, "", false
+	}
+	costMultiplier, _ := platformOverviewCostMultiplier(statuses[selected])
+	return platformOverviewUnitPrice(statuses[selected]), costMultiplier, statuses[selected].ID, true
 }
 
 func lowPriceReserveExecutionFromConfig(cfg store.ManagerSupplyConfig) LowPriceReserveExecution {
@@ -274,8 +293,9 @@ func (s *Service) RunLowPriceReserve(ctx context.Context) (LowPriceReserveExecut
 	}
 
 	selection, matched, err := s.selectLowPriceReserveCatalogPlatform(ctx, cfg.Supply, execution.NextStageQuantity)
-	if price, platformID, observed := lowPriceReserveQuoteSnapshot(selection.all); observed {
+	if price, costMultiplier, platformID, observed := lowPriceReserveQuoteSnapshot(selection.all); observed {
 		execution.LastQuotedUnitPriceFen = price
+		execution.LastQuotedCostMultiplier = costMultiplier
 		execution.SelectedPlatformID = platformID
 		execution.quoteObserved = true
 	}
@@ -312,6 +332,7 @@ func (s *Service) RunLowPriceReserve(ctx context.Context) (LowPriceReserveExecut
 		return execution, nil
 	}
 	execution.LastQuotedUnitPriceFen = selection.status.Inventory.EstimatedUnitPriceFen
+	execution.LastQuotedCostMultiplier, _ = platformOverviewCostMultiplier(selection.status)
 	execution.SelectedPlatformID = selection.platform.ID
 	execution.quoteObserved = true
 	quantity := min(execution.NextStageQuantity, selection.status.Inventory.Available)
@@ -420,6 +441,7 @@ func (s *Service) RecordLowPriceReserveExecution(
 	}
 	if !execution.quoteObserved {
 		execution.LastQuotedUnitPriceFen = previous.LastQuotedUnitPriceFen
+		execution.LastQuotedCostMultiplier = previous.LastQuotedCostMultiplier
 		execution.SelectedPlatformID = previous.SelectedPlatformID
 	}
 	execution.Running = false

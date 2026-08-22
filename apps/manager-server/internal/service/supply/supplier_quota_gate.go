@@ -103,10 +103,13 @@ type SupplierQuotaScore struct {
 	Available              int     `json:"available,omitempty"`
 	MinUnitPriceFen        int64   `json:"minUnitPriceFen,omitempty"`
 	MaxUnitPriceFen        int64   `json:"maxUnitPriceFen,omitempty"`
-	CostPerCapacityFen     float64 `json:"costPerCapacityFen,omitempty"`
-	MarketplaceQuality     float64 `json:"marketplaceQuality,omitempty"`
-	MarketplaceActiveRate  float64 `json:"marketplaceActiveRate,omitempty"`
-	CheckedAtMS            int64   `json:"checkedAtMs"`
+	// CostMultiplier is the normalized price/capacity ratio in yuan per 1M.
+	// CostPerCapacityFen remains available for older panel clients.
+	CostMultiplier        float64 `json:"costMultiplier,omitempty"`
+	CostPerCapacityFen    float64 `json:"costPerCapacityFen,omitempty"`
+	MarketplaceQuality    float64 `json:"marketplaceQuality,omitempty"`
+	MarketplaceActiveRate float64 `json:"marketplaceActiveRate,omitempty"`
+	CheckedAtMS           int64   `json:"checkedAtMs"`
 }
 
 type supplierQuotaScoreCacheEntry struct {
@@ -273,15 +276,15 @@ func sortMarketplaceSellerSelections(values []marketplaceSellerSelection) {
 	known := make([]marketplaceSellerSelection, 0, len(values))
 	unknown := make([]marketplaceSellerSelection, 0, len(values))
 	for _, value := range values {
-		if _, ok := supplierCostPerCapacityFen(marketplaceSellerSelectionPrice(value), value.score.ScoreM); ok {
+		if _, ok := supplierCostMultiplier(marketplaceSellerSelectionPrice(value), value.score.ScoreM); ok {
 			known = append(known, value)
 		} else {
 			unknown = append(unknown, value)
 		}
 	}
 	sort.SliceStable(known, func(i, j int) bool {
-		leftCost, _ := supplierCostPerCapacityFen(marketplaceSellerSelectionPrice(known[i]), known[i].score.ScoreM)
-		rightCost, _ := supplierCostPerCapacityFen(marketplaceSellerSelectionPrice(known[j]), known[j].score.ScoreM)
+		leftCost, _ := supplierCostMultiplier(marketplaceSellerSelectionPrice(known[i]), known[i].score.ScoreM)
+		rightCost, _ := supplierCostMultiplier(marketplaceSellerSelectionPrice(known[j]), known[j].score.ScoreM)
 		if leftCost != rightCost {
 			return leftCost < rightCost
 		}
@@ -483,17 +486,36 @@ func (s *Service) marketplaceSupplierQuotaScores(
 		// A revoked/invalid credential is a failed quality sample. It contributes
 		// to the seller's combined pass rate, but one isolated failure does not
 		// blacklist the seller before a representative evidence batch exists.
-		observedAtMS := max(item.ImportedAtMS, max(item.UpdatedAtMS, item.CreatedAtMS))
+		// Sample recency follows account import chronology. Metadata repairs and
+		// later quota observations must not make an old account displace a newer
+		// account from the seller's latest-20 evidence window.
+		sampleOrderMS := supplierQuotaSampleOrderMS(item.ImportedAtMS, item.CreatedAtMS)
 		if found && inspectionResultCredentialInvalid(result) {
 			entry.accountSamples = append(entry.accountSamples, supplierQuotaAccountSample{
-				itemID: item.ID, observedAtMS: observedAtMS, invalid: true,
+				itemID: item.ID, observedAtMS: sampleOrderMS, invalid: true,
 			})
 			continue
 		}
 		estimate, ok := s.smartQuotaSupplierEstimateForAt(now, identities...)
-		if ok && estimate.CapacityM > 0 {
+		capacityM := item.QuotaCapacityM
+		capacityObservedAtMS := item.QuotaCapacityObservedAtMS
+		complete := item.QuotaCapacityComplete
+		if ok && estimate.CapacityM > 0 && (capacityM <= 0 || (estimate.Source == smartQuotaEstimateSourceSupplierFinal && !complete)) {
+			capacityM = estimate.CapacityM
+			capacityObservedAtMS = sampleOrderMS
+			if capacityObservedAtMS <= 0 {
+				capacityObservedAtMS = now.UnixMilli()
+			}
+			complete = estimate.Source == smartQuotaEstimateSourceSupplierFinal
+			if s.store != nil {
+				_ = s.store.UpdateSupplyImportItemQuotaCapacity(ctx, item.ID, capacityM, capacityObservedAtMS, complete)
+			}
+		}
+		if capacityM > 0 {
 			entry.accountSamples = append(entry.accountSamples, supplierQuotaAccountSample{
-				itemID: item.ID, observedAtMS: observedAtMS, capacityM: estimate.CapacityM,
+				itemID:       item.ID,
+				observedAtMS: sampleOrderMS,
+				capacityM:    capacityM,
 			})
 		}
 	}
@@ -549,6 +571,7 @@ func (s *Service) marketplaceSupplierQuotaScores(
 			}
 		}
 		score.InvalidCredentialCount = entry.invalid
+		score.CostMultiplier, _ = supplierCostMultiplier(score.MinUnitPriceFen, score.ScoreM)
 		score.CostPerCapacityFen, _ = supplierCostPerCapacityFen(score.MinUnitPriceFen, score.ScoreM)
 		score.EvidenceCount = score.SampleCount + entry.invalid
 		if score.EvidenceCount > 0 {
@@ -608,6 +631,16 @@ type supplierQuotaAccountSample struct {
 	invalid      bool
 }
 
+func supplierQuotaSampleOrderMS(importedAtMS, createdAtMS int64) int64 {
+	if importedAtMS > 0 {
+		return importedAtMS
+	}
+	if createdAtMS > 0 {
+		return createdAtMS
+	}
+	return 0
+}
+
 func recentSupplierQuotaAccountSamples(samples []supplierQuotaAccountSample, limit int) []supplierQuotaAccountSample {
 	if len(samples) == 0 || limit <= 0 {
 		return nil
@@ -641,10 +674,21 @@ func trimmedSupplierQuotaCapacityMean(sortedCapacities []float64) float64 {
 }
 
 func supplierCostPerCapacityFen(unitPriceFen int64, capacityM float64) (float64, bool) {
+	multiplier, ok := supplierCostMultiplier(unitPriceFen, capacityM)
+	if !ok {
+		return 0, false
+	}
+	return math.Round(multiplier*100*10_000) / 10_000, true
+}
+
+// supplierCostMultiplier normalizes all purchase comparisons to yuan per 1M
+// quota. Keeping the normalized unit explicit avoids comparing raw account
+// prices when suppliers deliver very different capacities.
+func supplierCostMultiplier(unitPriceFen int64, capacityM float64) (float64, bool) {
 	if unitPriceFen <= 0 || capacityM <= 0 {
 		return 0, false
 	}
-	return math.Round((float64(unitPriceFen)/capacityM)*10_000) / 10_000, true
+	return math.Round((float64(unitPriceFen)/100/capacityM)*1_000_000) / 1_000_000, true
 }
 
 func inspectionResultCredentialInvalid(result store.CodexInspectionResult) bool {
@@ -739,6 +783,7 @@ func mergeMarketplaceSupplierQuotaScores(
 		score.MinUnitPriceFen = 0
 		score.MaxUnitPriceFen = 0
 		score.CostPerCapacityFen = 0
+		score.CostMultiplier = 0
 		score.CheckedAtMS = now.UnixMilli()
 		bySeller[normalizeMarketplaceSellerID(score.SellerID)] = score
 	}
@@ -763,6 +808,7 @@ func mergeMarketplaceSupplierQuotaScores(
 		score.Available = candidate.Available
 		score.MinUnitPriceFen = candidate.MinUnitPriceFen
 		score.MaxUnitPriceFen = candidate.MaxUnitPriceFen
+		score.CostMultiplier, _ = supplierCostMultiplier(score.MinUnitPriceFen, score.ScoreM)
 		score.CostPerCapacityFen, _ = supplierCostPerCapacityFen(score.MinUnitPriceFen, score.ScoreM)
 		score.CheckedAtMS = now.UnixMilli()
 		if candidate.QualityScore != nil {
@@ -839,8 +885,8 @@ func sortSupplierQuotaScores(scores []SupplierQuotaScore) {
 		}
 		leftPrice := supplierQuotaScoreSelectablePrice(scores[i])
 		rightPrice := supplierQuotaScoreSelectablePrice(scores[j])
-		leftCost, leftCostKnown := supplierCostPerCapacityFen(leftPrice, scores[i].ScoreM)
-		rightCost, rightCostKnown := supplierCostPerCapacityFen(rightPrice, scores[j].ScoreM)
+		leftCost, leftCostKnown := supplierCostMultiplier(leftPrice, scores[i].ScoreM)
+		rightCost, rightCostKnown := supplierCostMultiplier(rightPrice, scores[j].ScoreM)
 		if leftCostKnown != rightCostKnown {
 			return leftCostKnown
 		}

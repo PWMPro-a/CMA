@@ -16,22 +16,25 @@ import (
 )
 
 type PlatformOverview struct {
-	ID                    string                  `json:"id"`
-	Name                  string                  `json:"name,omitempty"`
-	Type                  string                  `json:"type"`
-	Product               string                  `json:"product"`
-	Priority              int                     `json:"priority,omitempty"`
-	EmergencyOnly         bool                    `json:"emergencyOnly,omitempty"`
-	Selected              bool                    `json:"selected"`
-	CheckedAtMS           int64                   `json:"checkedAtMs"`
-	Inventory             *supplyclient.Inventory `json:"inventory,omitempty"`
-	Balance               *supplyclient.Balance   `json:"balance,omitempty"`
-	ExpectedQuotaM        float64                 `json:"expectedQuotaM,omitempty"`
-	UsableQuotaM          float64                 `json:"usableQuotaM,omitempty"`
-	CostPerCapacityFen    float64                 `json:"costPerCapacityFen,omitempty"`
-	CostPerUsableQuotaFen float64                 `json:"costPerUsableQuotaFen,omitempty"`
-	LastError             string                  `json:"lastError,omitempty"`
-	SupplierQuotaScores   []SupplierQuotaScore    `json:"supplierQuotaScores,omitempty"`
+	ID             string                  `json:"id"`
+	Name           string                  `json:"name,omitempty"`
+	Type           string                  `json:"type"`
+	Product        string                  `json:"product"`
+	Priority       int                     `json:"priority,omitempty"`
+	EmergencyOnly  bool                    `json:"emergencyOnly,omitempty"`
+	Selected       bool                    `json:"selected"`
+	CheckedAtMS    int64                   `json:"checkedAtMs"`
+	Inventory      *supplyclient.Inventory `json:"inventory,omitempty"`
+	Balance        *supplyclient.Balance   `json:"balance,omitempty"`
+	ExpectedQuotaM float64                 `json:"expectedQuotaM,omitempty"`
+	UsableQuotaM   float64                 `json:"usableQuotaM,omitempty"`
+	// CostMultiplier is the normalized purchase cost in yuan per 1M quota.
+	// CostPerCapacityFen is retained for API compatibility with older panels.
+	CostMultiplier        float64              `json:"costMultiplier,omitempty"`
+	CostPerCapacityFen    float64              `json:"costPerCapacityFen,omitempty"`
+	CostPerUsableQuotaFen float64              `json:"costPerUsableQuotaFen,omitempty"`
+	LastError             string               `json:"lastError,omitempty"`
+	SupplierQuotaScores   []SupplierQuotaScore `json:"supplierQuotaScores,omitempty"`
 	marketplaceSeller     *marketplaceSellerSelection
 	purchaseQuantity      int
 }
@@ -1011,10 +1014,8 @@ func supplyPlatformLessWithPriority(left PlatformOverview, right PlatformOvervie
 			return leftPriority < rightPriority
 		}
 	}
-	leftCost := left.CostPerCapacityFen
-	rightCost := right.CostPerCapacityFen
-	leftCostKnown := leftCost > 0
-	rightCostKnown := rightCost > 0
+	leftCost, leftCostKnown := platformOverviewCostMultiplier(left)
+	rightCost, rightCostKnown := platformOverviewCostMultiplier(right)
 	if leftCostKnown && rightCostKnown && leftCost != rightCost {
 		return leftCost < rightCost
 	}
@@ -1115,7 +1116,7 @@ func bestSupplyPlatformCandidateIndex(
 	}
 	bestKnown, bestUnknown := -1, -1
 	for _, index := range finalists {
-		if statuses[index].CostPerCapacityFen > 0 {
+		if _, known := platformOverviewCostMultiplier(statuses[index]); known {
 			if bestKnown < 0 || supplyPlatformLessWithPriority(statuses[index], statuses[bestKnown], quantity, balanceReserveFen, used, emergency, false) {
 				bestKnown = index
 			}
@@ -1137,6 +1138,16 @@ func platformOverviewUnitPrice(status PlatformOverview) int64 {
 		return math.MaxInt64
 	}
 	return status.Inventory.EstimatedUnitPriceFen
+}
+
+func platformOverviewCostMultiplier(status PlatformOverview) (float64, bool) {
+	if status.CostMultiplier > 0 {
+		return status.CostMultiplier, true
+	}
+	if status.CostPerCapacityFen > 0 {
+		return status.CostPerCapacityFen / 100, true
+	}
+	return 0, false
 }
 
 func applySupplyPlatformEconomics(
@@ -1165,6 +1176,7 @@ func applyMarketplaceSellerEconomics(
 	if selection.score.ScoreM <= 0 {
 		status.ExpectedQuotaM = 0
 		status.UsableQuotaM = 0
+		status.CostMultiplier = 0
 		status.CostPerCapacityFen = 0
 		status.CostPerUsableQuotaFen = 0
 		return
@@ -1196,6 +1208,7 @@ func applySupplyEconomicsForExpectedQuota(
 	status.ExpectedQuotaM = round2(math.Max(expectedQuotaM, 0))
 	status.UsableQuotaM = round2(math.Max(usableQuotaM, 0))
 	if status.ExpectedQuotaM > 0 && status.Inventory.EstimatedUnitPriceFen > 0 {
+		status.CostMultiplier, _ = supplierCostMultiplier(status.Inventory.EstimatedUnitPriceFen, status.ExpectedQuotaM)
 		status.CostPerCapacityFen, _ = supplierCostPerCapacityFen(status.Inventory.EstimatedUnitPriceFen, status.ExpectedQuotaM)
 	}
 	if status.UsableQuotaM > 0 && status.Inventory.EstimatedUnitPriceFen > 0 {

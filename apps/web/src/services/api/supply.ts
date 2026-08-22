@@ -95,6 +95,8 @@ export interface SupplySupplierQuotaScore {
   available?: number;
   minUnitPriceFen?: number;
   maxUnitPriceFen?: number;
+  /** Unit price in yuan divided by the seller's observed capacity in M. */
+  costMultiplier?: number;
   costPerCapacityFen?: number;
   marketplaceQuality?: number;
   marketplaceActiveRate?: number;
@@ -262,6 +264,8 @@ export interface SupplyPlatformOverview {
   balance?: SupplyBalance;
   expectedQuotaM?: number;
   usableQuotaM?: number;
+  /** Unit price in yuan divided by expected quota in M. */
+  costMultiplier?: number;
   costPerCapacityFen?: number;
   costPerUsableQuotaFen?: number;
   lastError?: string;
@@ -569,6 +573,7 @@ export interface SupplyLowPriceReserveExecution {
   lastCheckedAtMs?: number;
   nextCheckAtMs?: number;
   lastQuotedUnitPriceFen?: number;
+  lastQuotedCostMultiplier?: number;
   selectedPlatformId?: string;
   activeTaskId?: string;
   lastResult?: string;

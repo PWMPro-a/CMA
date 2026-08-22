@@ -292,6 +292,32 @@ func TestRecentSupplierQuotaSamplesKeepLatestTwenty(t *testing.T) {
 	}
 }
 
+func TestRecentSupplierQuotaSamplesUseImportChronologyNotMetadataUpdates(t *testing.T) {
+	items := []struct {
+		id         int64
+		importedAt int64
+		createdAt  int64
+		updatedAt  int64
+	}{
+		{id: 1, importedAt: 100, createdAt: 90, updatedAt: 9_999},
+		{id: 2, importedAt: 200, createdAt: 190, updatedAt: 300},
+	}
+	samples := make([]supplierQuotaAccountSample, 0, len(items))
+	for _, item := range items {
+		samples = append(samples, supplierQuotaAccountSample{
+			itemID: item.id,
+			// This mirrors marketplaceSupplierQuotaScores: UpdatedAtMS is
+			// deliberately excluded from the sample ordering key.
+			observedAtMS: supplierQuotaSampleOrderMS(item.importedAt, item.createdAt),
+			capacityM:    float64(item.id),
+		})
+	}
+	recent := recentSupplierQuotaAccountSamples(samples, 1)
+	if len(recent) != 1 || recent[0].itemID != 2 {
+		t.Fatalf("import chronology sample = %#v", recent)
+	}
+}
+
 func TestTrimmedSupplierQuotaCapacityMeanUsesAllSamplesBelowThree(t *testing.T) {
 	if got := trimmedSupplierQuotaCapacityMean([]float64{100}); got != 100 {
 		t.Fatalf("single-sample mean = %.2f", got)
@@ -308,6 +334,13 @@ func TestSupplierCostPerCapacityFen(t *testing.T) {
 	got, ok := supplierCostPerCapacityFen(1800, 170)
 	if !ok || got != 10.5882 {
 		t.Fatalf("cost per capacity = %.4f ok=%v", got, ok)
+	}
+}
+
+func TestSupplierCostMultiplierUsesYuanPerMillion(t *testing.T) {
+	got, ok := supplierCostMultiplier(1800, 170)
+	if !ok || got != 0.105882 {
+		t.Fatalf("cost multiplier = %.6f ok=%v, want 0.105882", got, ok)
 	}
 }
 
@@ -409,9 +442,18 @@ func TestMarketplaceSupplierQuotaScoresUsesFivePercentEstimateBeforeInspectionAn
 		t.Fatalf("5%% seller scores = %#v err=%v", scores, err)
 	}
 	if score := scores[0]; score.Status != supplierQuotaStatusApproved || score.ScoreM != 120 ||
-		score.CostPerCapacityFen != 10 || score.SampleCount != 1 || score.EvidenceCount != 1 ||
+		score.CostMultiplier != 0.1 || score.CostPerCapacityFen != 10 || score.SampleCount != 1 || score.EvidenceCount != 1 ||
 		score.Reason != "provisional_quota_meets_threshold" {
 		t.Fatalf("5%% seller score = %#v", score)
+	}
+	items, itemErr := st.ListSupplyImportItems(ctx, 10, "imported")
+	if itemErr != nil || len(items) != 1 || items[0].QuotaCapacityM != 120 || items[0].QuotaCapacityComplete {
+		t.Fatalf("persisted provisional capacity = %#v err=%v", items, itemErr)
+	}
+	restarted := New(st, nil)
+	restartedScores, restartErr := restarted.marketplaceSupplierQuotaScores(ctx, platform, []supplyclient.MarketplaceSellerCandidate{candidate}, nil)
+	if restartErr != nil || len(restartedScores) != 1 || restartedScores[0].ScoreM != 120 || restartedScores[0].CostMultiplier != 0.1 {
+		t.Fatalf("persisted capacity after manager restart = %#v err=%v", restartedScores, restartErr)
 	}
 
 	// Finishing the same account revises its existing evidence from 120M to 80M.
@@ -427,9 +469,13 @@ func TestMarketplaceSupplierQuotaScoresUsesFivePercentEstimateBeforeInspectionAn
 		t.Fatalf("exhausted seller scores = %#v err=%v", scores, err)
 	}
 	if score := scores[0]; score.Status != supplierQuotaStatusObserving || score.ScoreM != 80 ||
-		score.CostPerCapacityFen != 15 || score.SampleCount != 1 || score.EvidenceCount != 1 ||
+		score.CostMultiplier != 0.15 || score.CostPerCapacityFen != 15 || score.SampleCount != 1 || score.EvidenceCount != 1 ||
 		score.Reason != "waiting_for_more_supplier_evidence" {
 		t.Fatalf("exhausted seller score did not replace its provisional sample: %#v", score)
+	}
+	items, itemErr = st.ListSupplyImportItems(ctx, 10, "imported")
+	if itemErr != nil || len(items) != 1 || items[0].QuotaCapacityM != 80 || !items[0].QuotaCapacityComplete {
+		t.Fatalf("persisted final capacity = %#v err=%v", items, itemErr)
 	}
 }
 
