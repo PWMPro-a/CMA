@@ -298,6 +298,9 @@ func accountActionCandidateFromEvent(event usage.Event, now time.Time) (accountA
 	}
 	seenAtMS := event.TimestampMS
 	if seenAtMS <= 0 {
+		seenAtMS = event.CreatedAtMS
+	}
+	if seenAtMS <= 0 {
 		seenAtMS = now.UnixMilli()
 	}
 	return accountActionCandidate{

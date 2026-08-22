@@ -90,6 +90,30 @@ func TestAccountActionCandidateFromEventUsesSafeEvidence(t *testing.T) {
 	}
 }
 
+func TestAccountActionCandidateFromEventUsesCreatedAtWhenTimestampMissing(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	createdAt := now.Add(-time.Hour)
+	event := usage.Event{
+		Failed:           true,
+		FailStatusCode:   http.StatusUnauthorized,
+		EventHash:        "evt-auth-created-at",
+		Provider:         "codex",
+		AuthFileSnapshot: "codex-auth.json",
+		AuthIndex:        "7",
+		AccountSnapshot:  "user@example.com",
+		FailSummary:      "authentication_error: invalidated OAuth token",
+		CreatedAtMS:      createdAt.UnixMilli(),
+	}
+
+	candidate, ok := accountActionCandidateFromEvent(event, now)
+	if !ok {
+		t.Fatal("candidate not detected")
+	}
+	if candidate.SeenAtMS != createdAt.UnixMilli() {
+		t.Fatalf("candidate seenAtMS = %d, want createdAtMS %d", candidate.SeenAtMS, createdAt.UnixMilli())
+	}
+}
+
 func TestAccountActionCandidateDoesNotPromoteDisplayFallbackToStableIdentity(t *testing.T) {
 	event := usage.Event{
 		Failed:            true,
