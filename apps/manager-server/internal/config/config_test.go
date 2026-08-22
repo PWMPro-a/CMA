@@ -30,6 +30,9 @@ func TestLoadCreatesDefaultConfig(t *testing.T) {
 	if !cfg.CodexAutoResetEnabled {
 		t.Fatal("CodexAutoResetEnabled = false by default")
 	}
+	if !cfg.QuotaCooldownEnabled {
+		t.Fatal("QuotaCooldownEnabled = false by default")
+	}
 	if cfg.UsageImportChunkBytes != DefaultUsageImportChunkBytes ||
 		cfg.UsageImportDiskQuotaBytes != DefaultUsageImportDiskQuotaBytes ||
 		cfg.UsageImportMaxSessions != DefaultUsageImportMaxSessions ||

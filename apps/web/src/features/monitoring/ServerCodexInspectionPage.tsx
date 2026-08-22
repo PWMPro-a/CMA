@@ -74,6 +74,8 @@ import {
   type CodexInspectionResult,
   type CodexInspectionRun,
   type CodexInspectionRunDetail,
+  type CodexBatchResetOutcome,
+  type CodexResetCreditInspectionItem,
   type ManagerCodexInspectionConfig,
   type ManagerCodexInspectionScheduleMode,
   type ManagerConfig,
@@ -718,6 +720,10 @@ export function ServerCodexInspectionPage({
   const [configDrawerOpen, setConfigDrawerOpen] = useState(false);
   const [configFocusField, setConfigFocusField] = useState<string | null>(null);
   const [codexReauthTarget, setCodexReauthTarget] = useState<CodexReauthTarget | null>(null);
+  const [resetCreditInspecting, setResetCreditInspecting] = useState(false);
+  const [resetCreditBatching, setResetCreditBatching] = useState(false);
+  const [resetCreditItems, setResetCreditItems] = useState<CodexResetCreditInspectionItem[]>([]);
+  const [resetCreditOutcomes, setResetCreditOutcomes] = useState<CodexBatchResetOutcome[]>([]);
   const refreshInFlightRef = useRef(false);
   const actionInFlightRef = useRef(false);
   const detailRequestGenerationRef = useRef(0);
@@ -1160,6 +1166,68 @@ export function ServerCodexInspectionPage({
     });
   };
 
+  const handleInspectResetCredits = useCallback(async (options?: { preserveOutcomes?: boolean }) => {
+    if (!serviceBase || !managementKey) {
+      showNotification(t('monitoring.server_codex_inspection_service_unavailable'), 'warning');
+      return;
+    }
+    setResetCreditInspecting(true);
+    try {
+      const items = await usageServiceApi.inspectCodexResetCredits(serviceBase, managementKey);
+      setResetCreditItems(items);
+      if (!options?.preserveOutcomes) setResetCreditOutcomes([]);
+      showNotification(
+        t('monitoring.codex_reset_credit_inspection_done', {
+          total: items.length,
+          eligible: items.filter((item) => item.eligible).length,
+        }),
+        'success'
+      );
+    } catch (error: unknown) {
+      showNotification(getUsageServiceDisplayError(error, t), 'error');
+    } finally {
+      setResetCreditInspecting(false);
+    }
+  }, [managementKey, serviceBase, showNotification, t]);
+
+  const handleBatchResetCredits = useCallback(() => {
+    const targets = resetCreditItems.filter((item) => item.eligible);
+    if (targets.length === 0 || !serviceBase || !managementKey) return;
+    showConfirmation({
+      title: t('monitoring.codex_reset_credit_batch_title'),
+      message: t('monitoring.codex_reset_credit_batch_confirm', { count: targets.length }),
+      confirmText: t('monitoring.codex_reset_credit_batch_button', { count: targets.length }),
+      cancelText: t('common.cancel'),
+      variant: 'primary',
+      onConfirm: async () => {
+        setResetCreditBatching(true);
+        try {
+          const outcomes = await usageServiceApi.batchResetCodexCredits(
+            serviceBase,
+            managementKey,
+            targets.map((item) => item.authIndex)
+          );
+          setResetCreditOutcomes(outcomes);
+          await handleInspectResetCredits({ preserveOutcomes: true });
+          await onCredentialsChanged?.();
+        } catch (error: unknown) {
+          showNotification(getUsageServiceDisplayError(error, t), 'error');
+        } finally {
+          setResetCreditBatching(false);
+        }
+      },
+    });
+  }, [
+    handleInspectResetCredits,
+    managementKey,
+    onCredentialsChanged,
+    resetCreditItems,
+    serviceBase,
+    showConfirmation,
+    showNotification,
+    t,
+  ]);
+
   const executeServerCancel = useCallback(async () => {
     if (!serviceBase || !cancellableRun) return;
     const requestedRunId = cancellableRun.id;
@@ -1477,6 +1545,34 @@ export function ServerCodexInspectionPage({
                 </li>
               </ul>
             </details>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void handleInspectResetCredits()}
+              loading={resetCreditInspecting}
+              disabled={!serviceBase || resetCreditInspecting || resetCreditBatching}
+              data-codex-reset-credit-inspection="true"
+            >
+              <IconRefreshCw size={14} />
+              {t('monitoring.codex_reset_credit_inspection_button')}
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleBatchResetCredits}
+              loading={resetCreditBatching}
+              disabled={
+                !serviceBase ||
+                resetCreditBatching ||
+                resetCreditInspecting ||
+                !resetCreditItems.some((item) => item.eligible)
+              }
+              data-codex-reset-credit-batch="true"
+            >
+              {t('monitoring.codex_reset_credit_batch_button', {
+                count: resetCreditItems.filter((item) => item.eligible).length,
+              })}
+            </Button>
             <Button
               variant="secondary"
               size="sm"
@@ -2146,6 +2242,60 @@ export function ServerCodexInspectionPage({
         </div>
       ) : null}
       {renderStatusPanel()}
+      {resetCreditItems.length > 0 ? (
+        <Panel className={styles.panel} data-codex-reset-credit-results="true">
+          <div className={styles.panelHeader}>
+            <div className={styles.panelHeading}>
+              <h3 className={styles.panelTitle}>{t('monitoring.codex_reset_credit_results_title')}</h3>
+              <p className={styles.panelSubtitle}>
+                {t('monitoring.codex_reset_credit_inspection_done', {
+                  total: resetCreditItems.length,
+                  eligible: resetCreditItems.filter((item) => item.eligible).length,
+                })}
+              </p>
+            </div>
+          </div>
+          <div className={styles.resultsTable}>
+            {resetCreditItems.map((item) => {
+              const outcome = resetCreditOutcomes.find(
+                (candidate) => candidate.authIndex === item.authIndex
+              );
+              const reasonKey = item.reason
+                ? `monitoring.codex_reset_credit_reason_${item.reason}`
+                : 'monitoring.codex_reset_credit_reason_unknown';
+              return (
+                <div className={styles.resultRow} key={item.authIndex}>
+                  <strong title={item.authFileName}>
+                    {item.account || item.accountId || item.authFileName}
+                  </strong>
+                  <span>
+                    {t('monitoring.codex_reset_credit_count', { count: item.availableCount })}
+                  </span>
+                  <span>
+                    {t('monitoring.codex_reset_credit_history_count', { count: item.resetCount })}
+                  </span>
+                  <span>
+                    {t('monitoring.codex_reset_credit_requests', {
+                      count: item.currentRequests ?? 0,
+                    })}
+                  </span>
+                  <span>
+                    {item.eligible
+                      ? t('monitoring.codex_reset_credit_eligible')
+                      : t(reasonKey, { defaultValue: t('monitoring.codex_reset_credit_reason_unknown') })}
+                  </span>
+                  {outcome ? (
+                    <span>
+                      {outcome.error || outcome.state || outcome.reason ||
+                        t('monitoring.codex_reset_credit_outcome_done')}
+                    </span>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </Panel>
+      ) : null}
       <div className={styles.serverDetailGrid}>
         {renderRunsPanel()}
         <div className={styles.serverDetailPanels}>

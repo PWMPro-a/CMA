@@ -671,10 +671,18 @@ export function AccountsPage() {
       if (!featureAvailability.managerServiceBase || !managementKey) return;
       setAccountProcessingPolicySaving(true);
       try {
+        const patch = {
+          codexAutoResetEnabled: enabled,
+          // The quota cooldown worker owns the event that starts automatic
+          // reset. Keep it in lockstep unless an environment policy locks it.
+          ...(accountProcessingPolicy?.codexQuotaCooldown.locked
+            ? {}
+            : { codexQuotaCooldownEnabled: enabled }),
+        };
         const next = await usageServiceApi.updateAccountProcessingPolicy(
           featureAvailability.managerServiceBase,
           managementKey,
-          { codexAutoResetEnabled: enabled }
+          patch
         );
         setAccountProcessingPolicy(next);
         showNotification(
@@ -693,7 +701,13 @@ export function AccountsPage() {
         setAccountProcessingPolicySaving(false);
       }
     },
-    [featureAvailability.managerServiceBase, managementKey, showNotification, t]
+    [
+      accountProcessingPolicy?.codexQuotaCooldown.locked,
+      featureAvailability.managerServiceBase,
+      managementKey,
+      showNotification,
+      t,
+    ]
   );
   const requestHistoryAvailable =
     managerStorageAvailable && featureAvailability.requestMonitoringAvailable;

@@ -554,13 +554,13 @@ export function CodexInspectionPage({
     startFreshInspection(false);
   }, [runStatus, startFreshInspection]);
 
-  const handleInspectResetCredits = useCallback(async () => {
+  const handleInspectResetCredits = useCallback(async (options?: { preserveOutcomes?: boolean }) => {
     if (!managerServiceBase || !managementKey) return;
     setResetCreditInspecting(true);
     try {
       const items = await usageServiceApi.inspectCodexResetCredits(managerServiceBase, managementKey);
       setResetCreditItems(items);
-      setResetCreditOutcomes([]);
+      if (!options?.preserveOutcomes) setResetCreditOutcomes([]);
       showNotification(
         t('monitoring.codex_reset_credit_inspection_done', {
           total: items.length,
@@ -597,7 +597,7 @@ export function CodexInspectionPage({
             targets.map((item) => item.authIndex)
           );
           setResetCreditOutcomes(outcomes);
-          await handleInspectResetCredits();
+          await handleInspectResetCredits({ preserveOutcomes: true });
           void onCredentialsChanged?.();
         } catch (err) {
           showNotification(err instanceof Error ? err.message : t('common.unknown_error'), 'error');

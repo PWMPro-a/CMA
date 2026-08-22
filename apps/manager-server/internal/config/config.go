@@ -92,7 +92,7 @@ type fileConfig struct {
 	PanelPath                 string   `json:"panelPath,omitempty"`
 	CORSOrigins               []string `json:"corsOrigins,omitempty"`
 	TLSSkipVerify             bool     `json:"tlsSkipVerify,omitempty"`
-	QuotaCooldownEnabled      bool     `json:"quotaCooldownEnabled,omitempty"`
+	QuotaCooldownEnabled      *bool    `json:"quotaCooldownEnabled,omitempty"`
 	CodexAutoResetEnabled     *bool    `json:"codexAutoResetEnabled,omitempty"`
 	AccountActionsEnabled     bool     `json:"accountActionsEnabled,omitempty"`
 	AccountActionsAutoDisable bool     `json:"accountActionsAutoDisable,omitempty"`
@@ -192,7 +192,7 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		PanelPath:                    env("PANEL_PATH", resolveConfigPath(cfgFile.PanelPath, cfgDir)),
 		CORSOrigins:                  splitCSV(env("USAGE_CORS_ORIGINS", strings.Join(sliceFallback(cfgFile.CORSOrigins, []string{"*"}), ","))),
 		TLSSkipVerify:                envBool("USAGE_RESP_TLS_SKIP_VERIFY", cfgFile.TLSSkipVerify),
-		QuotaCooldownEnabled:         envBool("USAGE_QUOTA_COOLDOWN_ENABLED", cfgFile.QuotaCooldownEnabled),
+		QuotaCooldownEnabled:         envBool("USAGE_QUOTA_COOLDOWN_ENABLED", boolPointerFallback(cfgFile.QuotaCooldownEnabled, true)),
 		CodexAutoResetEnabled:        envBool("USAGE_CODEX_AUTO_RESET_ENABLED", boolPointerFallback(cfgFile.CodexAutoResetEnabled, true)),
 		AccountActionsEnabled:        envBool("USAGE_ACCOUNT_ACTIONS_ENABLED", cfgFile.AccountActionsEnabled),
 		AccountActionsAutoDisable:    envBool("USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE", cfgFile.AccountActionsAutoDisable),
