@@ -372,7 +372,7 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
 
   const refreshQuotaForFile = useCallback(
     async (file: AuthFileItem) => {
-      if (disabled || file.disabled) return;
+      if (disabled || (file.disabled && !config.canUseDisabledFile?.(file))) return;
       if (getScopedQuota(file)?.status === 'loading') return;
       const displayName = getAccountDisplayName(file);
       const storeKey = getQuotaStoreKey(config, file);
@@ -413,7 +413,8 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
 
   const resetQuotaForFile = useCallback(
     (file: AuthFileItem) => {
-      if (!config.resetQuota || disabled || file.disabled) return;
+      if (!config.resetQuota || disabled || (file.disabled && !config.canUseDisabledFile?.(file)))
+        return;
       const fileQuota = getScopedQuota(file);
       const canReset =
         config.canResetQuota?.(file, fileQuota) ??
@@ -599,7 +600,7 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
               const canReset =
                 Boolean(config.resetQuota) &&
                 !disabled &&
-                !item.disabled &&
+                (!item.disabled || Boolean(config.canUseDisabledFile?.(item))) &&
                 (config.canResetQuota?.(item, itemQuota) ??
                   Boolean(itemQuota && itemQuota.status === 'success'));
               const canReauth =
@@ -621,7 +622,9 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
                   cardClassName={config.cardClassName}
                   defaultType={config.type}
                   accountDisplayMode={resolvedAccountDisplayMode}
-                  canRefresh={!disabled && !item.disabled}
+                  canRefresh={
+                    !disabled && (!item.disabled || Boolean(config.canUseDisabledFile?.(item)))
+                  }
                   onRefresh={() => void refreshQuotaForFile(item)}
                   canReset={canReset}
                   resetLabel={

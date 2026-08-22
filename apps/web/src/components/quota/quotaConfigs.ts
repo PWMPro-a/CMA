@@ -96,6 +96,8 @@ export interface QuotaConfig<TState, TData> {
   i18nPrefix: string;
   cardIdleMessageKey?: string;
   filterFn: (file: AuthFileItem) => boolean;
+  /** Allows quota refresh/reset controls for a narrowly eligible disabled file. */
+  canUseDisabledFile?: (file: AuthFileItem) => boolean;
   fetchQuota: (file: AuthFileItem, t: TFunction) => Promise<TData>;
   storeSelector: (state: QuotaStore) => Record<string, TState>;
   storeSetter: keyof QuotaStore;
@@ -423,6 +425,27 @@ const getCodexSearchText = (
     quota?.primaryOverSecondaryLimitPercent,
     quota?.observedAtMs,
   ];
+};
+
+const isCodexQuotaPreemptRecoveryCandidate = (file: AuthFileItem): boolean => {
+  if (!isDisabledAuthFile(file)) return true;
+  const reasonValue = [file['runtime_last_skip_reason'], file['runtimeLastSkipReason']].find(
+    (value) => typeof value === 'string' && value.trim()
+  );
+  const reason = typeof reasonValue === 'string' ? reasonValue.trim().toLowerCase() : '';
+  if (reason !== 'quota_preempt') return false;
+  const concurrency = [
+    file['runtime_current_concurrency'],
+    file['runtimeCurrentConcurrency'],
+    file['current_concurrency'],
+    file['currentConcurrency'],
+    file['active_requests'],
+    file['activeRequests'],
+    file['in_flight_requests'],
+    file['inFlightRequests'],
+  ].find((value) => value !== undefined && value !== null && value !== '');
+  const parsed = typeof concurrency === 'number' ? concurrency : Number(concurrency);
+  return Number.isFinite(parsed) && parsed === 0;
 };
 
 type DisplayQuotaState = {
@@ -1330,7 +1353,8 @@ export const CODEX_CONFIG: QuotaConfig<CodexQuotaState, CodexQuotaData> = {
   type: 'codex',
   i18nPrefix: 'codex_quota',
   cardIdleMessageKey: 'quota_management.card_idle_hint',
-  filterFn: (file) => isCodexFile(file) && !isDisabledAuthFile(file),
+  filterFn: (file) => isCodexFile(file) && isCodexQuotaPreemptRecoveryCandidate(file),
+  canUseDisabledFile: isCodexQuotaPreemptRecoveryCandidate,
   fetchQuota: fetchCodexQuota,
   storeSelector: (state) => state.codexQuota,
   storeSetter: 'setCodexQuota',

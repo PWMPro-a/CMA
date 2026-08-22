@@ -28,7 +28,9 @@ const { mocks } = vi.hoisted(() => {
   quotaStoreState.setCodexQuota = vi.fn((updater: unknown) => {
     const current = quotaStoreState.codexQuota as Record<string, unknown>;
     quotaStoreState.codexQuota =
-      typeof updater === 'function' ? (updater as (prev: typeof current) => typeof current)(current) : updater;
+      typeof updater === 'function'
+        ? (updater as (prev: typeof current) => typeof current)(current)
+        : updater;
   });
 
   return {
@@ -241,6 +243,28 @@ describe('QuotaSection account display mode', () => {
     const message = String(mocks.showNotification.mock.calls[0]?.[0] ?? '');
     expect(message).toContain(MASKED_FILE_NAME);
     expect(message).not.toContain(FULL_FILE_NAME);
+  });
+
+  it('allows a config-approved disabled credential to refresh and reset quota', async () => {
+    const disabledConfig = {
+      ...testConfig,
+      canUseDisabledFile: () => true,
+    };
+    const disabledFile = { ...testFile, disabled: true };
+    mocks.fetchQuota.mockResolvedValue({ resetCredits: 1 });
+    mocks.resetQuota.mockResolvedValue({ resetCredits: 0 });
+    const renderer = renderSection({ config: disabledConfig, files: [disabledFile] });
+
+    await act(async () => {
+      findButtonByText(renderer, 'codex_quota.refresh_button').props.onClick();
+      await Promise.resolve();
+    });
+    expect(mocks.fetchQuota).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      findButtonByText(renderer, 'codex_quota.reset_action_button').props.onClick();
+    });
+    expect(mocks.showConfirmation).toHaveBeenCalledTimes(1);
   });
 
   it('uses masked names in failed single quota refresh notifications', async () => {
