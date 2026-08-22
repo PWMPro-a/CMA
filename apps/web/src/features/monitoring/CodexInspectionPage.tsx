@@ -562,7 +562,7 @@ export function CodexInspectionPage({
       setResetCreditItems(items);
       if (!options?.preserveOutcomes) setResetCreditOutcomes([]);
       showNotification(
-        t('monitoring.codex_reset_credit_inspection_done', {
+        t('accounts.codex_reset_credit_inspection_done', {
           total: items.length,
           eligible: items.filter((item) => item.eligible).length,
           defaultValue: `Detected ${items.length} accounts`,
@@ -580,12 +580,12 @@ export function CodexInspectionPage({
     const targets = resetCreditItems.filter((item) => item.eligible);
     if (targets.length === 0) return;
     showConfirmation({
-      title: t('monitoring.codex_reset_credit_batch_title'),
-      message: t('monitoring.codex_reset_credit_batch_confirm', {
+      title: t('accounts.codex_reset_credit_batch_title'),
+      message: t('accounts.codex_reset_credit_batch_confirm', {
         count: targets.length,
         defaultValue: `Reset ${targets.length} eligible accounts now?`,
       }),
-      confirmText: t('monitoring.codex_reset_credit_batch_button'),
+      confirmText: t('accounts.codex_reset_credit_batch_button'),
       cancelText: t('common.cancel'),
       variant: 'primary',
       onConfirm: async () => {
@@ -1290,7 +1290,7 @@ export function CodexInspectionPage({
               disabled={resetCreditInspecting || resetCreditBatching || connectionStatus !== 'connected'}
               data-codex-reset-credit-inspection="true"
             >
-              {t('monitoring.codex_reset_credit_inspection_button')}
+              {t('accounts.codex_reset_credit_inspection_button')}
             </Button>
             <Button
               variant="primary"
@@ -1304,7 +1304,7 @@ export function CodexInspectionPage({
               }
               data-codex-reset-credit-batch="true"
             >
-              {t('monitoring.codex_reset_credit_batch_button', {
+              {t('accounts.codex_reset_credit_batch_button', {
                 count: resetCreditItems.filter((item) => item.eligible).length,
               })}
             </Button>
@@ -1320,7 +1320,7 @@ export function CodexInspectionPage({
 
       {resetCreditItems.length > 0 ? (
         <section className={styles.panel} data-codex-reset-credit-results="true">
-          <h3>{t('monitoring.codex_reset_credit_results_title')}</h3>
+          <h3>{t('accounts.codex_reset_credit_results_title')}</h3>
           <div className={styles.resultsTable}>
             {resetCreditItems.map((item) => {
               const outcome = resetCreditOutcomes.find(
@@ -1330,12 +1330,12 @@ export function CodexInspectionPage({
                 <div className={styles.resultRow} key={item.authIndex}>
                   <strong>{item.account || item.accountId || item.authFileName}</strong>
                   <span>
-                    {t('monitoring.codex_reset_credit_count', { count: item.availableCount })}
+                    {t('accounts.codex_reset_credit_count', { count: item.availableCount })}
                   </span>
                   <span>
                     {item.eligible
-                      ? t('monitoring.codex_reset_credit_eligible')
-                      : t(`monitoring.codex_reset_credit_reason_${item.reason ?? 'unknown'}`)}
+                      ? t('accounts.codex_reset_credit_eligible')
+                      : t(`accounts.codex_reset_credit_reason_${item.reason ?? 'unknown'}`)}
                   </span>
                   {outcome ? <span>{outcome.error || outcome.state || outcome.reason}</span> : null}
                 </div>
