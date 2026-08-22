@@ -546,18 +546,18 @@ func restoreSameTimestampDeltaRemovalsForCompleteObservation(
 		return false, nil
 	}
 	rows, err := tx.QueryContext(ctx, `select
-		window.id, window.provider_window_id, window.scope_fingerprint, window.inventory_scope_key,
-		window.availability, window.generation, window.absence_count,
-		window.first_seen_at_ms, window.last_seen_at_ms,
-		window.missing_since_ms, window.deactivated_at_ms,
-		coalesce(window.relationship_kind, ''), coalesce(window.container_provider_window_id, '')
-		from account_quota_windows window
+		quota_window.id, quota_window.provider_window_id, quota_window.scope_fingerprint, quota_window.inventory_scope_key,
+		quota_window.availability, quota_window.generation, quota_window.absence_count,
+		quota_window.first_seen_at_ms, quota_window.last_seen_at_ms,
+		quota_window.missing_since_ms, quota_window.deactivated_at_ms,
+		coalesce(quota_window.relationship_kind, ''), coalesce(quota_window.container_provider_window_id, '')
+		from account_quota_windows quota_window
 		join account_quota_window_activations activation
-			on activation.window_id = window.id and activation.generation = window.generation
+			on activation.window_id = quota_window.id and activation.generation = quota_window.generation
 		join account_quota_observations removal
 			on removal.id = activation.deactivate_observation_id
-		where window.account_key = ? and window.provider = ?
-			and window.inventory_scope_key = ? and window.availability = 'inactive'
+		where quota_window.account_key = ? and quota_window.provider = ?
+			and quota_window.inventory_scope_key = ? and quota_window.availability = 'inactive'
 			and activation.deactivated_at_ms is not null
 			and removal.inventory_mode = 'delta' and removal.observed_at_ms = ?`,
 		observation.AccountKey,

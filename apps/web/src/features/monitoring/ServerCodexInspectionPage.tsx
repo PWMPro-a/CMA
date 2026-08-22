@@ -1177,7 +1177,7 @@ export function ServerCodexInspectionPage({
       setResetCreditItems(items);
       if (!options?.preserveOutcomes) setResetCreditOutcomes([]);
       showNotification(
-        t('accounts.codex_reset_credit_inspection_done', {
+        t('quota_management.codex_reset_credit_inspection_done', {
           total: items.length,
           eligible: items.filter((item) => item.eligible).length,
         }),
@@ -1194,9 +1194,9 @@ export function ServerCodexInspectionPage({
     const targets = resetCreditItems.filter((item) => item.eligible);
     if (targets.length === 0 || !serviceBase || !managementKey) return;
     showConfirmation({
-      title: t('accounts.codex_reset_credit_batch_title'),
-      message: t('accounts.codex_reset_credit_batch_confirm', { count: targets.length }),
-      confirmText: t('accounts.codex_reset_credit_batch_button', { count: targets.length }),
+      title: t('quota_management.codex_reset_credit_batch_title'),
+      message: t('quota_management.codex_reset_credit_batch_confirm', { count: targets.length }),
+      confirmText: t('quota_management.codex_reset_credit_batch_button', { count: targets.length }),
       cancelText: t('common.cancel'),
       variant: 'primary',
       onConfirm: async () => {
@@ -1554,7 +1554,7 @@ export function ServerCodexInspectionPage({
               data-codex-reset-credit-inspection="true"
             >
               <IconRefreshCw size={14} />
-              {t('accounts.codex_reset_credit_inspection_button')}
+              {t('quota_management.codex_reset_credit_inspection_button')}
             </Button>
             <Button
               variant="primary"
@@ -1569,7 +1569,7 @@ export function ServerCodexInspectionPage({
               }
               data-codex-reset-credit-batch="true"
             >
-              {t('accounts.codex_reset_credit_batch_button', {
+              {t('quota_management.codex_reset_credit_batch_button', {
                 count: resetCreditItems.filter((item) => item.eligible).length,
               })}
             </Button>
@@ -2246,9 +2246,9 @@ export function ServerCodexInspectionPage({
         <Panel className={styles.panel} data-codex-reset-credit-results="true">
           <div className={styles.panelHeader}>
             <div className={styles.panelHeading}>
-              <h3 className={styles.panelTitle}>{t('accounts.codex_reset_credit_results_title')}</h3>
+              <h3 className={styles.panelTitle}>{t('quota_management.codex_reset_credit_results_title')}</h3>
               <p className={styles.panelSubtitle}>
-                {t('accounts.codex_reset_credit_inspection_done', {
+                {t('quota_management.codex_reset_credit_inspection_done', {
                   total: resetCreditItems.length,
                   eligible: resetCreditItems.filter((item) => item.eligible).length,
                 })}
@@ -2261,33 +2261,33 @@ export function ServerCodexInspectionPage({
                 (candidate) => candidate.authIndex === item.authIndex
               );
               const reasonKey = item.reason
-                ? `accounts.codex_reset_credit_reason_${item.reason}`
-                : 'accounts.codex_reset_credit_reason_unknown';
+                ? `quota_management.codex_reset_credit_reason_${item.reason}`
+                : 'quota_management.codex_reset_credit_reason_unknown';
               return (
                 <div className={styles.resultRow} key={item.authIndex}>
                   <strong title={item.authFileName}>
                     {item.account || item.accountId || item.authFileName}
                   </strong>
                   <span>
-                    {t('accounts.codex_reset_credit_count', { count: item.availableCount })}
+                    {t('quota_management.codex_reset_credit_count', { count: item.availableCount })}
                   </span>
                   <span>
-                    {t('accounts.codex_reset_credit_history_count', { count: item.resetCount })}
+                    {t('quota_management.codex_reset_credit_history_count', { count: item.resetCount })}
                   </span>
                   <span>
-                    {t('accounts.codex_reset_credit_requests', {
+                    {t('quota_management.codex_reset_credit_requests', {
                       count: item.currentRequests ?? 0,
                     })}
                   </span>
                   <span>
                     {item.eligible
-                      ? t('accounts.codex_reset_credit_eligible')
-                      : t(reasonKey, { defaultValue: t('accounts.codex_reset_credit_reason_unknown') })}
+                      ? t('quota_management.codex_reset_credit_eligible')
+                      : t(reasonKey, { defaultValue: t('quota_management.codex_reset_credit_reason_unknown') })}
                   </span>
                   {outcome ? (
                     <span>
                       {outcome.error || outcome.state || outcome.reason ||
-                        t('accounts.codex_reset_credit_outcome_done')}
+                        t('quota_management.codex_reset_credit_outcome_done')}
                     </span>
                   ) : null}
                 </div>
