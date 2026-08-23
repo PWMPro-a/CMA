@@ -46,6 +46,8 @@ import styles from './SupplyPage.module.scss';
 
 const DEFAULT_QUOTA_ESTIMATION_POLICIES: Record<string, SupplyQuotaEstimationPolicy> = {
   team: { mode: 'auto', fallbackM: 60, fixedM: 60 },
+  plus: { mode: 'auto', fallbackM: 160, fixedM: 160 },
+  pro: { mode: 'auto', fallbackM: 3000, fixedM: 3000 },
   free: { mode: 'auto', fallbackM: 10, fixedM: 10 },
 };
 
@@ -2172,7 +2174,7 @@ export function SupplyPage() {
     [t]
   );
   const quotaPlanTypes = useMemo(() => {
-    const planTypes = new Set<string>(['team', 'free']);
+    const planTypes = new Set<string>(['team', 'plus', 'pro', 'free']);
     Object.keys(draft.quotaEstimationPolicies ?? {}).forEach((planType) => {
       if (planType.trim()) planTypes.add(planType.trim().toLowerCase());
     });
@@ -2180,7 +2182,16 @@ export function SupplyPage() {
       if (estimate.planType.trim()) planTypes.add(estimate.planType.trim().toLowerCase());
     });
     return [...planTypes].sort((left, right) => {
-      const rank = (value: string) => (value === 'team' ? 0 : value === 'free' ? 1 : 2);
+      const rank = (value: string) =>
+        value === 'team'
+          ? 0
+          : value === 'free'
+            ? 1
+            : value === 'plus'
+              ? 2
+              : value === 'pro'
+                ? 3
+                : 4;
       return rank(left) - rank(right) || left.localeCompare(right);
     });
   }, [draft.quotaEstimationPolicies, smart?.accountQuotaPlanEstimates]);
@@ -3354,7 +3365,6 @@ export function SupplyPage() {
                                 label={t('supply.supplier_quota_minimum')}
                                 type="number"
                                 min={0.5}
-                                max={500}
                                 step={0.5}
                                 disabled={platform.supplierQuotaGateEnabled !== true}
                                 value={platform.supplierQuotaMinimumM ?? 30}
@@ -3559,7 +3569,7 @@ export function SupplyPage() {
                           </p>
                         ) : null}
                         <div className={styles.platformQuotaGrid}>
-                          {(['team', 'free'] as const).map((planType) => {
+                          {quotaPlanTypes.map((planType) => {
                             const globalPolicy = quotaPolicyForPlan(planType);
                             const policy = {
                               ...globalPolicy,
@@ -3593,7 +3603,6 @@ export function SupplyPage() {
                                   }
                                   type="number"
                                   min={0.5}
-                                  max={500}
                                   step={0.5}
                                   value={policy.mode === 'fixed' ? policy.fixedM : policy.fallbackM}
                                   onChange={(event) =>
@@ -4091,7 +4100,6 @@ export function SupplyPage() {
                               label={t('supply.quota_plan_fixed_input')}
                               type="number"
                               min={0.5}
-                              max={500}
                               step={0.5}
                               value={policy.fixedM}
                               onChange={(event) =>
@@ -4105,7 +4113,6 @@ export function SupplyPage() {
                               label={t('supply.quota_plan_fallback_input')}
                               type="number"
                               min={0.5}
-                              max={500}
                               step={0.5}
                               value={policy.fallbackM}
                               onChange={(event) =>

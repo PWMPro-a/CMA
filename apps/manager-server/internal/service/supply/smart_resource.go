@@ -62,6 +62,8 @@ const (
 	// verified 7-day baseline until an account has at least 10% valid usage data.
 	smartDefaultAccountQuotaMillionTokens     = 10.0
 	smartDefaultTeamAccountQuotaMillionTokens = 60.0
+	smartDefaultPlusAccountQuotaMillionTokens = 160.0
+	smartDefaultProAccountQuotaMillionTokens  = 3000.0
 	// Only a short, recent gap between the last successful request and an empty
 	// pool is treated as outage demand for emergency order sizing. Older demand
 	// memory still protects the low-water state, but must not create a fresh

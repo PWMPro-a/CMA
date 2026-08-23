@@ -918,6 +918,8 @@ func SupplyPlatformEnabled(cfg store.ManagerSupplyPlatformConfig) bool {
 func defaultSupplyQuotaEstimationPolicies() map[string]store.ManagerSupplyQuotaEstimationPolicy {
 	return map[string]store.ManagerSupplyQuotaEstimationPolicy{
 		"team": {Mode: SupplyQuotaEstimationAuto, FallbackM: 60, FixedM: 60},
+		"plus": {Mode: SupplyQuotaEstimationAuto, FallbackM: 160, FixedM: 160},
+		"pro":  {Mode: SupplyQuotaEstimationAuto, FallbackM: 3000, FixedM: 3000},
 		"free": {Mode: SupplyQuotaEstimationAuto, FallbackM: 10, FixedM: 10},
 	}
 }
@@ -986,12 +988,9 @@ func normalizeSupplyQuotaEstimationPolicy(
 	if mode != SupplyQuotaEstimationFixed {
 		mode = SupplyQuotaEstimationAuto
 	}
-	defaultFallback := 10.0
-	if planType == "team" {
-		defaultFallback = 60
-	}
-	fallbackM := BoundedFloatOrDefault(policy.FallbackM, current.FallbackM, defaultFallback, 0.5, 500)
-	fixedM := BoundedFloatOrDefault(policy.FixedM, current.FixedM, fallbackM, 0.5, 500)
+	defaultFallback := defaultSupplyQuotaFallbackM(planType)
+	fallbackM := FlooredFloatOrDefault(policy.FallbackM, current.FallbackM, defaultFallback, 0.5)
+	fixedM := FlooredFloatOrDefault(policy.FixedM, current.FixedM, fallbackM, 0.5)
 	return store.ManagerSupplyQuotaEstimationPolicy{Mode: mode, FallbackM: fallbackM, FixedM: fixedM}
 }
 
@@ -1141,8 +1140,8 @@ func validateSupplyPlatform(platform store.ManagerSupplyPlatformConfig) error {
 			return errors.New("maxUnitPriceFen must be zero or greater")
 		}
 		if platform.SupplierQuotaGateEnabled != nil && *platform.SupplierQuotaGateEnabled {
-			if platform.SupplierQuotaMinimumM < 0.5 || platform.SupplierQuotaMinimumM > 500 {
-				return errors.New("supplierQuotaMinimumM must be between 0.5 and 500 when supplier quota gate is enabled")
+			if platform.SupplierQuotaMinimumM < 0.5 {
+				return errors.New("supplierQuotaMinimumM must be at least 0.5 when supplier quota gate is enabled")
 			}
 			if platform.SupplierQuotaTrialQuantity < 1 || platform.SupplierQuotaTrialQuantity > 5 {
 				return errors.New("supplierQuotaTrialQuantity must be between 1 and 5 when supplier quota gate is enabled")
@@ -1248,6 +1247,33 @@ func BoundedPositiveOrDefault(value int, fallback int, hardDefault int, maximum 
 	result := PositiveOrDefault(value, fallback, hardDefault)
 	if result > maximum {
 		return maximum
+	}
+	return result
+}
+
+func defaultSupplyQuotaFallbackM(planType string) float64 {
+	switch strings.ToLower(strings.TrimSpace(planType)) {
+	case "team":
+		return 60
+	case "plus":
+		return 160
+	case "pro":
+		return 3000
+	default:
+		return 10
+	}
+}
+
+func FlooredFloatOrDefault(value float64, fallback float64, hardDefault float64, minimum float64) float64 {
+	result := hardDefault
+	if fallback > 0 {
+		result = fallback
+	}
+	if value > 0 {
+		result = value
+	}
+	if result < minimum {
+		return minimum
 	}
 	return result
 }

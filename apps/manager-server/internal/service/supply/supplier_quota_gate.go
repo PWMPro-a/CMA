@@ -132,7 +132,7 @@ func supplierQuotaGateEnabled(platform store.ManagerSupplyPlatformConfig) bool {
 
 func supplierQuotaGateMinimumM(platform store.ManagerSupplyPlatformConfig) float64 {
 	if platform.SupplierQuotaMinimumM >= 0.5 {
-		return math.Min(platform.SupplierQuotaMinimumM, 500)
+		return platform.SupplierQuotaMinimumM
 	}
 	return 30
 }

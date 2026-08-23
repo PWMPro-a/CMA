@@ -87,8 +87,9 @@ func TestNormalizeAndValidateNvtokensSupplierQuotaGate(t *testing.T) {
 		t.Fatal("trial quantity above 5 should fail validation")
 	}
 	platform.SupplierQuotaTrialQuantity = 1
+	platform.SupplierQuotaMinimumM = 3500
 	if err := validateSupplyPlatform(platform); err != nil {
-		t.Fatalf("valid supplier quota gate: %v", err)
+		t.Fatalf("valid high supplier quota gate: %v", err)
 	}
 }
 
@@ -359,6 +360,8 @@ func TestNormalizeSupplyConfigDefaultsRecoveryControls(t *testing.T) {
 	}
 	if next.QuotaEstimationPolicies["team"].Mode != SupplyQuotaEstimationAuto ||
 		next.QuotaEstimationPolicies["team"].FallbackM != 60 ||
+		next.QuotaEstimationPolicies["plus"].FallbackM != 160 ||
+		next.QuotaEstimationPolicies["pro"].FallbackM != 3000 ||
 		next.QuotaEstimationPolicies["free"].FallbackM != 10 {
 		t.Fatalf("quota estimation defaults = %#v", next.QuotaEstimationPolicies)
 	}
@@ -369,15 +372,19 @@ func TestNormalizeSupplyConfigDefaultsRecoveryControls(t *testing.T) {
 	}
 }
 
-func TestNormalizeSupplyConfigAcceptsFixedAndBoundedQuotaPolicies(t *testing.T) {
+func TestNormalizeSupplyConfigAcceptsFixedAndFlooredQuotaPolicies(t *testing.T) {
 	next := NormalizeSupplyConfig(store.ManagerSupplyConfig{
 		QuotaEstimationPolicies: map[string]store.ManagerSupplyQuotaEstimationPolicy{
 			" Team ": {Mode: SupplyQuotaEstimationFixed, FallbackM: 700, FixedM: 42},
+			"pro":    {Mode: SupplyQuotaEstimationFixed, FallbackM: 3500, FixedM: 4200},
 			"free":   {Mode: "invalid", FallbackM: 8, FixedM: 0.1},
 		},
 	}, store.ManagerSupplyConfig{})
-	if got := next.QuotaEstimationPolicies["team"]; got.Mode != SupplyQuotaEstimationFixed || got.FallbackM != 500 || got.FixedM != 42 {
+	if got := next.QuotaEstimationPolicies["team"]; got.Mode != SupplyQuotaEstimationFixed || got.FallbackM != 700 || got.FixedM != 42 {
 		t.Fatalf("normalized team quota policy = %#v", got)
+	}
+	if got := next.QuotaEstimationPolicies["pro"]; got.Mode != SupplyQuotaEstimationFixed || got.FallbackM != 3500 || got.FixedM != 4200 {
+		t.Fatalf("normalized pro quota policy = %#v", got)
 	}
 	if got := next.QuotaEstimationPolicies["free"]; got.Mode != SupplyQuotaEstimationAuto || got.FallbackM != 8 || got.FixedM != 0.5 {
 		t.Fatalf("normalized free quota policy = %#v", got)
