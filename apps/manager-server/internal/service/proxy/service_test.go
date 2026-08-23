@@ -1208,6 +1208,55 @@ func TestCaptureDeletedCredentialIdentitiesIncludesClearAllFiles(t *testing.T) {
 	}
 }
 
+func TestPrepareAuthFileMutationCapturesReplacedCredentialForUpload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v0/management/auth-files" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"files": []map[string]any{
+			{"id": "runtime-a", "name": "account.json", "auth_index": "auth-old", "provider": "codex", "account_id": "account-old", "account": "old@example.com"},
+		}})
+	}))
+	defer server.Close()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "account.json")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write([]byte(`{"type":"codex","account":"new@example.com"}`)); err != nil {
+		t.Fatalf("write form file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/auth-files", bytes.NewReader(body.Bytes()))
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	mutation, err := inspectAuthFileOwnershipMutation(req)
+	if err != nil {
+		t.Fatalf("inspect upload mutation: %v", err)
+	}
+	prepared, err := New(nil).prepareAuthFileMutation(
+		context.Background(),
+		store.Setup{CPAUpstreamURL: server.URL, ManagementKey: "management-key"},
+		req,
+		mutation,
+	)
+	if err != nil {
+		t.Fatalf("prepare upload mutation: %v", err)
+	}
+	if len(prepared.deletedIdentities) != 1 {
+		t.Fatalf("captured replaced identities = %#v, want one", prepared.deletedIdentities)
+	}
+	identity := prepared.deletedIdentities[0]
+	if identity.AuthFileName != "account.json" || identity.AuthIndex != "auth-old" || identity.AccountID != "account-old" {
+		t.Fatalf("captured replaced identity = %#v", identity)
+	}
+}
+
 func TestPrepareAuthFileWriteMutationVerifiesCompleteSourceMembership(t *testing.T) {
 	sourceContent := []byte(`[{"auth_index":"auth-1"},{"auth_index":"auth-2"}]`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
