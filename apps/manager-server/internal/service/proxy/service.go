@@ -523,6 +523,18 @@ func (s *Service) prepareAuthFileMutation(
 			return authFileOwnershipMutation{}, err
 		}
 	}
+	// A normal multipart upload replaces any existing credential with the same
+	// file name. Treat that as a new credential generation as well, so stale
+	// cooldowns and account-action candidates cannot be applied after upload.
+	// Verified writes carry the current credential identity and intentionally
+	// preserve its lifecycle state.
+	if r != nil && r.Method == http.MethodPost && prepared.writeMutation == nil &&
+		len(prepared.deletedIdentities) == 0 && len(prepared.fileNames) > 0 {
+		prepared, err = s.captureDeletedCredentialIdentities(ctx, setup, prepared)
+		if err != nil {
+			return authFileOwnershipMutation{}, err
+		}
+	}
 	return s.prepareAuthFileWriteMutation(ctx, setup, prepared)
 }
 
