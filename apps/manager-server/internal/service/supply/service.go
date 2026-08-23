@@ -7807,6 +7807,8 @@ func (s *Service) processSupplyAuth401Candidates(ctx context.Context, runtimeCfg
 	patchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	for _, candidate := range candidates {
+		// Record the 401 as a reauth candidate, but keep the credential visible
+		// until an operator or a separate recovery flow handles it.
 		item, err := s.store.UpsertAccountActionCandidate(patchCtx, model.AccountActionCandidateUpsert{
 			ActionType:          model.AccountActionTypeReauth,
 			Provider:            candidate.Provider,
@@ -7817,11 +7819,11 @@ func (s *Service) processSupplyAuth401Candidates(ctx context.Context, runtimeCfg
 			AuthLabel:           candidate.AuthLabel,
 			ReasonCode:          "invalid_401",
 			Reason:              firstNonEmptyString(candidate.FailureSummary, "OAuth token returned 401 and was quarantined"),
-			AutoDisableEligible: true,
+			AutoDisableEligible: false,
 			EvidenceJSON:        candidate.EvidenceJSON,
 			SeenAtMS:            candidate.SeenAtMS,
 		})
-		if err == nil && baseURL != "" && managementKey != "" {
+		if err == nil && baseURL != "" && managementKey != "" && item.AutoDisableEligible {
 			if patchErr := s.authFiles.PatchDisabled(patchCtx, baseURL, managementKey, candidate.FileName, true, candidate.AuthIndex); patchErr == nil {
 				_ = s.store.MarkAccountActionCandidateAutoDisabled(patchCtx, item.ID, time.Now().UnixMilli())
 			} else {

@@ -180,7 +180,7 @@ func TestAccountActionCandidateFromEventClassifiesXAIAuthenticationFailures(t *t
 			body:            `{"error":"Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"}`,
 			wantAction:      model.AccountActionTypeReauth,
 			wantReasonCode:  credentialpolicy.ReasonInvalidCredentials,
-			wantAutoDisable: true,
+			wantAutoDisable: false,
 		},
 		{
 			name:       "chat endpoint permission denied",
@@ -191,7 +191,7 @@ func TestAccountActionCandidateFromEventClassifiesXAIAuthenticationFailures(t *t
 			}},
 			wantAction:      model.AccountActionTypeReview,
 			wantReasonCode:  credentialpolicy.ReasonCredentialPermission,
-			wantAutoDisable: true,
+			wantAutoDisable: false,
 		},
 		{
 			name:            "regional permission denied",
@@ -1015,7 +1015,7 @@ func TestAccountActionCandidateWorkerSkipsFailureFromPreviousImport(t *testing.T
 	}
 }
 
-func TestAccountActionCandidateWorkerAutoDisablesEligibleXAIReviewWithProviderAlias(t *testing.T) {
+func TestAccountActionCandidateWorkerSkipsXAIReviewAutoDisableWithProviderAlias(t *testing.T) {
 	st, err := store.Open(t.TempDir() + "/usage.sqlite")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -1067,14 +1067,14 @@ func TestAccountActionCandidateWorkerAutoDisablesEligibleXAIReviewWithProviderAl
 
 	NewAccountActionCandidateWorker(st, true).handleCandidate(context.Background(), candidate)
 
-	if !patched {
-		t.Fatal("expected eligible xAI review to auto-disable")
+	if patched {
+		t.Fatal("expected eligible xAI review to stay visible")
 	}
 	items, err := st.ListAccountActionCandidates(context.Background(), model.AccountActionStatusPending, 10)
 	if err != nil {
 		t.Fatalf("list candidates: %v", err)
 	}
-	if len(items) != 1 || items[0].Provider != "xai" || items[0].ActionType != model.AccountActionTypeReview || items[0].AutoDisabledAtMS == 0 {
+	if len(items) != 1 || items[0].Provider != "xai" || items[0].ActionType != model.AccountActionTypeReview || items[0].AutoDisabledAtMS != 0 || items[0].AutoDisableEligible {
 		t.Fatalf("items = %#v", items)
 	}
 }

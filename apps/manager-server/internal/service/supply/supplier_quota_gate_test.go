@@ -479,7 +479,7 @@ func TestMarketplaceSupplierQuotaScoresUsesFivePercentEstimateBeforeInspectionAn
 	}
 }
 
-func TestMarketplaceSupplierQuotaScoresContinuesTrialAfterOneInvalidCredential(t *testing.T) {
+func TestMarketplaceSupplierQuotaScoresRecordsInvalidCredentialWithoutBlocking(t *testing.T) {
 	ctx := context.Background()
 	st := testutil.NewStore(t, testutil.NewConfig(t))
 	service := New(st, nil)
@@ -512,9 +512,9 @@ func TestMarketplaceSupplierQuotaScoresContinuesTrialAfterOneInvalidCredential(t
 		t.Fatalf("invalid credential scores = %#v err=%v", scores, err)
 	}
 	score := scores[0]
-	if score.Status != supplierQuotaStatusObserving || score.Reason != "waiting_for_more_supplier_evidence" ||
+	if score.Status != supplierQuotaStatusObserving || score.Reason != "waiting_for_account_quota_evidence" ||
 		score.InvalidCredentialCount != 1 || score.ImportedAccounts != 1 || score.SampleCount != 0 ||
-		score.EvidenceCount != 1 || score.PassRatePercent != 0 {
+		score.EvidenceCount != 0 || score.PassRatePercent != 0 {
 		t.Fatalf("invalid credential score = %#v", score)
 	}
 	selection, selectErr := chooseMarketplaceSellerForAutomaticPurchase(platform, 10, candidates, scores)
@@ -524,7 +524,7 @@ func TestMarketplaceSupplierQuotaScoresContinuesTrialAfterOneInvalidCredential(t
 	}
 }
 
-func TestMarketplaceSupplierQuotaScoresWaitsForTenEvidenceBeforeBlocking(t *testing.T) {
+func TestMarketplaceSupplierQuotaScoresIgnoresInvalidCredentialsForCapacityBlocking(t *testing.T) {
 	ctx := context.Background()
 	st := testutil.NewStore(t, testutil.NewConfig(t))
 	service := New(st, nil)
@@ -562,12 +562,12 @@ func TestMarketplaceSupplierQuotaScoresWaitsForTenEvidenceBeforeBlocking(t *test
 	if err != nil || len(scores) != 1 {
 		t.Fatalf("nine-evidence scores = %#v err=%v", scores, err)
 	}
-	if score := scores[0]; score.Status != supplierQuotaStatusObserving || score.EvidenceCount != 9 || score.InvalidCredentialCount != 3 {
-		t.Fatalf("nine evidence must remain observing: %#v", score)
+	if score := scores[0]; score.Status != supplierQuotaStatusApproved || score.EvidenceCount != 6 || score.InvalidCredentialCount != 3 || score.PassRatePercent != 100 {
+		t.Fatalf("invalid credentials must not block capacity-approved seller: %#v", score)
 	}
 	selection, selectErr := chooseMarketplaceSellerForAutomaticPurchase(platform, 5, []supplyclient.MarketplaceSellerCandidate{candidate}, scores)
-	if selectErr != nil || selection == nil || !selection.trial || selection.quantity != 1 {
-		t.Fatalf("nine-evidence follow-up trial = %#v err=%v", selection, selectErr)
+	if selectErr != nil || selection == nil || selection.trial || selection.quantity != 5 {
+		t.Fatalf("capacity-approved selection = %#v err=%v", selection, selectErr)
 	}
 
 	service.supplierQuotaScores = nil
@@ -580,13 +580,13 @@ func TestMarketplaceSupplierQuotaScoresWaitsForTenEvidenceBeforeBlocking(t *test
 	if err != nil || len(scores) != 1 {
 		t.Fatalf("ten-evidence scores = %#v err=%v", scores, err)
 	}
-	if score := scores[0]; score.Status != supplierQuotaStatusBlocked || score.EvidenceCount != 10 ||
-		score.PassingSampleCount != 7 || score.PassRatePercent != 70 {
-		t.Fatalf("ten evidence with three failures must block: %#v", score)
+	if score := scores[0]; score.Status != supplierQuotaStatusApproved || score.EvidenceCount != 7 ||
+		score.PassingSampleCount != 7 || score.InvalidCredentialCount != 3 || score.PassRatePercent != 100 {
+		t.Fatalf("invalid credentials must remain display-only once capacity is known: %#v", score)
 	}
 }
 
-func TestMarketplaceSupplierQuotaScoresToleratesTwoBadAccountsOutOfTen(t *testing.T) {
+func TestMarketplaceSupplierQuotaScoresKeepsInvalidCredentialsOutOfCapacityEvidence(t *testing.T) {
 	ctx := context.Background()
 	st := testutil.NewStore(t, testutil.NewConfig(t))
 	service := New(st, nil)
@@ -625,9 +625,9 @@ func TestMarketplaceSupplierQuotaScoresToleratesTwoBadAccountsOutOfTen(t *testin
 		t.Fatalf("mixed seller scores = %#v err=%v", scores, err)
 	}
 	score := scores[0]
-	if score.Status != supplierQuotaStatusApproved || score.SampleCount != 8 || score.EvidenceCount != 10 ||
-		score.PassingSampleCount != 8 || score.InvalidCredentialCount != 2 || score.PassRatePercent != 80 {
-		t.Fatalf("mixed seller should tolerate two failures out of ten: %#v", score)
+	if score.Status != supplierQuotaStatusApproved || score.SampleCount != 8 || score.EvidenceCount != 8 ||
+		score.PassingSampleCount != 8 || score.InvalidCredentialCount != 2 || score.PassRatePercent != 100 {
+		t.Fatalf("invalid credentials must not dilute capacity pass rate: %#v", score)
 	}
 	selection, selectErr := chooseMarketplaceSellerForAutomaticPurchase(platform, 5, []supplyclient.MarketplaceSellerCandidate{candidate}, scores)
 	if selectErr != nil || selection == nil || selection.candidate.SellerID != "mixed-seller" || selection.trial {

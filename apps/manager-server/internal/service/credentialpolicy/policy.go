@@ -46,7 +46,7 @@ func EvaluateFailure(signal FailureSignal) (Decision, bool) {
 			ReasonCode:          ReasonWorkspaceDeactivated,
 			Reason:              "Workspace is deactivated; review and delete the stale auth file if appropriate",
 			Confidence:          ConfidenceHigh,
-			AutoDisableEligible: true,
+			AutoDisableEligible: false,
 		}, true
 	}
 	if signal.StatusCode != 401 && signal.StatusCode != 403 {
@@ -59,7 +59,7 @@ func EvaluateFailure(signal FailureSignal) (Decision, bool) {
 			ReasonCode:          ReasonAccountDeactivated,
 			Reason:              "Account is deactivated; review and delete the stale auth file if appropriate",
 			Confidence:          ConfidenceHigh,
-			AutoDisableEligible: true,
+			AutoDisableEligible: false,
 		}, true
 	}
 	if containsAny(text,
@@ -76,7 +76,7 @@ func EvaluateFailure(signal FailureSignal) (Decision, bool) {
 			ReasonCode:          ReasonTokenRevoked,
 			Reason:              "OAuth token was revoked or invalidated; reauthorize the account",
 			Confidence:          ConfidenceHigh,
-			AutoDisableEligible: true,
+			AutoDisableEligible: false,
 		}, true
 	}
 	if containsAny(text,
@@ -96,7 +96,7 @@ func EvaluateFailure(signal FailureSignal) (Decision, bool) {
 			ReasonCode:          ReasonInvalidCredentials,
 			Reason:              "Credentials are invalid or expired; reauthorize the account",
 			Confidence:          ConfidenceHigh,
-			AutoDisableEligible: true,
+			AutoDisableEligible: false,
 		}, true
 	}
 
@@ -106,7 +106,7 @@ func EvaluateFailure(signal FailureSignal) (Decision, bool) {
 			ReasonCode:          ReasonCredentialPermission,
 			Reason:              "xAI rejected this credential for the chat endpoint; review credential permissions",
 			Confidence:          ConfidenceHigh,
-			AutoDisableEligible: true,
+			AutoDisableEligible: false,
 		}, true
 	}
 

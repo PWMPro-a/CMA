@@ -6328,7 +6328,12 @@
     "supplier_quota_reason_observed_quota_below_threshold": "Наблюдаемая квота ниже порога",
     "supplier_quota_reason_credential_invalidated": "Учетные данные поставщика недействительны; дальнейшие автозакупки заблокированы",
     "supplier_quota_reason_waiting_for_account_quota_evidence": "Закупка выполнена; ожидаются данные о квоте аккаунта",
-    "supplier_quota_reason_eligible_for_single_trial": "Локальных образцов нет; разрешена одна пробная закупка"
+    "supplier_quota_reason_eligible_for_single_trial": "Локальных образцов нет; разрешена одна пробная закупка",
+    "supply.supplier_quota_pass_rate_summary": "Соответствие по ёмкости {{passing}}/{{total}} ({{rate}}%); блокировка определяется только по образцам ёмкости",
+    "supply.supplier_quota_reason_credential_invalidated": "Учетные данные поставщика недействительны; показаны только для просмотра и не участвуют в автоматической блокировке",
+    "supply.supplier_quota_reason_observed_quota_below_threshold": "Образец ёмкости ниже порога; временная блокировка",
+    "supply.supplier_quota_reason_observed_supplier_quality_below_threshold": "Образец ёмкости ниже порога; временная блокировка",
+    "supply.supplier_quota_scores_hint": "Для каждого продавца хранятся последние 20 образцов ёмкости; при 3+ образцах минимум и максимум отбрасываются, остальные усредняются. Закупки сортируются по коэффициенту стоимости (цена ÷ ёмкость), а при неизвестной ёмкости используется цена. Недействительные учетные данные только отображаются и не блокируют продавца."
   },
   "egress_ip": {
     "card_eyebrow": "Выходной IP в один клик",

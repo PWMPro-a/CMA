@@ -51,13 +51,12 @@ const (
 )
 
 const (
-	// Permanent supplier decisions need a representative batch. Before this
-	// point a weak or revoked account only keeps the seller in single-account
-	// observation; one unlucky delivery never blacklists the whole seller.
+	// Permanent supplier capacity decisions need a representative batch. Before
+	// this point a weak account only keeps the seller in single-account
+	// observation; one unlucky low-capacity delivery never blacklists the whole
+	// seller. Revoked/invalid credentials are displayed for operators but do not
+	// block a seller by themselves.
 	supplierQuotaMinimumDecisionSamples = 10
-	// Up to 20% weak/invalid deliveries are tolerated. Thus a batch of ten may
-	// contain one or two bad accounts while the seller remains eligible.
-	supplierQuotaMinimumPassRate = 0.80
 )
 
 // An observing seller is not permanently excluded. A bounded pause gives the
@@ -483,9 +482,9 @@ func (s *Service) marketplaceSupplierQuotaScores(
 				result.AccountID,
 			)...)
 		}
-		// A revoked/invalid credential is a failed quality sample. It contributes
-		// to the seller's combined pass rate, but one isolated failure does not
-		// blacklist the seller before a representative evidence batch exists.
+		// A revoked/invalid credential is operator evidence only. It must not
+		// participate in supplier blocking; the automatic gate is strictly a
+		// capacity gate.
 		// Sample recency follows account import chronology. Metadata repairs and
 		// later quota observations must not make an old account displace a newer
 		// account from the seller's latest-20 evidence window.
@@ -573,36 +572,38 @@ func (s *Service) marketplaceSupplierQuotaScores(
 		score.InvalidCredentialCount = entry.invalid
 		score.CostMultiplier, _ = supplierCostMultiplier(score.MinUnitPriceFen, score.ScoreM)
 		score.CostPerCapacityFen, _ = supplierCostPerCapacityFen(score.MinUnitPriceFen, score.ScoreM)
-		score.EvidenceCount = score.SampleCount + entry.invalid
-		if score.EvidenceCount > 0 {
-			score.PassRatePercent = round2(float64(score.PassingSampleCount) / float64(score.EvidenceCount) * 100)
+		score.EvidenceCount = score.SampleCount
+		if score.SampleCount > 0 {
+			score.PassRatePercent = round2(float64(score.PassingSampleCount) / float64(score.SampleCount) * 100)
 		}
 		switch {
-		case score.EvidenceCount >= supplierQuotaMinimumDecisionSamples:
-			passRate := float64(score.PassingSampleCount) / float64(score.EvidenceCount)
-			if passRate+1e-9 >= supplierQuotaMinimumPassRate && score.ScoreM >= threshold {
+		case score.SampleCount >= supplierQuotaMinimumDecisionSamples:
+			if score.ScoreM >= threshold {
 				score.Status = supplierQuotaStatusApproved
 				score.Reason = "observed_quota_meets_threshold"
 			} else {
 				score.Status = supplierQuotaStatusBlocked
-				score.Reason = "observed_supplier_quality_below_threshold"
+				score.Reason = "observed_quota_below_threshold"
 			}
-		case score.EvidenceCount > 0:
+		case score.SampleCount > 0:
 			// A clean high-quota sample may provisionally release a seller, but a
-			// weak or invalid early sample only asks for more single-account trials.
-			// It never creates a permanent block before the evidence batch is large
-			// enough to tolerate normal 10-20% delivery variance.
-			if entry.invalid == 0 && score.PassingSampleCount == score.EvidenceCount {
+			// weak early sample only asks for more single-account trials. Invalid
+			// credentials are not capacity samples and therefore do not affect this
+			// decision.
+			if score.ScoreM >= threshold {
 				score.Status = supplierQuotaStatusApproved
 				score.Reason = "provisional_quota_meets_threshold"
 			} else {
 				score.Status = supplierQuotaStatusObserving
 				score.Reason = "waiting_for_more_supplier_evidence"
-				// The last account has already produced usable evidence. Keep the
-				// seller on bounded single-account trials, but do not impose the
-				// marketplace-failure cooldown: one weak/invalid delivery must not
-				// stop evidence collection before the representative batch is full.
+				// The last account has already produced usable capacity evidence.
+				// Keep the seller on bounded single-account trials, but do not
+				// impose the marketplace-failure cooldown before the representative
+				// batch is full.
 			}
+		case entry.invalid > 0:
+			score.Status = supplierQuotaStatusObserving
+			score.Reason = "waiting_for_account_quota_evidence"
 		case entry.imported > 0 || entry.inFlight || entry.attempted > 0 || entry.purchased > 0 || candidate.PurchasedBefore || candidate.PurchaseCount > 0:
 			score.Status = supplierQuotaStatusObserving
 			if entry.inFlight {

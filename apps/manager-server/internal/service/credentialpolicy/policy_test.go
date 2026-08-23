@@ -22,7 +22,7 @@ func TestEvaluateFailure(t *testing.T) {
 			},
 			wantAction:      ActionReauth,
 			wantReason:      ReasonInvalidCredentials,
-			wantAutoDisable: true,
+			wantAutoDisable: false,
 			wantDecision:    true,
 		},
 		{
@@ -36,7 +36,7 @@ func TestEvaluateFailure(t *testing.T) {
 			},
 			wantAction:      ActionReview,
 			wantReason:      ReasonCredentialPermission,
-			wantAutoDisable: true,
+			wantAutoDisable: false,
 			wantDecision:    true,
 		},
 		{
