@@ -1912,6 +1912,32 @@ func TestStartupAccountFloorUsesRecentDemandMemoryInsteadOfIdleEmergency(t *test
 	}
 }
 
+func TestStartupAccountFloorDoesNotOverrideHealthyVirtualRunway(t *testing.T) {
+	startupAccounts := 15
+	cfg := store.ManagerSupplyConfig{
+		Strategy:                  managerconfigsvc.SupplyStrategyStrongSupply,
+		StartupAvailableAccounts:  &startupAccounts,
+		CriticalAvailableAccounts: 2,
+		HealthyAvailableAccounts:  10,
+		CriticalMinutes:           80,
+	}
+	resource := SmartResource{
+		AvailableAccounts:          10,
+		CurrentCapacityRCU:         1_500,
+		AvailableCapacityRCU:       1_500,
+		DemandPlanningRCUPerMinute: 0.11,
+		DemandMemoryAgeSeconds:     int((smartEmergencyDemandMemoryMaxAge / time.Second) + 1),
+		CriticalMinutes:            80,
+	}
+	if smartStartupAccountFloorEmergency(cfg, resource) {
+		t.Fatalf("healthy virtual runway must suppress startup-floor emergency: %#v", resource)
+	}
+	applySmartEmergencyAvailability(cfg, &resource, time.Now())
+	if resource.EmergencyShortage || resource.EmergencyReason != "" || resource.SuggestedQuantity != 0 {
+		t.Fatalf("healthy virtual runway triggered emergency refill: %#v", resource)
+	}
+}
+
 func TestProgressiveStartupFloorUsesOneOrderAndNormalCooldown(t *testing.T) {
 	cfg := store.ManagerSupplyConfig{
 		ReplenishBatchSize:    10,

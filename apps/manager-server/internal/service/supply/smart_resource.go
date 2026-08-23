@@ -1789,7 +1789,28 @@ func smartStartupAccountFloorEmergency(cfg store.ManagerSupplyConfig, resource S
 		return false
 	}
 	_, recentDemandObserved := smartEmergencySizingResource(resource)
-	return !recentDemandObserved && resource.AvailableAccounts < smartStartupAvailableAccounts(cfg)
+	if recentDemandObserved {
+		return false
+	}
+	// A virtual/planning demand sample can outlive the short demand-memory
+	// window.  It still represents usable runway, so an idle pool with a healthy
+	// capacity baseline must not be escalated to emergency merely because its
+	// account count is below the startup floor.  The startup floor is intended
+	// for a genuinely empty/low-capacity pool; the capacity critical line remains
+	// the emergency boundary when a stale demand estimate is all that remains.
+	planningRate := math.Max(resource.DemandPlanningRCUPerMinute, resource.VirtualDemandRCUPerMinute)
+	planningRate = math.Max(planningRate, resource.DemandMemoryRCUPerMinute)
+	if planningRate > 0 {
+		availableCapacity := smartAvailableCapacity(resource)
+		if availableCapacity > 0 {
+			runwayMinutes := availableCapacity / planningRate
+			criticalMinutes := max(1, resource.CriticalMinutes)
+			if runwayMinutes > float64(criticalMinutes) {
+				return false
+			}
+		}
+	}
+	return resource.AvailableAccounts < smartStartupAvailableAccounts(cfg)
 }
 
 func smartAvailableCapacityEmergency(cfg store.ManagerSupplyConfig, resource SmartResource) bool {
