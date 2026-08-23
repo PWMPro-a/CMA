@@ -1027,6 +1027,14 @@ func (s *Service) purchaseTaskOrderPollDue(cfg store.ManagerSupplyConfig, order 
 	if order.SupplierRetryUntilMS > nowMS {
 		return false
 	}
+	// A ready order with payment/delivery evidence is already committed
+	// supplier inventory. The dashboard's read-only status refresh may update
+	// NextPollAtMS while the purchase worker is waiting; that must never strand
+	// a paid delivery behind a moving local polling deadline.
+	if supplyOrderHasPaymentEvidence(order) &&
+		(isReadyForTake(order.Status) || isReadyForTake(order.RemoteStatus)) {
+		return true
+	}
 	if order.Status == "taking" && order.NextPollAtMS > nowMS {
 		return false
 	}
@@ -1225,6 +1233,10 @@ func (s *Service) NextPurchaseTaskInterval(ctx context.Context) time.Duration {
 		for _, order := range orders {
 			if strings.TrimSpace(order.TaskID) == "" {
 				continue
+			}
+			if supplyOrderHasPaymentEvidence(order) &&
+				(isReadyForTake(order.Status) || isReadyForTake(order.RemoteStatus)) {
+				return time.Second
 			}
 			deadline := order.SupplierRetryUntilMS
 			if deadline <= 0 {

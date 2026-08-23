@@ -89,6 +89,25 @@ func TestPurchaseTaskReadyTakeAllowedWhilePlannerSnapshotIsStale(t *testing.T) {
 	}
 }
 
+func TestPurchaseTaskPaidReadyOrderIgnoresMovingStatusPollDeadline(t *testing.T) {
+	service := &Service{}
+	nowMS := time.Now().UnixMilli()
+	order := store.SupplyOrder{
+		OrderID:              "paid-ready-deadline",
+		TaskID:               "purchase-paid-ready-deadline",
+		Automatic:            true,
+		Status:               "ready",
+		RemoteStatus:         "completed",
+		ReadyQuantity:        1,
+		ChargedFen:           1111,
+		NextPollAtMS:         nowMS + time.Minute.Milliseconds(),
+		SupplierRetryUntilMS: nowMS - time.Second.Milliseconds(),
+	}
+	if !service.purchaseTaskOrderPollDue(store.ManagerSupplyConfig{}, order, nowMS) {
+		t.Fatal("paid ready order must be processed even when the dashboard moved its local poll deadline")
+	}
+}
+
 func TestPurchaseTaskReadyTakeAllowedSharesBudgetAcrossReadySiblings(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "purchase-task-ready-siblings.sqlite"))

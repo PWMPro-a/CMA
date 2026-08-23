@@ -3389,7 +3389,26 @@ func (s *Service) processOrder(ctx context.Context, cfg store.ManagerConfig, ord
 	if released, err := s.autoReleaseAutomaticOrderIfNotNeeded(ctx, cfg, &order, true); released || err != nil {
 		return err
 	}
-	if !retryingTake && order.Automatic && smartSupplyEnabled(cfg.Supply) && !s.smartTakeAllowed(cfg.Supply, order.OrderID) {
+	takeAllowed := s.smartTakeAllowed(cfg.Supply, order.OrderID)
+	if !takeAllowed && order.Automatic && supplyOrderHasPaymentEvidence(order) {
+		// The task ledger is the durable admission record for a paid delivery.
+		// Prefer its remaining target over a moving dashboard snapshot so a ready
+		// order cannot be kept in ready forever by repeated status refreshes.
+		readyAllowed, readyErr := s.purchaseTaskReadyTakeAllowed(ctx, order)
+		if readyErr != nil {
+			return readyErr
+		}
+		if readyAllowed {
+			resource := s.currentSmartResource(cfg.Supply)
+			resource.LockedOrderID = order.OrderID
+			resource.LockedOrderAgeSeconds = max(0, int(time.Since(time.UnixMilli(order.CreatedAtMS)).Seconds()))
+			resource.SuggestedAction = smartActionTakeLocked
+			resource.DecisionReason = "purchase_task_ready_target_remaining"
+			s.setSmartResource(resource)
+			takeAllowed = true
+		}
+	}
+	if !retryingTake && order.Automatic && smartSupplyEnabled(cfg.Supply) && !takeAllowed {
 		resource := s.currentSmartResource(cfg.Supply)
 		resource.LockedOrderID = order.OrderID
 		resource.SuggestedAction = smartActionWaitLocked
