@@ -276,6 +276,10 @@ export function VisualConfigEditor({
     t,
     validationErrors?.codexCacheAffinityMaxSessionDuration
   );
+  const codexCacheAffinityMaxSharePercentError = getValidationMessage(
+    t,
+    validationErrors?.codexCacheAffinityMaxSharePercent
+  );
   const codexCacheAffinityQuotaPreemptPercentError = getValidationMessage(
     t,
     validationErrors?.codexCacheAffinityQuotaPreemptPercent
@@ -399,6 +403,7 @@ export function VisualConfigEditor({
           'codexCacheAffinityWebsocketPoolSlots',
           'codexCacheAffinityMaxSessionRequests',
           'codexCacheAffinityMaxSessionDuration',
+          'codexCacheAffinityMaxSharePercent',
           'codexCacheAffinityQuotaPreemptPercent',
           'codexCacheAffinityQuotaHardStopPercent',
           'codexTailBurstTriggerRemainingPercent',
@@ -1608,6 +1613,24 @@ export function VisualConfigEditor({
                         'config_management.visual.sections.quota.cache_affinity_duration_hint'
                       )}
                       error={codexCacheAffinityMaxSessionDurationError}
+                    />
+                    <Input
+                      label={t(
+                        'config_management.visual.sections.quota.cache_affinity_max_share_percent'
+                      )}
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.01"
+                      value={values.codexCacheAffinityMaxSharePercent}
+                      onChange={(event) =>
+                        onChange({ codexCacheAffinityMaxSharePercent: event.target.value })
+                      }
+                      disabled={disabled || !values.codexCacheAffinityEnabled}
+                      hint={t(
+                        'config_management.visual.sections.quota.cache_affinity_max_share_percent_hint'
+                      )}
+                      error={codexCacheAffinityMaxSharePercentError}
                     />
                     <Input
                       label={t(

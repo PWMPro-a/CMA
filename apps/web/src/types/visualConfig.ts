@@ -29,6 +29,7 @@ export type VisualConfigFieldPath =
   | 'codexCacheAffinityWebsocketPoolSlots'
   | 'codexCacheAffinityMaxSessionRequests'
   | 'codexCacheAffinityMaxSessionDuration'
+  | 'codexCacheAffinityMaxSharePercent'
   | 'codexCacheAffinityQuotaPreemptPercent'
   | 'codexCacheAffinityQuotaHardStopPercent'
   | 'codexClientMinVersion'
@@ -46,6 +47,7 @@ export type VisualConfigValidationErrorCode =
   | 'codex_version_range'
   | 'positive_integer'
   | 'cache_affinity_websocket_slots_range'
+  | 'cache_affinity_share_percent_range'
   | 'positive_duration'
   | 'cache_affinity_preempt_percent_range'
   | 'cache_affinity_hard_stop_percent_range'
@@ -203,6 +205,7 @@ export type VisualConfigValues = {
   codexCacheAffinityWebsocketPoolSlots: string;
   codexCacheAffinityMaxSessionRequests: string;
   codexCacheAffinityMaxSessionDuration: string;
+  codexCacheAffinityMaxSharePercent: string;
   codexCacheAffinityQuotaPreemptPercent: string;
   codexCacheAffinityQuotaHardStopPercent: string;
   codexTailBurstEnabled: boolean;
@@ -329,6 +332,7 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   codexCacheAffinityWebsocketPoolSlots: '8',
   codexCacheAffinityMaxSessionRequests: '50',
   codexCacheAffinityMaxSessionDuration: '5m',
+  codexCacheAffinityMaxSharePercent: '0',
   codexCacheAffinityQuotaPreemptPercent: '97',
   codexCacheAffinityQuotaHardStopPercent: '99',
   codexTailBurstEnabled: false,

@@ -2444,7 +2444,9 @@
           "tail_burst_expiry_window": "Expiry entry window",
           "tail_burst_expiry_window_hint": "Enter the burst lane when supplier expiry is within this duration, for example 10m.",
           "tail_burst_max_concurrency": "Burst account max concurrency",
-          "tail_burst_max_concurrency_hint": "Concurrency ceiling for expiring or low-quota accounts; a higher per-account setting is preserved."
+          "tail_burst_max_concurrency_hint": "Concurrency ceiling for expiring or low-quota accounts; a higher per-account setting is preserved.",
+          "cache_affinity_max_share_percent": "Maximum cache-affinity share (%)",
+          "cache_affinity_max_share_percent_hint": "0 disables the cap. For example, 70 sends new cold sessions back to normal routing when cache-affinity selections are about 70% of the recent window; warm sessions and tail-burst behavior stay unchanged."
         },
         "streaming": {
           "title": "Streaming Configuration",
@@ -2577,7 +2579,8 @@
         "cache_affinity_websocket_slots_range": "Enter an integer from 1 to 30",
         "cache_affinity_preempt_percent_range": "Enter a percentage greater than 0 and less than 100",
         "cache_affinity_hard_stop_percent_range": "The hard-stop threshold must exceed the preemption threshold and be at most 100",
-        "positive_duration": "Enter a positive Go duration such as 30s, 5m, or 1h"
+        "positive_duration": "Enter a positive Go duration such as 30s, 5m, or 1h",
+        "cache_affinity_share_percent_range": "Enter a percentage from 0 to 100"
       },
       "common": {
         "edit": "Edit",

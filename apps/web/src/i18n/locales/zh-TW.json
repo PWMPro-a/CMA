@@ -2444,7 +2444,9 @@
           "tail_burst_expiry_window": "臨期進場視窗",
           "tail_burst_expiry_window_hint": "距離供應到期時間小於此時長時進入大併發，例如 10m。",
           "tail_burst_max_concurrency": "進場帳號最大併發",
-          "tail_burst_max_concurrency_hint": "臨期或尾量帳號的併發上限；帳號自身設定的更高併發仍會保留。"
+          "tail_burst_max_concurrency_hint": "臨期或尾量帳號的併發上限；帳號自身設定的更高併發仍會保留。",
+          "cache_affinity_max_share_percent": "快取親和最高占比 (%)",
+          "cache_affinity_max_share_percent_hint": "0 表示關閉控制；例如 70 表示最近視窗內快取親和選路達到約 70% 後，新的冷工作階段回落到普通排程，已預熱工作階段和尾流邏輯保持不變。"
         },
         "streaming": {
           "title": "串流傳輸設定",
@@ -2577,7 +2579,8 @@
         "cache_affinity_websocket_slots_range": "請輸入 1 到 30 之間的整數",
         "cache_affinity_preempt_percent_range": "請輸入大於 0 且小於 100 的百分比",
         "cache_affinity_hard_stop_percent_range": "硬停止門檻必須高於避讓門檻且不超過 100",
-        "positive_duration": "請輸入大於 0 的 Go duration，例如 30s、5m 或 1h"
+        "positive_duration": "請輸入大於 0 的 Go duration，例如 30s、5m 或 1h",
+        "cache_affinity_share_percent_range": "請輸入 0 到 100 之間的百分比"
       },
       "common": {
         "edit": "編輯",

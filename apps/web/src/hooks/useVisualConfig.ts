@@ -300,6 +300,8 @@ function migrateLegacyCodexCacheAffinity(doc: YamlDocument): void {
     websocketPoolSlots: 'websocket-pool-slots',
     maxSessionRequests: 'max-session-requests',
     maxSessionDuration: 'max-session-duration',
+    maxShareRatio: 'max-share-ratio',
+    max_share_ratio: 'max-share-ratio',
     quotaPreemptUsedRatio: 'quota-preempt-used-ratio',
     quotaHardStopUsedRatio: 'quota-hard-stop-used-ratio',
   };
@@ -606,6 +608,17 @@ function getCacheAffinityPreemptPercentError(
     : 'cache_affinity_preempt_percent_range';
 }
 
+function getCacheAffinitySharePercentError(
+  value: string
+): 'cache_affinity_share_percent_range' | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100
+    ? undefined
+    : 'cache_affinity_share_percent_range';
+}
+
 function getCacheAffinityHardStopPercentError(
   hardStopValue: string,
   preemptValue: string
@@ -659,9 +672,28 @@ function readRatioPercent(value: unknown, fallback: string, allowOne: boolean): 
   return String(Number((ratio * 100).toFixed(4)));
 }
 
+function readNonNegativeRatioPercent(value: unknown, fallback: string): string {
+  const ratio = Number(value);
+  const valid = Number.isFinite(ratio) && ratio >= 0 && ratio <= 1;
+  if (!valid) return fallback;
+  return String(Number((ratio * 100).toFixed(4)));
+}
+
 function setRatioPercentInDoc(doc: YamlDocument, path: YamlPath, value: string): void {
   const percent = Number(value.trim());
   if (Number.isFinite(percent) && percent > 0 && percent <= 100) {
+    doc.setIn(path, percent / 100);
+  }
+}
+
+function setNonNegativeRatioPercentInDoc(doc: YamlDocument, path: YamlPath, value: string): void {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    if (docHas(doc, path)) doc.deleteIn(path);
+    return;
+  }
+  const percent = Number(trimmed);
+  if (Number.isFinite(percent) && percent >= 0 && percent <= 100) {
     doc.setIn(path, percent / 100);
   }
 }
@@ -723,6 +755,9 @@ export function getVisualConfigValidationErrors(
       : undefined,
     codexCacheAffinityMaxSessionDuration: values.codexCacheAffinityEnabled
       ? getPositiveDurationError(values.codexCacheAffinityMaxSessionDuration)
+      : undefined,
+    codexCacheAffinityMaxSharePercent: values.codexCacheAffinityEnabled
+      ? getCacheAffinitySharePercentError(values.codexCacheAffinityMaxSharePercent)
       : undefined,
     codexCacheAffinityQuotaPreemptPercent: values.codexCacheAffinityEnabled
       ? getCacheAffinityPreemptPercentError(values.codexCacheAffinityQuotaPreemptPercent)
@@ -874,6 +909,7 @@ function getNextDirtyFields(
       'codexCacheAffinityWebsocketPoolSlots',
       'codexCacheAffinityMaxSessionRequests',
       'codexCacheAffinityMaxSessionDuration',
+      'codexCacheAffinityMaxSharePercent',
       'codexCacheAffinityQuotaPreemptPercent',
       'codexCacheAffinityQuotaHardStopPercent',
       'codexTailBurstEnabled',
@@ -1369,6 +1405,12 @@ export function useVisualConfig() {
           codexCacheAffinity?.['max-session-duration'] ?? codexCacheAffinity?.maxSessionDuration,
           '5m'
         ),
+        codexCacheAffinityMaxSharePercent: readNonNegativeRatioPercent(
+          codexCacheAffinity?.['max-share-ratio'] ??
+            codexCacheAffinity?.maxShareRatio ??
+            codexCacheAffinity?.max_share_ratio,
+          '0'
+        ),
         codexCacheAffinityQuotaPreemptPercent: readRatioPercent(
           codexCacheAffinity?.['quota-preempt-used-ratio'] ??
             codexCacheAffinity?.quotaPreemptUsedRatio,
@@ -1856,6 +1898,7 @@ export function useVisualConfig() {
           isDirty('codexCacheAffinityWebsocketPoolSlots') ||
           isDirty('codexCacheAffinityMaxSessionRequests') ||
           isDirty('codexCacheAffinityMaxSessionDuration') ||
+          isDirty('codexCacheAffinityMaxSharePercent') ||
           isDirty('codexCacheAffinityQuotaPreemptPercent') ||
           isDirty('codexCacheAffinityQuotaHardStopPercent');
         if (codexCacheAffinityDirty) {
@@ -1908,6 +1951,13 @@ export function useVisualConfig() {
               doc,
               ['codex', 'cache-affinity', 'max-session-duration'],
               values.codexCacheAffinityMaxSessionDuration
+            );
+          }
+          if (isDirty('codexCacheAffinityMaxSharePercent')) {
+            setNonNegativeRatioPercentInDoc(
+              doc,
+              ['codex', 'cache-affinity', 'max-share-ratio'],
+              values.codexCacheAffinityMaxSharePercent
             );
           }
           if (isDirty('codexCacheAffinityQuotaPreemptPercent')) {

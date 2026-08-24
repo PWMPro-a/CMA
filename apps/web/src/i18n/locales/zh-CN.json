@@ -2444,7 +2444,9 @@
           "tail_burst_expiry_window": "临期入场窗口",
           "tail_burst_expiry_window_hint": "距离供应过期时间小于此时长时进入大并发，例如 10m。",
           "tail_burst_max_concurrency": "入场账号最大并发",
-          "tail_burst_max_concurrency_hint": "临期或尾量账号的并发上限；账号自身配置的更高并发仍会保留。"
+          "tail_burst_max_concurrency_hint": "临期或尾量账号的并发上限；账号自身配置的更高并发仍会保留。",
+          "cache_affinity_max_share_percent": "缓存亲和最高占比 (%)",
+          "cache_affinity_max_share_percent_hint": "0 表示关闭控制；例如 70 表示最近窗口内缓存亲和选路达到约 70% 后，新冷会话回落到普通调度，已预热会话和尾流逻辑保持不变。"
         },
         "streaming": {
           "title": "流式传输配置",
@@ -2577,7 +2579,8 @@
         "cache_affinity_websocket_slots_range": "请输入 1 到 30 之间的整数",
         "cache_affinity_preempt_percent_range": "请输入大于 0 且小于 100 的百分比",
         "cache_affinity_hard_stop_percent_range": "硬停止阈值必须高于避让阈值且不超过 100",
-        "positive_duration": "请输入大于 0 的 Go duration，例如 30s、5m 或 1h"
+        "positive_duration": "请输入大于 0 的 Go duration，例如 30s、5m 或 1h",
+        "cache_affinity_share_percent_range": "请输入 0 到 100 之间的百分比"
       },
       "common": {
         "edit": "编辑",

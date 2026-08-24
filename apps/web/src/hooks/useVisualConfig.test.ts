@@ -796,6 +796,7 @@ describe('useVisualConfig', () => {
       '    websocketPoolSlots: 12',
       '    maxSessionRequests: 80',
       '    maxSessionDuration: 8m',
+      '    maxShareRatio: 0.72',
       '    quotaPreemptUsedRatio: 0.96',
       '    quotaHardStopUsedRatio: 1',
       '    future-affinity-option: preserve-affinity',
@@ -816,6 +817,7 @@ describe('useVisualConfig', () => {
         codexCacheAffinityWebsocketPoolSlots: '12',
         codexCacheAffinityMaxSessionRequests: '80',
         codexCacheAffinityMaxSessionDuration: '8m',
+        codexCacheAffinityMaxSharePercent: '72',
         codexCacheAffinityQuotaPreemptPercent: '96',
         codexCacheAffinityQuotaHardStopPercent: '100',
       })
@@ -830,6 +832,7 @@ describe('useVisualConfig', () => {
         codexCacheAffinityWebsocketPoolSlots: '8',
         codexCacheAffinityMaxSessionRequests: '50',
         codexCacheAffinityMaxSessionDuration: '5m',
+        codexCacheAffinityMaxSharePercent: '70',
         codexCacheAffinityQuotaPreemptPercent: '97',
         codexCacheAffinityQuotaHardStopPercent: '100',
       });
@@ -853,6 +856,7 @@ describe('useVisualConfig', () => {
       'websocket-pool-slots': 8,
       'max-session-requests': 50,
       'max-session-duration': '5m',
+      'max-share-ratio': 0.7,
       'quota-preempt-used-ratio': 0.97,
       'quota-hard-stop-used-ratio': 1,
       'future-affinity-option': 'preserve-affinity',
@@ -871,6 +875,7 @@ describe('useVisualConfig', () => {
       codexCacheAffinityWebsocketPoolSlots: '31',
       codexCacheAffinityMaxSessionRequests: '0',
       codexCacheAffinityMaxSessionDuration: 'five minutes',
+      codexCacheAffinityMaxSharePercent: '101',
       codexCacheAffinityQuotaPreemptPercent: '97',
       codexCacheAffinityQuotaHardStopPercent: '97',
     });
@@ -882,6 +887,7 @@ describe('useVisualConfig', () => {
       codexCacheAffinityWebsocketPoolSlots: 'cache_affinity_websocket_slots_range',
       codexCacheAffinityMaxSessionRequests: 'positive_integer',
       codexCacheAffinityMaxSessionDuration: 'positive_duration',
+      codexCacheAffinityMaxSharePercent: 'cache_affinity_share_percent_range',
       codexCacheAffinityQuotaHardStopPercent: 'cache_affinity_hard_stop_percent_range',
     });
   });
