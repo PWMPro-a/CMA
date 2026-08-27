@@ -303,39 +303,99 @@ const verifyPluginSourceDeleteFallback = async (
   }
 };
 
+const AUTH_FILE_DELETE_BATCH_SIZE = 100;
+
+type VerifiedAuthFileDeleteTarget = {
+  snapshot: AuthFileDeleteSnapshot;
+  selector: string;
+  freshMembers: AuthFileItem[];
+};
+
+const appendAuthFileDeleteResult = (
+  result: AuthFileDeleteExecutionResult,
+  deletion: {
+    deleted: number;
+    files: string[];
+    failed: Array<{ name: string; error: string }>;
+  },
+  requestedNames: string[],
+  unconfirmedError: string
+): void => {
+  result.deleted += Math.max(0, deletion.deleted);
+  result.files.push(...deletion.files);
+  result.failed.push(...deletion.failed);
+  if (deletion.deleted <= 0 && deletion.failed.length === 0) {
+    requestedNames.forEach((name) => result.failed.push({ name, error: unconfirmedError }));
+  }
+};
+
 const deleteVerifiedAuthFileSnapshots = async (
   snapshots: AuthFileDeleteSnapshot[],
   targetChangedError: string,
   unconfirmedError: string
 ): Promise<AuthFileDeleteExecutionResult> => {
   const result: AuthFileDeleteExecutionResult = { deleted: 0, files: [], failed: [] };
-  for (const snapshot of snapshots) {
+  if (snapshots.length === 0) return result;
+
+  // Fetch the upstream inventory once for the whole operation. The previous
+  // implementation fetched it separately for every file, adding one network
+  // round trip (and lock wait) per account before the actual delete request.
+  let freshFiles: AuthFileItem[];
+  try {
+    const response = await authFilesApi.list();
+    freshFiles = Array.isArray(response.files) ? response.files : [];
+  } catch (error) {
+    const message = error instanceof Error ? error.message : unconfirmedError;
+    snapshots.forEach((snapshot) => result.failed.push({ name: snapshot.name, error: message }));
+    return result;
+  }
+
+  const batchableNames: string[] = [];
+  const verifiedSpecialTargets: VerifiedAuthFileDeleteTarget[] = [];
+  snapshots.forEach((snapshot) => {
+    const freshMembers = getAuthFileSourceMembers(freshFiles, snapshot.name);
+    const selector = resolveVerifiedAuthFileDeleteSelector(freshFiles, snapshot);
+    if (!selector) {
+      result.failed.push({ name: snapshot.name, error: targetChangedError });
+      return;
+    }
+
+    // A standalone physical file has a stable selector equal to its physical
+    // name. These files can share one verified batch request. Shared physical
+    // files and plugin virtual credentials stay on the identity-aware path.
+    if (freshMembers.length === 1 && selector === snapshot.name) {
+      batchableNames.push(snapshot.name);
+      return;
+    }
+    verifiedSpecialTargets.push({ snapshot, selector, freshMembers });
+  });
+
+  for (let offset = 0; offset < batchableNames.length; offset += AUTH_FILE_DELETE_BATCH_SIZE) {
+    const names = batchableNames.slice(offset, offset + AUTH_FILE_DELETE_BATCH_SIZE);
     try {
-      const response = await authFilesApi.list();
-      const freshFiles = Array.isArray(response.files) ? response.files : [];
-      const selector = resolveVerifiedAuthFileDeleteSelector(freshFiles, snapshot);
-      if (!selector) {
-        result.failed.push({ name: snapshot.name, error: targetChangedError });
-        continue;
-      }
-      const identityTargets = getAuthFileSourceMembers(freshFiles, snapshot.name).map(
-        getAuthFilePatchTarget
-      );
-      const deletion =
+      const deletion = await authFilesApi.deleteFiles(names);
+      appendAuthFileDeleteResult(result, deletion, names, unconfirmedError);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : unconfirmedError;
+      names.forEach((name) => result.failed.push({ name, error: message }));
+    }
+  }
+
+  // Keep identity-aware deletion and plugin fallback serialized. Those paths
+  // perform a second, per-credential verification when the upstream reports a
+  // virtual mutation conflict and must retain their full membership checks.
+  for (const { snapshot, selector, freshMembers } of verifiedSpecialTargets) {
+    try {
+      const identityTargets = freshMembers.map(getAuthFilePatchTarget);
+      const deletion = await authFilesApi.deleteFileByName(
+        selector,
+        snapshot.name,
         selector === snapshot.name
-          ? await authFilesApi.deleteFileByName(selector, snapshot.name, undefined, identityTargets)
-          : await authFilesApi.deleteFileByName(
-              selector,
-              snapshot.name,
-              () => verifyPluginSourceDeleteFallback(snapshot, selector, targetChangedError),
-              identityTargets
-            );
-      result.deleted += deletion.deleted;
-      result.files.push(...deletion.files);
-      result.failed.push(...deletion.failed);
-      if (deletion.deleted <= 0 && deletion.failed.length === 0) {
-        result.failed.push({ name: snapshot.name, error: unconfirmedError });
-      }
+          ? undefined
+          : () => verifyPluginSourceDeleteFallback(snapshot, selector, targetChangedError),
+        identityTargets
+      );
+      appendAuthFileDeleteResult(result, deletion, [snapshot.name], unconfirmedError);
     } catch (error) {
       result.failed.push({
         name: snapshot.name,
@@ -343,6 +403,7 @@ const deleteVerifiedAuthFileSnapshots = async (
       });
     }
   }
+
   return {
     ...result,
     files: Array.from(new Set(result.files)),

@@ -1910,6 +1910,42 @@ describe('useAuthFilesData handleDeleteAll', () => {
 });
 
 describe('useAuthFilesData batchDelete', () => {
+  it('batches standalone physical files after one inventory verification', async () => {
+    const first = {
+      id: 'first.json',
+      name: 'first.json',
+      type: 'codex',
+      auth_index: 'auth-first',
+      account: 'first@example.com',
+    } as AuthFileItem;
+    const second = {
+      id: 'second.json',
+      name: 'second.json',
+      type: 'xai',
+      auth_index: 'auth-second',
+      account: 'second@example.com',
+    } as AuthFileItem;
+    mocks.list.mockResolvedValue({ files: [first, second] });
+    mocks.deleteFiles.mockResolvedValue({
+      deleted: 2,
+      failed: [],
+      files: ['first.json', 'second.json'],
+    });
+    const hook = mountUseAuthFilesData();
+    await act(async () => hook.getCurrent().loadFiles());
+
+    act(() => hook.getCurrent().batchDelete([first, second]));
+    const confirmation = mocks.showConfirmation.mock.calls[0]?.[0] as
+      | { onConfirm?: () => Promise<void> }
+      | undefined;
+    await act(async () => confirmation?.onConfirm?.());
+
+    expect(mocks.deleteFiles).toHaveBeenCalledTimes(1);
+    expect(mocks.deleteFiles).toHaveBeenCalledWith(['first.json', 'second.json']);
+    expect(mocks.deleteFileByName).not.toHaveBeenCalled();
+    hook.unmount();
+  });
+
   it('requires a second confirmation and uses verified runtime selectors', async () => {
     const first = {
       id: 'runtime-first',

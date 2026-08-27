@@ -890,20 +890,8 @@ describe('AuthFilesPage real auth JSON paste flow', () => {
     });
 
     expect(mocks.deleteAll).not.toHaveBeenCalled();
-    expect(mocks.deleteFileByName).toHaveBeenCalledWith(
-      'team-codex.json',
-      'team-codex.json',
-      undefined,
-      [
-        {
-          name: 'team-codex.json',
-          runtimeId: 'team-codex.json',
-          authIndex: 'team',
-          provider: 'codex',
-        },
-      ]
-    );
-    expect(mocks.deleteFiles).not.toHaveBeenCalled();
+    expect(mocks.deleteFileByName).not.toHaveBeenCalled();
+    expect(mocks.deleteFiles).toHaveBeenCalledWith(['team-codex.json']);
 
     await act(async () => {
       renderer!.unmount();
