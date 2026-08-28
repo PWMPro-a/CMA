@@ -1873,6 +1873,7 @@
     "routing_title": "Routing Strategy",
     "routing_strategy_label": "Routing strategy:",
     "routing_strategy_hint": "round-robin cycles through keys; fill-first prioritizes the first available key.",
+    "routing_strategy_concurrency_balanced": "Concurrency Balanced",
     "routing_strategy_update": "Update",
     "routing_strategy_round_robin": "round-robin (cycle)",
     "routing_strategy_fill_first": "fill-first (prioritize)"
@@ -2348,6 +2349,7 @@
           "video_result_auth_cache_ttl_hint": "Duration such as 30m or 3h. Empty or invalid values use 3h.",
           "routing_strategy": "Routing Strategy",
           "routing_strategy_hint": "Select credential selection strategy",
+          "strategy_concurrency_balanced": "Concurrency Balanced (fewest in-flight requests)",
           "strategy_round_robin": "Round Robin",
           "strategy_fill_first": "Fill First",
           "session_affinity_ttl": "Session Affinity TTL",

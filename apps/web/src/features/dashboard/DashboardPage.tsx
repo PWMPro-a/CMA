@@ -427,14 +427,18 @@ export function DashboardPage() {
   const routingStrategyRaw = config?.routingStrategy?.trim() || '';
   const routingStrategyDisplay = !routingStrategyRaw
     ? '-'
-    : routingStrategyRaw === 'round-robin'
+    : routingStrategyRaw === 'concurrency-balanced'
+      ? t('basic_settings.routing_strategy_concurrency_balanced')
+      : routingStrategyRaw === 'round-robin'
       ? t('basic_settings.routing_strategy_round_robin')
       : routingStrategyRaw === 'fill-first'
         ? t('basic_settings.routing_strategy_fill_first')
         : routingStrategyRaw;
   const routingStrategyBadgeClass = !routingStrategyRaw
     ? styles.configBadgeUnknown
-    : routingStrategyRaw === 'round-robin'
+    : routingStrategyRaw === 'concurrency-balanced'
+      ? styles.configBadgeConcurrencyBalanced
+      : routingStrategyRaw === 'round-robin'
       ? styles.configBadgeRoundRobin
       : routingStrategyRaw === 'fill-first'
         ? styles.configBadgeFillFirst

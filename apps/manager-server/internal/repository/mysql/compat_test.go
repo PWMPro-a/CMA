@@ -49,6 +49,13 @@ func TestTranslateQuery(t *testing.T) {
 			notContain: []string{"materialized"},
 		},
 		{
+			name: "sqlite index clause with mysql optimizer hint",
+			input: `select /*+ INDEX(e idx_usage_events_latest_request_auth_file) */ e.id
+				from usage_events e indexed by idx_usage_events_latest_request_auth_file`,
+			contains:   []string{"/*+ index(e idx_usage_events_latest_request_auth_file) */"},
+			notContain: []string{"indexed by"},
+		},
+		{
 			name:     "sqlite json type",
 			input:    `select json_type(metadata_json, '$.routing') from sample`,
 			contains: []string{"json_type(json_extract(metadata_json, '$.routing'))"},

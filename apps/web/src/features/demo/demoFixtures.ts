@@ -353,7 +353,7 @@ const initialRawConfig: Record<string, unknown> = {
   plugins: { enabled: true },
   'ws-auth': true,
   'force-model-prefix': false,
-  routing: { strategy: 'round-robin' },
+  routing: { strategy: 'concurrency-balanced' },
   'api-keys': ['sk-demo-primary', 'sk-demo-automation', 'sk-demo-fallback'],
   'gemini-api-key': [
     {

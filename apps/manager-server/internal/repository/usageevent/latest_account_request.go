@@ -3,7 +3,14 @@ package usageevent
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"sort"
 	"strings"
+)
+
+const (
+	latestRequestAuthFileIndex = "idx_usage_events_latest_request_auth_file"
+	latestRequestSourceIndex   = "idx_usage_events_latest_request_source"
 )
 
 // LatestAccountRequestQuery identifies one credential using the immutable
@@ -29,6 +36,17 @@ type LatestAccountRequest struct {
 	HeaderTraceID   string
 }
 
+type rankedAccountRequest struct {
+	LatestAccountRequest
+	id int64
+}
+
+type latestRequestPredicate struct {
+	index string
+	sql   string
+	args  []any
+}
+
 func (r *repository) RecentAccountRequests(
 	ctx context.Context,
 	targets []LatestAccountRequestQuery,
@@ -37,6 +55,200 @@ func (r *repository) RecentAccountRequests(
 	if len(targets) == 0 || limit <= 0 {
 		return []LatestAccountRequest{}, nil
 	}
+	ready, err := r.latestRequestIndexesReady(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if ready {
+		return r.recentAccountRequestsIndexed(ctx, targets, limit)
+	}
+	return r.recentAccountRequestsBatched(ctx, targets, limit)
+}
+
+func (r *repository) latestRequestIndexesReady(ctx context.Context) (bool, error) {
+	var count int
+	err := r.db.QueryRowContext(ctx, `select count(*) from sqlite_master
+		where type = 'index'
+			and tbl_name = 'usage_events'
+			and name in (?, ?)`,
+		latestRequestAuthFileIndex,
+		latestRequestSourceIndex,
+	).Scan(&count)
+	if err == nil {
+		return count == 2, nil
+	}
+
+	// MySQL does not expose sqlite_master. Its schema migration creates the
+	// same canonical index names, so inspect information_schema instead.
+	err = r.db.QueryRowContext(ctx, `select count(distinct index_name) from information_schema.statistics
+		where table_schema = database()
+			and table_name = 'usage_events'
+			and index_name in (?, ?)`,
+		latestRequestAuthFileIndex,
+		latestRequestSourceIndex,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count == 2, nil
+}
+
+func (r *repository) recentAccountRequestsIndexed(
+	ctx context.Context,
+	targets []LatestAccountRequestQuery,
+	limit int,
+) ([]LatestAccountRequest, error) {
+	requests := make([]LatestAccountRequest, 0, len(targets)*limit)
+	for _, target := range targets {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		authFileSnapshot := strings.TrimSpace(target.AuthFileSnapshot)
+		if authFileSnapshot == "" {
+			continue
+		}
+		authIndex := strings.TrimSpace(target.AuthIndex)
+		snapshot, err := r.recentAccountRequestsByPredicates(
+			ctx,
+			target.RequestIndex,
+			limit,
+			snapshotLatestRequestPredicates(authFileSnapshot, authIndex),
+		)
+		if err != nil {
+			return nil, err
+		}
+		legacy, err := r.recentAccountRequestsByPredicates(
+			ctx,
+			target.RequestIndex,
+			limit,
+			legacyLatestRequestPredicates(authFileSnapshot, authIndex),
+		)
+		if err != nil {
+			return nil, err
+		}
+		requests = append(requests, mergeRecentAccountRequests(limit, snapshot, legacy)...)
+	}
+	return requests, nil
+}
+
+func snapshotLatestRequestPredicates(authFileSnapshot, authIndex string) []latestRequestPredicate {
+	return latestRequestPredicates(
+		latestRequestAuthFileIndex,
+		`e.auth_file_snapshot collate nocase = ?`,
+		[]any{authFileSnapshot},
+		authIndex,
+	)
+}
+
+func legacyLatestRequestPredicates(authFileSnapshot, authIndex string) []latestRequestPredicate {
+	filePredicates := []latestRequestPredicate{
+		{index: latestRequestSourceIndex, sql: `e.auth_file_snapshot is null and e.source collate nocase = ?`, args: []any{authFileSnapshot}},
+		{index: latestRequestSourceIndex, sql: `e.auth_file_snapshot = '' and e.source collate nocase = ?`, args: []any{authFileSnapshot}},
+	}
+	predicates := make([]latestRequestPredicate, 0, 4)
+	for _, filePredicate := range filePredicates {
+		predicates = append(predicates, latestRequestPredicates(
+			filePredicate.index,
+			filePredicate.sql,
+			filePredicate.args,
+			authIndex,
+		)...)
+	}
+	return predicates
+}
+
+func latestRequestPredicates(index, baseSQL string, baseArgs []any, authIndex string) []latestRequestPredicate {
+	if authIndex != "" {
+		return []latestRequestPredicate{{
+			index: index,
+			sql:   baseSQL + ` and e.auth_index collate nocase = ?`,
+			args:  append(append([]any{}, baseArgs...), authIndex),
+		}}
+	}
+	return []latestRequestPredicate{
+		{index: index, sql: baseSQL + ` and e.auth_index is null`, args: append([]any{}, baseArgs...)},
+		{index: index, sql: baseSQL + ` and e.auth_index collate nocase = ''`, args: append([]any{}, baseArgs...)},
+	}
+}
+
+func (r *repository) recentAccountRequestsByPredicates(
+	ctx context.Context,
+	requestIndex int,
+	limit int,
+	predicates []latestRequestPredicate,
+) ([]rankedAccountRequest, error) {
+	parts := make([][]rankedAccountRequest, 0, len(predicates))
+	for _, predicate := range predicates {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		rows, err := r.recentAccountRequestsByPredicate(ctx, requestIndex, limit, predicate)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, rows)
+	}
+	return mergeRankedAccountRequests(limit, parts...), nil
+}
+
+func (r *repository) recentAccountRequestsByPredicate(
+	ctx context.Context,
+	requestIndex int,
+	limit int,
+	predicate latestRequestPredicate,
+) ([]rankedAccountRequest, error) {
+	args := append(append([]any{}, predicate.args...), limit)
+	query := latestAccountRequestQuery(predicate)
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	requests := make([]rankedAccountRequest, 0, limit)
+	for rows.Next() {
+		var request rankedAccountRequest
+		var failed int
+		if err := rows.Scan(
+			&request.id,
+			&request.TimestampMS,
+			&failed,
+			&request.FailStatusCode,
+			&request.FailSummary,
+			&request.HeaderErrorKind,
+			&request.HeaderErrorCode,
+			&request.HeaderTraceID,
+		); err != nil {
+			return nil, err
+		}
+		request.RequestIndex = requestIndex
+		request.Failed = failed != 0
+		requests = append(requests, request)
+	}
+	return requests, rows.Err()
+}
+
+func latestAccountRequestQuery(predicate latestRequestPredicate) string {
+	return fmt.Sprintf(`select /*+ INDEX(e %s) */
+	e.id,
+	e.timestamp_ms,
+	e.failed,
+	e.fail_status_code,
+	coalesce(e.fail_summary, ''),
+	coalesce(e.header_error_kind, ''),
+	coalesce(e.header_error_code, ''),
+	coalesce(e.header_trace_id, '')
+from usage_events e indexed by %s
+where %s
+order by e.timestamp_ms desc, e.id desc
+limit ?`, predicate.index, predicate.index, predicate.sql)
+}
+
+func (r *repository) recentAccountRequestsBatched(
+	ctx context.Context,
+	targets []LatestAccountRequestQuery,
+	limit int,
+) ([]LatestAccountRequest, error) {
 
 	values := make([]string, 0, len(targets))
 	args := make([]any, 0, len(targets)*3+1)
@@ -150,4 +362,34 @@ order by request_index, row_rank`, args...)
 		requests = append(requests, request)
 	}
 	return requests, rows.Err()
+}
+
+func mergeRecentAccountRequests(limit int, parts ...[]rankedAccountRequest) []LatestAccountRequest {
+	merged := mergeRankedAccountRequests(limit, parts...)
+	requests := make([]LatestAccountRequest, len(merged))
+	for index, request := range merged {
+		requests[index] = request.LatestAccountRequest
+	}
+	return requests
+}
+
+func mergeRankedAccountRequests(limit int, parts ...[]rankedAccountRequest) []rankedAccountRequest {
+	total := 0
+	for _, part := range parts {
+		total += len(part)
+	}
+	merged := make([]rankedAccountRequest, 0, total)
+	for _, part := range parts {
+		merged = append(merged, part...)
+	}
+	sort.SliceStable(merged, func(left, right int) bool {
+		if merged[left].TimestampMS != merged[right].TimestampMS {
+			return merged[left].TimestampMS > merged[right].TimestampMS
+		}
+		return merged[left].id > merged[right].id
+	})
+	if len(merged) > limit {
+		merged = merged[:limit]
+	}
+	return merged
 }

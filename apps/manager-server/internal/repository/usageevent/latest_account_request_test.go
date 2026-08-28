@@ -106,6 +106,40 @@ func TestRecentAccountRequestsUseSnapshotIdentityLimitAndConservativeLegacyFallb
 	}
 }
 
+func TestRecentAccountRequestQueryPinsCompositeIndex(t *testing.T) {
+	db, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	predicate := snapshotLatestRequestPredicates("credential-a.json", "auth-a")[0]
+	args := append(append([]any{}, predicate.args...), 10)
+	rows, err := db.Query(`explain query plan `+latestAccountRequestQuery(predicate), args...)
+	if err != nil {
+		t.Fatalf("explain recent account request query: %v", err)
+	}
+	defer rows.Close()
+
+	usesCompositeIndex := false
+	fullScan := false
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("scan query plan: %v", err)
+		}
+		usesCompositeIndex = usesCompositeIndex || strings.Contains(detail, latestRequestAuthFileIndex)
+		fullScan = fullScan || strings.Contains(detail, "SCAN usage_events")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("query plan rows: %v", err)
+	}
+	if !usesCompositeIndex || fullScan {
+		t.Fatalf("query plan compositeIndex=%t fullScan=%t", usesCompositeIndex, fullScan)
+	}
+}
+
 func latestAccountRequestEvent(
 	hash string,
 	timestampMS int64,

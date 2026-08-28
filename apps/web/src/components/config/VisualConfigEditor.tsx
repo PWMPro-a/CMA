@@ -1103,6 +1103,10 @@ export function VisualConfigEditor({
                     value={values.disableImageGeneration}
                     options={[
                       {
+                        value: 'concurrency-balanced',
+                        label: t('config_management.visual.sections.network.strategy_concurrency_balanced'),
+                      },
+                      {
                         value: 'false',
                         label: t(
                           'config_management.visual.sections.network.disable_image_generation_false'
