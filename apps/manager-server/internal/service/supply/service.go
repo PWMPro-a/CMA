@@ -9843,6 +9843,7 @@ func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.Manage
 	}
 	existingFound := false
 	var replacedIdentity *model.CredentialIdentity
+	var existingPayload []byte
 	if existing, found, err := s.authFiles.Find(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName, ""); err != nil {
 		return err
 	} else if found {
@@ -9866,15 +9867,29 @@ func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.Manage
 		}
 	}
 	if existingFound || strings.EqualFold(strings.TrimSpace(importAction), "replace") {
-		existingPayload, errDownload := s.authFiles.Download(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName)
+		downloadedPayload, errDownload := s.authFiles.Download(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName)
 		if errDownload == nil {
-			payload = preserveCodexSupplyMetadata(payload, existingPayload)
+			existingPayload = downloadedPayload
+			payload = preserveCodexSupplyMetadata(payload, downloadedPayload)
 		} else if !errors.Is(errDownload, cpaauthfiles.ErrAuthFileNotFound) {
 			return fmt.Errorf("preserve CPA auth file metadata %q: %w", fileName, errDownload)
 		}
 	}
+	// Supply imports call CPA directly, bypassing the manager proxy. Delete the
+	// old physical file first so CLIProxy's watcher emits a remove followed by an
+	// add, which drops in-memory runtime state before the replacement is loaded.
+	// Restore the previous payload if the replacement upload fails.
+	if existingFound && replacedIdentity != nil {
+		if err := s.authFiles.Delete(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName); err != nil && !errors.Is(err, cpaauthfiles.ErrAuthFileNotFound) {
+			return fmt.Errorf("remove CPA auth file before re-import %q: %w", fileName, err)
+		}
+	}
 	if err := s.authFiles.Upload(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey,
 		fileName, payload, cfg.Supply.DefaultWebsockets); err != nil {
+		if len(existingPayload) > 0 {
+			_ = s.authFiles.Upload(context.WithoutCancel(ctx), cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey,
+				fileName, existingPayload, cfg.Supply.DefaultWebsockets)
+		}
 		return err
 	}
 	// The supply worker uploads directly to CPA and therefore bypasses the

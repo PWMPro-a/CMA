@@ -5502,6 +5502,8 @@ func TestProcessOrderCompletesPersistedImportsAfterRequestCancellation(t *testin
 			_, _ = w.Write(account.payload)
 		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/auth-files":
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -5917,6 +5919,8 @@ func TestEnsureCPAAccountImportedReplacesAvailableDifferentAccountAndKeepsFinger
 			uploadedPayload, _ = io.ReadAll(file)
 			uploaded.Store(true)
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
 			if uploaded.Load() {
 				_, _ = w.Write([]byte(`{"files":[{"name":"codex-pool.json","provider":"codex","status":"active","account_id":"workspace-new","workspace_id":"workspace-new","chatgpt_user_id":"member-new","email":"new@example.com"}]}`))
@@ -5967,6 +5971,8 @@ func TestEnsureCPAAccountImportedClearsPreviousCredentialState(t *testing.T) {
 			_, _ = w.Write(existingPayload)
 		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/auth-files":
 			uploaded.Store(true)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v0/management/auth-files":
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
 			if !uploaded.Load() {
