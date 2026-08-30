@@ -5491,15 +5491,20 @@ func TestProcessOrderCompletesPersistedImportsAfterRequestCancellation(t *testin
 	releaseLookup := make(chan struct{})
 	var firstLookup sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v0/management/auth-files" {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			firstLookup.Do(func() {
+				close(lookupStarted)
+				<-releaseLookup
+			})
+			_ = json.NewEncoder(w).Encode(map[string]any{"files": []any{registered}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files/download":
+			_, _ = w.Write(account.payload)
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/auth-files":
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		firstLookup.Do(func() {
-			close(lookupStarted)
-			<-releaseLookup
-		})
-		_ = json.NewEncoder(w).Encode(map[string]any{"files": []any{registered}})
 	}))
 	t.Cleanup(server.Close)
 
@@ -5944,6 +5949,67 @@ func TestEnsureCPAAccountImportedReplacesAvailableDifferentAccountAndKeepsFinger
 	}
 	if got := stringFromMap(metadata, "access_token"); got != "new" {
 		t.Fatalf("replacement access token = %q, want new", got)
+	}
+}
+
+func TestEnsureCPAAccountImportedClearsPreviousCredentialState(t *testing.T) {
+	const fileName = "codex-reimport-state.json"
+	existingPayload := []byte(`{"type":"codex","email":"state@example.com","workspace_id":"workspace-state","chatgpt_user_id":"member-state","access_token":"old"}`)
+	account, err := normalizeAccountForImport(`{"type":"codex","email":"state@example.com","workspace_id":"workspace-state","chatgpt_user_id":"member-state","access_token":"new"}`)
+	if err != nil {
+		t.Fatalf("normalize account: %v", err)
+	}
+
+	var uploaded atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files/download":
+			_, _ = w.Write(existingPayload)
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/auth-files":
+			uploaded.Store(true)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			if !uploaded.Load() {
+				_, _ = w.Write([]byte(`{"files":[{"name":"codex-reimport-state.json","provider":"codex","auth_index":"old-index","status":"active","account_id":"workspace-state","email":"state@example.com"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"files":[{"name":"codex-reimport-state.json","provider":"codex","auth_index":"new-index","status":"active","account_id":"workspace-state","email":"state@example.com"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "reimport-state.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	now := time.Now()
+	if _, err := st.UpsertQuotaCooldown(context.Background(), store.QuotaCooldownUpsert{
+		AuthFileName: fileName, AuthIndex: "old-index", AccountSnapshot: "state@example.com", Provider: "codex",
+		ReasonCode: "usage_limit_reached", WindowKind: "weekly", RecoverAtMS: now.Add(-time.Minute).UnixMilli(),
+		Owner: model.QuotaCooldownOwnerUsage429, EventHash: "reimport-state-event", DisabledAtMS: now.Add(-time.Hour).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("seed cooldown: %v", err)
+	}
+
+	service := New(st, nil, server.Client())
+	cfg := store.ManagerConfig{CPAConnection: store.ManagerCPAConnectionConfig{
+		CPABaseURL: server.URL, ManagementKey: "management-key",
+	}}
+	if err := service.ensureCPAAccountImported(context.Background(), cfg, fileName, account.payload, "replace", account); err != nil {
+		t.Fatalf("re-import account: %v", err)
+	}
+	if !uploaded.Load() {
+		t.Fatal("re-import upload was skipped")
+	}
+	due, err := st.ListDueQuotaCooldowns(context.Background(), time.Now().Add(time.Hour).UnixMilli(), 10)
+	if err != nil {
+		t.Fatalf("list cooldowns: %v", err)
+	}
+	if len(due) != 0 {
+		t.Fatalf("previous credential cooldowns remain after re-import: %#v", due)
 	}
 }
 

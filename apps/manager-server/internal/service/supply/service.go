@@ -9842,20 +9842,26 @@ func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.Manage
 		return file, nil
 	}
 	existingFound := false
+	var replacedIdentity *model.CredentialIdentity
 	if existing, found, err := s.authFiles.Find(ctx, cfg.CPAConnection.CPABaseURL, cfg.CPAConnection.ManagementKey, fileName, ""); err != nil {
 		return err
 	} else if found {
 		existingFound = true
+		if identity, ok := credentialIdentityFromCPAFile(existing); ok {
+			replacedIdentity = &identity
+		}
 		matchesAccount := supplyCPAFileMatchesAccount(existing, account)
 		if strings.EqualFold(strings.TrimSpace(importAction), "add") && !matchesAccount {
 			return fmt.Errorf("CPA auth file %q already belongs to another account", fileName)
 		}
 		if matchesAccount {
-			if _, err := find(ctx); err == nil {
-				return nil
-			}
-			if isCPAAuthLifecyclePending(existing) {
-				return s.waitForCPAAuthLifecycle(ctx, find)
+			// Re-importing an already available account still creates a new
+			// credential generation. Do not short-circuit here: the stale local
+			// lifecycle state must be purged after the replacement upload.
+			if _, findErr := find(ctx); findErr != nil && isCPAAuthLifecyclePending(existing) {
+				if err := s.waitForCPAAuthLifecycle(ctx, find); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -9871,7 +9877,42 @@ func (s *Service) ensureCPAAccountImported(ctx context.Context, cfg store.Manage
 		fileName, payload, cfg.Supply.DefaultWebsockets); err != nil {
 		return err
 	}
+	// The supply worker uploads directly to CPA and therefore bypasses the
+	// management proxy's mutation bookkeeping. Clear all manager-side state
+	// tied to the previous credential generation after CPA accepts the new
+	// payload. The identity-scoped cleanup keeps sibling credentials in a
+	// shared physical file untouched.
+	if replacedIdentity != nil {
+		_ = s.cleanupReimportedCredentialState(ctx, *replacedIdentity)
+	}
 	return s.waitForCPAAuthLifecycle(ctx, find)
+}
+
+func credentialIdentityFromCPAFile(file cpaauthfiles.File) (model.CredentialIdentity, bool) {
+	identity := model.CredentialIdentity{
+		AuthFileName:    strings.TrimSpace(file.Name),
+		AuthIndex:       strings.TrimSpace(file.AuthIndex),
+		Provider:        strings.TrimSpace(file.Provider),
+		AccountSnapshot: strings.TrimSpace(file.AccountSnapshot),
+		AccountID:       strings.TrimSpace(file.AccountID),
+	}
+	if identity.AuthFileName == "" {
+		return model.CredentialIdentity{}, false
+	}
+	if identity.AuthIndex == "" && identity.AccountID == "" &&
+		(identity.Provider == "" || identity.AccountSnapshot == "") {
+		return model.CredentialIdentity{}, false
+	}
+	return identity, true
+}
+
+func (s *Service) cleanupReimportedCredentialState(ctx context.Context, identity model.CredentialIdentity) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return s.store.CleanupDeletedCredential(cleanupCtx, identity)
 }
 
 const cpaAuthLifecycleWaitTimeout = 90 * time.Second
