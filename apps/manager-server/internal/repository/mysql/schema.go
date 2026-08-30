@@ -13,6 +13,10 @@ import (
 
 const searchIndexTable = "usage_monitoring_event_search_v1"
 
+// literalDefaultPattern matches a quoted literal default such as `default ''`
+// or `default 'codex'`, which MySQL rejects on TEXT columns.
+var literalDefaultPattern = regexp.MustCompile(`(?i)\bdefault\s+'`)
+
 type schemaObject struct {
 	Type      string
 	Name      string
@@ -293,19 +297,20 @@ func convertColumnDefinition(name, remainder string, keyColumn bool) string {
 		typeName = "double"
 		tail = strings.TrimSpace(remainder[len("real"):])
 	case strings.HasPrefix(lower, "text"):
-		if keyColumn {
+		tail = strings.TrimSpace(remainder[len("text"):])
+		// MySQL never accepts a literal default on a TEXT column, and before
+		// 8.0.13 it accepts no default at all. Every SQLite text column that
+		// carries a default holds a short identifier, so a bounded VARCHAR
+		// preserves the canonical semantics on both 5.7 and 8.x.
+		if keyColumn || literalDefaultPattern.MatchString(tail) {
 			typeName = "varchar(512)"
 		}
-		tail = strings.TrimSpace(remainder[len("text"):])
 	case strings.HasPrefix(lower, "blob"):
 		typeName = "longblob"
 		tail = strings.TrimSpace(remainder[len("blob"):])
 	}
 	tail = regexp.MustCompile(`(?i)\bautoincrement\b`).ReplaceAllString(tail, "auto_increment")
 	tail = regexp.MustCompile(`(?i)\binteger\b`).ReplaceAllString(tail, "signed")
-	if typeName == "longtext" && regexp.MustCompile(`(?i)\bdefault\s+''`).MatchString(tail) {
-		tail = regexp.MustCompile(`(?i)\bdefault\s+''`).ReplaceAllString(tail, "default ('')")
-	}
 	return strings.TrimSpace(fmt.Sprintf("%s %s %s", quoteIdentifier(name), typeName, tail))
 }
 
