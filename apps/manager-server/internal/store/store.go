@@ -1104,6 +1104,21 @@ func (s *Store) CleanupDeletedCredential(ctx context.Context, identity model.Cre
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
+	if s.CodexInspections != nil {
+		if _, err := s.CodexInspections.DeleteCredential(ctx, identity); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
+	if s.CodexQuotaOperations != nil {
+		if _, err := s.CodexQuotaOperations.DeleteCredential(ctx, identity); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
+	if s.QuotaSnapshots != nil {
+		if _, err := s.QuotaSnapshots.DeleteCredential(ctx, identity); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
 	return cleanupErr
 }
 

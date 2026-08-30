@@ -45,6 +45,7 @@ type Repository interface {
 	DeleteDisableOwnership(ctx context.Context, target model.CodexInspectionDisableOwnershipTarget) error
 	RevokeDisableOwnership(ctx context.Context, targets []model.CodexInspectionDisableOwnershipTarget, clearAll bool) ([]model.CodexInspectionDisableOwnership, error)
 	RestoreDisableOwnership(ctx context.Context, items []model.CodexInspectionDisableOwnership) error
+	DeleteCredential(ctx context.Context, identity model.CredentialIdentity) (int64, error)
 }
 
 type AcquireRunResult struct {
@@ -67,6 +68,130 @@ type repository struct {
 
 func New(db *sql.DB) Repository {
 	return &repository{db: db}
+}
+
+// DeleteCredential removes inspection results and disable ownership for a
+// deleted credential. Run summaries remain as aggregate audit history, while
+// executable credential rows are removed so they cannot target a re-import.
+func (r *repository) DeleteCredential(ctx context.Context, identity model.CredentialIdentity) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, nil
+	}
+	fileName := strings.TrimSpace(identity.AuthFileName)
+	if fileName == "" {
+		return 0, errors.New("inspection credential file name is required")
+	}
+	where, args := inspectionCredentialWhere(identity)
+	if where == "" {
+		return 0, nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `delete from codex_inspection_results where `+where, args...)
+	if err != nil {
+		return 0, err
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	ownershipWhere, ownershipArgs := inspectionOwnershipCredentialWhere(identity)
+	if ownershipWhere != "" {
+		ownershipResult, errDelete := tx.ExecContext(ctx, `delete from codex_inspection_disable_ownership where `+ownershipWhere, ownershipArgs...)
+		if errDelete != nil {
+			return 0, errDelete
+		}
+		ownershipDeleted, errRows := ownershipResult.RowsAffected()
+		if errRows != nil {
+			return 0, errRows
+		}
+		deleted += ownershipDeleted
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
+func inspectionCredentialWhere(identity model.CredentialIdentity) (string, []any) {
+	fileName := strings.TrimSpace(identity.AuthFileName)
+	provider := normalizeCredentialProvider(identity.Provider)
+	authIndex := strings.TrimSpace(identity.AuthIndex)
+	accountID := strings.TrimSpace(identity.AccountID)
+	accountSnapshot := strings.TrimSpace(identity.AccountSnapshot)
+	where := `lower(trim(file_name)) = lower(trim(?))`
+	args := []any{fileName}
+	if authIndex != "" {
+		where += ` and (lower(trim(coalesce(auth_index, ''))) = lower(trim(?))`
+		args = append(args, authIndex)
+		fallback, fallbackArgs := inspectionFallbackWhere("provider", "account_id", "account_snapshot", provider, accountID, accountSnapshot)
+		if fallback != "" {
+			where += ` or (trim(coalesce(auth_index, '')) = '' and ` + fallback + `)`
+			args = append(args, fallbackArgs...)
+		}
+		return where + `)`, args
+	}
+	fallback, fallbackArgs := inspectionFallbackWhere("provider", "account_id", "account_snapshot", provider, accountID, accountSnapshot)
+	if fallback == "" {
+		return "", nil
+	}
+	return where + ` and ` + fallback, append(args, fallbackArgs...)
+}
+
+func inspectionOwnershipCredentialWhere(identity model.CredentialIdentity) (string, []any) {
+	fileName := strings.TrimSpace(identity.AuthFileName)
+	provider := normalizeCredentialProvider(identity.Provider)
+	authIndex := strings.TrimSpace(identity.AuthIndex)
+	accountID := strings.TrimSpace(identity.AccountID)
+	accountSnapshot := strings.TrimSpace(identity.AccountSnapshot)
+	where := `lower(trim(file_name)) = lower(trim(?))`
+	args := []any{fileName}
+	if authIndex != "" {
+		where += ` and (lower(trim(coalesce(auth_index, ''))) = lower(trim(?))`
+		args = append(args, authIndex)
+		fallback, fallbackArgs := inspectionFallbackWhere("provider", "account_id", "account_snapshot", provider, accountID, accountSnapshot)
+		if fallback != "" {
+			where += ` or (trim(coalesce(auth_index, '')) = '' and ` + fallback + `)`
+			args = append(args, fallbackArgs...)
+		}
+		return where + `)`, args
+	}
+	fallback, fallbackArgs := inspectionFallbackWhere("provider", "account_id", "account_snapshot", provider, accountID, accountSnapshot)
+	if fallback == "" {
+		return "", nil
+	}
+	return where + ` and ` + fallback, append(args, fallbackArgs...)
+}
+
+func inspectionFallbackWhere(providerColumn, accountIDColumn, accountSnapshotColumn, provider, accountID, accountSnapshot string) (string, []any) {
+	clauses := make([]string, 0, 2)
+	args := make([]any, 0, 3)
+	if accountID != "" {
+		clauses = append(clauses, `lower(trim(coalesce(`+accountIDColumn+`, ''))) = lower(trim(?))`)
+		args = append(args, accountID)
+	}
+	if provider != "" && accountSnapshot != "" {
+		clauses = append(clauses, `(lower(trim(coalesce(`+providerColumn+`, ''))) = lower(trim(?))
+			and lower(trim(coalesce(`+accountSnapshotColumn+`, ''))) = lower(trim(?)))`)
+		args = append(args, provider, accountSnapshot)
+	}
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	return `(` + strings.Join(clauses, ` or `) + `)`, args
+}
+
+func normalizeCredentialProvider(value string) string {
+	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "_", "-"))
+	switch normalized {
+	case "x-ai", "grok":
+		return "xai"
+	default:
+		return normalized
+	}
 }
 
 func (r *repository) CreateRun(ctx context.Context, run model.CodexInspectionRun) (model.CodexInspectionRun, error) {

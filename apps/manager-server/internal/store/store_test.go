@@ -7,6 +7,9 @@ import (
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/credentialidentity"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	quotasnapshotrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
@@ -14,6 +17,149 @@ func TestOpenConfigRequiresMySQLDSN(t *testing.T) {
 	_, err := OpenConfig(config.Config{DBDriver: "mysql"})
 	if err == nil || !strings.Contains(err.Error(), "USAGE_DB_DSN") {
 		t.Fatalf("OpenConfig() error = %v", err)
+	}
+}
+
+func TestCleanupDeletedCredentialRemovesCredentialStateAndPreservesSibling(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "deleted-credential.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	target := model.CredentialIdentity{
+		AuthFileName: "shared.json", AuthIndex: "auth-target", Provider: "codex",
+		AccountSnapshot: "target@example.com", AccountID: "account-target",
+	}
+	sibling := model.CredentialIdentity{
+		AuthFileName: "shared.json", AuthIndex: "auth-sibling", Provider: "codex",
+		AccountSnapshot: "sibling@example.com", AccountID: "account-sibling",
+	}
+	targetKey := credentialidentity.AccountKeys(target)[0]
+	siblingKey := credentialidentity.AccountKeys(sibling)[0]
+
+	for index, identity := range []model.CredentialIdentity{target, sibling} {
+		if _, err = db.InsertEvents(ctx, []usage.Event{{
+			EventHash:            "delete-event-" + identity.AuthIndex,
+			TimestampMS:          int64(1000 + index),
+			Timestamp:            "2026-08-30T00:00:00Z",
+			Model:                "gpt-5.5",
+			AuthIndex:            identity.AuthIndex,
+			AccountSnapshot:      identity.AccountSnapshot,
+			AuthFileSnapshot:     identity.AuthFileName,
+			AuthProviderSnapshot: identity.Provider,
+			CreatedAtMS:          int64(2000 + index),
+		}}); err != nil {
+			t.Fatalf("insert usage event %s: %v", identity.AuthIndex, err)
+		}
+		if _, err = db.QuotaCooldowns.UpsertActive(ctx, model.QuotaCooldownUpsert{
+			AuthFileName: identity.AuthFileName, AuthIndex: identity.AuthIndex,
+			AccountSnapshot: identity.AccountSnapshot, Provider: identity.Provider,
+			RecoverAtMS: 10_000, Owner: model.QuotaCooldownOwnerUsage429,
+		}); err != nil {
+			t.Fatalf("insert quota cooldown %s: %v", identity.AuthIndex, err)
+		}
+		_, errUpsert := db.AccountActions.Upsert(ctx, model.AccountActionCandidateUpsert{
+			ActionType: model.AccountActionTypeReview, Provider: identity.Provider,
+			AuthFileName: identity.AuthFileName, AuthIndex: identity.AuthIndex,
+			AccountSnapshot: identity.AccountSnapshot, AccountIDSnapshot: identity.AccountID,
+			ReasonCode: "quota", Reason: "quota state",
+		})
+		if errUpsert != nil {
+			t.Fatalf("insert account action %s: %v", identity.AuthIndex, errUpsert)
+		}
+		consumed := true
+		if _, _, err = db.CodexQuotaOperations.Create(ctx, model.CodexQuotaOperation{
+			OperationID:  "delete-operation-" + identity.AuthIndex,
+			AccountKey:   "delete-account-key-" + identity.AuthIndex,
+			AuthIndex:    identity.AuthIndex,
+			AuthFileName: identity.AuthFileName,
+			State:        model.CodexQuotaOperationStateCompleted,
+			Consumed:     &consumed,
+		}); err != nil {
+			t.Fatalf("insert quota operation %s: %v", identity.AuthIndex, err)
+		}
+	}
+
+	run, err := db.CodexInspections.CreateRun(ctx, model.CodexInspectionRun{
+		TriggerType: model.CodexInspectionTriggerManual,
+		Status:      model.CodexInspectionStatusCompleted,
+		StartedAtMS: 1,
+		Settings:    model.DefaultCodexInspectionConfig(),
+	})
+	if err != nil {
+		t.Fatalf("create inspection run: %v", err)
+	}
+	for _, seeded := range []struct {
+		identity model.CredentialIdentity
+		key      string
+	}{{target, targetKey}, {sibling, siblingKey}} {
+		if _, err = db.CodexInspections.InsertResult(ctx, model.CodexInspectionResult{
+			RunID: run.ID, AccountKey: seeded.key, FileName: seeded.identity.AuthFileName,
+			DisplayAccount: seeded.identity.AccountSnapshot, AccountSnapshot: seeded.identity.AccountSnapshot,
+			AuthIndex: seeded.identity.AuthIndex, AccountID: seeded.identity.AccountID,
+			Provider: seeded.identity.Provider, Action: model.CodexInspectionAutoActionDisable,
+		}); err != nil {
+			t.Fatalf("insert inspection result %s: %v", seeded.identity.AuthIndex, err)
+		}
+		if err = db.CodexInspections.UpsertDisableOwnership(ctx, model.CodexInspectionDisableOwnership{
+			FileName: seeded.identity.AuthFileName, Provider: seeded.identity.Provider,
+			AuthIndex: seeded.identity.AuthIndex, AccountID: seeded.identity.AccountID,
+			AccountSnapshot: seeded.identity.AccountSnapshot, DisabledAtMS: 1, UpdatedAtMS: 1,
+		}); err != nil {
+			t.Fatalf("insert inspection ownership %s: %v", seeded.identity.AuthIndex, err)
+		}
+	}
+
+	scope := quotasnapshotrepo.ScopeFingerprint("all", "", nil)
+	for index, seeded := range []struct {
+		key   string
+		index string
+	}{{targetKey, target.AuthIndex}, {siblingKey, sibling.AuthIndex}} {
+		observedAt := int64(3000 + index)
+		if err = db.QuotaSnapshots.InsertObservationWrites(ctx, []model.AccountQuotaObservationWrite{{
+			Observation: model.AccountQuotaObservation{
+				ObservationHash: "delete-quota-observation-" + seeded.index,
+				AccountKey:      seeded.key, Provider: "codex", Source: "inspection",
+				SourceObservationID: "delete-quota-source-" + seeded.index,
+				InventoryScopeKey:   "codex:rate-limits", InventoryMode: "partial",
+				ObservedAtMS: observedAt, WindowCount: 1, CreatedAtMS: observedAt,
+			},
+			Snapshots: []model.AccountQuotaSnapshot{{
+				AccountKey: seeded.key, Provider: "codex", ProviderWindowID: "weekly",
+				WindowKind: "weekly", WindowMode: "fixed", ModelScopeKind: "all",
+				ScopeFingerprint: scope, ContentHash: "delete-quota-content-" + seeded.index,
+				InventoryScopeKey: "codex:rate-limits", Source: "inspection",
+				SourceObservationID: "delete-quota-source-" + seeded.index,
+				ObservedAtMS:        observedAt, BoundaryAccuracy: "exact", CreatedAtMS: observedAt,
+			}},
+		}}); err != nil {
+			t.Fatalf("insert quota snapshot %s: %v", seeded.index, err)
+		}
+	}
+
+	if err = db.CleanupDeletedCredential(ctx, target); err != nil {
+		t.Fatalf("cleanup target credential: %v", err)
+	}
+
+	assertCredentialCount := func(table, column, value string, want int) {
+		t.Helper()
+		var count int
+		if errCount := db.db.QueryRowContext(ctx, `select count(*) from `+table+` where `+column+` = ?`, value).Scan(&count); errCount != nil {
+			t.Fatalf("count %s: %v", table, errCount)
+		}
+		if count != want {
+			t.Fatalf("%s count for %q = %d, want %d", table, value, count, want)
+		}
+	}
+	for _, table := range []string{"usage_events", "quota_cooldowns", "account_action_candidates", "codex_quota_operations", "codex_inspection_results", "codex_inspection_disable_ownership"} {
+		column := "auth_index"
+		assertCredentialCount(table, column, target.AuthIndex, 0)
+		assertCredentialCount(table, column, sibling.AuthIndex, 1)
+	}
+	for _, table := range []string{"account_quota_observations", "account_quota_windows", "account_quota_snapshots"} {
+		assertCredentialCount(table, "account_key", targetKey, 0)
+		assertCredentialCount(table, "account_key", siblingKey, 1)
 	}
 }
 
