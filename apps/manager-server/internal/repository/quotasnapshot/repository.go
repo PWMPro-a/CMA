@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/credentialidentity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
 
@@ -22,6 +23,7 @@ type Repository interface {
 	InsertObservationWrites(ctx context.Context, writes []model.AccountQuotaObservationWrite) error
 	ListCandidates(ctx context.Context, accountKey, provider string, limit int) ([]model.AccountQuotaSnapshot, error)
 	ListWindowStates(ctx context.Context, accountKey, provider string) ([]model.AccountQuotaWindowState, error)
+	DeleteCredential(ctx context.Context, identity model.CredentialIdentity) (int64, error)
 }
 
 type repository struct {
@@ -30,6 +32,82 @@ type repository struct {
 
 func New(db *sql.DB) Repository {
 	return &repository{db: db}
+}
+
+// DeleteCredential removes quota observations and their derived lifecycle
+// state for a deleted credential. The parent rows are removed after children
+// so foreign-key enforcement remains valid on every supported database.
+func (r *repository) DeleteCredential(ctx context.Context, identity model.CredentialIdentity) (int64, error) {
+	keys := credentialidentity.AccountKeys(identity)
+	if r == nil || r.db == nil || len(keys) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(keys)), ",")
+	args := make([]any, len(keys))
+	for index, key := range keys {
+		args[index] = key
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var deleted int64
+	deleteRows := func(query string, queryArgs ...any) error {
+		result, errExec := tx.ExecContext(ctx, query, queryArgs...)
+		if errExec != nil {
+			return errExec
+		}
+		count, errRows := result.RowsAffected()
+		if errRows != nil {
+			return errRows
+		}
+		deleted += count
+		return nil
+	}
+	if err = deleteRows(`delete from account_quota_snapshots where account_key in (`+placeholders+`)`, args...); err != nil {
+		return 0, err
+	}
+	// Detach children outside the deleted account scope first. A cycle can
+	// reference a parent from an earlier identity generation, and SQLite/MySQL
+	// both enforce the self-referencing foreign key while deleting the parent.
+	if err = deleteRows(`update account_quota_cycles set parent_cycle_id = null where parent_cycle_id in (
+		select cycle.id from account_quota_cycles cycle
+		join account_quota_window_activations activation on activation.id = cycle.activation_id
+		join account_quota_windows window on window.id = activation.window_id
+		where window.account_key in (`+placeholders+`)
+	)`, args...); err != nil {
+		return 0, err
+	}
+	if err = deleteRows(`update account_quota_cycles set parent_cycle_id = null where activation_id in (
+		select activation.id from account_quota_window_activations activation
+		join account_quota_windows window on window.id = activation.window_id
+		where window.account_key in (`+placeholders+`)
+	)`, args...); err != nil {
+		return 0, err
+	}
+	if err = deleteRows(`delete from account_quota_cycles where activation_id in (
+		select activation.id from account_quota_window_activations activation
+		join account_quota_windows window on window.id = activation.window_id
+		where window.account_key in (`+placeholders+`)
+	)`, args...); err != nil {
+		return 0, err
+	}
+	if err = deleteRows(`delete from account_quota_window_activations where window_id in (
+		select id from account_quota_windows where account_key in (`+placeholders+`)
+	)`, args...); err != nil {
+		return 0, err
+	}
+	if err = deleteRows(`delete from account_quota_windows where account_key in (`+placeholders+`)`, args...); err != nil {
+		return 0, err
+	}
+	if err = deleteRows(`delete from account_quota_observations where account_key in (`+placeholders+`)`, args...); err != nil {
+		return 0, err
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
 }
 
 // ScopeFingerprint returns the canonical identity for one provider quota

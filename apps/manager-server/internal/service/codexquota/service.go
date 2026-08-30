@@ -203,8 +203,11 @@ func (s *Service) AutoResetCredit(ctx context.Context, request ResetRequest) (Op
 	}
 	if !exhausted {
 		// A recovered quota needs no credit consumption. Still clear a stale
-		// CPAMP quota-preempt disable so the worker can finish the cooldown
-		// recovery path immediately.
+		// CPAMP quota-preempt disable and native CLIProxy runtime state so the
+		// worker can finish the cooldown recovery path immediately.
+		if _, _, err := s.gateway.resetLocalQuota(ctx, setup, authIndex); err != nil {
+			return OperationResponse{}, AutoResetResult{Eligible: true, Reason: "recovery_failed"}, err
+		}
 		if err := s.recoverRuntimeQuotaPreempt(ctx, setup, file); err != nil {
 			return OperationResponse{}, AutoResetResult{Eligible: true, Reason: "recovery_failed"}, err
 		}

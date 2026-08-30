@@ -2,8 +2,10 @@ package codexquotaoperation
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -22,6 +24,7 @@ type Repository interface {
 	UpdateIfState(ctx context.Context, operation model.CodexQuotaOperation, expectedState string) (model.CodexQuotaOperation, bool, error)
 	CountCompletedByAccount(ctx context.Context, accountKey string) (int64, error)
 	CountCompletedByCredential(ctx context.Context, accountKey string, authIndex string) (int64, error)
+	DeleteCredential(ctx context.Context, identity model.CredentialIdentity) (int64, error)
 }
 
 type repository struct {
@@ -30,6 +33,71 @@ type repository struct {
 
 func New(db *sql.DB) Repository {
 	return &repository{db: db}
+}
+
+// DeleteCredential clears reset operations for a deleted credential. Matching
+// the file/index first preserves isolation for shared account identities while
+// the account-key fallbacks cover legacy rows created before auth indexes were
+// persisted.
+func (r *repository) DeleteCredential(ctx context.Context, identity model.CredentialIdentity) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, nil
+	}
+	fileName := strings.TrimSpace(identity.AuthFileName)
+	authIndex := strings.TrimSpace(identity.AuthIndex)
+	accountID := strings.TrimSpace(identity.AccountID)
+	accountSnapshot := strings.TrimSpace(identity.AccountSnapshot)
+	if fileName == "" && authIndex == "" && accountID == "" && accountSnapshot == "" {
+		return 0, nil
+	}
+	clauses := make([]string, 0, 4)
+	args := make([]any, 0, 4)
+	if authIndex != "" && fileName != "" {
+		clauses = append(clauses, `(lower(trim(coalesce(auth_file_name, ''))) = lower(trim(?)) and lower(trim(auth_index)) = lower(trim(?)))`)
+		args = append(args, fileName, authIndex)
+	} else if authIndex != "" {
+		clauses = append(clauses, `lower(trim(auth_index)) = lower(trim(?))`)
+		args = append(args, authIndex)
+	} else if fileName != "" {
+		clauses = append(clauses, `lower(trim(coalesce(auth_file_name, ''))) = lower(trim(?))`)
+		args = append(args, fileName)
+	}
+	for _, key := range codexAccountKeys(identity) {
+		clauses = append(clauses, `account_key = ?`)
+		args = append(args, key)
+	}
+	if len(clauses) == 0 {
+		return 0, nil
+	}
+	result, err := r.db.ExecContext(ctx, `delete from codex_quota_operations where `+strings.Join(clauses, " or "), args...)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func codexAccountKeys(identity model.CredentialIdentity) []string {
+	keys := make([]string, 0, 3)
+	seen := make(map[string]struct{}, 3)
+	appendKey := func(prefix, value string) {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			return
+		}
+		sum := sha256.Sum256([]byte(value))
+		key := prefix + fmt.Sprintf("%x", sum[:16])
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	appendKey("codex:account-id:", identity.AccountID)
+	appendKey("codex:account:", identity.AccountSnapshot)
+	if index := strings.ToLower(strings.TrimSpace(identity.AuthIndex)); index != "" {
+		keys = append(keys, "codex:auth-index:"+index)
+	}
+	return keys
 }
 
 func (r *repository) Create(ctx context.Context, operation model.CodexQuotaOperation) (model.CodexQuotaOperation, bool, error) {
