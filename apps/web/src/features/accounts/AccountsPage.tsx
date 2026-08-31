@@ -4587,99 +4587,130 @@ export function AccountsPage() {
     return typeof document === 'undefined' ? content : createPortal(content, document.body);
   };
 
-  const renderRowActions = (row: AccountRow, needsReauth = false) => (
-    <div className={styles.rowActions} onClick={(event) => event.stopPropagation()}>
-      <div className={styles.accountQuickActionsGrid}>
-        {needsReauth ? (
+  const renderRowActions = (
+    row: AccountRow,
+    needsReauth = false,
+    quotaThresholdRule: QuotaThresholdRule | null = null
+  ) => {
+    const quotaThresholdTitle = quotaThresholdRule
+      ? `${t('accounts.quota_threshold_rule_label', {
+          percent: quotaThresholdRule.thresholdPercent,
+        })} · ${t('accounts.quota_threshold_explain')} · ${t(
+          quotaThresholdRule.enabled
+            ? 'accounts.quota_threshold_enabled'
+            : 'accounts.quota_threshold_disabled'
+        )}`
+      : t('auth_files.status_toggle_label');
+
+    return (
+      <div className={styles.rowActions} onClick={(event) => event.stopPropagation()}>
+        <div className={styles.accountQuickActionsGrid}>
+          {needsReauth ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              iconOnly
+              className={`${styles.accountIconButton} ${styles.accountIconButtonRefresh}`}
+              onClick={() => handleReauthAccount(row.raw)}
+              disabled={disableControls || row.runtimeOnly}
+              title={t('accounts.recommend_action_reauth')}
+              aria-label={t('accounts.recommend_action_reauth')}
+            >
+              <IconShield size={15} />
+            </Button>
+          ) : null}
           <Button
             variant="secondary"
             size="sm"
             iconOnly
             className={`${styles.accountIconButton} ${styles.accountIconButtonRefresh}`}
-            onClick={() => handleReauthAccount(row.raw)}
-            disabled={disableControls || row.runtimeOnly}
-            title={t('accounts.recommend_action_reauth')}
-            aria-label={t('accounts.recommend_action_reauth')}
+            onClick={() => void refreshAccountQuota(row)}
+            disabled={
+              quotaRefreshing ||
+              (row.disabled && !isQuotaPreemptDisabledCodexRow(row)) ||
+              row.runtimeOnly
+            }
+            title={t('accounts.refresh_quota')}
+            aria-label={t('accounts.refresh_quota')}
           >
-            <IconShield size={15} />
+            <IconRefreshCw size={15} />
           </Button>
-        ) : null}
-        <Button
-          variant="secondary"
-          size="sm"
-          iconOnly
-          className={`${styles.accountIconButton} ${styles.accountIconButtonRefresh}`}
-          onClick={() => void refreshAccountQuota(row)}
-          disabled={
-            quotaRefreshing ||
-            (row.disabled && !isQuotaPreemptDisabledCodexRow(row)) ||
-            row.runtimeOnly
-          }
-          title={t('accounts.refresh_quota')}
-          aria-label={t('accounts.refresh_quota')}
-        >
-          <IconRefreshCw size={15} />
-        </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          iconOnly
-          className={`${styles.accountIconButton} ${styles.accountIconButtonModels}`}
-          onClick={() => void openAccountDetail(row, 'models')}
-          disabled={row.runtimeOnly && row.provider !== 'aistudio'}
-          title={t('auth_files.models_button')}
-          aria-label={t('auth_files.models_button')}
-        >
-          <IconModelCluster size={15} />
-        </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          iconOnly
-          className={`${styles.accountIconButton} ${styles.accountIconButtonDownload}`}
-          onClick={() => void handleDownload(row.fileName)}
-          disabled={row.runtimeOnly}
-          title={t('auth_files.download_button')}
-          aria-label={t('auth_files.download_button')}
-        >
-          <IconDownload size={15} />
-        </Button>
-        <Button
-          variant="danger"
-          size="sm"
-          iconOnly
-          className={`${styles.accountIconButton} ${styles.accountIconButtonDelete}`}
-          onClick={() => void handleAccountDelete(row.raw)}
-          disabled={disableControls || row.runtimeOnly || deleting === row.fileName}
-          title={t('auth_files.delete_button')}
-          aria-label={t('auth_files.delete_button')}
-        >
-          {deleting === row.fileName ? <LoadingSpinner size={14} /> : <IconTrash2 size={15} />}
-        </Button>
-      </div>
-      <span className={styles.accountActionsDivider} aria-hidden="true" />
-      <div className={styles.accountSideActions}>
-        <div className={styles.accountStatusSwitch}>
-          <ToggleSwitch
-            checked={!row.disabled}
-            onChange={(enabled) => void handleBatchStatus(enabled, [row])}
-            disabled={disableControls || statusUpdating || row.runtimeOnly}
-            ariaLabel={t('auth_files.status_toggle_label')}
-          />
+          <Button
+            variant="secondary"
+            size="sm"
+            iconOnly
+            className={`${styles.accountIconButton} ${styles.accountIconButtonModels}`}
+            onClick={() => void openAccountDetail(row, 'models')}
+            disabled={row.runtimeOnly && row.provider !== 'aistudio'}
+            title={t('auth_files.models_button')}
+            aria-label={t('auth_files.models_button')}
+          >
+            <IconModelCluster size={15} />
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            iconOnly
+            className={`${styles.accountIconButton} ${styles.accountIconButtonDownload}`}
+            onClick={() => void handleDownload(row.fileName)}
+            disabled={row.runtimeOnly}
+            title={t('auth_files.download_button')}
+            aria-label={t('auth_files.download_button')}
+          >
+            <IconDownload size={15} />
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
+            iconOnly
+            className={`${styles.accountIconButton} ${styles.accountIconButtonDelete}`}
+            onClick={() => void handleAccountDelete(row.raw)}
+            disabled={disableControls || row.runtimeOnly || deleting === row.fileName}
+            title={t('auth_files.delete_button')}
+            aria-label={t('auth_files.delete_button')}
+          >
+            {deleting === row.fileName ? <LoadingSpinner size={14} /> : <IconTrash2 size={15} />}
+          </Button>
         </div>
-        <Button
-          variant="ghost"
-          size="xs"
-          className={styles.rowDetailButton}
-          onClick={() => void openAccountDetail(row)}
-          title={t('accounts.open_detail', { name: row.fileName })}
-          aria-label={t('accounts.open_detail', { name: row.fileName })}
-        >
-          {t('accounts.open_detail_short')}
-        </Button>
+        <span className={styles.accountActionsDivider} aria-hidden="true" />
+        <div className={styles.accountSideActions}>
+          <div
+            className={`${styles.accountStatusSwitch} ${
+              quotaThresholdRule ? styles.accountStatusSwitchWithThreshold : ''
+            }`}
+            title={quotaThresholdTitle}
+          >
+            {quotaThresholdRule ? (
+              <span
+                className={`${styles.quotaThresholdTogglePill} ${
+                  quotaThresholdRule.enabled ? '' : styles.quotaThresholdTogglePillDisabled
+                }`}
+                aria-label={quotaThresholdTitle}
+              >
+                {formatQuotaThresholdValue(quotaThresholdRule.thresholdPercent)}
+              </span>
+            ) : null}
+            <ToggleSwitch
+              checked={!row.disabled}
+              onChange={(enabled) => void handleBatchStatus(enabled, [row])}
+              disabled={disableControls || statusUpdating || row.runtimeOnly}
+              ariaLabel={t('auth_files.status_toggle_label')}
+            />
+          </div>
+          <Button
+            variant="ghost"
+            size="xs"
+            className={styles.rowDetailButton}
+            onClick={() => void openAccountDetail(row)}
+            title={t('accounts.open_detail', { name: row.fileName })}
+            aria-label={t('accounts.open_detail', { name: row.fileName })}
+          >
+            {t('accounts.open_detail_short')}
+          </Button>
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const renderPagination = () => (
     <div className={styles.accountsPagination}>
@@ -4885,22 +4916,6 @@ export function AccountsPage() {
                     </span>
                     {item.identity.planType ? (
                       <span className={styles.accountMetaPill}>{item.identity.planType}</span>
-                    ) : null}
-                    {quotaThresholdRule ? (
-                      <span
-                        className={`${styles.accountMetaPill} ${styles.quotaThresholdPill} ${
-                          quotaThresholdRule.enabled ? '' : styles.quotaThresholdPillDisabled
-                        }`}
-                        title={`${t('accounts.quota_threshold_rule_label', {
-                          percent: quotaThresholdRule.thresholdPercent,
-                        })} · ${t(
-                          quotaThresholdRule.enabled
-                            ? 'accounts.quota_threshold_enabled'
-                            : 'accounts.quota_threshold_disabled'
-                        )}`}
-                      >
-                        {formatQuotaThresholdValue(quotaThresholdRule.thresholdPercent)}
-                      </span>
                     ) : null}
                     {accountGroupsAvailable ? (
                       <button
@@ -5280,7 +5295,7 @@ export function AccountsPage() {
                 </div>
 
                 <div className={styles.accountCardRecommendation}>
-                  {renderRowActions(row, item.health.status === 'reauth')}
+                  {renderRowActions(row, item.health.status === 'reauth', quotaThresholdRule)}
                 </div>
               </article>
             );
