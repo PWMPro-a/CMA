@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -18,10 +18,17 @@ type Props = {
   disabled?: boolean;
 };
 
+export type QuotaThresholdRulesPanelHandle = {
+  open: () => void;
+};
+
 const formatPercent = (value: number | undefined) =>
   typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)}%` : '—';
 
-export function QuotaThresholdRulesPanel({ selectedRows, managerServiceBase, managementKey, disabled }: Props) {
+export const QuotaThresholdRulesPanel = forwardRef<QuotaThresholdRulesPanelHandle, Props>(function QuotaThresholdRulesPanel(
+  { selectedRows, managerServiceBase, managementKey, disabled },
+  ref
+) {
   const { t } = useTranslation();
   const showNotification = useNotificationStore((state) => state.showNotification);
   const [rules, setRules] = useState<QuotaThresholdRule[]>([]);
@@ -30,6 +37,8 @@ export function QuotaThresholdRulesPanel({ selectedRows, managerServiceBase, man
   const [open, setOpen] = useState(false);
   const [threshold, setThreshold] = useState('20');
   const [enabled, setEnabled] = useState(true);
+
+  useImperativeHandle(ref, () => ({ open: () => setOpen(true) }), []);
 
   const codexRows = useMemo(
     () => selectedRows.filter((row) => !row.runtimeOnly && row.provider === CODEX_CONFIG.type),
@@ -73,11 +82,7 @@ export function QuotaThresholdRulesPanel({ selectedRows, managerServiceBase, man
       <div className={styles.header}>
         <div>
           <h3>{t('accounts.quota_threshold_title')}</h3>
-          <p>{t('accounts.quota_threshold_description')}</p>
         </div>
-        <Button size="sm" variant="secondary" onClick={() => setOpen(true)} disabled={disabled || codexRows.length === 0}>
-          {t('accounts.quota_threshold_configure', { count: codexRows.length })}
-        </Button>
       </div>
       {loading ? <p className={styles.muted}>{t('common.loading')}</p> : rules.length === 0 ? <p className={styles.muted}>{t('accounts.quota_threshold_empty')}</p> : (
         <div className={styles.list}>
@@ -86,17 +91,19 @@ export function QuotaThresholdRulesPanel({ selectedRows, managerServiceBase, man
             <span>{t('accounts.quota_threshold_rule_label', { percent: rule.thresholdPercent })}</span>
             <span>{t('accounts.quota_threshold_current_label', { percent: formatPercent(rule.lastObservedRemainingPercent) })}</span>
             <span className={rule.enabled ? styles.enabled : styles.disabled}>{rule.enabled ? t('accounts.quota_threshold_enabled') : t('accounts.quota_threshold_disabled')}{rule.lastDisabled ? ` · ${t('accounts.quota_threshold_account_disabled')}` : ''}</span>
-            <Button size="xs" variant="ghost" onClick={() => void remove(rule.id)} disabled={saving}>{t('common.delete')}</Button>
+            <Button size="xs" variant="ghost" onClick={() => void remove(rule.id)} disabled={saving || disabled}>{t('common.delete')}</Button>
           </div>)}
         </div>
       )}
-      <Modal open={open} onClose={() => { if (!saving) setOpen(false); }} closeDisabled={saving} title={t('accounts.quota_threshold_modal_title', { count: codexRows.length })} width={460} footer={<div className={styles.footer}><Button size="sm" variant="secondary" onClick={() => setOpen(false)} disabled={saving}>{t('common.cancel')}</Button><Button size="sm" onClick={() => void save()} loading={saving} disabled={saving}>{t('common.confirm')}</Button></div>}>
+      <Modal open={open} onClose={() => { if (!saving) setOpen(false); }} closeDisabled={saving || disabled} title={t('accounts.quota_threshold_modal_title', { count: codexRows.length })} width={460} footer={<div className={styles.footer}><Button size="sm" variant="secondary" onClick={() => setOpen(false)} disabled={saving || disabled}>{t('common.cancel')}</Button><Button size="sm" onClick={() => void save()} loading={saving} disabled={saving || disabled}>{t('common.confirm')}</Button></div>}>
         <div className={styles.form}>
-          <Input label={t('accounts.quota_threshold_input_label')} hint={t('accounts.quota_threshold_input_hint')} value={threshold} onChange={(event) => setThreshold(event.target.value)} inputMode="decimal" autoFocus disabled={saving} />
-          <ToggleSwitch checked={enabled} onChange={setEnabled} ariaLabel={t('accounts.quota_threshold_enabled')} label={t('accounts.quota_threshold_enabled')} disabled={saving} />
+          <Input label={t('accounts.quota_threshold_input_label')} hint={t('accounts.quota_threshold_input_hint')} value={threshold} onChange={(event) => setThreshold(event.target.value)} inputMode="decimal" autoFocus disabled={saving || disabled} />
+          <ToggleSwitch checked={enabled} onChange={setEnabled} ariaLabel={t('accounts.quota_threshold_enabled')} label={t('accounts.quota_threshold_enabled')} disabled={saving || disabled} />
           <p className={styles.explain}>{t('accounts.quota_threshold_explain')}</p>
         </div>
       </Modal>
     </section>
   );
-}
+});
+
+QuotaThresholdRulesPanel.displayName = 'QuotaThresholdRulesPanel';

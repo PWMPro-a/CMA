@@ -294,7 +294,10 @@ import type {
   CredentialInspectionTarget,
 } from '@/features/monitoring/model/credentialInspectionSnapshot';
 import styles from './AccountsPage.module.scss';
-import { QuotaThresholdRulesPanel } from './QuotaThresholdRulesPanel';
+import {
+  QuotaThresholdRulesPanel,
+  type QuotaThresholdRulesPanelHandle,
+} from './QuotaThresholdRulesPanel';
 
 type QuotaUpdater<T> = T | ((prev: T) => T);
 type QuotaSetter<T> = (updater: QuotaUpdater<Record<string, T>>) => void;
@@ -625,6 +628,7 @@ export function AccountsPage() {
   const initialWorkspaceUrlState = useRef(
     readAccountsWorkspaceUrlState(location.search, initialWorkspaceUiState.current)
   );
+  const quotaThresholdRulesPanelRef = useRef<QuotaThresholdRulesPanelHandle>(null);
   const modelsLoadKeyRef = useRef('');
   const modelRulesLoadKeyRef = useRef('');
   const connectionFingerprint = useMemo(
@@ -4510,6 +4514,15 @@ export function AccountsPage() {
             >
               {t('accounts.set_priority')}
             </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={disableControls || selectedCodexRows.length === 0 || batchFieldsUpdating}
+              onClick={() => quotaThresholdRulesPanelRef.current?.open()}
+              title={t('accounts.quota_threshold_configure', { count: selectedCodexRows.length })}
+            >
+              {t('accounts.quota_threshold_configure_short')}
+            </Button>
             <DropdownMenu
               items={moreItems}
               ariaLabel={t('accounts.batch_more')}
@@ -4656,6 +4669,7 @@ export function AccountsPage() {
       {paged ? renderBatchBar() : null}
       {paged ? (
         <QuotaThresholdRulesPanel
+          ref={quotaThresholdRulesPanelRef}
           selectedRows={selectedRows}
           managerServiceBase={featureAvailability.managerServiceBase}
           managementKey={managementKey}

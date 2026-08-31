@@ -178,8 +178,16 @@ func runServer() {
 	)
 	serverApp.AppContext().AutomationRuntimeService = automationRuntime
 	automationRuntime.Start(ctx)
+	quotaThresholdWorker := worker.NewQuotaThresholdAutoDisableWorker(
+		db,
+		cfg.CPAUpstreamURL,
+		cfg.ManagementKey,
+		serverApp.AppContext().AuthFileMutationCoordinator,
+	)
+	quotaThresholdWorker.Start(ctx)
 	manager.SetUsageEventHandler(worker.NewUsageEventFanout(
 		automationRuntime.UsageEventHandler(),
+		quotaThresholdWorker,
 		accountHistoryRollupWorker,
 		usageDerivedRollupWorker,
 		usageHourlyAggregateWorker,
@@ -219,13 +227,6 @@ func runServer() {
 	}
 	codexInspectionWorker := worker.NewCodexInspectionWorker(serverApp.AppContext().Store, serverApp.AppContext().CodexInspectionService)
 	codexInspectionWorker.Start(ctx)
-	quotaThresholdWorker := worker.NewQuotaThresholdAutoDisableWorker(
-		db,
-		cfg.CPAUpstreamURL,
-		cfg.ManagementKey,
-		serverApp.AppContext().AuthFileMutationCoordinator,
-	)
-	quotaThresholdWorker.Start(ctx)
 	serverResult := make(chan error, 1)
 	go func() {
 		log.Printf("cpa-manager-plus listening on %s", listener.Addr())
@@ -266,6 +267,7 @@ func runServer() {
 		stop()
 	}
 	stopCodexInspectionWorker(codexInspectionWorker, 20*time.Second)
+	stopCodexInspectionWorker(quotaThresholdWorker, 20*time.Second)
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
 	collectorWorker.Stop(context.Background())

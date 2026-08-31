@@ -1,7 +1,7 @@
 package model
 
-// QuotaThresholdRule disables a CPA credential when the latest successful
-// Codex inspection reports remaining quota at or below ThresholdPercent.
+// QuotaThresholdRule disables a CPA credential when a live Codex response
+// reports remaining quota at or below ThresholdPercent.
 type QuotaThresholdRule struct {
 	ID                           int64    `json:"id"`
 	FileName                     string   `json:"fileName"`
