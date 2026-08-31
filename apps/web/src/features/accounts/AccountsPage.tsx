@@ -294,6 +294,7 @@ import type {
   CredentialInspectionTarget,
 } from '@/features/monitoring/model/credentialInspectionSnapshot';
 import styles from './AccountsPage.module.scss';
+import { QuotaThresholdRulesPanel } from './QuotaThresholdRulesPanel';
 
 type QuotaUpdater<T> = T | ((prev: T) => T);
 type QuotaSetter<T> = (updater: QuotaUpdater<Record<string, T>>) => void;
@@ -4653,6 +4654,14 @@ export function AccountsPage() {
   const renderAccountCards = (rowsToRender = pageRows, paged = true) => (
     <section className={styles.tablePanel}>
       {paged ? renderBatchBar() : null}
+      {paged ? (
+        <QuotaThresholdRulesPanel
+          selectedRows={selectedRows}
+          managerServiceBase={featureAvailability.managerServiceBase}
+          managementKey={managementKey}
+          disabled={disableControls}
+        />
+      ) : null}
       {rowsToRender.length > 0 ? (
         <div className={styles.accountCardList}>
           <div className={styles.accountCardHeader} data-account-list-header="true">

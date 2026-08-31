@@ -21,6 +21,7 @@ import (
 	proxycontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/proxy"
 	quotacooldowncontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/quotacooldown"
 	quotasnapshotcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/quotasnapshot"
+	quotathresholdcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/quotathreshold"
 	setupcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/setup"
 	supplycontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/supply"
 	systemcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/system"
@@ -47,6 +48,7 @@ func New(appCtx *app.Context) http.Handler {
 	databaseHandler := &databasecontroller.Handler{App: appCtx}
 	monitoringHandler := &monitoringcontroller.Handler{App: appCtx}
 	quotaSnapshotHandler := &quotasnapshotcontroller.Handler{App: appCtx}
+	quotaThresholdHandler := &quotathresholdcontroller.Handler{App: appCtx}
 	proxyHandler := &proxycontroller.Handler{App: appCtx}
 	panelHandler := &panelcontroller.Handler{App: appCtx}
 	supplyHandler := &supplycontroller.Handler{App: appCtx}
@@ -60,7 +62,7 @@ func New(appCtx *app.Context) http.Handler {
 	mux.HandleFunc("/usage-service/quota-cooldowns", middleware.WithCORS(appCtx.Config, quotaCooldownHandler.Handle))
 	mux.HandleFunc("/setup", middleware.WithCORS(appCtx.Config, setupHandler.Setup))
 	mux.HandleFunc("/management.html", panelHandler.ManagementHTML)
-	mux.HandleFunc("/", rootHandler(appCtx, usageHandler, modelPriceHandler, apiKeyAliasHandler, accountActionHandler, codexInspectionHandler, codexQuotaHandler, containerOpsHandler, dashboardHandler, databaseHandler, monitoringHandler, quotaSnapshotHandler, supplyHandler, proxyHandler))
+	mux.HandleFunc("/", rootHandler(appCtx, usageHandler, modelPriceHandler, apiKeyAliasHandler, accountActionHandler, codexInspectionHandler, quotaThresholdHandler, codexQuotaHandler, containerOpsHandler, dashboardHandler, databaseHandler, monitoringHandler, quotaSnapshotHandler, supplyHandler, proxyHandler))
 
 	return middleware.Recovery(middleware.RequestLogger(middleware.CompressLargeResponses(mux)))
 }
@@ -72,6 +74,7 @@ func rootHandler(
 	apiKeyAliasHandler *apikeyaliascontroller.Handler,
 	accountActionHandler *accountactioncontroller.Handler,
 	codexInspectionHandler *codexinspectioncontroller.Handler,
+	quotaThresholdHandler *quotathresholdcontroller.Handler,
 	codexQuotaHandler *codexquotacontroller.Handler,
 	containerOpsHandler *containeropscontroller.Handler,
 	dashboardHandler *dashboardcontroller.Handler,
@@ -124,6 +127,10 @@ func rootHandler(
 		}
 		if strings.HasPrefix(r.URL.Path, "/v0/management/codex-inspection") {
 			middleware.WithCORS(appCtx.Config, codexInspectionHandler.Handle)(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/v0/management/quota-threshold-rules") {
+			middleware.WithCORS(appCtx.Config, quotaThresholdHandler.Handle)(w, r)
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/v0/management/cpamp/codex-quota/") {

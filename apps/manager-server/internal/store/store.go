@@ -25,6 +25,7 @@ import (
 	mysqlrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/mysql"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotacooldown"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotasnapshot"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotathreshold"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/supplyorder"
@@ -74,6 +75,7 @@ type ModelUsageSummary = model.ModelUsageSummary
 type APIKeyAlias = model.APIKeyAlias
 type QuotaCooldown = model.QuotaCooldown
 type QuotaCooldownUpsert = model.QuotaCooldownUpsert
+type QuotaThresholdRule = model.QuotaThresholdRule
 type AccountQuotaSnapshot = model.AccountQuotaSnapshot
 type AccountActionCandidate = model.AccountActionCandidate
 type AccountActionCandidateUpsert = model.AccountActionCandidateUpsert
@@ -163,6 +165,7 @@ type Store struct {
 	CodexQuotaOperations codexquotaoperation.Repository
 	DataMigrations       datamigration.Repository
 	QuotaCooldowns       quotacooldown.Repository
+	QuotaThresholdRules  quotathreshold.Repository
 	QuotaSnapshots       quotasnapshot.Repository
 	UsageAggregates      usageaggregate.Repository
 	UsagePricing         usagepricing.Repository
@@ -214,6 +217,7 @@ func New(db *sql.DB, protector ...*security.Protector) *Store {
 		CodexQuotaOperations: codexquotaoperation.New(db),
 		DataMigrations:       datamigration.New(db),
 		QuotaCooldowns:       quotacooldown.New(db),
+		QuotaThresholdRules:  quotathreshold.New(db),
 		QuotaSnapshots:       quotasnapshot.New(db),
 		UsageAggregates:      usageaggregate.New(db),
 		UsagePricing:         usagepricing.New(db),
@@ -249,6 +253,18 @@ func (s *Store) Close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+func (s *Store) GetLatestCompletedCodexInspectionRun(ctx context.Context) (CodexInspectionRun, bool, error) {
+	return s.CodexInspections.GetLatestCompletedRun(ctx)
+}
+
+func (s *Store) ListQuotaThresholdRules(ctx context.Context) ([]QuotaThresholdRule, error) {
+	return s.QuotaThresholdRules.List(ctx)
+}
+
+func (s *Store) UpdateQuotaThresholdObservation(ctx context.Context, id int64, remaining *float64, disabled bool, inspectionAtMS, triggeredAtMS int64, lastError string) error {
+	return s.QuotaThresholdRules.UpdateObservation(ctx, id, remaining, disabled, inspectionAtMS, triggeredAtMS, lastError)
 }
 
 func (s *Store) SaveSetup(ctx context.Context, setup Setup) error {
@@ -1116,6 +1132,11 @@ func (s *Store) CleanupDeletedCredential(ctx context.Context, identity model.Cre
 	}
 	if s.QuotaSnapshots != nil {
 		if _, err := s.QuotaSnapshots.DeleteCredential(ctx, identity); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
+	if s.QuotaThresholdRules != nil {
+		if _, err := s.QuotaThresholdRules.DeleteCredential(ctx, identity); err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}

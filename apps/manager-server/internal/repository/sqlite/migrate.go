@@ -818,6 +818,25 @@ func Migrate(db *sql.DB) error {
 			disabled_at_ms integer not null,
 			updated_at_ms integer not null
 		)`,
+		`create table if not exists quota_threshold_rules (
+			id integer primary key autoincrement,
+			file_name text not null,
+			auth_index text,
+			provider text,
+			account_snapshot text,
+			account_id text,
+			threshold_percent real not null,
+			enabled integer not null default 1,
+			last_observed_remaining_percent real,
+			last_disabled integer not null default 0,
+			last_triggered_at_ms integer,
+			last_inspection_at_ms integer,
+			last_error text,
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		)`,
+		`create index if not exists idx_quota_threshold_rules_enabled on quota_threshold_rules(enabled, updated_at_ms)`,
+		`create index if not exists idx_quota_threshold_rules_identity on quota_threshold_rules(file_name, auth_index, provider, account_id, account_snapshot)`,
 		`create table if not exists quota_cooldowns (
 			id integer primary key autoincrement,
 			auth_file_name text not null,

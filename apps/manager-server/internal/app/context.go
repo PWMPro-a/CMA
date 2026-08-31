@@ -28,6 +28,7 @@ import (
 	panelsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/panel"
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 	quotasnapshotsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/quotasnapshot"
+	quotathresholdsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/quotathreshold"
 	setupsvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/setup"
 	supplysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/supply"
 	usagesvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/usage"
@@ -71,6 +72,7 @@ type Context struct {
 	ProxyService                   *proxysvc.Service
 	PanelService                   *panelsvc.Service
 	SupplyService                  *supplysvc.Service
+	QuotaThresholdService          *quotathresholdsvc.Service
 	AutomationRuntimeService       AutomationRuntimeService
 	DatabaseMaintenance            DatabaseMaintenanceStatusProvider
 }
@@ -204,6 +206,7 @@ func fromExisting(
 		),
 		PanelService:             panelsvc.New(cfg.PanelPath, embeddedPanel, buildinfo.Version),
 		SupplyService:            supplyService,
+		QuotaThresholdService:    quotathresholdsvc.New(st),
 		AutomationRuntimeService: runtimeService,
 	}
 }

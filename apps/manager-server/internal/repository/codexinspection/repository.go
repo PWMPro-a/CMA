@@ -37,6 +37,7 @@ type Repository interface {
 	GetRun(ctx context.Context, id int64) (model.CodexInspectionRun, bool, error)
 	GetLatestRunByTrigger(ctx context.Context, triggerType, triggerKey string) (model.CodexInspectionRun, bool, error)
 	GetLatestRunByTriggerType(ctx context.Context, triggerType string) (model.CodexInspectionRun, bool, error)
+	GetLatestCompletedRun(ctx context.Context) (model.CodexInspectionRun, bool, error)
 	ListResults(ctx context.Context, runID int64) ([]model.CodexInspectionResult, error)
 	ListLogs(ctx context.Context, runID int64) ([]model.CodexInspectionLog, error)
 	ListDisableOwnership(ctx context.Context) ([]model.CodexInspectionDisableOwnership, error)
@@ -583,6 +584,26 @@ func (r *repository) GetLatestRunByTriggerType(ctx context.Context, triggerType 
 		limit 1`,
 		triggerType,
 	)
+	run, err := scanRun(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.CodexInspectionRun{}, false, nil
+	}
+	if err != nil {
+		return model.CodexInspectionRun{}, false, err
+	}
+	return run, true, nil
+}
+
+func (r *repository) GetLatestCompletedRun(ctx context.Context) (model.CodexInspectionRun, bool, error) {
+	row := r.db.QueryRowContext(ctx, `select
+		id, trigger_type, trigger_key, status, started_at_ms, finished_at_ms,
+		total_files, probe_set_count, sampled_count, disabled_count, enabled_count,
+		delete_count, disable_count, enable_count, reauth_count, keep_count, error,
+		settings_json, created_at_ms, updated_at_ms
+	from codex_inspection_runs
+	where status = ?
+	order by finished_at_ms desc, id desc
+	limit 1`, model.CodexInspectionStatusCompleted)
 	run, err := scanRun(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.CodexInspectionRun{}, false, nil
