@@ -250,6 +250,7 @@ import {
   type MonitoringAnalyticsSummary,
   type MonitoringAccountHistoryItem,
   type MonitoringAccountWindowUsageItem,
+  type QuotaThresholdRule,
   type QuotaCooldownInfo,
   type SupplyAccountLeaseItem,
   type SupplyAccountPoolCredentialSummary,
@@ -307,6 +308,45 @@ const MAX_CONCURRENT_QUOTA_REFRESH_PROVIDERS = 3;
 const PASSIVE_HEADER_SNAPSHOT_REFRESH_MS = 60_000;
 const PASSIVE_RUNTIME_CONCURRENCY_REFRESH_MS = 15_000;
 const PASSIVE_ACCOUNT_POOL_REFRESH_MS = 30_000;
+
+const normalizeQuotaThresholdIdentity = (value: string | null | undefined) =>
+  String(value ?? '')
+    .trim()
+    .toLowerCase();
+
+const findQuotaThresholdRuleForRow = (
+  row: AccountRow,
+  rules: QuotaThresholdRule[]
+): QuotaThresholdRule | undefined => {
+  const target = getAuthFilePatchTarget(row.raw);
+  const fileName = normalizeQuotaThresholdIdentity(target.name);
+  const authIndex = normalizeQuotaThresholdIdentity(
+    target.authIndex == null ? '' : String(target.authIndex)
+  );
+  const accountId = normalizeQuotaThresholdIdentity(target.accountId);
+  const provider = normalizeQuotaThresholdIdentity(target.provider || row.provider).replace(
+    /_/g,
+    '-'
+  );
+  const accountSnapshot = normalizeQuotaThresholdIdentity(target.accountSnapshot);
+
+  return rules.find((rule) => {
+    if (normalizeQuotaThresholdIdentity(rule.fileName) !== fileName) return false;
+    const ruleAuthIndex = normalizeQuotaThresholdIdentity(rule.authIndex);
+    if (ruleAuthIndex) return ruleAuthIndex === authIndex;
+    const ruleAccountId = normalizeQuotaThresholdIdentity(rule.accountId);
+    if (ruleAccountId) return ruleAccountId === accountId;
+    const ruleProvider = normalizeQuotaThresholdIdentity(rule.provider).replace(/_/g, '-');
+    const ruleAccountSnapshot = normalizeQuotaThresholdIdentity(rule.accountSnapshot);
+    return (
+      (!ruleProvider || ruleProvider === provider) &&
+      (!ruleAccountSnapshot || ruleAccountSnapshot === accountSnapshot)
+    );
+  });
+};
+
+const formatQuotaThresholdValue = (value: number) =>
+  `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}%`;
 
 const isManagedCodexQuotaCooldown = (cooldown: QuotaCooldownInfo): boolean =>
   cooldown.owner === QUOTA_COOLDOWN_OWNER_CODEX_USAGE &&
@@ -827,6 +867,7 @@ export function AccountsPage() {
     managementKey,
   });
   const [quotaRefreshing, setQuotaRefreshing] = useState(false);
+  const [quotaThresholdRules, setQuotaThresholdRules] = useState<QuotaThresholdRule[]>([]);
   const [codexResetCounts, setCodexResetCounts] = useState<CodexResetCountLookup>(
     () => EMPTY_CODEX_RESET_COUNT_LOOKUP
   );
@@ -1685,6 +1726,14 @@ export function AccountsPage() {
       ),
     [accountQuotaOverrides, baseQuotaStores, files, inspectionResults, supplyMetadataByFile]
   );
+  const quotaThresholdRuleByRowKey = useMemo(() => {
+    const lookup = new Map<string, QuotaThresholdRule>();
+    rows.forEach((row) => {
+      const rule = findQuotaThresholdRuleForRow(row, quotaThresholdRules);
+      if (rule) lookup.set(row.selectionKey, rule);
+    });
+    return lookup;
+  }, [quotaThresholdRules, rows]);
   const accountSourceIpContext = useMemo(() => {
     const values = rows.map((row) => row.raw.sourceIp ?? row.raw.source_ip ?? '');
     return { values, usageCounts: collectSourceIpUsageCounts(values) };
@@ -4674,6 +4723,7 @@ export function AccountsPage() {
           managerServiceBase={featureAvailability.managerServiceBase}
           managementKey={managementKey}
           disabled={disableControls}
+          onRulesChange={setQuotaThresholdRules}
         />
       ) : null}
       {rowsToRender.length > 0 ? (
@@ -4712,6 +4762,7 @@ export function AccountsPage() {
             const codexStatus = codexStatusBySelectionKey.get(row.selectionKey) ?? null;
             const poolStatus = accountPoolStatusByRowKey.get(row.selectionKey) ?? null;
             const poolCredential = accountPoolCredentialByRowKey.get(row.selectionKey) ?? null;
+            const quotaThresholdRule = quotaThresholdRuleByRowKey.get(row.selectionKey) ?? null;
             const item = buildAccountListItem(row, {
               recommendation,
               quotaCooldown,
@@ -4834,6 +4885,22 @@ export function AccountsPage() {
                     </span>
                     {item.identity.planType ? (
                       <span className={styles.accountMetaPill}>{item.identity.planType}</span>
+                    ) : null}
+                    {quotaThresholdRule ? (
+                      <span
+                        className={`${styles.accountMetaPill} ${styles.quotaThresholdPill} ${
+                          quotaThresholdRule.enabled ? '' : styles.quotaThresholdPillDisabled
+                        }`}
+                        title={`${t('accounts.quota_threshold_rule_label', {
+                          percent: quotaThresholdRule.thresholdPercent,
+                        })} · ${t(
+                          quotaThresholdRule.enabled
+                            ? 'accounts.quota_threshold_enabled'
+                            : 'accounts.quota_threshold_disabled'
+                        )}`}
+                      >
+                        {formatQuotaThresholdValue(quotaThresholdRule.thresholdPercent)}
+                      </span>
                     ) : null}
                     {accountGroupsAvailable ? (
                       <button

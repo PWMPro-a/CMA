@@ -799,6 +799,21 @@
   white-space: nowrap;
 }
 
+.quotaThresholdPill {
+  min-width: 44px;
+  border: 1px solid color-mix(in srgb, var(--accounts-warning) 38%, var(--accounts-border));
+  background: color-mix(in srgb, var(--accounts-warning) 10%, var(--accounts-surface));
+  color: color-mix(in srgb, var(--accounts-warning) 82%, var(--accounts-text));
+  font-variant-numeric: tabular-nums;
+}
+
+.quotaThresholdPillDisabled {
+  border-color: var(--accounts-border);
+  background: var(--accounts-muted-surface);
+  color: var(--accounts-muted);
+  opacity: 0.7;
+}
+
 .accountWorkspacePill {
   max-width: 168px;
   border: 1px solid color-mix(in srgb, var(--accounts-warning) 32%, var(--accounts-border));
