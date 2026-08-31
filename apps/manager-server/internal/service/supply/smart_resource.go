@@ -3194,8 +3194,20 @@ func smartAccountRuntimeCooling(values map[string]any, message string) bool {
 		"temporarily unavailable",
 		"temporary unavailable",
 		"service unavailable",
+		"service_unavailable_error",
 		"server overloaded",
+		"server_is_overloaded",
 		"upstream unavailable",
+		"context canceled",
+		"context cancelled",
+		"client disconnected",
+		"websocket disconnected",
+		"websocket close 1006",
+		"unexpected eof",
+		"http 499",
+		"status 499",
+		"status_code:499",
+		"status_code\":499",
 	} {
 		if strings.Contains(combined, marker) {
 			return smartAccountHasRecentSuccess(values)

@@ -1860,6 +1860,53 @@ func TestAccountPoolStatsKeepsRateLimitedCredentialsAvailable(t *testing.T) {
 	}
 }
 
+func TestAccountPoolStatsKeepsTransientRequestFailuresAvailable(t *testing.T) {
+	transientMessages := []string{
+		"context canceled",
+		"upstream websocket disconnected before response.completed: websocket: close 1006 (abnormal closure): unexpected EOF",
+		`{"error":{"type":"service_unavailable_error","code":"server_is_overloaded"}}`,
+		"HTTP 499 client disconnected",
+	}
+	files := make([]cpaauthfiles.File, 0, len(transientMessages)+1)
+	results := make([]store.CodexInspectionResult, 0, len(transientMessages)+1)
+	for index, message := range transientMessages {
+		name := fmt.Sprintf("transient-%d.json", index)
+		authIndex := fmt.Sprintf("transient-%d", index)
+		files = append(files, cpaauthfiles.File{
+			Name: name, Provider: "codex", AuthIndex: authIndex,
+			Raw: map[string]any{
+				"status":         "error",
+				"status_message": message,
+				"recent_requests": []any{
+					map[string]any{"success": 8, "failed": 2},
+				},
+			},
+		})
+		results = append(results, store.CodexInspectionResult{
+			FileName: name, Provider: "codex", AuthIndex: authIndex, Action: "keep", Status: "active",
+		})
+	}
+	files = append(files, cpaauthfiles.File{
+		Name: "invalid-token.json", Provider: "codex", AuthIndex: "invalid-token",
+		Raw: map[string]any{
+			"status":         "error",
+			"status_message": "invalid_token login_required",
+			"recent_requests": []any{
+				map[string]any{"success": 8, "failed": 2},
+			},
+		},
+	})
+	results = append(results, store.CodexInspectionResult{
+		FileName: "invalid-token.json", Provider: "codex", AuthIndex: "invalid-token", Action: "keep",
+	})
+
+	stats := accountPoolStatsFromFilesAndInspection(files, results)
+	if stats.schedulable != len(transientMessages) || stats.normal != len(transientMessages) ||
+		stats.needsAttention != 1 || stats.quotaRisk != 0 || stats.unconfirmed != 0 {
+		t.Fatalf("transient request failure buckets = %#v", stats)
+	}
+}
+
 func TestEnabledPoolCapacitySplitUsesCredentialIdentity(t *testing.T) {
 	resource := SmartResource{
 		CurrentCapacityRCU:     1_000,

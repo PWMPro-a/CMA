@@ -212,18 +212,39 @@ const AUTH_FILE_TRANSIENT_UPSTREAM_MARKERS = [
   'temporarily unavailable',
   'temporary unavailable',
   'service unavailable',
+  'service_unavailable_error',
   'server overloaded',
+  'server_is_overloaded',
   'upstream unavailable',
+  'context canceled',
+  'context cancelled',
+  'client disconnected',
+  'websocket disconnected',
+  'websocket close 1006',
+  'unexpected eof',
+  'http 499',
+  'status 499',
+  'status_code:499',
+  'status_code":499',
 ];
+
+export const isAuthFileTransientUpstreamStatusText = (
+  value: string,
+  hasRecentSuccess = false
+): boolean => {
+  if (!hasRecentSuccess) return false;
+  const message = value.trim().toLowerCase();
+  return (
+    Boolean(message) &&
+    AUTH_FILE_TRANSIENT_UPSTREAM_MARKERS.some((marker) => message.includes(marker))
+  );
+};
 
 export const isAuthFileCoolingStatusText = (value: string, hasRecentSuccess = false): boolean => {
   const message = value.trim().toLowerCase();
   if (!message) return false;
   if (AUTH_FILE_COOLDOWN_MARKERS.some((marker) => message.includes(marker))) return true;
-  return (
-    hasRecentSuccess &&
-    AUTH_FILE_TRANSIENT_UPSTREAM_MARKERS.some((marker) => message.includes(marker))
-  );
+  return isAuthFileTransientUpstreamStatusText(message, hasRecentSuccess);
 };
 
 const AUTH_FILE_HEALTH_MIN_RECENT_SAMPLES = 5;

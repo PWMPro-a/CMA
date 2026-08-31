@@ -406,6 +406,23 @@ describe('accountListPresentation', () => {
     expect(cooldownItem.health.reasonKey).toBe('accounts.health_reason_cooldown_status');
     expect(cooldownItem.health.reasonTone).toBe('warning');
 
+    const transientFailureItem = buildAccountListItem(
+      makeRow({
+        statusMessage:
+          'upstream websocket disconnected before response.completed: websocket: close 1006 (abnormal closure): unexpected EOF',
+        usage: {
+          success: 88,
+          failure: 12,
+          successRate: 88,
+          recentRequests: [{ time: 'now', success: 88, failed: 12 }],
+        },
+      }),
+      { poolStatus: 'needs_attention' }
+    );
+    expect(transientFailureItem.health.status).toBe('available');
+    expect(transientFailureItem.health.reasonKey).toBe('accounts.health_reason_available');
+    expect(transientFailureItem.health.reasonTone).toBe('muted');
+
     const disabledItem = buildAccountListItem(
       makeRow({
         disabled: true,
