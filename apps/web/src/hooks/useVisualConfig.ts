@@ -1755,12 +1755,11 @@ export function useVisualConfig() {
               values.temporaryErrorMaxWaitSeconds
             );
           }
-          if (isDirty('retryBeforeFirstOutputOnly')) {
-            doc.setIn(
-              ['error-handling', 'retry-before-first-output-only'],
-              values.retryBeforeFirstOutputOnly
-            );
-          }
+          // Retrying after output has started is intentionally always enabled.
+          // Keep the persisted value aligned with the runtime guard whenever
+          // this settings group is written, including legacy YAML that still
+          // contains `false`.
+          doc.setIn(['error-handling', 'retry-before-first-output-only'], true);
           if (isDirty('transientErrorsKeepAccountActive')) {
             doc.setIn(
               ['error-handling', 'transient-errors-keep-account-active'],

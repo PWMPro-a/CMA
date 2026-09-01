@@ -2121,7 +2121,7 @@
     "status_saving_short": "保存中",
     "status_saved": "配置保存完成",
     "status_save_failed": "保存失败",
-    "save_success": "配置已保存",
+    "save_success": "配置已生效，新请求立即使用",
     "error_yaml_not_supported": "服务器未返回 YAML 格式，请确认 /config.yaml 接口可用",
     "visual_mode_unavailable": "YAML 语法修复前无法使用可视化编辑",
     "visual_mode_unavailable_short": "YAML错误",
