@@ -268,6 +268,7 @@ export function ConfigPage() {
 
   const [content, setContent] = useState('');
   const [sourceConfigLoaded, setSourceConfigLoaded] = useState(false);
+  const [configLastModified, setConfigLastModified] = useState<string | null>(null);
   const [savedConfigRevision, setSavedConfigRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -368,7 +369,9 @@ export function ConfigPage() {
     setLoading(true);
     setError('');
     try {
-      const data = await configFileApi.fetchConfigYaml();
+      const response = await configFileApi.fetchConfigYamlWithMetadata();
+      const data = response.content;
+      setConfigLastModified(response.lastModified);
       setContent(data);
       setDirty(false);
       setDiffModalOpen(false);
@@ -608,7 +611,9 @@ export function ConfigPage() {
       const commercialModeChanged = previousCommercialMode !== nextCommercialMode;
 
       await configFileApi.saveConfigYaml(mergedYaml);
-      const latestContent = await configFileApi.fetchConfigYaml();
+      const latestResponse = await configFileApi.fetchConfigYamlWithMetadata();
+      const latestContent = latestResponse.content;
+      setConfigLastModified(latestResponse.lastModified);
       setDirty(false);
       setDiffModalOpen(false);
       setContent(latestContent);
@@ -1323,6 +1328,7 @@ export function ConfigPage() {
               hasPayloadValidationErrors={visualHasPayloadValidationErrors}
               disabled={disableControls || loading}
               apiKeysRefreshToken={savedConfigRevision}
+              configLastModified={configLastModified}
               onChange={setVisualValues}
             />
           ) : (

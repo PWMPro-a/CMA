@@ -534,11 +534,13 @@ function getIntegerError(value: string): 'integer' | undefined {
   return /^-?\d+$/.test(trimmed) ? undefined : 'integer';
 }
 
-function getTemporaryErrorMaxWaitError(value: string): 'integer' | undefined {
+function getTemporaryErrorMaxWaitError(value: string): 'temporary_error_wait_range' | undefined {
   const trimmed = value.trim();
-  if (!/^\d+$/.test(trimmed)) return 'integer';
+  if (!/^\d+$/.test(trimmed)) return 'temporary_error_wait_range';
   const parsed = Number(trimmed);
-  return Number.isSafeInteger(parsed) && parsed >= 0 && parsed <= 3 ? undefined : 'integer';
+  return Number.isSafeInteger(parsed) && parsed >= 0 && parsed <= 3
+    ? undefined
+    : 'temporary_error_wait_range';
 }
 
 function getPortError(value: string): 'port_range' | undefined {

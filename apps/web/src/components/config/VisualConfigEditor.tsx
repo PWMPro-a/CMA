@@ -73,6 +73,7 @@ interface VisualConfigEditorProps {
   hasPayloadValidationErrors?: boolean;
   disabled?: boolean;
   apiKeysRefreshToken?: number;
+  configLastModified?: string | null;
   onChange: (values: Partial<VisualConfigValues>) => void;
 }
 
@@ -181,6 +182,7 @@ export function VisualConfigEditor({
   hasPayloadValidationErrors = false,
   disabled = false,
   apiKeysRefreshToken = 0,
+  configLastModified = null,
   onChange,
 }: VisualConfigEditorProps) {
   const { t } = useTranslation();
@@ -224,10 +226,6 @@ export function VisualConfigEditor({
   const redisUsageQueueRetentionError = getValidationMessage(
     t,
     validationErrors?.redisUsageQueueRetentionSeconds
-  );
-  const transientErrorCooldownError = getValidationMessage(
-    t,
-    validationErrors?.transientErrorCooldownSeconds
   );
   const requestRetryError = getValidationMessage(t, validationErrors?.requestRetry);
   const maxRetryCredentialsError = getValidationMessage(t, validationErrors?.maxRetryCredentials);
@@ -387,7 +385,6 @@ export function VisualConfigEditor({
           'requestRetry',
           'maxRetryCredentials',
           'maxRetryInterval',
-          'transientErrorCooldownSeconds',
           'temporaryErrorMaxWaitSeconds',
           'authAutoRefreshWorkers',
         ]),
@@ -1078,23 +1075,24 @@ export function VisualConfigEditor({
                   )}
                   error={authAutoRefreshWorkersError}
                 />
-                <Input
-                  label={t(
-                    'config_management.visual.sections.network.transient_error_cooldown_seconds'
-                  )}
-                  type="number"
-                  placeholder="0"
-                  value={values.transientErrorCooldownSeconds}
-                  onChange={(e) => onChange({ transientErrorCooldownSeconds: e.target.value })}
-                  disabled={disabled}
-                  hint={t(
-                    'config_management.visual.sections.network.transient_error_cooldown_seconds_hint'
-                  )}
-                  error={transientErrorCooldownError}
-                />
+              </SectionGrid>
+
+              <SectionSubsection
+                title={t('config_management.visual.sections.network.temporary_error_handling_title')}
+                description={t(
+                  'config_management.visual.sections.network.temporary_error_handling_description'
+                )}
+                >
+                <SectionGrid>
                 <FieldShell
                   label={t('config_management.visual.sections.network.temporary_error_strategy')}
-                  hint={t('config_management.visual.sections.network.temporary_error_strategy_hint')}
+                  hint={t(
+                    values.temporaryErrorStrategy === 'immediate-switch'
+                      ? 'config_management.visual.sections.network.temporary_error_strategy_immediate_hint'
+                      : values.temporaryErrorStrategy === 'no-switch'
+                        ? 'config_management.visual.sections.network.temporary_error_strategy_none_hint'
+                        : 'config_management.visual.sections.network.temporary_error_strategy_wait_hint'
+                  )}
                 >
                   <Select
                     value={values.temporaryErrorStrategy}
@@ -1145,6 +1143,17 @@ export function VisualConfigEditor({
                   onChange={(value) => onChange({ transientErrorsKeepAccountActive: value })}
                   disabled={disabled}
                 />
+                </SectionGrid>
+                {configLastModified ? (
+                  <div className={styles.temporaryErrorUpdatedAt}>
+                    {t('config_management.visual.sections.network.temporary_error_updated_at', {
+                      time: new Date(configLastModified).toLocaleString(),
+                    })}
+                  </div>
+                ) : null}
+              </SectionSubsection>
+
+              <SectionGrid>
                 <FieldShell
                   label={t('config_management.visual.sections.network.disable_image_generation')}
                   labelId={disableImageGenerationLabelId}

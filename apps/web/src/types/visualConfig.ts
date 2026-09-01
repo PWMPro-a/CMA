@@ -53,7 +53,8 @@ export type VisualConfigValidationErrorCode =
   | 'cache_affinity_preempt_percent_range'
   | 'cache_affinity_hard_stop_percent_range'
   | 'tail_burst_trigger_percent_range'
-  | 'tail_burst_collector_concurrency_range';
+  | 'tail_burst_collector_concurrency_range'
+  | 'temporary_error_wait_range';
 
 export type CodexClientRestrictionEntry = {
   id: string;
