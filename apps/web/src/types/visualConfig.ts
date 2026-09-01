@@ -15,6 +15,7 @@ export type VisualConfigFieldPath =
   | 'logsMaxTotalSizeMb'
   | 'redisUsageQueueRetentionSeconds'
   | 'transientErrorCooldownSeconds'
+  | 'temporaryErrorMaxWaitSeconds'
   | 'requestRetry'
   | 'maxRetryCredentials'
   | 'maxRetryInterval'
@@ -165,6 +166,10 @@ export type VisualConfigValues = {
   disableCooling: boolean;
   saveCooldownStatus: boolean;
   transientErrorCooldownSeconds: string;
+  temporaryErrorStrategy: 'wait-then-switch' | 'immediate-switch' | 'no-switch';
+  temporaryErrorMaxWaitSeconds: string;
+  retryBeforeFirstOutputOnly: boolean;
+  transientErrorsKeepAccountActive: boolean;
   disableClaudeCloakMode: boolean;
   disableImageGeneration: DisableImageGenerationMode;
   gptImage2BaseModel: string;
@@ -267,6 +272,10 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   disableCooling: false,
   saveCooldownStatus: false,
   transientErrorCooldownSeconds: '',
+  temporaryErrorStrategy: 'wait-then-switch',
+  temporaryErrorMaxWaitSeconds: '3',
+  retryBeforeFirstOutputOnly: true,
+  transientErrorsKeepAccountActive: true,
   disableClaudeCloakMode: false,
   disableImageGeneration: 'false',
   gptImage2BaseModel: '',

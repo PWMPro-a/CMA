@@ -2385,7 +2385,18 @@
           "high_cache_mode": "High cache mode",
           "high_cache_mode_desc": "Prefer stable account binding by request context to reduce account switching and improve Prompt Cache hit rate.",
           "ws_auth": "WebSocket Authentication",
-          "ws_auth_desc": "Enable WebSocket authentication (/v1/ws)"
+          "ws_auth_desc": "Enable WebSocket authentication (/v1/ws)",
+          "temporary_error_strategy": "Temporary network issue handling",
+          "temporary_error_strategy_hint": "Choose whether to wait, switch accounts, or return the error for temporary network failures.",
+          "temporary_error_strategy_wait": "Wait, then switch account",
+          "temporary_error_strategy_immediate": "Switch account immediately",
+          "temporary_error_strategy_none": "Do not switch account",
+          "temporary_error_max_wait_seconds": "Maximum wait (seconds)",
+          "temporary_error_max_wait_seconds_hint": "Up to 3 seconds by default. Longer waits may improve success rate but delay the first token.",
+          "retry_before_first_output_only": "Retry only before output starts",
+          "retry_before_first_output_only_hint": "Once output has started, no duplicate request is sent to avoid repeated content and billing.",
+          "transient_errors_keep_account_active": "Keep account active for temporary issues",
+          "transient_errors_keep_account_active_hint": "Only temporary network failures use this rule; invalid accounts, insufficient balance, and exhausted quota follow existing rules."
         },
         "quota": {
           "title": "Quota Fallback",

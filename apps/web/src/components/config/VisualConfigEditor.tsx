@@ -388,6 +388,7 @@ export function VisualConfigEditor({
           'maxRetryCredentials',
           'maxRetryInterval',
           'transientErrorCooldownSeconds',
+          'temporaryErrorMaxWaitSeconds',
           'authAutoRefreshWorkers',
         ]),
       },
@@ -1090,6 +1091,59 @@ export function VisualConfigEditor({
                     'config_management.visual.sections.network.transient_error_cooldown_seconds_hint'
                   )}
                   error={transientErrorCooldownError}
+                />
+                <FieldShell
+                  label={t('config_management.visual.sections.network.temporary_error_strategy')}
+                  hint={t('config_management.visual.sections.network.temporary_error_strategy_hint')}
+                >
+                  <Select
+                    value={values.temporaryErrorStrategy}
+                    options={[
+                      {
+                        value: 'wait-then-switch',
+                        label: t('config_management.visual.sections.network.temporary_error_strategy_wait'),
+                      },
+                      {
+                        value: 'immediate-switch',
+                        label: t('config_management.visual.sections.network.temporary_error_strategy_immediate'),
+                      },
+                      {
+                        value: 'no-switch',
+                        label: t('config_management.visual.sections.network.temporary_error_strategy_none'),
+                      },
+                    ]}
+                    onChange={(value) =>
+                      onChange({
+                        temporaryErrorStrategy: value as VisualConfigValues['temporaryErrorStrategy'],
+                      })
+                    }
+                    disabled={disabled}
+                  />
+                </FieldShell>
+                <Input
+                  label={t('config_management.visual.sections.network.temporary_error_max_wait_seconds')}
+                  type="number"
+                  min={0}
+                  max={3}
+                  value={values.temporaryErrorMaxWaitSeconds}
+                  onChange={(e) => onChange({ temporaryErrorMaxWaitSeconds: e.target.value })}
+                  disabled={disabled}
+                  hint={t('config_management.visual.sections.network.temporary_error_max_wait_seconds_hint')}
+                  error={getValidationMessage(t, validationErrors?.temporaryErrorMaxWaitSeconds)}
+                />
+                <ToggleRow
+                  title={t('config_management.visual.sections.network.retry_before_first_output_only')}
+                  description={t('config_management.visual.sections.network.retry_before_first_output_only_hint')}
+                  checked={values.retryBeforeFirstOutputOnly}
+                  onChange={(value) => onChange({ retryBeforeFirstOutputOnly: value })}
+                  disabled
+                />
+                <ToggleRow
+                  title={t('config_management.visual.sections.network.transient_errors_keep_account_active')}
+                  description={t('config_management.visual.sections.network.transient_errors_keep_account_active_hint')}
+                  checked={values.transientErrorsKeepAccountActive}
+                  onChange={(value) => onChange({ transientErrorsKeepAccountActive: value })}
+                  disabled={disabled}
                 />
                 <FieldShell
                   label={t('config_management.visual.sections.network.disable_image_generation')}

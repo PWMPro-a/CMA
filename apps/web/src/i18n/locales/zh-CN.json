@@ -2385,7 +2385,18 @@
           "high_cache_mode": "高缓存模式",
           "high_cache_mode_desc": "按调用上下文优先稳定绑定账号，减少账号切换，提高 Prompt Cache 命中率。",
           "ws_auth": "WebSocket 认证",
-          "ws_auth_desc": "启用 WebSocket 连接认证 (/v1/ws)"
+          "ws_auth_desc": "启用 WebSocket 连接认证 (/v1/ws)",
+          "temporary_error_strategy": "临时网络问题处理方式",
+          "temporary_error_strategy_hint": "遇到临时网络故障时，决定等待、换账号还是直接返回。",
+          "temporary_error_strategy_wait": "先等一下，再换账号",
+          "temporary_error_strategy_immediate": "立即换账号",
+          "temporary_error_strategy_none": "不换账号",
+          "temporary_error_max_wait_seconds": "最多等待时间（秒）",
+          "temporary_error_max_wait_seconds_hint": "默认最多等待 3 秒；等待时间越长，成功率可能更高，但首字出现会更慢。",
+          "retry_before_first_output_only": "只在开始输出内容前重试",
+          "retry_before_first_output_only_hint": "已经开始输出后不会重复请求，避免内容重复和重复计费。",
+          "transient_errors_keep_account_active": "临时网络问题不暂停账号",
+          "transient_errors_keep_account_active_hint": "只针对临时网络故障；账号失效、余额不足、额度用完仍按原规则处理。"
         },
         "quota": {
           "title": "配额回退",

@@ -534,6 +534,13 @@ function getIntegerError(value: string): 'integer' | undefined {
   return /^-?\d+$/.test(trimmed) ? undefined : 'integer';
 }
 
+function getTemporaryErrorMaxWaitError(value: string): 'integer' | undefined {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return 'integer';
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) && parsed >= 0 && parsed <= 3 ? undefined : 'integer';
+}
+
 function getPortError(value: string): 'port_range' | undefined {
   const trimmed = value.trim();
   if (!trimmed) return undefined;
@@ -732,6 +739,7 @@ export function getVisualConfigValidationErrors(
       values.redisUsageQueueRetentionSeconds
     ),
     transientErrorCooldownSeconds: getIntegerError(values.transientErrorCooldownSeconds),
+    temporaryErrorMaxWaitSeconds: getTemporaryErrorMaxWaitError(values.temporaryErrorMaxWaitSeconds),
     requestRetry: getNonNegativeIntegerError(values.requestRetry),
     maxRetryCredentials: getNonNegativeIntegerError(values.maxRetryCredentials),
     maxRetryInterval: getNonNegativeIntegerError(values.maxRetryInterval),
@@ -878,6 +886,10 @@ function getNextDirtyFields(
       'disableCooling',
       'saveCooldownStatus',
       'transientErrorCooldownSeconds',
+      'temporaryErrorStrategy',
+      'temporaryErrorMaxWaitSeconds',
+      'retryBeforeFirstOutputOnly',
+      'transientErrorsKeepAccountActive',
       'disableClaudeCloakMode',
       'disableImageGeneration',
       'gptImage2BaseModel',
@@ -1305,6 +1317,25 @@ export function useVisualConfig() {
         disableCooling: Boolean(parsed['disable-cooling']),
         saveCooldownStatus: Boolean(parsed['save-cooldown-status']),
         transientErrorCooldownSeconds: String(parsed['transient-error-cooldown-seconds'] ?? ''),
+        temporaryErrorStrategy:
+          parsed['error-handling'] && typeof parsed['error-handling'] === 'object'
+            ? (() => {
+                const handling = asRecord(parsed['error-handling']);
+                const strategy = String(handling?.['temporary-error-strategy'] ?? '').trim();
+                return strategy === 'immediate-switch' || strategy === 'no-switch'
+                  ? strategy
+                  : 'wait-then-switch';
+              })()
+            : 'wait-then-switch',
+        temporaryErrorMaxWaitSeconds:
+          parsed['error-handling'] && typeof parsed['error-handling'] === 'object'
+            ? String(asRecord(parsed['error-handling'])?.['temporary-error-max-wait-seconds'] ?? 3)
+            : '3',
+        retryBeforeFirstOutputOnly: true,
+        transientErrorsKeepAccountActive:
+          parsed['error-handling'] && typeof parsed['error-handling'] === 'object'
+            ? asRecord(parsed['error-handling'])?.['transient-errors-keep-account-active'] !== false
+            : true,
         disableClaudeCloakMode: Boolean(parsed['disable-claude-cloak-mode']),
         disableImageGeneration: parseDisableImageGenerationMode(parsed['disable-image-generation']),
         gptImage2BaseModel:
@@ -1704,6 +1735,37 @@ export function useVisualConfig() {
             ['transient-error-cooldown-seconds'],
             values.transientErrorCooldownSeconds
           );
+        }
+        const errorHandlingDirty =
+          isDirty('temporaryErrorStrategy') ||
+          isDirty('temporaryErrorMaxWaitSeconds') ||
+          isDirty('retryBeforeFirstOutputOnly') ||
+          isDirty('transientErrorsKeepAccountActive');
+        if (errorHandlingDirty) {
+          ensureMapInDoc(doc, ['error-handling']);
+          if (isDirty('temporaryErrorStrategy')) {
+            doc.setIn(['error-handling', 'temporary-error-strategy'], values.temporaryErrorStrategy);
+          }
+          if (isDirty('temporaryErrorMaxWaitSeconds')) {
+            setIntFromStringInDoc(
+              doc,
+              ['error-handling', 'temporary-error-max-wait-seconds'],
+              values.temporaryErrorMaxWaitSeconds
+            );
+          }
+          if (isDirty('retryBeforeFirstOutputOnly')) {
+            doc.setIn(
+              ['error-handling', 'retry-before-first-output-only'],
+              values.retryBeforeFirstOutputOnly
+            );
+          }
+          if (isDirty('transientErrorsKeepAccountActive')) {
+            doc.setIn(
+              ['error-handling', 'transient-errors-keep-account-active'],
+              values.transientErrorsKeepAccountActive
+            );
+          }
+          deleteIfMapEmpty(doc, ['error-handling']);
         }
         if (isDirty('disableClaudeCloakMode')) {
           setBooleanInDoc(doc, ['disable-claude-cloak-mode'], values.disableClaudeCloakMode);
