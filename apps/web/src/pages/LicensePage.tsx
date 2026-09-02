@@ -1,0 +1,261 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
+import { Modal } from '@/components/ui/Modal';
+import { IconKey, IconRefreshCw, IconShield, IconShieldCheck } from '@/components/ui/icons';
+import { licenseApi, type LicenseStatus } from '@/services/api/license';
+import { useNotificationStore } from '@/stores';
+import styles from './LicensePage.module.scss';
+
+type CallbackMessage = {
+  type?: string;
+  state?: string;
+  code?: string;
+  error?: string;
+};
+
+const popupFeatures = 'popup=yes,width=920,height=760,resizable=yes,scrollbars=yes';
+
+export function LicensePage() {
+  const { t, i18n } = useTranslation();
+  const { showNotification } = useNotificationStore();
+  const [status, setStatus] = useState<LicenseStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [authorizing, setAuthorizing] = useState(false);
+  const [activateOpen, setActivateOpen] = useState(false);
+  const [activationCode, setActivationCode] = useState('');
+  const [activating, setActivating] = useState(false);
+  const pendingStateRef = useRef('');
+  const popupRef = useRef<Window | null>(null);
+
+  const loadStatus = useCallback(async () => {
+    try {
+      setStatus(await licenseApi.status());
+    } catch (error) {
+      showNotification(error instanceof Error ? error.message : String(error), 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [showNotification]);
+
+  useEffect(() => {
+    void loadStatus();
+    return () => popupRef.current?.close();
+  }, [loadStatus]);
+
+  const errorText = useCallback(
+    (code: string) =>
+      t(`license.errors.${code}`, {
+        defaultValue: t('license.errors.provider_error'),
+      }),
+    [t]
+  );
+
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent<CallbackMessage>) => {
+      if (
+        event.source !== popupRef.current ||
+        event.origin !== window.location.origin ||
+        event.data?.type !== 'cpa-license-callback'
+      ) {
+        return;
+      }
+      if (!event.data.state || event.data.state !== pendingStateRef.current) {
+        return;
+      }
+      const state = pendingStateRef.current;
+      pendingStateRef.current = '';
+      popupRef.current?.close();
+      popupRef.current = null;
+      if (event.data.error || !event.data.code) {
+        setAuthorizing(false);
+        showNotification(errorText(event.data.error || 'authorization_invalid'), 'error');
+        return;
+      }
+      void licenseApi
+        .exchangeShopCode(state, event.data.code)
+        .then((result) => {
+          setStatus(result.license);
+          showNotification(t('license.authorization_success'), 'success');
+        })
+        .catch((error) => {
+          showNotification(errorText(error instanceof Error ? error.message : 'provider_error'), 'error');
+        })
+        .finally(() => setAuthorizing(false));
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [errorText, showNotification, t]);
+
+  const handleShopAuthorization = async () => {
+    const popup = window.open('about:blank', 'cpa-shop-license', popupFeatures);
+    if (!popup) {
+      showNotification(t('license.popup_blocked'), 'warning');
+      return;
+    }
+    popup.document.title = t('license.shop_authorization');
+    popup.document.body.textContent = t('license.opening_shop');
+    popupRef.current = popup;
+    setAuthorizing(true);
+    try {
+      const callbackUrl = new URL('/license/shop/callback', window.location.origin).toString();
+      const authorization = await licenseApi.startShopAuthorization(
+        callbackUrl,
+        window.location.origin
+      );
+      pendingStateRef.current = authorization.state;
+      popup.location.replace(authorization.url);
+      popup.focus();
+    } catch (error) {
+      popup.close();
+      popupRef.current = null;
+      setAuthorizing(false);
+      showNotification(errorText(error instanceof Error ? error.message : 'provider_error'), 'error');
+    }
+  };
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      const result = await licenseApi.refresh();
+      setStatus(result.license);
+      showNotification(t('license.refresh_success'), 'success');
+    } catch (error) {
+      showNotification(errorText(error instanceof Error ? error.message : 'provider_error'), 'error');
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const handleActivate = async () => {
+    const code = activationCode.trim();
+    if (!code) return;
+    setActivating(true);
+    try {
+      const result = await licenseApi.activate(code);
+      setStatus(result.license);
+      setActivationCode('');
+      setActivateOpen(false);
+      showNotification(t('license.activation_success'), 'success');
+    } catch (error) {
+      showNotification(errorText(error instanceof Error ? error.message : 'provider_error'), 'error');
+    } finally {
+      setActivating(false);
+    }
+  };
+
+  const formatTime = (value?: number) => {
+    if (!value) return t('common.not_available', { defaultValue: '-' });
+    return new Intl.DateTimeFormat(i18n.language, {
+      dateStyle: 'medium',
+      timeStyle: 'medium',
+    }).format(new Date(value * 1000));
+  };
+
+  const statusKey = useMemo(() => {
+    if (!status?.enabled) return 'disabled';
+    if (status.valid && status.in_grace) return 'grace';
+    if (status.valid) return 'active';
+    return status?.reason || 'not_activated';
+  }, [status]);
+
+  if (loading && !status) {
+    return <LoadingSpinner />;
+  }
+
+  const active = Boolean(status?.valid);
+  return (
+    <div className={styles.page}>
+      <header className={styles.toolbar}>
+        <div className={styles.titleGroup}>
+          <h1>{t('license.title')}</h1>
+          <p>{t('license.subtitle')}</p>
+        </div>
+        <div className={styles.actions}>
+          <Button
+            variant="secondary"
+            onClick={() => void handleRefresh()}
+            loading={refreshing}
+            disabled={!status?.enabled}
+          >
+            <IconRefreshCw size={16} />
+            {t('license.refresh')}
+          </Button>
+          <Button
+            onClick={() => void handleShopAuthorization()}
+            loading={authorizing}
+            disabled={!status?.enabled}
+          >
+            <IconShieldCheck size={16} />
+            {t('license.shop_authorization')}
+          </Button>
+        </div>
+      </header>
+
+      <section className={styles.statusPanel}>
+        <div className={styles.statusLead}>
+          <span className={`${styles.statusIcon} ${active ? styles.active : styles.inactive}`}>
+            {active ? <IconShieldCheck size={24} /> : <IconShield size={24} />}
+          </span>
+          <div>
+            <span className={styles.label}>{t('license.current_status')}</span>
+            <strong>{t(`license.status.${statusKey}`, { defaultValue: statusKey })}</strong>
+          </div>
+        </div>
+        {!status?.enabled ? <p className={styles.notice}>{t('license.disabled_notice')}</p> : null}
+      </section>
+
+      <section className={styles.detailsPanel}>
+        <h2>{t('license.details')}</h2>
+        <div className={styles.detailsGrid}>
+          <div><span>{t('license.product')}</span><strong>{status?.product_name || status?.product_code || '-'}</strong></div>
+          <div><span>{t('license.license_id')}</span><strong>{status?.license_id || '-'}</strong></div>
+          <div><span>{t('license.expires_at')}</span><strong>{formatTime(status?.expires_at)}</strong></div>
+          <div><span>{t('license.instance_binding')}</span><strong>{status?.instance_bound ? t('license.bound') : t('license.unbound')}</strong></div>
+          <div><span>{t('license.instance')}</span><strong>{status?.instance_id || '-'}</strong></div>
+          <div><span>{t('license.last_verified')}</span><strong>{formatTime(status?.last_verified_at)}</strong></div>
+        </div>
+      </section>
+
+      <section className={styles.backupPanel}>
+        <div>
+          <h2>{t('license.activation_code')}</h2>
+          <p>{t('license.activation_code_hint')}</p>
+        </div>
+        <Button variant="secondary" onClick={() => setActivateOpen(true)} disabled={!status?.enabled}>
+          <IconKey size={16} />
+          {t('license.enter_activation_code')}
+        </Button>
+      </section>
+
+      <Modal
+        open={activateOpen}
+        title={t('license.enter_activation_code')}
+        onClose={() => !activating && setActivateOpen(false)}
+        closeDisabled={activating}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setActivateOpen(false)} disabled={activating}>
+              {t('common.cancel')}
+            </Button>
+            <Button onClick={() => void handleActivate()} loading={activating} disabled={!activationCode.trim()}>
+              {t('license.activate')}
+            </Button>
+          </>
+        }
+      >
+        <Input
+          label={t('license.activation_code')}
+          value={activationCode}
+          onChange={(event) => setActivationCode(event.target.value)}
+          autoComplete="off"
+          spellCheck={false}
+          placeholder={t('license.activation_code_placeholder')}
+        />
+      </Modal>
+    </div>
+  );
+}
