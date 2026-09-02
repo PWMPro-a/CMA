@@ -34,17 +34,20 @@ interface LicenseMutationResponse {
 }
 
 export const licenseApi = {
-  status: () => apiClient.get<LicenseStatus>('/v0/management/license/status'),
+  // apiClient already prefixes requests with the management API path. Keep
+  // these endpoint paths relative so they resolve to /v0/management/license/*
+  // instead of duplicating the prefix as /v0/management/v0/management/*.
+  status: () => apiClient.get<LicenseStatus>('/license/status'),
   startShopAuthorization: (callbackUrl: string, origin: string) =>
-    apiClient.get<ShopAuthorization>('/v0/management/license/shop/start', {
+    apiClient.get<ShopAuthorization>('/license/shop/start', {
       params: { callback_url: callbackUrl, origin },
     }),
   exchangeShopCode: (state: string, code: string) =>
-    apiClient.post<LicenseMutationResponse>('/v0/management/license/shop/exchange', {
+    apiClient.post<LicenseMutationResponse>('/license/shop/exchange', {
       state,
       code,
     }),
-  refresh: () => apiClient.post<LicenseMutationResponse>('/v0/management/license/refresh'),
+  refresh: () => apiClient.post<LicenseMutationResponse>('/license/refresh'),
   activate: (code: string) =>
-    apiClient.post<LicenseMutationResponse>('/v0/management/license/activate', { code }),
+    apiClient.post<LicenseMutationResponse>('/license/activate', { code }),
 };
