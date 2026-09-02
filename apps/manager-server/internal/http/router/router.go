@@ -62,6 +62,7 @@ func New(appCtx *app.Context) http.Handler {
 	mux.HandleFunc("/usage-service/quota-cooldowns", middleware.WithCORS(appCtx.Config, quotaCooldownHandler.Handle))
 	mux.HandleFunc("/setup", middleware.WithCORS(appCtx.Config, setupHandler.Setup))
 	mux.HandleFunc("/management.html", panelHandler.ManagementHTML)
+	mux.HandleFunc("/license/shop/callback", proxyHandler.LicenseShopCallback)
 	mux.HandleFunc("/", rootHandler(appCtx, usageHandler, modelPriceHandler, apiKeyAliasHandler, accountActionHandler, codexInspectionHandler, quotaThresholdHandler, codexQuotaHandler, containerOpsHandler, dashboardHandler, databaseHandler, monitoringHandler, quotaSnapshotHandler, supplyHandler, proxyHandler))
 
 	return middleware.Recovery(middleware.RequestLogger(middleware.CompressLargeResponses(mux)))

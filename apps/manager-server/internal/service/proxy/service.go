@@ -152,6 +152,7 @@ var cpaBuiltinManagementPathHeads = map[string]struct{}{
 	"codex-inspection":          {},
 	"config":                    {},
 	"dashboard":                 {},
+	"license":                   {},
 	"model-prices":              {},
 	"monitoring":                {},
 	"plugin-store":              {},
@@ -185,6 +186,41 @@ func NewWithMutationCoordinator(
 
 func (s *Service) ProxyManagement(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error)) {
 	s.proxyWithSavedManagementKey(w, r, writeError)
+}
+
+func (s *Service) ProxyLicenseShopCallback(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error)) {
+	if r == nil || r.Method != http.MethodGet || strings.TrimRight(r.URL.Path, "/") != "/license/shop/callback" {
+		writeError(w, http.StatusNotFound, errors.New("license callback path is invalid"))
+		return
+	}
+	setup, ok, err := s.resolveSetup(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusPreconditionRequired, errors.New("usage service is not configured"))
+		return
+	}
+	target, err := url.Parse(setup.CPAUpstreamURL)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		req.URL.Scheme = target.Scheme
+		req.URL.Host = target.Host
+		req.Host = target.Host
+		req.Header.Del("Authorization")
+		req.Header.Del("X-Management-Key")
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
+		writeError(w, http.StatusBadGateway, proxyErr)
+	}
+	proxy.ServeHTTP(w, r)
 }
 
 func (s *Service) ProxyPluginManagement(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error)) {

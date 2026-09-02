@@ -203,7 +203,7 @@ describe('useVisualConfig', () => {
     harness.unmount();
   });
 
-  it('keeps retries limited to the pre-output phase when saving network handling settings', () => {
+  it('removes legacy temporary error handling overrides when saving visual settings', () => {
     const harness = mountUseVisualConfig();
     const yaml = [
       'error-handling:',
@@ -215,12 +215,12 @@ describe('useVisualConfig', () => {
     act(() => {
       const result = harness.getCurrent().loadVisualValuesFromYaml(yaml);
       expect(result.ok).toBe(true);
-      harness.getCurrent().setVisualValues({ temporaryErrorStrategy: 'immediate-switch' });
+      harness.getCurrent().setVisualValues({ requestRetry: '1' });
     });
 
     const savedYaml = harness.getCurrent().applyVisualChangesToYaml(yaml);
     expect((parseYaml(savedYaml) as { 'error-handling'?: Record<string, unknown> })['error-handling'])
-      .toMatchObject({ 'retry-before-first-output-only': true });
+      .toBeUndefined();
     harness.unmount();
   });
 

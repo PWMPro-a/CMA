@@ -534,15 +534,6 @@ function getIntegerError(value: string): 'integer' | undefined {
   return /^-?\d+$/.test(trimmed) ? undefined : 'integer';
 }
 
-function getTemporaryErrorMaxWaitError(value: string): 'temporary_error_wait_range' | undefined {
-  const trimmed = value.trim();
-  if (!/^\d+$/.test(trimmed)) return 'temporary_error_wait_range';
-  const parsed = Number(trimmed);
-  return Number.isSafeInteger(parsed) && parsed >= 0 && parsed <= 3
-    ? undefined
-    : 'temporary_error_wait_range';
-}
-
 function getPortError(value: string): 'port_range' | undefined {
   const trimmed = value.trim();
   if (!trimmed) return undefined;
@@ -741,7 +732,6 @@ export function getVisualConfigValidationErrors(
       values.redisUsageQueueRetentionSeconds
     ),
     transientErrorCooldownSeconds: getIntegerError(values.transientErrorCooldownSeconds),
-    temporaryErrorMaxWaitSeconds: getTemporaryErrorMaxWaitError(values.temporaryErrorMaxWaitSeconds),
     requestRetry: getNonNegativeIntegerError(values.requestRetry),
     maxRetryCredentials: getNonNegativeIntegerError(values.maxRetryCredentials),
     maxRetryInterval: getNonNegativeIntegerError(values.maxRetryInterval),
@@ -888,10 +878,6 @@ function getNextDirtyFields(
       'disableCooling',
       'saveCooldownStatus',
       'transientErrorCooldownSeconds',
-      'temporaryErrorStrategy',
-      'temporaryErrorMaxWaitSeconds',
-      'retryBeforeFirstOutputOnly',
-      'transientErrorsKeepAccountActive',
       'disableClaudeCloakMode',
       'disableImageGeneration',
       'gptImage2BaseModel',
@@ -1319,25 +1305,6 @@ export function useVisualConfig() {
         disableCooling: Boolean(parsed['disable-cooling']),
         saveCooldownStatus: Boolean(parsed['save-cooldown-status']),
         transientErrorCooldownSeconds: String(parsed['transient-error-cooldown-seconds'] ?? ''),
-        temporaryErrorStrategy:
-          parsed['error-handling'] && typeof parsed['error-handling'] === 'object'
-            ? (() => {
-                const handling = asRecord(parsed['error-handling']);
-                const strategy = String(handling?.['temporary-error-strategy'] ?? '').trim();
-                return strategy === 'immediate-switch' || strategy === 'no-switch'
-                  ? strategy
-                  : 'wait-then-switch';
-              })()
-            : 'wait-then-switch',
-        temporaryErrorMaxWaitSeconds:
-          parsed['error-handling'] && typeof parsed['error-handling'] === 'object'
-            ? String(asRecord(parsed['error-handling'])?.['temporary-error-max-wait-seconds'] ?? 3)
-            : '3',
-        retryBeforeFirstOutputOnly: true,
-        transientErrorsKeepAccountActive:
-          parsed['error-handling'] && typeof parsed['error-handling'] === 'object'
-            ? asRecord(parsed['error-handling'])?.['transient-errors-keep-account-active'] !== false
-            : true,
         disableClaudeCloakMode: Boolean(parsed['disable-claude-cloak-mode']),
         disableImageGeneration: parseDisableImageGenerationMode(parsed['disable-image-generation']),
         gptImage2BaseModel:
@@ -1738,35 +1705,11 @@ export function useVisualConfig() {
             values.transientErrorCooldownSeconds
           );
         }
-        const errorHandlingDirty =
-          isDirty('temporaryErrorStrategy') ||
-          isDirty('temporaryErrorMaxWaitSeconds') ||
-          isDirty('retryBeforeFirstOutputOnly') ||
-          isDirty('transientErrorsKeepAccountActive');
-        if (errorHandlingDirty) {
-          ensureMapInDoc(doc, ['error-handling']);
-          if (isDirty('temporaryErrorStrategy')) {
-            doc.setIn(['error-handling', 'temporary-error-strategy'], values.temporaryErrorStrategy);
-          }
-          if (isDirty('temporaryErrorMaxWaitSeconds')) {
-            setIntFromStringInDoc(
-              doc,
-              ['error-handling', 'temporary-error-max-wait-seconds'],
-              values.temporaryErrorMaxWaitSeconds
-            );
-          }
-          // Retrying after output has started is intentionally always enabled.
-          // Keep the persisted value aligned with the runtime guard whenever
-          // this settings group is written, including legacy YAML that still
-          // contains `false`.
-          doc.setIn(['error-handling', 'retry-before-first-output-only'], true);
-          if (isDirty('transientErrorsKeepAccountActive')) {
-            doc.setIn(
-              ['error-handling', 'transient-errors-keep-account-active'],
-              values.transientErrorsKeepAccountActive
-            );
-          }
-          deleteIfMapEmpty(doc, ['error-handling']);
+        // Temporary network handling is code-owned. Drop the legacy YAML
+        // block when writing a visual configuration so old overrides do not
+        // linger in the source editor.
+        if (docHas(doc, ['error-handling'])) {
+          doc.deleteIn(['error-handling']);
         }
         if (isDirty('disableClaudeCloakMode')) {
           setBooleanInDoc(doc, ['disable-claude-cloak-mode'], values.disableClaudeCloakMode);

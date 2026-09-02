@@ -73,7 +73,6 @@ interface VisualConfigEditorProps {
   hasPayloadValidationErrors?: boolean;
   disabled?: boolean;
   apiKeysRefreshToken?: number;
-  configLastModified?: string | null;
   onChange: (values: Partial<VisualConfigValues>) => void;
 }
 
@@ -182,7 +181,6 @@ export function VisualConfigEditor({
   hasPayloadValidationErrors = false,
   disabled = false,
   apiKeysRefreshToken = 0,
-  configLastModified = null,
   onChange,
 }: VisualConfigEditorProps) {
   const { t } = useTranslation();
@@ -385,7 +383,6 @@ export function VisualConfigEditor({
           'requestRetry',
           'maxRetryCredentials',
           'maxRetryInterval',
-          'temporaryErrorMaxWaitSeconds',
           'authAutoRefreshWorkers',
         ]),
       },
@@ -1076,82 +1073,6 @@ export function VisualConfigEditor({
                   error={authAutoRefreshWorkersError}
                 />
               </SectionGrid>
-
-              <SectionSubsection
-                title={t('config_management.visual.sections.network.temporary_error_handling_title')}
-                description={t(
-                  'config_management.visual.sections.network.temporary_error_handling_description'
-                )}
-                >
-                <SectionGrid>
-                <FieldShell
-                  label={t('config_management.visual.sections.network.temporary_error_strategy')}
-                  hint={t(
-                    values.temporaryErrorStrategy === 'immediate-switch'
-                      ? 'config_management.visual.sections.network.temporary_error_strategy_immediate_hint'
-                      : values.temporaryErrorStrategy === 'no-switch'
-                        ? 'config_management.visual.sections.network.temporary_error_strategy_none_hint'
-                        : 'config_management.visual.sections.network.temporary_error_strategy_wait_hint'
-                  )}
-                >
-                  <Select
-                    value={values.temporaryErrorStrategy}
-                    options={[
-                      {
-                        value: 'wait-then-switch',
-                        label: t('config_management.visual.sections.network.temporary_error_strategy_wait'),
-                      },
-                      {
-                        value: 'immediate-switch',
-                        label: t('config_management.visual.sections.network.temporary_error_strategy_immediate'),
-                      },
-                      {
-                        value: 'no-switch',
-                        label: t('config_management.visual.sections.network.temporary_error_strategy_none'),
-                      },
-                    ]}
-                    onChange={(value) =>
-                      onChange({
-                        temporaryErrorStrategy: value as VisualConfigValues['temporaryErrorStrategy'],
-                      })
-                    }
-                    disabled={disabled}
-                  />
-                </FieldShell>
-                <Input
-                  label={t('config_management.visual.sections.network.temporary_error_max_wait_seconds')}
-                  type="number"
-                  min={0}
-                  max={3}
-                  value={values.temporaryErrorMaxWaitSeconds}
-                  onChange={(e) => onChange({ temporaryErrorMaxWaitSeconds: e.target.value })}
-                  disabled={disabled}
-                  hint={t('config_management.visual.sections.network.temporary_error_max_wait_seconds_hint')}
-                  error={getValidationMessage(t, validationErrors?.temporaryErrorMaxWaitSeconds)}
-                />
-                <ToggleRow
-                  title={t('config_management.visual.sections.network.retry_before_first_output_only')}
-                  description={t('config_management.visual.sections.network.retry_before_first_output_only_hint')}
-                  checked={values.retryBeforeFirstOutputOnly}
-                  onChange={(value) => onChange({ retryBeforeFirstOutputOnly: value })}
-                  disabled
-                />
-                <ToggleRow
-                  title={t('config_management.visual.sections.network.transient_errors_keep_account_active')}
-                  description={t('config_management.visual.sections.network.transient_errors_keep_account_active_hint')}
-                  checked={values.transientErrorsKeepAccountActive}
-                  onChange={(value) => onChange({ transientErrorsKeepAccountActive: value })}
-                  disabled={disabled}
-                />
-                </SectionGrid>
-                {configLastModified ? (
-                  <div className={styles.temporaryErrorUpdatedAt}>
-                    {t('config_management.visual.sections.network.temporary_error_updated_at', {
-                      time: new Date(configLastModified).toLocaleString(),
-                    })}
-                  </div>
-                ) : null}
-              </SectionSubsection>
 
               <SectionGrid>
                 <FieldShell

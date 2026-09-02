@@ -28,6 +28,7 @@ import { ModelPricesPage } from '@/pages/ModelPricesPage';
 import { ContainerOpsPage } from '@/pages/ContainerOpsPage';
 import { ConfigPage } from '@/pages/ConfigPage';
 import { LogsPage } from '@/pages/LogsPage';
+import { LicensePage } from '@/pages/LicensePage';
 import { PluginResourcePage } from '@/pages/PluginResourcePage';
 import { PluginsPage } from '@/pages/PluginsPage';
 import { SystemPage } from '@/pages/SystemPage';
@@ -289,6 +290,7 @@ const mainRoutes: RouteObject[] = [
     ),
   },
   { path: '/system', element: <SystemPage /> },
+  { path: '/license', element: <LicensePage /> },
   { path: '*', element: <Navigate to="/" replace /> },
 ];
 

@@ -15,7 +15,6 @@ export type VisualConfigFieldPath =
   | 'logsMaxTotalSizeMb'
   | 'redisUsageQueueRetentionSeconds'
   | 'transientErrorCooldownSeconds'
-  | 'temporaryErrorMaxWaitSeconds'
   | 'requestRetry'
   | 'maxRetryCredentials'
   | 'maxRetryInterval'
@@ -53,8 +52,7 @@ export type VisualConfigValidationErrorCode =
   | 'cache_affinity_preempt_percent_range'
   | 'cache_affinity_hard_stop_percent_range'
   | 'tail_burst_trigger_percent_range'
-  | 'tail_burst_collector_concurrency_range'
-  | 'temporary_error_wait_range';
+  | 'tail_burst_collector_concurrency_range';
 
 export type CodexClientRestrictionEntry = {
   id: string;
@@ -167,10 +165,6 @@ export type VisualConfigValues = {
   disableCooling: boolean;
   saveCooldownStatus: boolean;
   transientErrorCooldownSeconds: string;
-  temporaryErrorStrategy: 'wait-then-switch' | 'immediate-switch' | 'no-switch';
-  temporaryErrorMaxWaitSeconds: string;
-  retryBeforeFirstOutputOnly: boolean;
-  transientErrorsKeepAccountActive: boolean;
   disableClaudeCloakMode: boolean;
   disableImageGeneration: DisableImageGenerationMode;
   gptImage2BaseModel: string;
@@ -273,10 +267,6 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   disableCooling: false,
   saveCooldownStatus: false,
   transientErrorCooldownSeconds: '',
-  temporaryErrorStrategy: 'wait-then-switch',
-  temporaryErrorMaxWaitSeconds: '3',
-  retryBeforeFirstOutputOnly: true,
-  transientErrorsKeepAccountActive: true,
   disableClaudeCloakMode: false,
   disableImageGeneration: 'false',
   gptImage2BaseModel: '',
