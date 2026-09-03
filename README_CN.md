@@ -128,7 +128,7 @@ services:
   cli-proxy-api:
     image: ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.2
     restart: unless-stopped
-    command: ['./CLIProxyAPI', '-config', '/app/data/config.yaml']
+    command: ['./CLIProxyAPI', '-config', '/CLIProxyAPI/config.yaml']
     ports:
       - '8317:8317'
     environment:
@@ -137,9 +137,14 @@ services:
       CPA_LICENSE_CLIENT_ID: '${CPA_LICENSE_CLIENT_ID:-}'
       CPA_LICENSE_CLIENT_SECRET_FILE: '/run/secrets/cpa-license-client-secret'
       CPA_LICENSE_API_BASE_URL: 'https://p.666ttt.net/api/storefront'
-      CPA_LICENSE_STATE_DIR: '/app/data/license'
+      CPA_LICENSE_STATE_DIR: '/CLIProxyAPI/data/license'
     volumes:
-      - cpa-data:/app/data
+      # 该配置文件由安装器生成，手动部署时请先从固定版本模板创建。
+      - ./cliproxyapi/config.yaml:/CLIProxyAPI/config.yaml
+      - ./cliproxyapi/auths:/root/.cli-proxy-api
+      - ./cliproxyapi/logs:/CLIProxyAPI/logs
+      - ./cliproxyapi/data:/CLIProxyAPI/data
+      - ./cliproxyapi/data:/app/data
     secrets:
       - cpa_license_client_secret
 
@@ -164,6 +169,10 @@ secrets:
 再设置 `CPA_LICENSE_CLIENT_ID` 并把 secret 写入上述文件。首次启动的宽限时间由商城
 签名租约的 `grace_until` 控制，重启容器或修改本地 `CPA_LICENSE_GRACE_PERIOD` 不会
 重置或延长；正式授权到期后的过渡窗口也由商城签发。
+
+手动部署还要先创建 `cliproxyapi/config.yaml`（包含
+`remote-management.secret-key` 和 `license` 段）；推荐直接运行上面的安装器，它会
+自动生成该文件和目录。
 
 ```bash
 docker compose up -d
