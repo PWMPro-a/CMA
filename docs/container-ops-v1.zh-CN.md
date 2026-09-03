@@ -35,6 +35,8 @@ CPAMP 主服务不直接挂载 Docker socket。所有 Docker 操作通过 `cpamp
 - Stack 根目录：`/opt/cpamp/stacks/cpa`
 - 备份目录：`/opt/cpamp/backups`
 - NewAPI 推荐内网地址：`http://cli-proxy-api:8317/v1`
+- CPA 默认镜像：`ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.2`
+- CPAMP/Agent 默认镜像：`seakee/cpa-manager-plus:latest`
 
 ## Agent 安全模型
 
@@ -54,17 +56,17 @@ CPAMP 主服务不直接挂载 Docker socket。所有 Docker 操作通过 `cpamp
 | `GET /v0/management/container-ops/agent` | 检查 Agent 是否已配置和是否可达 |
 | `GET /v0/management/container-ops/discover` | 发现 CPA/CPAMP/NewAPI 相关容器、网络和数据目录 |
 | `POST /v0/management/container-ops/import` | 接管现有部署并生成 manifest/Compose 草案 |
-| `POST /v0/management/container-ops/deploy` | 生成标准 CPA 栈部署预案；`apply=true` 可由 Agent 写入部署文件、拉取标准镜像或受控启动标准服务 |
+| `POST /v0/management/container-ops/deploy` | 生成标准 CPA 栈部署预案；`apply=true` 可由 Agent 写入部署文件、拉取标准镜像或受控启动标准服务；`allowCustomImages=true` 才允许为已知角色显式使用自定义镜像 |
 | `POST /v0/management/container-ops/backup` | 创建 CPA 栈备份，归档 CPA `/app/data` 和可发现的 CPAMP `/data` |
 | `POST /v0/management/container-ops/restore` | 基于备份 ID 生成恢复预检；`apply=true` 由 Agent 创建回滚备份后受控执行恢复 |
 | `POST /v0/management/container-ops/network-standardize` | 基于备份 ID 预检或执行标准 CPA 网络创建与容器连接 |
 | `GET /v0/management/container-ops/audits` | 返回最近 CPA 生命周期写操作审计记录 |
 | `GET /v0/management/container-ops/upgrade-tasks` | 返回最近升级准备/后续异步升级任务状态 |
 | `POST /v0/management/container-ops/upgrade-tasks/start` | 启动已准备任务的异步升级 runner；Manager 会创建并轮询 Agent 持久化升级 job，当前只执行 CPA 容器重建，CPAMP/Agent 重建延后 |
-| `POST /v0/management/container-ops/upgrade` | 生成升级预检；`apply=true` 由 Agent 创建升级回滚备份并拉取标准镜像，容器重建延后到异步升级阶段 |
+| `POST /v0/management/container-ops/upgrade` | 生成升级预检；`apply=true` 由 Agent 创建升级回滚备份并拉取标准镜像，容器重建延后到异步升级阶段；空镜像字段会保留当前 CPA/CPAMP 镜像 |
 | `POST /v0/management/container-ops/rollback` | 基于回滚备份 ID 执行受控回滚 |
 
-当前实现先落地 `info`、`agent`、`discover`、`import` 预案、`deploy` 预案、`backup` 备份、`restore` 预检/执行、`rollback` 独立回滚、`network-standardize` 受控网络标准化、`upgrade` 安全准备接口、`upgrade-tasks` 升级任务历史和升级任务启动控制面。`discover` 通过 Agent 调用 Docker Engine API 汇总容器、网络和镜像；`import` 只生成候选容器、manifest、Compose 草案、风险清单和下一步动作，不修改 Docker 资源；`deploy` 面向干净新机生成标准 CPA/CPAMP/Agent Compose 草案和部署步骤，如果发现非标准或非托管的 CPA/CPAMP/Agent 容器或标准网络归属冲突，会阻断执行建议，已存在的标准 CPAMP 托管服务可由部署状态机复用；`deploy apply=true` 默认通过 Agent 将 `compose.yml`、`stack.manifest.json` 和 `.env.example` 写入 `CPAMP_STACK_ROOT`，`action=pull_images` 时只允许拉取 manifest 中标准 CPA/CPAMP/Agent 服务对应的镜像，`action=start_services` 要求 `compose.yml`、`stack.manifest.json` 和包含非占位密钥的 `.env` 均已就绪，然后只创建/复用标准网络、数据卷和 CPA/CPAMP/Agent 容器并按 CPA -> Agent -> CPAMP 顺序启动，最后只做运行状态健康检查；`backup` 通过 Docker archive API 只读导出 CPA `/app/data` 和可发现的 CPAMP `/data`，写入 Agent 的 `CPAMP_BACKUP_ROOT` 目录；`restore` 根据备份 ID 读取 `manifest.json`、校验归档文件、检查当前 CPA/CPAMP 目标容器，默认只返回预检和步骤，`apply=true` 时先创建 `rollback-cpa-*` 回滚备份，再按 CPAMP -> CPA 停止、CPA/CPAMP archive 恢复、CPA -> CPAMP 启动和运行状态健康检查执行受控恢复；`rollback` 要求传入已存在的回滚备份 ID，执行前再创建 `pre-rollback-cpa-*` 安全备份，然后复用同一条 CPA/CPAMP 受控归档应用流程；`network-standardize` 要求传入备份 ID，只允许创建标准 bridge 网络 `cpamp-cpa_default` 并将已识别的 CPA/CPAMP/Agent/NewAPI 容器连接到该网络，不提供任意容器、任意网络或删除能力；`upgrade` 默认只做预检，要求标准 `cpamp-cpa_default` 网络和 CPAMP 托管的 CPA/CPAMP 目标容器存在，且目标镜像只能来自 `seakee/cli-proxy-api` 和 `seakee/cpa-manager-plus` 仓库，`apply=true` 时先创建 `upgrade-cpa-*` 回滚备份，再拉取允许的升级镜像，并把同步容器重建标记为已跳过；`upgrade-tasks/start` 会把已准备任务推进到 `running`，创建 Agent 持久化升级 job，并轮询 job 直到 `completed/blocked/failed`。当前 Agent job 只重建标准 CPA 容器：先校验回滚备份，再停止旧 CPA、改名保留旧容器、创建并启动新版 `cli-proxy-api`，健康检查失败时尝试把旧容器改回并启动；CPAMP/Agent 自身重建仍延后。
+当前实现先落地 `info`、`agent`、`discover`、`import` 预案、`deploy` 预案、`backup` 备份、`restore` 预检/执行、`rollback` 独立回滚、`network-standardize` 受控网络标准化、`upgrade` 安全准备接口、`upgrade-tasks` 升级任务历史和升级任务启动控制面。`discover` 通过 Agent 调用 Docker Engine API 汇总容器、网络和镜像；`import` 只生成候选容器、manifest、Compose 草案、风险清单和下一步动作，不修改 Docker 资源；`deploy` 面向干净新机生成标准 CPA/CPAMP/Agent Compose 草案和部署步骤，如果发现非标准或非托管的 CPA/CPAMP/Agent 容器或标准网络归属冲突，会阻断执行建议，已存在的标准 CPAMP 托管服务可由部署状态机复用；`deploy apply=true` 默认通过 Agent 将 `compose.yml`、`stack.manifest.json`、`.env.example`、CPA `config.yaml` 和 Secret 占位文件写入 `CPAMP_STACK_ROOT`，`action=pull_images` 时只允许拉取 manifest 中已知角色对应的镜像（CPA 默认使用固定 GHCR 发布标签，旧 CPA 仓库仅为存量部署兼容保留；自定义仓库必须显式传入 `allowCustomImages=true`），`action=start_services` 要求 `compose.yml`、`stack.manifest.json` 和包含非占位密钥的 `.env` 均已就绪，然后只创建/复用标准网络、数据卷和 CPA/CPAMP/Agent 容器并按 CPA -> Agent -> CPAMP 顺序启动，首次启动会在 `/app/data` 卷中种入配置且不会覆盖已有配置，最后只做运行状态健康检查；`backup` 通过 Docker archive API 只读导出 CPA `/app/data` 和可发现的 CPAMP `/data`，写入 Agent 的 `CPAMP_BACKUP_ROOT` 目录；`restore` 根据备份 ID 读取 `manifest.json`、校验归档文件、检查当前 CPA/CPAMP 目标容器，默认只返回预检和步骤，`apply=true` 时先创建 `rollback-cpa-*` 回滚备份，再按 CPAMP -> CPA 停止、CPA/CPAMP archive 恢复、CPA -> CPAMP 启动和运行状态健康检查执行受控恢复；`rollback` 要求传入已存在的回滚备份 ID，执行前再创建 `pre-rollback-cpa-*` 安全备份，然后复用同一条 CPA/CPAMP 受控归档应用流程；`network-standardize` 要求传入备份 ID，只允许创建标准 bridge 网络 `cpamp-cpa_default` 并将已识别的 CPA/CPAMP/Agent/NewAPI 容器连接到该网络，不提供任意容器、任意网络或删除能力；`upgrade` 默认只做预检，要求标准 `cpamp-cpa_default` 网络和 CPAMP 托管的 CPA/CPAMP 目标容器存在，空镜像字段保留当前运行镜像，目标镜像通过同一白名单校验，自定义仓库必须显式传入 `allowCustomImages=true`；`apply=true` 时先创建 `upgrade-cpa-*` 回滚备份，再拉取允许的升级镜像，并把同步容器重建标记为已跳过；`upgrade-tasks/start` 会把已准备任务推进到 `running`，创建 Agent 持久化升级 job，并轮询 job 直到 `completed/blocked/failed`。当前 Agent job 只重建标准 CPA 容器：先校验回滚备份，再停止旧 CPA、改名保留旧容器、创建并启动新版 `cli-proxy-api`，健康检查失败时尝试把旧容器改回并启动；CPAMP/Agent 自身重建仍延后。
 
 Manager Server 镜像同时包含 `cpa-manager-plus` 和 `cpamp-agent` 两个二进制，Compose 草案中的 Agent 服务通过同一镜像执行 `cpamp-agent` 命令启动。
 
@@ -97,8 +99,8 @@ Manager Server 会把 `upgrade apply=true` 创建为持久化升级任务，写�
 
 当前已开放的写操作都必须由 Agent 执行，且不属于破坏性操作：
 
-- 部署文件渲染：`deploy apply=true` 只允许在 `CPAMP_STACK_ROOT` 下写入固定文件名的 `compose.yml`、`stack.manifest.json` 和 `.env.example`，不拉镜像、不启动容器、不覆盖任意路径。
-- 部署镜像拉取：`deploy apply=true action=pull_images` 只允许拉取标准 CPA/CPAMP/Agent manifest 中的 `seakee/cli-proxy-api` 和 `seakee/cpa-manager-plus` 镜像，不创建网络、卷或容器。
+- 部署文件渲染：`deploy apply=true` 只允许在 `CPAMP_STACK_ROOT` 下写入固定文件名的 `compose.yml`、`stack.manifest.json`、`.env.example`、`cliproxyapi/config.yaml` 和 Secret 占位文件，不拉镜像、不启动容器、不覆盖已有 CPA 配置或授权状态。
+- 部署镜像拉取：`deploy apply=true action=pull_images` 只允许拉取标准 CPA/CPAMP/Agent manifest 中的已知角色镜像；CPA 默认是 `ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.2`，存量 `seakee/cli-proxy-api` 仍可升级，其他仓库必须显式启用 `allowCustomImages`，不创建网络、卷或容器。
 - 部署服务启动：`deploy apply=true action=start_services` 必须先存在部署文件和 `.env`，且 `.env` 中 `CPA_MANAGER_ADMIN_KEY`、`CPA_MANAGEMENT_KEY`、`CPAMP_AGENT_TOKEN` 不得为空或占位；Agent 只允许创建标准 `cpamp-cpa_default` 网络、标准数据卷和标准 CPA/CPAMP/Agent 容器，不提供任意镜像、任意容器名或任意挂载入口。
 - 恢复预检：`restore` 默认只读取备份 manifest、校验 archive 文件、检查 CPA/CPAMP 目标容器，并返回恢复步骤，不执行 Docker 写操作。
 - 恢复执行：`restore apply=true` 必须先通过恢复预检；Agent 会先创建新的 `rollback-cpa-*` 备份，回滚备份失败则不继续；随后只允许停止/恢复/启动已识别的 CPA 与可选 CPAMP 目标容器，不恢复 Agent，不修改 NewAPI 数据，不接受任意 archive 路径或任意容器名。
