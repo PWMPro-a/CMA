@@ -12,8 +12,35 @@ services:
       com.cpamp.stack: "cpa"
       com.cpamp.role: "cpa"
     network_mode: host
+    environment:
+      TZ: "Asia/Shanghai"
+      CPA_LICENSE_PROVIDER: "${CPA_LICENSE_PROVIDER:-shop666}"
+      CPA_LICENSE_PRODUCT_CODE: "${CPA_LICENSE_PRODUCT_CODE:-CPA}"
+      CPA_LICENSE_PUBLIC_KEY: "${CPA_LICENSE_PUBLIC_KEY:?set CPA_LICENSE_PUBLIC_KEY}"
+      CPA_LICENSE_PLUGIN_PUBLIC_KEY: "${CPA_LICENSE_PLUGIN_PUBLIC_KEY:-}"
+      CPA_LICENSE_CLIENT_ID: "${CPA_LICENSE_CLIENT_ID:-}"
+      CPA_LICENSE_CLIENT_SECRET: "${CPA_LICENSE_CLIENT_SECRET:-}"
+      # The CPA process always reads the stable in-container path. Set
+      # CPA_LICENSE_CLIENT_SECRET_HOST_PATH to a host secret file when using a
+      # client credential; the legacy *_FILE name is also accepted. /dev/null
+      # keeps this optional for key-only setups.
+      CPA_LICENSE_CLIENT_SECRET_FILE: "/run/secrets/cpa-license-client-secret"
+      CPA_LICENSE_API_BASE_URL: "${CPA_LICENSE_API_BASE_URL:-https://p.666ttt.net/api/storefront}"
+      CPA_LICENSE_GRACE_PATH: "${CPA_LICENSE_GRACE_PATH:-/licenses/grace}"
+      CPA_LICENSE_REFRESH_INTERVAL: "${CPA_LICENSE_REFRESH_INTERVAL:-10m}"
+      CPA_LICENSE_GRACE_PERIOD: "${CPA_LICENSE_GRACE_PERIOD:-6h}"
+      CPA_LICENSE_STATE_DIR: "${CPA_LICENSE_STATE_DIR:-/CLIProxyAPI/data/license}"
+      CPA_LICENSE_SHOP_AUTH_URL: "${CPA_LICENSE_SHOP_AUTH_URL:-https://p.666ttt.net/shop/?authorize=cpa}"
+      CPA_LICENSE_SHOP_EXCHANGE_PATH: "${CPA_LICENSE_SHOP_EXCHANGE_PATH:-/licenses/exchange}"
+      CPA_LICENSE_ACTIVATE_PATH: "${CPA_LICENSE_ACTIVATE_PATH:-/licenses/activate}"
+      CPA_LICENSE_REFRESH_PATH: "${CPA_LICENSE_REFRESH_PATH:-/licenses/refresh}"
+      CPA_LICENSE_VERIFY_PATH: "${CPA_LICENSE_VERIFY_PATH:-/licenses/verify}"
+      CPA_LICENSE_STORAGE_KEY: "${CPA_LICENSE_STORAGE_KEY:-}"
+      CPA_LICENSE_EXECUTABLE_SHA256: "${CPA_LICENSE_EXECUTABLE_SHA256:-}"
+      CPA_LICENSE_CLAIM_PATH: "${CPA_LICENSE_CLAIM_PATH:-}"
     volumes:
       - /opt/cpamp/data/cpa:/app/data
+      - ${CPA_LICENSE_CLIENT_SECRET_HOST_PATH:-${CPA_LICENSE_CLIENT_SECRET_FILE:-/dev/null}}:/run/secrets/cpa-license-client-secret:ro
     healthcheck:
       test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8317'"]
       interval: 10s

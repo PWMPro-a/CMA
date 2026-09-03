@@ -3,6 +3,9 @@ package containeropsagent
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -183,7 +186,7 @@ func readDeployEnv(root string) (map[string]string, []model.ContainerOpsDeployCh
 			values[key] = value
 		}
 	}
-	checks := make([]model.ContainerOpsDeployCheck, 0, 4)
+	checks := make([]model.ContainerOpsDeployCheck, 0, 8)
 	if err := scanner.Err(); err != nil {
 		checks = append(checks, deployAgentCheck("error", "deploy_env_unreadable", "Deploy .env could not be read.", envPath, true))
 		return values, checks
@@ -191,14 +194,85 @@ func readDeployEnv(root string) (map[string]string, []model.ContainerOpsDeployCh
 	required := []string{"CPA_MANAGER_ADMIN_KEY", "CPA_MANAGEMENT_KEY", "CPAMP_AGENT_TOKEN"}
 	for _, key := range required {
 		value := strings.TrimSpace(values[key])
-		if value == "" || strings.HasPrefix(value, "replace-with") || strings.Contains(value, "?set ") {
+		if deployEnvValueMissing(value) {
 			checks = append(checks, deployAgentCheck("error", "deploy_env_secret_missing", fmt.Sprintf("%s must be set in deploy .env before services can be started.", key), key, true))
 		}
 	}
+	// CPA-CLI verifies signed licenses and server-issued grace leases with the
+	// publisher public key. Keep this value in the deployment .env so the
+	// agent can inject it into the CPA container without placing it in a
+	// manifest or API response.
+	if deployEnvValueMissing(values["CPA_LICENSE_PUBLIC_KEY"]) {
+		checks = append(checks, deployAgentCheck("error", "deploy_env_license_public_key_missing", "CPA_LICENSE_PUBLIC_KEY must be set to the storefront Ed25519 public key before CPA can start.", "CPA_LICENSE_PUBLIC_KEY", true))
+	} else if !validDeployLicensePublicKey(values["CPA_LICENSE_PUBLIC_KEY"]) {
+		checks = append(checks, deployAgentCheck("error", "deploy_env_license_public_key_invalid", "CPA_LICENSE_PUBLIC_KEY must be a base64/base64url or hex Ed25519 public key (32 decoded bytes).", "CPA_LICENSE_PUBLIC_KEY", true))
+	}
+	if value := strings.TrimSpace(values["CPA_LICENSE_PLUGIN_PUBLIC_KEY"]); value != "" && deployEnvValueMissing(value) {
+		checks = append(checks, deployAgentCheck("error", "deploy_env_license_plugin_public_key_invalid", "CPA_LICENSE_PLUGIN_PUBLIC_KEY is configured but still contains a placeholder.", "CPA_LICENSE_PLUGIN_PUBLIC_KEY", true))
+	}
+	if value := strings.TrimSpace(values["CPA_LICENSE_CLIENT_SECRET"]); value != "" && deployEnvValueMissing(value) {
+		checks = append(checks, deployAgentCheck("error", "deploy_env_license_client_secret_invalid", "CPA_LICENSE_CLIENT_SECRET is configured but still contains a placeholder.", "CPA_LICENSE_CLIENT_SECRET", true))
+	}
+	secretFileKey := "CPA_LICENSE_CLIENT_SECRET_HOST_PATH"
+	secretFile := strings.TrimSpace(values[secretFileKey])
+	if secretFile == "" {
+		// Keep accepting the original variable name for existing stacks. New
+		// compose drafts use *_HOST_PATH to distinguish it from the stable
+		// in-container file path.
+		secretFileKey = "CPA_LICENSE_CLIENT_SECRET_FILE"
+		secretFile = strings.TrimSpace(values[secretFileKey])
+	}
+	if secretFile != "" {
+		if deployEnvValueMissing(secretFile) {
+			checks = append(checks, deployAgentCheck("error", "deploy_env_license_client_secret_file_invalid", fmt.Sprintf("%s is configured but still contains a placeholder.", secretFileKey), secretFileKey, true))
+		} else {
+			resolvedSecretFile := secretFile
+			if !filepath.IsAbs(resolvedSecretFile) {
+				resolvedSecretFile = filepath.Join(root, strings.TrimPrefix(resolvedSecretFile, "./"))
+			}
+			if info, err := os.Stat(resolvedSecretFile); err != nil || info.IsDir() {
+				checks = append(checks, deployAgentCheck("error", "deploy_env_license_client_secret_file_missing", fmt.Sprintf("%s must point to a readable host file before CPA can start.", secretFileKey), resolvedSecretFile, true))
+			} else {
+				values["CPA_LICENSE_CLIENT_SECRET_HOST_PATH"] = resolvedSecretFile
+				values["CPA_LICENSE_CLIENT_SECRET_FILE"] = resolvedSecretFile
+			}
+		}
+	}
 	if len(checks) == 0 {
-		checks = append(checks, deployAgentCheck("info", "deploy_env_ready", "Deploy .env contains the required CPA and Agent secrets.", envPath, false))
+		checks = append(checks, deployAgentCheck("info", "deploy_env_ready", "Deploy .env contains the required CPA, license, and Agent settings.", envPath, false))
 	}
 	return values, checks
+}
+
+func deployEnvValueMissing(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.Contains(value, "?set ") {
+		return true
+	}
+	lower := strings.ToLower(value)
+	return strings.HasPrefix(lower, "replace-with") || strings.HasPrefix(lower, "changeme")
+}
+
+func validDeployLicensePublicKey(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	for _, decoder := range []*base64.Encoding{
+		base64.RawURLEncoding,
+		base64.URLEncoding,
+		base64.RawStdEncoding,
+		base64.StdEncoding,
+	} {
+		decoded, err := decoder.DecodeString(value)
+		if err == nil && len(decoded) == ed25519.PublicKeySize {
+			return true
+		}
+	}
+	if decoded, err := hex.DecodeString(strings.TrimPrefix(value, "0x")); err == nil && len(decoded) == ed25519.PublicKeySize {
+		return true
+	}
+	return false
 }
 
 func validateDeployStartOverview(overview model.ContainerOpsDockerOverview, manifest model.ContainerOpsStackManifest) []model.ContainerOpsDeployCheck {
@@ -225,12 +299,15 @@ func validateDeployStartOverview(overview model.ContainerOpsDockerOverview, mani
 
 func deployStartSpecs(manifest model.ContainerOpsStackManifest, env map[string]string, stackRoot string, backupRoot string) []deployServiceSpec {
 	networkBaseURL := strings.TrimSuffix(manifest.NewAPIBaseURL, "/v1")
+	cpaLicenseEnv, cpaLicenseBinds := deployCPALicenseEnv(env)
 	return []deployServiceSpec{
 		{
 			Role:         "cpa",
 			Name:         "cli-proxy-api",
 			Image:        deployManifestImage(manifest, "cpa"),
+			Env:          cpaLicenseEnv,
 			VolumeMounts: map[string]string{deployVolumeName(manifest.ComposeProject, "cpa-data"): "/app/data"},
+			Binds:        cpaLicenseBinds,
 			HostNetwork:  true,
 			StartOrder:   1,
 		},
@@ -275,6 +352,62 @@ func deployStartSpecs(manifest model.ContainerOpsStackManifest, env map[string]s
 			StartOrder:  2,
 		},
 	}
+}
+
+// deployCPALicenseEnv maps deployment-only values into the CPA container.
+// The public key is required; optional client credentials and endpoint
+// overrides are included only when present. A host secret file is mounted at
+// a stable container path so the CPA process can read it without exposing its
+// contents in a compose draft or stack manifest.
+func deployCPALicenseEnv(env map[string]string) ([]string, []string) {
+	valueOr := func(key string, fallback string) string {
+		if value := strings.TrimSpace(env[key]); value != "" {
+			return value
+		}
+		return fallback
+	}
+	result := []string{
+		"CPA_LICENSE_PROVIDER=" + valueOr("CPA_LICENSE_PROVIDER", "shop666"),
+		"CPA_LICENSE_PRODUCT_CODE=" + valueOr("CPA_LICENSE_PRODUCT_CODE", "CPA"),
+		"CPA_LICENSE_PUBLIC_KEY=" + strings.TrimSpace(env["CPA_LICENSE_PUBLIC_KEY"]),
+		"CPA_LICENSE_CLIENT_SECRET_FILE=/run/secrets/cpa-license-client-secret",
+	}
+	for _, item := range []struct {
+		key      string
+		fallback string
+	}{
+		{"CPA_LICENSE_PLUGIN_PUBLIC_KEY", ""},
+		{"CPA_LICENSE_CLIENT_ID", ""},
+		{"CPA_LICENSE_API_BASE_URL", "https://p.666ttt.net/api/storefront"},
+		{"CPA_LICENSE_CLIENT_SECRET", ""},
+		{"CPA_LICENSE_STATE_DIR", "/CLIProxyAPI/data/license"},
+		{"CPA_LICENSE_SHOP_AUTH_URL", "https://p.666ttt.net/shop/?authorize=cpa"},
+		{"CPA_LICENSE_SHOP_EXCHANGE_PATH", "/licenses/exchange"},
+		{"CPA_LICENSE_ACTIVATE_PATH", "/licenses/activate"},
+		{"CPA_LICENSE_REFRESH_PATH", "/licenses/refresh"},
+		{"CPA_LICENSE_VERIFY_PATH", "/licenses/verify"},
+		{"CPA_LICENSE_GRACE_PATH", "/licenses/grace"},
+		{"CPA_LICENSE_REFRESH_INTERVAL", "10m"},
+		{"CPA_LICENSE_GRACE_PERIOD", "6h"},
+		{"CPA_LICENSE_STORAGE_KEY", ""},
+		{"CPA_LICENSE_EXECUTABLE_SHA256", ""},
+		{"CPA_LICENSE_CLAIM_PATH", ""},
+	} {
+		result = append(result, item.key+"="+valueOr(item.key, item.fallback))
+	}
+	binds := make([]string, 0, 1)
+	secretFile := strings.TrimSpace(env["CPA_LICENSE_CLIENT_SECRET_HOST_PATH"])
+	if secretFile == "" {
+		secretFile = strings.TrimSpace(env["CPA_LICENSE_CLIENT_SECRET_FILE"])
+	}
+	if secretFile != "" {
+		binds = append(binds, secretFile+":/run/secrets/cpa-license-client-secret:ro")
+	} else {
+		// Keep the optional file readable inside the container without making
+		// key-only installations depend on a host secret.
+		binds = append(binds, "/dev/null:/run/secrets/cpa-license-client-secret:ro")
+	}
+	return result, binds
 }
 
 func (c *DockerClient) applyDeployStart(ctx context.Context, result *DeployStartResult, overview model.ContainerOpsDockerOverview, specs []deployServiceSpec) error {

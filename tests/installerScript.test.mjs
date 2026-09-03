@@ -537,6 +537,7 @@ describe('installer script', () => {
           CPAMP_INSTALL_MODE: 'stack',
           CPAMP_DEPLOY_METHOD: 'docker',
           CPAMP_INSTALL_DIR: installDir,
+          CPA_LICENSE_PUBLIC_KEY: 'MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE',
           FAKE_DOCKER_DAEMON_OK: '0',
           PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
         },

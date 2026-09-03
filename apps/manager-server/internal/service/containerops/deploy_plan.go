@@ -222,6 +222,7 @@ func buildDeployComposeDraft(resources model.ContainerOpsStandardResource, newAP
 	line("    restart: unless-stopped")
 	line("    network_mode: host")
 	writeComposeLabels(&builder, roleCPA)
+	writeCPALicenseEnvironment(&builder)
 	line("    volumes:")
 	line("      - %s", quoteYAML("cpa-data:/app/data"))
 	line("")
@@ -281,6 +282,10 @@ func buildDeployComposeDraft(resources model.ContainerOpsStandardResource, newAP
 	line("volumes:")
 	line("  cpa-data:")
 	line("  cpa-manager-plus-data:")
+	line("")
+	line("secrets:")
+	line("  cpa_license_client_secret:")
+	line("    file: %s", quoteYAML("${CPA_LICENSE_CLIENT_SECRET_HOST_PATH:-${CPA_LICENSE_CLIENT_SECRET_FILE:-/dev/null}}"))
 
 	return model.ContainerOpsComposeDraft{
 		FileName:    "compose.deploy-preview.yml",
@@ -289,6 +294,27 @@ func buildDeployComposeDraft(resources model.ContainerOpsStandardResource, newAP
 		Services:    []string{resources.CPAService, resources.CPAMPService, resources.AgentService},
 		Content:     strings.TrimSpace(builder.String()) + "\n",
 	}
+}
+
+// writeCPALicenseEnvironment writes only Compose interpolation expressions.
+// Actual license material is supplied through the deployment .env at runtime;
+// it must never be embedded in a deploy plan or manifest response.
+func writeCPALicenseEnvironment(builder *strings.Builder) {
+	line := func(format string, args ...any) {
+		builder.WriteString(fmt.Sprintf(format, args...))
+		builder.WriteByte('\n')
+	}
+	line("    environment:")
+	line("      CPA_LICENSE_PUBLIC_KEY: %s", quoteYAML("${CPA_LICENSE_PUBLIC_KEY:?set CPA_LICENSE_PUBLIC_KEY}"))
+	line("      CPA_LICENSE_PLUGIN_PUBLIC_KEY: %s", quoteYAML("${CPA_LICENSE_PLUGIN_PUBLIC_KEY:-}"))
+	line("      CPA_LICENSE_CLIENT_ID: %s", quoteYAML("${CPA_LICENSE_CLIENT_ID:-}"))
+	line("      CPA_LICENSE_CLIENT_SECRET: %s", quoteYAML("${CPA_LICENSE_CLIENT_SECRET:-}"))
+	line("      CPA_LICENSE_CLIENT_SECRET_FILE: %s", quoteYAML("/run/secrets/cpa-license-client-secret"))
+	line("      CPA_LICENSE_API_BASE_URL: %s", quoteYAML("${CPA_LICENSE_API_BASE_URL:-https://p.666ttt.net/api/storefront}"))
+	line("      CPA_LICENSE_GRACE_PATH: %s", quoteYAML("${CPA_LICENSE_GRACE_PATH:-/licenses/grace}"))
+	line("      CPA_LICENSE_GRACE_PERIOD: %s", quoteYAML("${CPA_LICENSE_GRACE_PERIOD:-6h}"))
+	line("    secrets:")
+	line("      - cpa_license_client_secret")
 }
 
 func buildDeploySteps(resources model.ContainerOpsStandardResource, newAPI model.ContainerOpsNewAPIInfo) []model.ContainerOpsDeployStep {

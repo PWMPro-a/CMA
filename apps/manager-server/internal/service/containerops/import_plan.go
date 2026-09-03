@@ -342,6 +342,7 @@ func buildComposeDraft(
 	line("    container_name: %s", resources.CPAService)
 	line("    restart: unless-stopped")
 	writeComposeLabels(&builder, roleCPA)
+	writeCPALicenseEnvironment(&builder)
 	line("    networks:")
 	line("      - %s", resources.Network)
 	line("    ports:")
@@ -409,6 +410,10 @@ func buildComposeDraft(
 		line("    external: true")
 	}
 	line("  cpa-manager-plus-data:")
+	line("")
+	line("secrets:")
+	line("  cpa_license_client_secret:")
+	line("    file: %s", quoteYAML("${CPA_LICENSE_CLIENT_SECRET_HOST_PATH:-${CPA_LICENSE_CLIENT_SECRET_FILE:-/dev/null}}"))
 
 	return model.ContainerOpsComposeDraft{
 		FileName:    "compose.import-preview.yml",

@@ -455,6 +455,16 @@ func (c *DockerClient) RecreateCPAUpgrade(ctx context.Context, options UpgradeOp
 		return upgradeRecreateBlocked(plan, "recreate_cpa_container", "CPA container must have a writable /app/data volume or bind mount before recreate."), nil
 	}
 
+	// Docker's list endpoint omits Config.Env. Inspect the existing CPA
+	// container so license settings (and other deployment environment values)
+	// survive the recreate. Keep the diagnostic generic; environment values can
+	// contain secrets and must never be written to upgrade actions or logs.
+	preservedEnv, inspectErr := c.inspectContainerEnv(ctx, cpa.ID)
+	if inspectErr != nil {
+		return upgradeRecreateBlocked(plan, "preserve_cpa_environment", "Existing CPA environment could not be inspected; recreate is blocked to avoid dropping license settings."), nil
+	}
+	upgradeMarkAction(plan.Actions, "preserve_cpa_environment", "applied", "Existing CPA environment was copied to the replacement container.")
+
 	wasRunning := cpa.State == "running"
 	if wasRunning {
 		if err := c.stopUpgradeContainer(ctx, cpa.Name); err != nil {
@@ -476,6 +486,7 @@ func (c *DockerClient) RecreateCPAUpgrade(ctx context.Context, options UpgradeOp
 	upgradeMarkAction(plan.Actions, "preserve_old_cpa_container", "applied", "Old CPA container was renamed and preserved for rollback.")
 
 	spec := upgradeCPAServiceSpec(request.CPAImage, cpa)
+	spec.Env = preservedEnv
 	if err := c.createDeployContainer(ctx, spec); err != nil {
 		rollbackMessage := c.rollbackCPARecreate(ctx, preservedName, false, wasRunning, now)
 		return upgradeRecreateFailure(plan, "recreate_cpa_container", "Create upgraded CPA container failed: "+err.Error()+rollbackMessage, true), nil
@@ -705,12 +716,13 @@ func buildUpgradeActions() []model.ContainerOpsUpgradeAction {
 func buildUpgradeRecreateActions() []model.ContainerOpsUpgradeAction {
 	return []model.ContainerOpsUpgradeAction{
 		{Order: 1, Code: "verify_rollback_backup", Target: "rollback", Status: "planned", Message: "Verify the upgrade rollback backup before any container change."},
-		{Order: 2, Code: "stop_cpa_container", Target: "cli-proxy-api", Status: "planned", Message: "Stop the current CPA container."},
-		{Order: 3, Code: "preserve_old_cpa_container", Target: "cli-proxy-api", Status: "planned", Message: "Rename and preserve the old CPA container for rollback."},
-		{Order: 4, Code: "recreate_cpa_container", Target: "cli-proxy-api", Status: "planned", Message: "Create the CPA container with the prepared image."},
-		{Order: 5, Code: "start_cpa_container", Target: "cli-proxy-api", Status: "planned", Message: "Start the upgraded CPA container."},
-		{Order: 6, Code: "healthcheck_after_recreate", Target: "cli-proxy-api", Status: "planned", Message: "Verify the upgraded CPA container is running."},
-		{Order: 7, Code: "recreate_cpamp_container", Target: "cpa-manager-plus", Status: "planned", Message: "Recreate CPAMP in a later phase."},
+		{Order: 2, Code: "preserve_cpa_environment", Target: "cli-proxy-api", Status: "planned", Message: "Inspect and preserve the current CPA environment before recreate."},
+		{Order: 3, Code: "stop_cpa_container", Target: "cli-proxy-api", Status: "planned", Message: "Stop the current CPA container."},
+		{Order: 4, Code: "preserve_old_cpa_container", Target: "cli-proxy-api", Status: "planned", Message: "Rename and preserve the old CPA container for rollback."},
+		{Order: 5, Code: "recreate_cpa_container", Target: "cli-proxy-api", Status: "planned", Message: "Create the CPA container with the prepared image."},
+		{Order: 6, Code: "start_cpa_container", Target: "cli-proxy-api", Status: "planned", Message: "Start the upgraded CPA container."},
+		{Order: 7, Code: "healthcheck_after_recreate", Target: "cli-proxy-api", Status: "planned", Message: "Verify the upgraded CPA container is running."},
+		{Order: 8, Code: "recreate_cpamp_container", Target: "cpa-manager-plus", Status: "planned", Message: "Recreate CPAMP in a later phase."},
 	}
 }
 

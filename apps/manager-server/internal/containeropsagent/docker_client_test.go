@@ -811,6 +811,11 @@ func TestRecreateCPAUpgradeRecreatesCPAOnlyWithRollbackBackup(t *testing.T) {
 				return backupJSONResponse(http.StatusOK, []dockerNetwork{{Name: standardCPANetworkName, Driver: "bridge", Labels: map[string]string{"com.cpamp.managed": "true"}}})
 			case "/images/json":
 				return backupJSONResponse(http.StatusOK, []dockerImage{})
+			case "/containers/old-cpa-full/json":
+				return backupJSONResponse(http.StatusOK, map[string]any{"Config": map[string]any{"Env": []string{
+					"CPA_LICENSE_PUBLIC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+					"CPA_LICENSE_GRACE_PERIOD=6h",
+				}}})
 			case "/containers/cli-proxy-api/stop":
 				if req.Method != http.MethodPost {
 					t.Fatalf("stop method = %s", req.Method)
@@ -833,6 +838,7 @@ func TestRecreateCPAUpgradeRecreatesCPAOnlyWithRollbackBackup(t *testing.T) {
 				var payload struct {
 					Image      string            `json:"Image"`
 					Labels     map[string]string `json:"Labels"`
+					Env        []string          `json:"Env"`
 					HostConfig struct {
 						Mounts []struct {
 							Type   string `json:"Type"`
@@ -852,7 +858,9 @@ func TestRecreateCPAUpgradeRecreatesCPAOnlyWithRollbackBackup(t *testing.T) {
 				}
 				if payload.Image != "seakee/cli-proxy-api:v2" ||
 					payload.Labels["com.cpamp.role"] != "cpa" ||
-					!hasCPAMount {
+					!hasCPAMount ||
+					!containsString(payload.Env, "CPA_LICENSE_PUBLIC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") ||
+					!containsString(payload.Env, "CPA_LICENSE_GRACE_PERIOD=6h") {
 					t.Fatalf("create payload = %#v", payload)
 				}
 				createdNew = true
@@ -1244,7 +1252,11 @@ func TestStartCPADeployServicesCreatesAndStartsStandardStack(t *testing.T) {
 				case "cli-proxy-api":
 					if payload.Labels["com.cpamp.role"] != "cpa" ||
 						payload.Image != "seakee/cli-proxy-api:latest" ||
-						payload.HostConfig.NetworkMode != "host" {
+						payload.HostConfig.NetworkMode != "host" ||
+						!containsString(payload.Env, "CPA_LICENSE_PUBLIC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") ||
+						!containsString(payload.Env, "CPA_LICENSE_GRACE_PERIOD=6h") ||
+						!containsString(payload.Env, "CPA_LICENSE_CLIENT_SECRET_FILE=/run/secrets/cpa-license-client-secret") ||
+						!containsString(payload.HostConfig.Binds, filepath.Join(stackRoot, "license-client-secret")+":/run/secrets/cpa-license-client-secret:ro") {
 						t.Fatalf("cpa payload = %#v", payload)
 					}
 				case "cpa-manager-plus":
@@ -1445,10 +1457,17 @@ func writeDeployStartStackFiles(t *testing.T, stackRoot string) {
 
 func writeDeployStartEnv(t *testing.T, stackRoot string) {
 	t.Helper()
+	licenseSecretPath := filepath.Join(stackRoot, "license-client-secret")
+	if err := os.WriteFile(licenseSecretPath, []byte("client-secret\n"), 0o600); err != nil {
+		t.Fatalf("write license secret: %v", err)
+	}
 	data := strings.Join([]string{
 		"CPA_MANAGER_ADMIN_KEY=admin-secret",
 		"CPA_MANAGEMENT_KEY=management-secret",
 		"CPAMP_AGENT_TOKEN=agent-token",
+		"CPA_LICENSE_PUBLIC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		"CPA_LICENSE_GRACE_PERIOD=6h",
+		"CPA_LICENSE_CLIENT_SECRET_HOST_PATH=license-client-secret",
 		"",
 	}, "\n")
 	if err := os.WriteFile(filepath.Join(stackRoot, ".env"), []byte(data), 0o640); err != nil {

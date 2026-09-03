@@ -93,6 +93,24 @@ func (c *DockerClient) get(ctx context.Context, path string, target any) error {
 	return nil
 }
 
+// inspectContainerEnv reads the environment from Docker's inspect endpoint.
+// The /containers/json list endpoint does not include Config.Env, so upgrade
+// flows use this helper before recreating a CPA container.
+func (c *DockerClient) inspectContainerEnv(ctx context.Context, id string) ([]string, error) {
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("container id is empty")
+	}
+	var inspected struct {
+		Config struct {
+			Env []string `json:"Env"`
+		} `json:"Config"`
+	}
+	if err := c.get(ctx, "/containers/"+url.PathEscape(id)+"/json", &inspected); err != nil {
+		return nil, err
+	}
+	return append([]string(nil), inspected.Config.Env...), nil
+}
+
 func (c *DockerClient) post(ctx context.Context, path string, body any, target any) error {
 	var payload bytes.Buffer
 	if body != nil {

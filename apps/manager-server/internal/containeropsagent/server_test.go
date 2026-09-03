@@ -1,6 +1,8 @@
 package containeropsagent
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +14,34 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
+
+func TestValidDeployLicensePublicKeyMatchesCPARuntimeFormats(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef")
+	for name, value := range map[string]string{
+		"base64url": base64.RawURLEncoding.EncodeToString(key),
+		"base64":    base64.StdEncoding.EncodeToString(key),
+		"hex":       hex.EncodeToString(key),
+		"hex-0x":    "0x" + hex.EncodeToString(key),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !validDeployLicensePublicKey(value) {
+				t.Fatalf("expected %s key to be accepted", name)
+			}
+		})
+	}
+	for name, value := range map[string]string{
+		"empty":     "",
+		"short":     base64.RawURLEncoding.EncodeToString([]byte("short")),
+		"pem":       "-----BEGIN PUBLIC KEY-----\\nMCowBQYDK2VwAyEA000000000000000000000000000000000000000=\\n-----END PUBLIC KEY-----",
+		"malformed": "not-a-key",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if validDeployLicensePublicKey(value) {
+				t.Fatalf("expected %s key to be rejected", name)
+			}
+		})
+	}
+}
 
 func TestServerRequiresBearerTokenForAgentInfo(t *testing.T) {
 	serverApp, err := NewServer(ServerOptions{
@@ -110,6 +140,11 @@ func TestUpgradeJobRoutesRecreateCPAOnlyAndPersistJob(t *testing.T) {
 					return backupJSONResponse(http.StatusOK, []dockerNetwork{{Name: standardCPANetworkName, Driver: "bridge", Labels: map[string]string{"com.cpamp.managed": "true"}}})
 				case "/images/json":
 					return backupJSONResponse(http.StatusOK, []dockerImage{})
+				case "/containers/old-cpa-full/json":
+					return backupJSONResponse(http.StatusOK, map[string]any{"Config": map[string]any{"Env": []string{
+						"CPA_LICENSE_PUBLIC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+						"CPA_LICENSE_GRACE_PERIOD=6h",
+					}}})
 				case "/containers/cli-proxy-api/stop":
 					cpaWrites = append(cpaWrites, "stop")
 					return backupJSONResponse(http.StatusNoContent, map[string]any{})
