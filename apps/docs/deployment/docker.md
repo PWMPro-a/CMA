@@ -32,6 +32,9 @@ http://<host>:18317/management.html
 - CPA Management Key。
 - 挂载并备份持久化 `/data`。
 - 同一个 CPA 用量队列只由一个 CPAMP Manager Server 消费。
+- CPA 商城授权配置。每个 CPA 实例都必须提供 `CPA_LICENSE_PUBLIC_KEY`；如果
+  商城启用了客户端校验，还要提供商城签发的 client ID 和 client secret（secret
+  建议使用文件型 Docker secret）。
 
 推荐 CPA 版本：
 
@@ -65,16 +68,37 @@ usage-statistics-enabled: true
 
 如果还没有运行 CPA，用下面的 Compose 文件同时启动 CPA 和 CPAMP：
 
+> 客户部署优先使用[一键安装脚本](./installer.md)生成的栈（或仓库中的
+> `deploy/pool-server` 固定版本模板）。这里不再使用旧的
+> `eceasy/cli-proxy-api:latest` 示例，因为它没有包含 CPA 商城授权配置，容易
+> 启动成 `not_activated` / `configuration_error`。
+
 ```yaml
 services:
   cli-proxy-api:
-    image: eceasy/cli-proxy-api:latest
+    image: ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.2
     container_name: cli-proxy-api
     restart: unless-stopped
     ports:
       - '8317:8317'
+    command: ['./CLIProxyAPI', '-config', '/app/data/config.yaml']
+    environment:
+      CPA_LICENSE_PROVIDER: 'shop666'
+      CPA_LICENSE_PRODUCT_CODE: 'CPA'
+      CPA_LICENSE_API_BASE_URL: 'https://p.666ttt.net/api/storefront'
+      CPA_LICENSE_PUBLIC_KEY: '${CPA_LICENSE_PUBLIC_KEY:?set CPA_LICENSE_PUBLIC_KEY}'
+      CPA_LICENSE_PLUGIN_PUBLIC_KEY: '${CPA_LICENSE_PLUGIN_PUBLIC_KEY:-}'
+      CPA_LICENSE_CLIENT_ID: '${CPA_LICENSE_CLIENT_ID:-}'
+      CPA_LICENSE_CLIENT_SECRET_FILE: '/run/secrets/cpa-license-client-secret'
+      CPA_LICENSE_STATE_DIR: '/app/data/license'
+      CPA_LICENSE_GRACE_PATH: '/licenses/grace'
+      CPA_LICENSE_REFRESH_INTERVAL: '10m'
+      # 这里只是离线刷新兼容回退；实际初始/到期宽限截止时间来自商城签名租约。
+      CPA_LICENSE_GRACE_PERIOD: '6h'
     volumes:
       - cpa-data:/app/data
+    secrets:
+      - cpa_license_client_secret
 
   cpa-manager-plus:
     image: seakee/cpa-manager-plus:latest
@@ -105,9 +129,26 @@ services:
 volumes:
   cpa-data:
   cpa-manager-plus-data:
+
+secrets:
+  cpa_license_client_secret:
+    file: '${CPA_LICENSE_CLIENT_SECRET_HOST_PATH:-./secrets/cpa-license-client-secret}'
 ```
 
+在 Compose 文件旁创建 `.env`。公钥必须使用商城发布的值，不能替换成私钥或占位符：
+
+```env
+CPA_LICENSE_PUBLIC_KEY=kJhDRBpfneFdURvPXwiGW3XAmPrd2HVVORfHzP-eYTg
+# 只有 p.666ttt.net 开启客户端校验时才需要填写下面两项。
+CPA_LICENSE_CLIENT_ID=issued-client-id
+CPA_LICENSE_CLIENT_SECRET_HOST_PATH=./secrets/cpa-license-client-secret
+```
+
+把商城签发的 secret 写入 `./secrets/cpa-license-client-secret`（单行），再执行：
+
 ```bash
+chmod 600 ./secrets/cpa-license-client-secret
+docker compose config >/dev/null
 docker compose up -d
 ```
 
@@ -132,6 +173,14 @@ docker compose logs cpa-manager-plus
 ```
 
 setup 完成后，新浏览器登录只需要 CPAMP 管理员密钥。CPA Management Key 会在服务端加密保存。
+
+### 授权与宽限期
+
+CPA 首次启动会向 `p.666ttt.net` 申请商城签名的初始宽限租约。商城按实例持久化
+开始和结束时间，因此重启容器、修改 `.env` 或修改 `CPA_LICENSE_GRACE_PERIOD`
+都不会重置或延长这份租约。正式授权到期后，商城还可以签发独立的
+`expiry_grace_until` 过渡窗口。公钥缺失/无效，或启用客户端校验但 secret 不匹配
+时，CPA 会保持 fail-closed，并在面板中显示配置错误，不会凭本地配置放行。
 
 ## 仅部署 CPAMP
 

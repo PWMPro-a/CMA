@@ -32,6 +32,10 @@ Before deployment, confirm:
 - A CPA Management Key.
 - Persistent `/data` storage mounted and backed up.
 - Exactly one CPAMP Manager Server consuming one CPA usage queue.
+- CPA storefront authorization settings. `CPA_LICENSE_PUBLIC_KEY` is required
+  on every CPA instance. If the storefront has enabled its client guard, also
+  provide the issued client ID and client secret (prefer a file-backed Docker
+  secret for the secret).
 
 Recommended CPA version:
 
@@ -65,16 +69,39 @@ CPAMP can also enable this during first setup or config save.
 
 If CPA is not running yet, start CPA and CPAMP with this Compose file:
 
+> For customer installs, prefer the generated stack from the
+> [One-Click Installer](./installer.md) (or the pinned template under
+> `deploy/pool-server`). The older `eceasy/cli-proxy-api:latest` example is
+> intentionally not used here: it omits the CPA storefront license settings
+> and can start in `not_activated`/`configuration_error` state.
+
 ```yaml
 services:
   cli-proxy-api:
-    image: eceasy/cli-proxy-api:latest
+    image: ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.2
     container_name: cli-proxy-api
     restart: unless-stopped
     ports:
       - '8317:8317'
+    command: ['./CLIProxyAPI', '-config', '/app/data/config.yaml']
+    environment:
+      CPA_LICENSE_PROVIDER: 'shop666'
+      CPA_LICENSE_PRODUCT_CODE: 'CPA'
+      CPA_LICENSE_API_BASE_URL: 'https://p.666ttt.net/api/storefront'
+      CPA_LICENSE_PUBLIC_KEY: '${CPA_LICENSE_PUBLIC_KEY:?set CPA_LICENSE_PUBLIC_KEY}'
+      CPA_LICENSE_PLUGIN_PUBLIC_KEY: '${CPA_LICENSE_PLUGIN_PUBLIC_KEY:-}'
+      CPA_LICENSE_CLIENT_ID: '${CPA_LICENSE_CLIENT_ID:-}'
+      CPA_LICENSE_CLIENT_SECRET_FILE: '/run/secrets/cpa-license-client-secret'
+      CPA_LICENSE_STATE_DIR: '/app/data/license'
+      CPA_LICENSE_GRACE_PATH: '/licenses/grace'
+      CPA_LICENSE_REFRESH_INTERVAL: '10m'
+      # Offline-refresh compatibility fallback only; actual initial/expiry
+      # grace deadlines come from the signed storefront lease.
+      CPA_LICENSE_GRACE_PERIOD: '6h'
     volumes:
       - cpa-data:/app/data
+    secrets:
+      - cpa_license_client_secret
 
   cpa-manager-plus:
     image: seakee/cpa-manager-plus:latest
@@ -105,9 +132,30 @@ services:
 volumes:
   cpa-data:
   cpa-manager-plus-data:
+
+secrets:
+  cpa_license_client_secret:
+    file: '${CPA_LICENSE_CLIENT_SECRET_HOST_PATH:-./secrets/cpa-license-client-secret}'
 ```
 
+Create `.env` beside the Compose file. Keep the public key exactly as
+published by the storefront; do not replace it with a private key or a
+placeholder:
+
+```env
+CPA_LICENSE_PUBLIC_KEY=kJhDRBpfneFdURvPXwiGW3XAmPrd2HVVORfHzP-eYTg
+# Required only when p.666ttt.net enables client authentication for CPA calls.
+CPA_LICENSE_CLIENT_ID=issued-client-id
+CPA_LICENSE_CLIENT_SECRET_HOST_PATH=./secrets/cpa-license-client-secret
+```
+
+Put the issued secret on one line in
+`./secrets/cpa-license-client-secret`, then run the deployment preflight and
+start the stack:
+
 ```bash
+chmod 600 ./secrets/cpa-license-client-secret
+docker compose config >/dev/null
 docker compose up -d
 ```
 
@@ -132,6 +180,17 @@ docker compose logs cpa-manager-plus
 ```
 
 After setup, new browsers log in with the CPAMP Admin Key. The CPA Management Key is encrypted and stored server-side.
+
+### License activation and grace behavior
+
+On first start CPA requests a signed grace lease from `p.666ttt.net`. The
+storefront persists the start and end timestamps by instance, so restarting a
+container, editing `.env`, or changing `CPA_LICENSE_GRACE_PERIOD` does not
+restart or extend that lease. After a paid license expires, the storefront may
+issue a separately signed `expiry_grace_until` window. If the public key is
+missing/invalid, or a required client secret is not accepted, CPA stays
+fail-closed and the panel reports the configuration error instead of silently
+granting local access.
 
 ## Deploy CPAMP Only
 

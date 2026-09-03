@@ -200,6 +200,18 @@ func readDeployEnv(root string) (map[string]string, []model.ContainerOpsDeployCh
 		checks = append(checks, deployAgentCheck("error", "deploy_env_unreadable", "Deploy .env could not be read.", envPath, true))
 		return values, checks
 	}
+	// The release checker also accepts the public license settings from the
+	// customer CPA config. Keep the agent consistent with that path: generated
+	// stacks may have a real public key in cliproxyapi/config.yaml while an old
+	// .env file still has the key commented out or left empty. Environment
+	// values remain authoritative; only missing/placeholder values are filled
+	// from the local config, and secret material is never read from YAML.
+	licenseConfigValues := readDeployLicenseConfigValues(root)
+	for key, value := range licenseConfigValues {
+		if deployEnvValueMissing(values[key]) && strings.TrimSpace(value) != "" {
+			values[key] = value
+		}
+	}
 	required := []string{"CPA_MANAGER_ADMIN_KEY", "CPA_MANAGEMENT_KEY", "CPAMP_AGENT_TOKEN"}
 	for _, key := range required {
 		value := strings.TrimSpace(values[key])
@@ -208,7 +220,8 @@ func readDeployEnv(root string) (map[string]string, []model.ContainerOpsDeployCh
 		}
 	}
 	// CPA-CLI verifies signed licenses and server-issued grace leases with the
-	// publisher public key. Keep this value in the deployment .env so the
+	// publisher public key. Keep this value in the deployment .env (or the local
+	// CPA license section, which is accepted as a compatibility fallback) so the
 	// agent can inject it into the CPA container without placing it in a
 	// manifest or API response.
 	if deployEnvValueMissing(values["CPA_LICENSE_PUBLIC_KEY"]) {
@@ -251,6 +264,118 @@ func readDeployEnv(root string) (map[string]string, []model.ContainerOpsDeployCh
 		checks = append(checks, deployAgentCheck("info", "deploy_env_ready", "Deploy .env contains the required CPA, license, and Agent settings.", envPath, false))
 	}
 	return values, checks
+}
+
+// readDeployLicenseConfigValues reads only scalar values under the top-level
+// license section from known customer config locations. It deliberately uses a
+// small, non-evaluating parser instead of unmarshalling arbitrary YAML: this
+// file is deployment input and may contain provider-specific structures that
+// are irrelevant to the agent's preflight checks.
+func readDeployLicenseConfigValues(root string) map[string]string {
+	keys := map[string]string{
+		"provider":           "CPA_LICENSE_PROVIDER",
+		"product-code":       "CPA_LICENSE_PRODUCT_CODE",
+		"api-base-url":       "CPA_LICENSE_API_BASE_URL",
+		"public-key":         "CPA_LICENSE_PUBLIC_KEY",
+		"plugin-public-key":  "CPA_LICENSE_PLUGIN_PUBLIC_KEY",
+		"client-id":          "CPA_LICENSE_CLIENT_ID",
+		"state-dir":          "CPA_LICENSE_STATE_DIR",
+		"shop-auth-url":      "CPA_LICENSE_SHOP_AUTH_URL",
+		"shop-exchange-path": "CPA_LICENSE_SHOP_EXCHANGE_PATH",
+		"activate-path":      "CPA_LICENSE_ACTIVATE_PATH",
+		"refresh-path":       "CPA_LICENSE_REFRESH_PATH",
+		"verify-path":        "CPA_LICENSE_VERIFY_PATH",
+		"grace-path":         "CPA_LICENSE_GRACE_PATH",
+		"refresh-interval":   "CPA_LICENSE_REFRESH_INTERVAL",
+		"grace-period":       "CPA_LICENSE_GRACE_PERIOD",
+		"storage-key":        "CPA_LICENSE_STORAGE_KEY",
+		"executable-sha256":  "CPA_LICENSE_EXECUTABLE_SHA256",
+		"claim-path":         "CPA_LICENSE_CLAIM_PATH",
+	}
+	result := make(map[string]string, len(keys))
+	root = cleanStackRoot(root)
+	paths := []string{
+		filepath.Join(root, "cliproxyapi", "config.yaml"),
+		filepath.Join(root, "config.yaml"),
+		filepath.Join(root, "data", "cpa", "config.yaml"),
+	}
+	for _, path := range paths {
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		parsed := parseDeployLicenseYAML(file, keys)
+		_ = file.Close()
+		for envKey, value := range parsed {
+			if strings.TrimSpace(result[envKey]) == "" {
+				result[envKey] = value
+			}
+		}
+	}
+	return result
+}
+
+func parseDeployLicenseYAML(reader io.Reader, keys map[string]string) map[string]string {
+	result := make(map[string]string, len(keys))
+	scanner := bufio.NewScanner(reader)
+	inLicense := false
+	licenseIndent := -1
+	for scanner.Scan() {
+		raw := strings.TrimRight(scanner.Text(), "\r")
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := len(raw) - len(strings.TrimLeft(raw, " \t"))
+		if key, value, ok := strings.Cut(trimmed, ":"); ok && strings.TrimSpace(key) == "license" && strings.TrimSpace(value) == "" {
+			inLicense = true
+			licenseIndent = indent
+			continue
+		}
+		if !inLicense {
+			continue
+		}
+		if indent <= licenseIndent {
+			inLicense = false
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, ":")
+		if !ok {
+			continue
+		}
+		envKey, ok := keys[strings.TrimSpace(key)]
+		if !ok {
+			continue
+		}
+		value = normalizeDeployYAMLScalar(value)
+		if value != "" {
+			result[envKey] = value
+		}
+	}
+	return result
+}
+
+func normalizeDeployYAMLScalar(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	// Strip a YAML inline comment before unquoting. A comment is recognized
+	// only when preceded by whitespace, so URL fragments and base64 material
+	// containing a literal '#' are left intact.
+	if comment := strings.Index(value, " #"); comment >= 0 {
+		value = strings.TrimSpace(value[:comment])
+	}
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		if unquoted, err := strconv.Unquote(value); err == nil {
+			return strings.TrimSpace(unquoted)
+		}
+		return strings.TrimSpace(value[1 : len(value)-1])
+	}
+	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
+		return strings.TrimSpace(value[1 : len(value)-1])
+	}
+	return strings.TrimSpace(value)
 }
 
 func deployEnvValueMissing(value string) bool {

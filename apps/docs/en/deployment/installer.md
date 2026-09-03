@@ -100,6 +100,28 @@ http://cli-proxy-api:8317
 
 This connection is managed by `compose.yaml` and `secrets/cpa-management-key` in the install directory. Open the panel and log in with the CPAMP Admin Key; first setup is not required.
 
+### CPA storefront authorization, public keys, and grace
+
+The full-stack installer also writes these license settings to `.env` and
+`cliproxyapi/config.yaml`:
+
+- `CPA_LICENSE_PUBLIC_KEY`: the storefront signing public key. Keep the real
+  Ed25519 key; do not leave it empty or replace it with a placeholder.
+- `CPA_LICENSE_PLUGIN_PUBLIC_KEY`: plugin signing public key. When no separate
+  plugin key is configured, use the value shipped with the release.
+- `CPA_LICENSE_CLIENT_ID` and `CPA_LICENSE_CLIENT_SECRET_FILE`: required only
+  when `p.666ttt.net` enables client authentication. The storefront issues
+  these values for the customer; the secret is stored in
+  `secrets/cpa-license-client-secret`, not in a public Compose file or image.
+
+On first start CPA requests a one-time signed grace lease from the storefront.
+The storefront persists its start and end by instance and returns
+`grace_until`; restarting a container, rerunning the installer, or editing the
+local `CPA_LICENSE_GRACE_PERIOD=6h` value does not restart the countdown. After
+paid expiry, the storefront may issue a separate `expiry_grace_until` window.
+Missing/invalid public keys or a rejected client secret are reported by the
+pre-start checks and keep CPA from starting in an unconfigured state.
+
 After deployment, open:
 
 ```text

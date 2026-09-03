@@ -43,6 +43,51 @@ func TestValidDeployLicensePublicKeyMatchesCPARuntimeFormats(t *testing.T) {
 	}
 }
 
+func TestReadDeployEnvFallsBackToLicenseValuesInCPAConfig(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "cliproxyapi"), 0o750); err != nil {
+		t.Fatalf("create config directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte(strings.Join([]string{
+		"CPA_MANAGER_ADMIN_KEY=admin-secret",
+		"CPA_MANAGEMENT_KEY=management-secret",
+		"CPAMP_AGENT_TOKEN=agent-secret",
+		"CPA_LICENSE_PUBLIC_KEY=",
+	}, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	config := strings.Join([]string{
+		"license:",
+		"  public-key: \"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"",
+		"  plugin-public-key: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'",
+		"  client-id: \"client-from-config\"",
+		"  grace-period: \"6h\" # compatibility fallback",
+		"routing:",
+		"  strategy: round-robin",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(root, "cliproxyapi", "config.yaml"), []byte(config), 0o640); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	values, checks := readDeployEnv(root)
+	if values["CPA_LICENSE_PUBLIC_KEY"] != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" {
+		t.Fatalf("public key fallback = %q", values["CPA_LICENSE_PUBLIC_KEY"])
+	}
+	if values["CPA_LICENSE_CLIENT_ID"] != "client-from-config" {
+		t.Fatalf("client id fallback = %q", values["CPA_LICENSE_CLIENT_ID"])
+	}
+	if values["CPA_LICENSE_GRACE_PERIOD"] != "6h" {
+		t.Fatalf("grace period fallback = %q", values["CPA_LICENSE_GRACE_PERIOD"])
+	}
+	if hasAgentDeployCheck(checks, "deploy_env_license_public_key_missing") {
+		t.Fatalf("public key fallback was still reported missing: %#v", checks)
+	}
+	if hasAgentDeployCheck(checks, "deploy_env_license_public_key_invalid") {
+		t.Fatalf("public key fallback was reported invalid: %#v", checks)
+	}
+}
+
 func TestServerRequiresBearerTokenForAgentInfo(t *testing.T) {
 	serverApp, err := NewServer(ServerOptions{
 		ServiceID:  "cpamp-agent",

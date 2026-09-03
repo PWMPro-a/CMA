@@ -118,15 +118,31 @@ See [One-Click Installer](https://seakee.github.io/CPA-Manager-Plus/docs/en/depl
 
 ### CPA + CPAMP Together
 
+For customer deployments, prefer the [One-Click Installer](https://seakee.github.io/CPA-Manager-Plus/docs/en/deployment/installer.html),
+which writes the CPA storefront public key, persistent lease directory, and
+Docker secret. A hand-written Compose file must include the license settings;
+the plain `eceasy/cli-proxy-api:latest` example can start as
+`not_activated`/`configuration_error` when its public key is missing.
+
 ```yaml
 services:
   cli-proxy-api:
-    image: eceasy/cli-proxy-api:latest
+    image: ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.2
     restart: unless-stopped
+    command: ['./CLIProxyAPI', '-config', '/app/data/config.yaml']
     ports:
       - '8317:8317'
+    environment:
+      CPA_LICENSE_PUBLIC_KEY: '${CPA_LICENSE_PUBLIC_KEY:?set CPA_LICENSE_PUBLIC_KEY}'
+      CPA_LICENSE_PLUGIN_PUBLIC_KEY: '${CPA_LICENSE_PLUGIN_PUBLIC_KEY:-}'
+      CPA_LICENSE_CLIENT_ID: '${CPA_LICENSE_CLIENT_ID:-}'
+      CPA_LICENSE_CLIENT_SECRET_FILE: '/run/secrets/cpa-license-client-secret'
+      CPA_LICENSE_API_BASE_URL: 'https://p.666ttt.net/api/storefront'
+      CPA_LICENSE_STATE_DIR: '/app/data/license'
     volumes:
       - cpa-data:/app/data
+    secrets:
+      - cpa_license_client_secret
 
   cpa-manager-plus:
     image: seakee/cpa-manager-plus:latest
@@ -139,7 +155,19 @@ services:
 volumes:
   cpa-data:
   cpa-manager-plus-data:
+
+secrets:
+  cpa_license_client_secret:
+    file: '${CPA_LICENSE_CLIENT_SECRET_HOST_PATH:-./secrets/cpa-license-client-secret}'
 ```
+
+Before starting, set `CPA_LICENSE_PUBLIC_KEY` in `.env` beside the Compose
+file. If the storefront has enabled client authentication, also set
+`CPA_LICENSE_CLIENT_ID` and put the issued secret in the file above. The
+initial grace period is controlled by the signed storefront `grace_until`
+lease; restarting the container or editing local `CPA_LICENSE_GRACE_PERIOD`
+does not reset or extend it. Any post-expiry transition window is signed by
+the storefront as well.
 
 ```bash
 docker compose up -d
