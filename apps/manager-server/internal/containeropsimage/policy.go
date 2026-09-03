@@ -10,7 +10,7 @@ import (
 const (
 	// DefaultCPAImage is the pinned CPA build that contains the storefront
 	// license gate. Keep the tag immutable for a release series.
-	DefaultCPAImage = "ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.2"
+	DefaultCPAImage = "ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.3"
 	// DefaultCPAMPImage is the manager/agent image used by a clean stack.
 	DefaultCPAMPImage = "seakee/cpa-manager-plus:latest"
 

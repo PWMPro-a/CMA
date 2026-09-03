@@ -78,7 +78,7 @@ If CPA is not running yet, start CPA and CPAMP with this Compose file:
 ```yaml
 services:
   cli-proxy-api:
-    image: ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.2
+    image: ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.3
     container_name: cli-proxy-api
     restart: unless-stopped
     ports:

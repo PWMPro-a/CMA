@@ -127,7 +127,7 @@ the plain `eceasy/cli-proxy-api:latest` example can start as
 ```yaml
 services:
   cli-proxy-api:
-    image: ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.2
+    image: ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.3
     restart: unless-stopped
     command: ['./CLIProxyAPI', '-config', '/CLIProxyAPI/config.yaml']
     ports:

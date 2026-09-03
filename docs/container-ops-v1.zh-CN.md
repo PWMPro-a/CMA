@@ -35,7 +35,7 @@ CPAMP 主服务不直接挂载 Docker socket。所有 Docker 操作通过 `cpamp
 - Stack 根目录：`/opt/cpamp/stacks/cpa`
 - 备份目录：`/opt/cpamp/backups`
 - NewAPI 推荐内网地址：`http://cli-proxy-api:8317/v1`
-- CPA 默认镜像：`ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.2`
+- CPA 默认镜像：`ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.3`
 - CPAMP/Agent 默认镜像：`seakee/cpa-manager-plus:latest`
 
 ## Agent 安全模型
@@ -100,7 +100,7 @@ Manager Server 会把 `upgrade apply=true` 创建为持久化升级任务，写�
 当前已开放的写操作都必须由 Agent 执行，且不属于破坏性操作：
 
 - 部署文件渲染：`deploy apply=true` 只允许在 `CPAMP_STACK_ROOT` 下写入固定文件名的 `compose.yml`、`stack.manifest.json`、`.env.example`、`cliproxyapi/config.yaml` 和 Secret 占位文件，不拉镜像、不启动容器、不覆盖已有 CPA 配置或授权状态。
-- 部署镜像拉取：`deploy apply=true action=pull_images` 只允许拉取标准 CPA/CPAMP/Agent manifest 中的已知角色镜像；CPA 默认是 `ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.2`，存量 `seakee/cli-proxy-api` 仍可升级，其他仓库必须显式启用 `allowCustomImages`，不创建网络、卷或容器。
+- 部署镜像拉取：`deploy apply=true action=pull_images` 只允许拉取标准 CPA/CPAMP/Agent manifest 中的已知角色镜像；CPA 默认是 `ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.3`，存量 `seakee/cli-proxy-api` 仍可升级，其他仓库必须显式启用 `allowCustomImages`，不创建网络、卷或容器。
 - 部署服务启动：`deploy apply=true action=start_services` 必须先存在部署文件和 `.env`，且 `.env` 中 `CPA_MANAGER_ADMIN_KEY`、`CPA_MANAGEMENT_KEY`、`CPAMP_AGENT_TOKEN` 不得为空或占位；Agent 只允许创建标准 `cpamp-cpa_default` 网络、标准数据卷和标准 CPA/CPAMP/Agent 容器，不提供任意镜像、任意容器名或任意挂载入口。
 - 恢复预检：`restore` 默认只读取备份 manifest、校验 archive 文件、检查 CPA/CPAMP 目标容器，并返回恢复步骤，不执行 Docker 写操作。
 - 恢复执行：`restore apply=true` 必须先通过恢复预检；Agent 会先创建新的 `rollback-cpa-*` 备份，回滚备份失败则不继续；随后只允许停止/恢复/启动已识别的 CPA 与可选 CPAMP 目标容器，不恢复 Agent，不修改 NewAPI 数据，不接受任意 archive 路径或任意容器名。

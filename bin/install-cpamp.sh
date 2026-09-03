@@ -7,7 +7,7 @@ default_cpamp_image="seakee/cpa-manager-plus:latest"
 # storefront-license runtime. Existing installs keep their CPA_IMAGE value
 # when the installer is run in upgrade/repair mode; an alternate image is
 # only selected when the operator explicitly supplies CPAMP_CPA_IMAGE.
-default_cpa_image="ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.2"
+default_cpa_image="ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.3"
 default_install_dir="${HOME:-.}/cpa-manager-plus"
 release_license_public_key="kJhDRBpfneFdURvPXwiGW3XAmPrd2HVVORfHzP-eYTg"
 release_plugin_public_key="OHRHVVIlFC34K-5AQUkOPcZLeiSpeX_n_VPbrH3agXQ"
