@@ -343,8 +343,13 @@ check_storefront_secret_file() {
   contents="${contents%$'\r'}"
   if [ -z "$contents" ] || [[ "$contents" =~ ^[[:space:]]*$ ]] || is_placeholder "$contents"; then
     fail "$name must contain the matching storefront-issued secret (one line); an empty or generated placeholder is not accepted"
-  elif [[ "$contents" == *$'\n'* || "$contents" == *$'\r'* ]]; then
-    fail "$name must contain a single-line storefront secret: $resolved"
+  else
+    local line_count=""
+    if line_count="$(awk 'END { print NR }' "$resolved" 2>/dev/null)" && [ "$line_count" -gt 1 ] 2>/dev/null; then
+      fail "$name must contain a single-line storefront secret: $resolved"
+    elif LC_ALL=C grep -q $'\r' "$resolved" 2>/dev/null; then
+      fail "$name must contain a single-line storefront secret: $resolved"
+    fi
   fi
   if mode="$(stat -c '%a' "$resolved" 2>/dev/null)"; then :; elif mode="$(stat -f '%Lp' "$resolved" 2>/dev/null)"; then :; else mode=""; fi
   if [ -n "$mode" ] && [ "$mode" != "600" ]; then
