@@ -28,6 +28,7 @@ export function LicensePage() {
   const [activateOpen, setActivateOpen] = useState(false);
   const [activationCode, setActivationCode] = useState('');
   const [activating, setActivating] = useState(false);
+  const [clock, setClock] = useState(() => Date.now());
   const pendingStateRef = useRef('');
   const popupRef = useRef<Window | null>(null);
 
@@ -45,6 +46,12 @@ export function LicensePage() {
     void loadStatus();
     return () => popupRef.current?.close();
   }, [loadStatus]);
+
+  useEffect(() => {
+    if (!status?.grace_until) return;
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [status?.grace_until]);
 
   const errorText = useCallback(
     (code: string) =>
@@ -155,6 +162,20 @@ export function LicensePage() {
     }).format(new Date(value * 1000));
   };
 
+  const graceRemainingSeconds = status?.grace_until
+    ? Math.max(0, Math.ceil(status.grace_until - clock / 1000))
+    : Math.max(0, status?.grace_remaining_seconds || 0);
+  const formatCountdown = (seconds: number) => {
+    const total = Math.max(0, Math.floor(seconds));
+    const days = Math.floor(total / 86400);
+    const hours = Math.floor((total % 86400) / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    if (days > 0) return t('license.grace_countdown_days', { days, hours });
+    if (hours > 0) return t('license.grace_countdown_hours', { hours, minutes });
+    return t('license.grace_countdown_minutes', { minutes, seconds: secs });
+  };
+
   const statusKey = useMemo(() => {
     if (!status?.enabled) return 'disabled';
     if (status.valid && status.in_grace) return 'grace';
@@ -167,6 +188,8 @@ export function LicensePage() {
   }
 
   const active = Boolean(status?.valid);
+  const graceActive = Boolean(status?.in_grace && graceRemainingSeconds > 0);
+  const graceEnded = Boolean(status?.grace_until && !graceActive && status?.reason === 'not_activated');
   return (
     <div className={styles.page}>
       <header className={styles.toolbar}>
@@ -206,6 +229,14 @@ export function LicensePage() {
           </div>
         </div>
         {!status?.enabled ? <p className={styles.notice}>{t('license.disabled_notice')}</p> : null}
+        {graceActive ? (
+          <div className={styles.graceNotice}>
+            <strong>{t('license.grace_title')}</strong>
+            <span>{formatCountdown(graceRemainingSeconds)}</span>
+            <p>{t('license.grace_notice', { until: formatTime(status?.grace_until) })}</p>
+          </div>
+        ) : null}
+        {graceEnded ? <div className={`${styles.graceNotice} ${styles.graceExpired}`}><strong>{t('license.grace_expired_title')}</strong><p>{t('license.grace_expired_notice')}</p></div> : null}
       </section>
 
       <section className={styles.detailsPanel}>
@@ -217,6 +248,7 @@ export function LicensePage() {
           <div><span>{t('license.instance_binding')}</span><strong>{status?.instance_bound ? t('license.bound') : t('license.unbound')}</strong></div>
           <div><span>{t('license.instance')}</span><strong>{status?.instance_id || '-'}</strong></div>
           <div><span>{t('license.last_verified')}</span><strong>{formatTime(status?.last_verified_at)}</strong></div>
+          <div><span>{t('license.grace_period')}</span><strong>{status?.grace_period_seconds ? formatCountdown(status.grace_period_seconds) : t('common.not_available', { defaultValue: '-' })}</strong></div>
         </div>
       </section>
 

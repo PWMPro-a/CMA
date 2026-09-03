@@ -104,6 +104,23 @@
   background: var(--surface-subtle);
 }
 
+.graceNotice {
+  display: grid;
+  gap: 4px;
+  min-width: 250px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, #f59e0b 45%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, #f59e0b 10%, var(--bg-primary));
+  color: var(--text-primary);
+}
+
+.graceNotice strong { color: color-mix(in srgb, #f59e0b 78%, var(--text-primary)); font-size: 13px; }
+.graceNotice > span { font-size: 18px; font-weight: 800; letter-spacing: .02em; }
+.graceNotice p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+.graceExpired { border-color: var(--failure-badge-border); background: var(--failure-badge-bg); }
+.graceExpired strong { color: var(--failure-badge-text); }
+
 .detailsPanel { display: grid; gap: 12px; padding: 16px; }
 .detailsPanel h2,
 .backupPanel h2 { font-size: 15px; font-weight: 720; }

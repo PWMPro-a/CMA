@@ -20,6 +20,10 @@ export interface LicenseStatus {
   last_verified_at?: number;
   last_refresh_at?: number;
   last_refresh_error?: string;
+  grace_period_seconds?: number;
+  grace_started_at?: number;
+  grace_until?: number;
+  grace_remaining_seconds?: number;
 }
 
 export interface ShopAuthorization {
