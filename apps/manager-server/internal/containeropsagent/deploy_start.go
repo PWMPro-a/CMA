@@ -1,17 +1,21 @@
 package containeropsagent
 
 import (
+	"archive/tar"
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
@@ -37,10 +41,14 @@ type DeployStartResult struct {
 }
 
 type deployServiceSpec struct {
-	Role         string
-	Name         string
-	Image        string
-	Env          []string
+	Role  string
+	Name  string
+	Image string
+	Env   []string
+	// ConfigYAML is deployment bootstrap data for the CPA container. It is
+	// written into the mounted data volume before the container is started and
+	// is intentionally not exposed in API responses or lifecycle logs.
+	ConfigYAML   []byte
 	Entrypoint   []string
 	Cmd          []string
 	Ports        map[string]string
@@ -79,7 +87,7 @@ func (c *DockerClient) StartCPADeployServices(ctx context.Context, options Deplo
 	if err := validateDeployRenderRequest(request); err != nil {
 		return DeployStartResult{}, err
 	}
-	if _, err := deployPullImages(request.Manifest); err != nil {
+	if _, err := deployPullImages(request.Manifest, request.AllowCustomImages); err != nil {
 		return DeployStartResult{}, err
 	}
 
@@ -126,7 +134,7 @@ func (c *DockerClient) StartCPADeployServices(ctx context.Context, options Deplo
 }
 
 func newDeployStartResult(manifest model.ContainerOpsStackManifest) DeployStartResult {
-	actions := make([]model.ContainerOpsDeployAction, 0, 10)
+	actions := make([]model.ContainerOpsDeployAction, 0, 11)
 	add := func(code string, target string, message string) {
 		actions = append(actions, model.ContainerOpsDeployAction{
 			Order:   len(actions) + 1,
@@ -140,6 +148,7 @@ func newDeployStartResult(manifest model.ContainerOpsStackManifest) DeployStartR
 	add("create_cpa_volume", deployVolumeName(manifest.ComposeProject, "cpa-data"), "Create the standard CPA data volume.")
 	add("create_cpamp_volume", deployVolumeName(manifest.ComposeProject, "cpa-manager-plus-data"), "Create the standard CPAMP data volume.")
 	add("create_cpa_container", "cli-proxy-api", "Create the standard CPA container.")
+	add("seed_cpa_config", "cli-proxy-api", "Initialize config.yaml in the CPA data volume before the first start.")
 	add("create_cpamp_container", "cpa-manager-plus", "Create the standard CPAMP container.")
 	add("create_agent_container", "cpamp-agent", "Create the standard cpamp-agent container.")
 	add("start_cpa_container", "cli-proxy-api", "Start the CPA container.")
@@ -302,10 +311,15 @@ func deployStartSpecs(manifest model.ContainerOpsStackManifest, env map[string]s
 	cpaLicenseEnv, cpaLicenseBinds := deployCPALicenseEnv(env)
 	return []deployServiceSpec{
 		{
-			Role:         "cpa",
-			Name:         "cli-proxy-api",
-			Image:        deployManifestImage(manifest, "cpa"),
-			Env:          cpaLicenseEnv,
+			Role:  "cpa",
+			Name:  "cli-proxy-api",
+			Image: deployManifestImage(manifest, "cpa"),
+			Env:   cpaLicenseEnv,
+			// Keep the runtime command explicit. The CPA image intentionally
+			// has no default config path because customer installs use a named
+			// volume mounted at /app/data.
+			Cmd:          []string{"./CLIProxyAPI", "-config", "/app/data/config.yaml"},
+			ConfigYAML:   renderCPADeployConfig(env),
 			VolumeMounts: map[string]string{deployVolumeName(manifest.ComposeProject, "cpa-data"): "/app/data"},
 			Binds:        cpaLicenseBinds,
 			HostNetwork:  true,
@@ -354,6 +368,159 @@ func deployStartSpecs(manifest model.ContainerOpsStackManifest, env map[string]s
 	}
 }
 
+// renderCPADeployConfig returns the smallest valid CPA config needed for a
+// customer-host deployment. License values are also passed as environment
+// overrides, but keeping the public settings in config.yaml makes the
+// installation self-describing and gives remote-management a durable key.
+// The client secret is deliberately excluded; it is supplied through the
+// environment/Docker secret mount by deployCPALicenseEnv.
+func renderCPADeployConfig(env map[string]string) []byte {
+	valueOr := func(key string, fallback string) string {
+		if value := strings.TrimSpace(env[key]); value != "" {
+			return value
+		}
+		return fallback
+	}
+	quote := func(value string) string { return strconv.Quote(value) }
+
+	lines := []string{
+		"host: \"\"",
+		"port: 8317",
+		"remote-management:",
+		"  allow-remote: true",
+		"  secret-key: " + quote(strings.TrimSpace(env["CPA_MANAGEMENT_KEY"])),
+		"  disable-control-panel: true",
+		"license:",
+		"  provider: " + quote(valueOr("CPA_LICENSE_PROVIDER", "shop666")),
+		"  product-code: " + quote(valueOr("CPA_LICENSE_PRODUCT_CODE", "CPA")),
+		"  api-base-url: " + quote(valueOr("CPA_LICENSE_API_BASE_URL", "https://p.666ttt.net/api/storefront")),
+		"  public-key: " + quote(strings.TrimSpace(env["CPA_LICENSE_PUBLIC_KEY"])),
+		"  plugin-public-key: " + quote(strings.TrimSpace(env["CPA_LICENSE_PLUGIN_PUBLIC_KEY"])),
+		"  client-id: " + quote(strings.TrimSpace(env["CPA_LICENSE_CLIENT_ID"])),
+		"  state-dir: " + quote(valueOr("CPA_LICENSE_STATE_DIR", "/app/data/license")),
+		"  shop-auth-url: " + quote(valueOr("CPA_LICENSE_SHOP_AUTH_URL", "https://p.666ttt.net/shop/?authorize=cpa")),
+		"  shop-exchange-path: " + quote(valueOr("CPA_LICENSE_SHOP_EXCHANGE_PATH", "/licenses/exchange")),
+		"  activate-path: " + quote(valueOr("CPA_LICENSE_ACTIVATE_PATH", "/licenses/activate")),
+		"  refresh-path: " + quote(valueOr("CPA_LICENSE_REFRESH_PATH", "/licenses/refresh")),
+		"  verify-path: " + quote(valueOr("CPA_LICENSE_VERIFY_PATH", "/licenses/verify")),
+		"  grace-path: " + quote(valueOr("CPA_LICENSE_GRACE_PATH", "/licenses/grace")),
+		"  refresh-interval: " + quote(valueOr("CPA_LICENSE_REFRESH_INTERVAL", "10m")),
+		"  grace-period: " + quote(valueOr("CPA_LICENSE_GRACE_PERIOD", "6h")),
+		"  instance-binding: \"strict\"",
+		"auth-dir: \"/app/data/auths\"",
+		"api-keys: []",
+		"debug: false",
+		"commercial-mode: false",
+		"logging-to-file: false",
+		"usage-statistics-enabled: true",
+		"request-retry: 3",
+		"max-retry-credentials: 0",
+		"max-retry-interval: 30",
+		"routing:",
+		"  strategy: \"round-robin\"",
+	}
+	return []byte(strings.Join(lines, "\n") + "\n")
+}
+
+// ensureCPAConfig writes config.yaml into the container's mounted /app/data
+// volume only when it is missing. Docker's archive endpoint works while the
+// container is stopped, so no helper image or host-specific volume path is
+// needed. The function returns true when a file was seeded.
+func (c *DockerClient) ensureCPAConfig(ctx context.Context, container string, config []byte) (bool, error) {
+	container = strings.TrimSpace(container)
+	if container == "" {
+		return false, fmt.Errorf("CPA container name is empty")
+	}
+	if len(bytes.TrimSpace(config)) == 0 {
+		return false, fmt.Errorf("CPA bootstrap config is empty")
+	}
+	exists, err := c.containerPathExists(ctx, container, "/app/data/config.yaml")
+	if err != nil {
+		return false, fmt.Errorf("check /app/data/config.yaml: %w", err)
+	}
+	if exists {
+		return false, nil
+	}
+	archive, err := tarArchive("config.yaml", config)
+	if err != nil {
+		return false, fmt.Errorf("build CPA config archive: %w", err)
+	}
+	if err := c.putContainerArchive(ctx, container, "/app/data", archive); err != nil {
+		return false, fmt.Errorf("write /app/data/config.yaml: %w", err)
+	}
+	return true, nil
+}
+
+func tarArchive(name string, data []byte) ([]byte, error) {
+	name = filepath.Base(strings.TrimSpace(name))
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		return nil, fmt.Errorf("invalid archive file name")
+	}
+	var buffer bytes.Buffer
+	writer := tar.NewWriter(&buffer)
+	if err := writer.WriteHeader(&tar.Header{
+		Name: name,
+		Mode: 0o600,
+		Size: int64(len(data)),
+	}); err != nil {
+		return nil, err
+	}
+	if _, err := writer.Write(data); err != nil {
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
+func (c *DockerClient) containerPathExists(ctx context.Context, container string, path string) (bool, error) {
+	endpoint := fmt.Sprintf(
+		"http://docker/containers/%s/archive?path=%s",
+		url.PathEscape(strings.TrimSpace(container)),
+		url.QueryEscape(path),
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, fmt.Errorf("docker api status %d", resp.StatusCode)
+	}
+	return true, nil
+}
+
+func (c *DockerClient) putContainerArchive(ctx context.Context, container string, path string, archive []byte) error {
+	endpoint := fmt.Sprintf(
+		"http://docker/containers/%s/archive?path=%s",
+		url.PathEscape(strings.TrimSpace(container)),
+		url.QueryEscape(path),
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(archive))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-tar")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("docker api status %d", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
 // deployCPALicenseEnv maps deployment-only values into the CPA container.
 // The public key is required; optional client credentials and endpoint
 // overrides are included only when present. A host secret file is mounted at
@@ -380,7 +547,7 @@ func deployCPALicenseEnv(env map[string]string) ([]string, []string) {
 		{"CPA_LICENSE_CLIENT_ID", ""},
 		{"CPA_LICENSE_API_BASE_URL", "https://p.666ttt.net/api/storefront"},
 		{"CPA_LICENSE_CLIENT_SECRET", ""},
-		{"CPA_LICENSE_STATE_DIR", "/CLIProxyAPI/data/license"},
+		{"CPA_LICENSE_STATE_DIR", "/app/data/license"},
 		{"CPA_LICENSE_SHOP_AUTH_URL", "https://p.666ttt.net/shop/?authorize=cpa"},
 		{"CPA_LICENSE_SHOP_EXCHANGE_PATH", "/licenses/exchange"},
 		{"CPA_LICENSE_ACTIVATE_PATH", "/licenses/activate"},
@@ -445,6 +612,26 @@ func (c *DockerClient) applyDeployStart(ctx context.Context, result *DeployStart
 			return fmt.Errorf("create %s container: %w", spec.Name, err)
 		}
 		deployMarkAction(result.Actions, "create_"+spec.Role+"_container", "applied", "Standard managed container created.")
+	}
+
+	// A named volume starts empty on a clean customer host. Seed the CPA
+	// config after the container has been created (so the volume is mounted)
+	// but before any service is started. Existing config.yaml files are kept
+	// intact so a retry or an imported deployment cannot overwrite settings.
+	for _, spec := range specs {
+		if spec.Role != "cpa" {
+			continue
+		}
+		seeded, err := c.ensureCPAConfig(ctx, spec.Name, spec.ConfigYAML)
+		if err != nil {
+			return fmt.Errorf("initialize CPA config: %w", err)
+		}
+		if seeded {
+			deployMarkAction(result.Actions, "seed_cpa_config", "applied", "CPA config.yaml was written to the mounted data volume.")
+		} else {
+			deployMarkAction(result.Actions, "seed_cpa_config", "skipped", "Existing CPA config.yaml was preserved.")
+		}
+		break
 	}
 
 	startSpecs := append([]deployServiceSpec{}, specs...)

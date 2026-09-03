@@ -3,7 +3,11 @@ set -euo pipefail
 
 repo="seakee/CPA-Manager-Plus"
 default_cpamp_image="seakee/cpa-manager-plus:latest"
-default_cpa_image="eceasy/cli-proxy-api:latest"
+# New CPA+CPAMP installs use the pinned CPA build that contains the
+# storefront-license runtime. Existing installs keep their CPA_IMAGE value
+# when the installer is run in upgrade/repair mode; an alternate image is
+# only selected when the operator explicitly supplies CPAMP_CPA_IMAGE.
+default_cpa_image="ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.2"
 default_install_dir="${HOME:-.}/cpa-manager-plus"
 release_license_public_key="kJhDRBpfneFdURvPXwiGW3XAmPrd2HVVORfHzP-eYTg"
 release_plugin_public_key="OHRHVVIlFC34K-5AQUkOPcZLeiSpeX_n_VPbrH3agXQ"
@@ -768,7 +772,7 @@ validate_duration_value() {
     0|0s|0m|0h|0d) die "$label must be greater than zero." ;;
     *[!0-9a-zA-Z.+-]*) die "$label contains unsupported characters." ;;
   esac
-  if [[ ! "$value" =~ ^[0-9]+(ns|us|µs|ms|s|m|h|d|w)([0-9]+(ns|us|µs|ms|s|m|h|d|w))*$ ]]; then
+  if [[ ! "$value" =~ ^[0-9]+(ns|us|µs|ms|s|m|h)([0-9]+(ns|us|µs|ms|s|m|h))*$ ]]; then
     die "$label must use a duration such as 6h or 30m."
   fi
 }
@@ -1513,6 +1517,8 @@ write_cpa_config() {
   local tmp="${file}.tmp.$$"
   local escaped_cpa_management_key=""
   local escaped_demo_client_key=""
+  local escaped_license_provider=""
+  local escaped_license_product_code=""
   local escaped_license_public_key=""
   local escaped_license_plugin_public_key=""
   local escaped_license_client_id=""
@@ -1536,6 +1542,8 @@ write_cpa_config() {
   prepare_file "$file"
   escaped_cpa_management_key="$(yaml_double_quote_escape "$cpa_management_key")"
   escaped_demo_client_key="$(yaml_double_quote_escape "$demo_client_key")"
+  escaped_license_provider="$(yaml_double_quote_escape "$cpa_license_provider")"
+  escaped_license_product_code="$(yaml_double_quote_escape "$cpa_license_product_code")"
   escaped_license_public_key="$(yaml_double_quote_escape "$cpa_license_public_key")"
   escaped_license_plugin_public_key="$(yaml_double_quote_escape "$cpa_license_plugin_public_key")"
   escaped_license_client_id="$(yaml_double_quote_escape "$cpa_license_client_id")"
@@ -1564,13 +1572,13 @@ remote-management:
   panel-github-repository: "https://github.com/seakee/CPA-Manager-Plus"
 
 license:
-  provider: "shop666"
-  product-code: "CPA"
+  provider: "$escaped_license_provider"
+  product-code: "$escaped_license_product_code"
   api-base-url: "$escaped_license_api_base_url"
   public-key: "$escaped_license_public_key"
   plugin-public-key: "$escaped_license_plugin_public_key"
   client-id: "$escaped_license_client_id"
-  client-secret-file: "/run/secrets/cpa-license-client-secret"
+  client-secret: ""
   state-dir: "$escaped_license_state_dir"
   shop-auth-url: "$escaped_license_shop_auth_url"
   shop-exchange-path: "$escaped_license_shop_exchange_path"

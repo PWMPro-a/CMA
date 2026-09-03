@@ -295,13 +295,16 @@ func TestRenderCPADeployFilesWritesOnlyStandardStackFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render files: %v", err)
 	}
-	if len(files) != 3 {
+	if len(files) != 4 {
 		t.Fatalf("files = %#v", files)
 	}
-	for _, name := range []string{"compose.yml", "stack.manifest.json", ".env.example"} {
+	for _, name := range []string{"compose.yml", "stack.manifest.json", ".env.example", "cliproxyapi/config.yaml"} {
 		if _, err := os.Stat(filepath.Join(stackRoot, name)); err != nil {
 			t.Fatalf("stat %s: %v", name, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(stackRoot, "secrets", "cpa-license-client-secret")); err != nil {
+		t.Fatalf("stat client secret placeholder: %v", err)
 	}
 	composeData, err := os.ReadFile(filepath.Join(stackRoot, "compose.yml"))
 	if err != nil {
@@ -316,6 +319,13 @@ func TestRenderCPADeployFilesWritesOnlyStandardStackFiles(t *testing.T) {
 	}
 	if !strings.Contains(string(envData), "CPAMP_AGENT_TOKEN") {
 		t.Fatalf("env example = %s", envData)
+	}
+	configData, err := os.ReadFile(filepath.Join(stackRoot, "cliproxyapi", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(configData), "state-dir: \"/app/data/license\"") {
+		t.Fatalf("config = %s", configData)
 	}
 }
 

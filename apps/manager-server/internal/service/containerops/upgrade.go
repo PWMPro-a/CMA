@@ -101,10 +101,11 @@ func (s *Service) StartUpgradeTask(ctx context.Context, request model.ContainerO
 	}
 	var job model.ContainerOpsUpgradeJob
 	if err := s.postAgentJSON(ctx, "/upgrades/cpa/jobs", model.ContainerOpsUpgradeJobStartRequest{
-		TaskID:           task.TaskID,
-		CPAImage:         task.CPAImage,
-		CPAMPImage:       task.CPAMPImage,
-		RollbackBackupID: task.RollbackBackupID,
+		TaskID:            task.TaskID,
+		CPAImage:          task.CPAImage,
+		CPAMPImage:        task.CPAMPImage,
+		RollbackBackupID:  task.RollbackBackupID,
+		AllowCustomImages: task.AllowCustomImages || request.AllowCustomImages,
 	}, &job); err != nil {
 		finishLifecycle(lifecycleStatusFailed, "agent_job_start_failed", err.Error(), map[string]any{"error": err.Error()})
 		return model.ContainerOpsUpgradeTask{}, fmt.Errorf("start agent upgrade job: %w", err)
@@ -119,6 +120,7 @@ func (s *Service) StartUpgradeTask(ctx context.Context, request model.ContainerO
 	task.Phase = "async_recreate"
 	task.AgentBaseURL = agent.BaseURL
 	task.Message = "Asynchronous upgrade task started."
+	task.AllowCustomImages = task.AllowCustomImages || request.AllowCustomImages
 	task.Error = ""
 	task.NextAction = "wait_for_async_result"
 	task.Result = map[string]any{
@@ -198,14 +200,15 @@ func upgradeJobPlan(job model.ContainerOpsUpgradeJob) (model.ContainerOpsUpgrade
 		return model.ContainerOpsUpgradePlan{}, false
 	}
 	return model.ContainerOpsUpgradePlan{
-		Status:      status,
-		CPAImage:    job.CPAImage,
-		CPAMPImage:  job.CPAMPImage,
-		Checks:      job.Checks,
-		Actions:     job.Actions,
-		Applied:     false,
-		Destructive: true,
-		ReadOnly:    false,
+		Status:            status,
+		CPAImage:          job.CPAImage,
+		CPAMPImage:        job.CPAMPImage,
+		AllowCustomImages: job.AllowCustomImages,
+		Checks:            job.Checks,
+		Actions:           job.Actions,
+		Applied:           false,
+		Destructive:       true,
+		ReadOnly:          false,
 	}, true
 }
 
@@ -215,6 +218,7 @@ func (s *Service) finishAsyncUpgradeTask(ctx context.Context, task model.Contain
 	task.Phase = asyncUpgradeTaskPhase(status)
 	task.CPAImage = plan.CPAImage
 	task.CPAMPImage = plan.CPAMPImage
+	task.AllowCustomImages = plan.AllowCustomImages
 	task.AgentBaseURL = agent.BaseURL
 	task.Message = asyncUpgradeTaskMessage(status, plan.Status)
 	task.Error = asyncUpgradeTaskError(status, plan.Status)
@@ -280,19 +284,20 @@ func (s *Service) createUpgradeTask(ctx context.Context, state model.ContainerOp
 	}
 	startedAtMS := state.StartedAt * 1000
 	task, err := s.auditStore.CreateContainerOpsUpgradeTask(context.WithoutCancel(ctx), model.ContainerOpsUpgradeTask{
-		TaskID:       state.OperationID,
-		OperationID:  state.OperationID,
-		Status:       "preparing",
-		Phase:        "prepare",
-		CPAImage:     request.CPAImage,
-		CPAMPImage:   request.CPAMPImage,
-		AgentBaseURL: agent.BaseURL,
-		Message:      "Upgrade preparation started.",
-		NextAction:   "wait_for_prepare",
-		Request:      auditRequestSummary(request),
-		StartedAtMS:  startedAtMS,
-		CreatedAtMS:  startedAtMS,
-		UpdatedAtMS:  startedAtMS,
+		TaskID:            state.OperationID,
+		OperationID:       state.OperationID,
+		Status:            "preparing",
+		Phase:             "prepare",
+		CPAImage:          request.CPAImage,
+		CPAMPImage:        request.CPAMPImage,
+		AllowCustomImages: request.AllowCustomImages,
+		AgentBaseURL:      agent.BaseURL,
+		Message:           "Upgrade preparation started.",
+		NextAction:        "wait_for_prepare",
+		Request:           auditRequestSummary(request),
+		StartedAtMS:       startedAtMS,
+		CreatedAtMS:       startedAtMS,
+		UpdatedAtMS:       startedAtMS,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create container ops upgrade task: %w", err)
@@ -306,6 +311,7 @@ func (s *Service) finishUpgradeTask(ctx context.Context, task model.ContainerOps
 	task.Phase = upgradeTaskPhase(status)
 	task.CPAImage = plan.CPAImage
 	task.CPAMPImage = plan.CPAMPImage
+	task.AllowCustomImages = plan.AllowCustomImages
 	task.AgentBaseURL = agent.BaseURL
 	task.Message = upgradeTaskMessage(status, plan.Status)
 	task.Error = upgradeTaskError(status, plan.Status)

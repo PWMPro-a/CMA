@@ -12,13 +12,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/containeropsimage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
 
 const (
-	defaultCPAUpgradeImage   = "seakee/cli-proxy-api:latest"
-	defaultCPAMPUpgradeImage = "seakee/cpa-manager-plus:latest"
+	// Upgrade fallbacks are intentionally kept on the legacy repository. A
+	// blank upgrade request is resolved against the currently managed
+	// containers first; these values are only used when no existing target is
+	// available (for example, a preflight on a partially initialized host).
+	defaultCPAUpgradeImage   = containeropsimage.DefaultCPAImage
+	defaultCPAMPUpgradeImage = containeropsimage.DefaultCPAMPImage
 )
 
 type UpgradeOptions struct {
@@ -136,11 +141,15 @@ func (s *Server) upgradeCPAJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createUpgradeJob(request model.ContainerOpsUpgradeJobStartRequest) (model.ContainerOpsUpgradeJob, error) {
-	upgradeRequest := normalizeUpgradeRequest(model.ContainerOpsUpgradeRequest{
-		CPAImage:   request.CPAImage,
-		CPAMPImage: request.CPAMPImage,
-		Apply:      true,
-	})
+	// Keep empty image fields empty here. The agent resolves them from the
+	// running managed containers during the actual plan/recreate call; filling
+	// defaults at queue time would silently replace an existing deployment.
+	upgradeRequest := model.ContainerOpsUpgradeRequest{
+		CPAImage:          request.CPAImage,
+		CPAMPImage:        request.CPAMPImage,
+		Apply:             true,
+		AllowCustomImages: request.AllowCustomImages,
+	}
 	nowMS := time.Now().UTC().UnixMilli()
 
 	s.jobMu.Lock()
@@ -154,19 +163,20 @@ func (s *Server) createUpgradeJob(request model.ContainerOpsUpgradeJobStartReque
 		}
 	}
 	job := model.ContainerOpsUpgradeJob{
-		JobID:            jobID,
-		TaskID:           strings.TrimSpace(request.TaskID),
-		Status:           "queued",
-		Phase:            "queued",
-		CPAImage:         upgradeRequest.CPAImage,
-		CPAMPImage:       upgradeRequest.CPAMPImage,
-		RollbackBackupID: strings.TrimSpace(request.RollbackBackupID),
-		Message:          "Upgrade job queued on cpamp-agent.",
-		NextAction:       "wait_for_agent_job",
-		Actions:          buildUpgradeRecreateActions(),
-		StartedAtMS:      nowMS,
-		CreatedAtMS:      nowMS,
-		UpdatedAtMS:      nowMS,
+		JobID:             jobID,
+		TaskID:            strings.TrimSpace(request.TaskID),
+		Status:            "queued",
+		Phase:             "queued",
+		CPAImage:          upgradeRequest.CPAImage,
+		CPAMPImage:        upgradeRequest.CPAMPImage,
+		AllowCustomImages: upgradeRequest.AllowCustomImages,
+		RollbackBackupID:  strings.TrimSpace(request.RollbackBackupID),
+		Message:           "Upgrade job queued on cpamp-agent.",
+		NextAction:        "wait_for_agent_job",
+		Actions:           buildUpgradeRecreateActions(),
+		StartedAtMS:       nowMS,
+		CreatedAtMS:       nowMS,
+		UpdatedAtMS:       nowMS,
 	}
 	s.upgradeJobs[jobID] = job
 	if err := s.saveUpgradeJobLocked(job); err != nil {
@@ -214,9 +224,10 @@ func (s *Server) runUpgradeJob(ctx context.Context, jobID string) {
 		BackupRoot:       s.backupRoot,
 		RollbackBackupID: job.RollbackBackupID,
 		Request: model.ContainerOpsUpgradeRequest{
-			CPAImage:   job.CPAImage,
-			CPAMPImage: job.CPAMPImage,
-			Apply:      true,
+			CPAImage:          job.CPAImage,
+			CPAMPImage:        job.CPAMPImage,
+			Apply:             true,
+			AllowCustomImages: job.AllowCustomImages,
 		},
 	})
 	if err != nil {
@@ -237,6 +248,7 @@ func (s *Server) runUpgradeJob(ctx context.Context, jobID string) {
 		job.Phase = upgradeJobPhase(status)
 		job.CPAImage = plan.CPAImage
 		job.CPAMPImage = plan.CPAMPImage
+		job.AllowCustomImages = plan.AllowCustomImages
 		job.Message = upgradeJobMessage(status, plan.Status)
 		job.Error = upgradeJobError(status, plan.Status)
 		job.NextAction = upgradeJobNextAction(status)
@@ -357,31 +369,31 @@ func upgradeJobSequence(jobID string) (int64, bool) {
 }
 
 func (c *DockerClient) UpgradeCPAPlan(ctx context.Context, options UpgradeOptions) (model.ContainerOpsUpgradePlan, error) {
-	request := normalizeUpgradeRequest(options.Request)
-	checks := validateUpgradeImages(request)
 	overview, err := c.Overview(ctx)
 	if err != nil {
 		return model.ContainerOpsUpgradePlan{}, fmt.Errorf("discover docker resources: %w", err)
 	}
+	request := normalizeUpgradeRequestForOverview(options.Request, overview)
+	checks := validateUpgradeImages(request)
 	checks = append(checks, buildUpgradeTargetChecks(overview)...)
 	status := upgradeStatus(checks, false)
 	plan := model.ContainerOpsUpgradePlan{
-		Status:      status,
-		CPAImage:    request.CPAImage,
-		CPAMPImage:  request.CPAMPImage,
-		Checks:      checks,
-		Steps:       buildUpgradeSteps(),
-		ReadOnly:    true,
-		Destructive: true,
-		Overview:    &overview,
+		Status:            status,
+		CPAImage:          request.CPAImage,
+		CPAMPImage:        request.CPAMPImage,
+		AllowCustomImages: request.AllowCustomImages,
+		Checks:            checks,
+		Steps:             buildUpgradeSteps(),
+		ReadOnly:          true,
+		Destructive:       true,
+		Overview:          &overview,
 	}
 	return plan, nil
 }
 
 func (c *DockerClient) PrepareCPAUpgrade(ctx context.Context, options UpgradeOptions) (model.ContainerOpsUpgradePlan, error) {
 	backupRoot := cleanBackupRoot(options.BackupRoot)
-	request := normalizeUpgradeRequest(options.Request)
-	plan, err := c.UpgradeCPAPlan(ctx, UpgradeOptions{BackupRoot: backupRoot, Request: request})
+	plan, err := c.UpgradeCPAPlan(ctx, UpgradeOptions{BackupRoot: backupRoot, Request: options.Request, Now: options.Now})
 	if err != nil {
 		return model.ContainerOpsUpgradePlan{}, err
 	}
@@ -402,7 +414,7 @@ func (c *DockerClient) PrepareCPAUpgrade(ctx context.Context, options UpgradeOpt
 	plan.RollbackBackup = &rollback
 	upgradeMarkAction(plan.Actions, "create_upgrade_backup", "applied", "Upgrade rollback backup created.")
 
-	for _, image := range []string{request.CPAImage, request.CPAMPImage} {
+	for _, image := range []string{plan.CPAImage, plan.CPAMPImage} {
 		if err := c.pullImage(ctx, image); err != nil {
 			return upgradeFailure(plan, "pull_upgrade_images", "Pull upgrade image failed: "+err.Error()), nil
 		}
@@ -421,8 +433,7 @@ func (c *DockerClient) PrepareCPAUpgrade(ctx context.Context, options UpgradeOpt
 
 func (c *DockerClient) RecreateCPAUpgrade(ctx context.Context, options UpgradeOptions) (model.ContainerOpsUpgradePlan, error) {
 	backupRoot := cleanBackupRoot(options.BackupRoot)
-	request := normalizeUpgradeRequest(options.Request)
-	plan, err := c.UpgradeCPAPlan(ctx, UpgradeOptions{BackupRoot: backupRoot, Request: request})
+	plan, err := c.UpgradeCPAPlan(ctx, UpgradeOptions{BackupRoot: backupRoot, Request: options.Request, Now: options.Now})
 	if err != nil {
 		return model.ContainerOpsUpgradePlan{}, err
 	}
@@ -485,7 +496,7 @@ func (c *DockerClient) RecreateCPAUpgrade(ctx context.Context, options UpgradeOp
 	}
 	upgradeMarkAction(plan.Actions, "preserve_old_cpa_container", "applied", "Old CPA container was renamed and preserved for rollback.")
 
-	spec := upgradeCPAServiceSpec(request.CPAImage, cpa)
+	spec := upgradeCPAServiceSpec(plan.CPAImage, cpa)
 	spec.Env = preservedEnv
 	if err := c.createDeployContainer(ctx, spec); err != nil {
 		rollbackMessage := c.rollbackCPARecreate(ctx, preservedName, false, wasRunning, now)
@@ -640,20 +651,48 @@ func normalizeUpgradeRequest(request model.ContainerOpsUpgradeRequest) model.Con
 	return request
 }
 
+// normalizeUpgradeRequestForOverview resolves omitted image fields from the
+// currently managed stack before applying the pinned fallback. This is
+// important for upgrades: an empty request means "keep the image already in
+// use", not "silently switch the production container to a new default".
+func normalizeUpgradeRequestForOverview(request model.ContainerOpsUpgradeRequest, overview model.ContainerOpsDockerOverview) model.ContainerOpsUpgradeRequest {
+	request.CPAImage = strings.TrimSpace(request.CPAImage)
+	if request.CPAImage == "" {
+		if image := existingManagedContainerImage(overview, "cli-proxy-api", "cpa"); image != "" {
+			request.CPAImage = image
+		}
+	}
+	request.CPAMPImage = strings.TrimSpace(request.CPAMPImage)
+	if request.CPAMPImage == "" {
+		if image := existingManagedContainerImage(overview, "cpa-manager-plus", "cpamp"); image != "" {
+			request.CPAMPImage = image
+		}
+	}
+	return normalizeUpgradeRequest(request)
+}
+
+func existingManagedContainerImage(overview model.ContainerOpsDockerOverview, name string, role string) string {
+	container, ok := findContainerByName(overview, name)
+	if !ok || !container.Managed || !strings.EqualFold(strings.TrimSpace(container.Role), role) {
+		return ""
+	}
+	return strings.TrimSpace(container.Image)
+}
+
 func validateUpgradeImages(request model.ContainerOpsUpgradeRequest) []model.ContainerOpsUpgradeCheck {
 	checks := make([]model.ContainerOpsUpgradeCheck, 0, 3)
 	add := func(severity string, code string, message string, resource string, blocking bool) {
 		checks = append(checks, model.ContainerOpsUpgradeCheck{Severity: severity, Code: code, Message: message, Resource: resource, Blocking: blocking})
 	}
-	if !deployImageAllowed("cpa", request.CPAImage) {
-		add("error", "upgrade_cpa_image_unsupported", "CPA upgrade image must use the standard seakee/cli-proxy-api repository.", request.CPAImage, true)
+	if !deployImageAllowed("cpa", request.CPAImage, request.AllowCustomImages) {
+		add("error", "upgrade_cpa_image_unsupported", "CPA upgrade image must use the pinned CPA repository or an explicitly approved custom repository.", request.CPAImage, true)
 	} else {
-		add("info", "upgrade_cpa_image_allowed", "CPA upgrade image uses the standard repository.", request.CPAImage, false)
+		add("info", "upgrade_cpa_image_allowed", "CPA upgrade image is accepted by the deployment image policy.", request.CPAImage, false)
 	}
-	if !deployImageAllowed("cpamp", request.CPAMPImage) {
-		add("error", "upgrade_cpamp_image_unsupported", "CPAMP upgrade image must use the standard seakee/cpa-manager-plus repository.", request.CPAMPImage, true)
+	if !deployImageAllowed("cpamp", request.CPAMPImage, request.AllowCustomImages) {
+		add("error", "upgrade_cpamp_image_unsupported", "CPAMP upgrade image must use the standard repository or an explicitly approved custom repository.", request.CPAMPImage, true)
 	} else {
-		add("info", "upgrade_cpamp_image_allowed", "CPAMP upgrade image uses the standard repository.", request.CPAMPImage, false)
+		add("info", "upgrade_cpamp_image_allowed", "CPAMP upgrade image is accepted by the deployment image policy.", request.CPAMPImage, false)
 	}
 	add("info", "upgrade_agent_recreate_deferred", "cpamp-agent uses the CPAMP image, but self-upgrade/recreate is deferred to an asynchronous phase.", "cpamp-agent", false)
 	return checks

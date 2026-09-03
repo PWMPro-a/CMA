@@ -54,16 +54,17 @@ func (r *repository) Create(ctx context.Context, task model.ContainerOpsUpgradeT
 		ctx,
 		`insert into container_ops_upgrade_tasks (
 			task_id, operation_id, status, phase, cpa_image, cpamp_image,
-			rollback_backup_id, agent_base_url, message, error, next_action,
+			allow_custom_images, rollback_backup_id, agent_base_url, message, error, next_action,
 			request_json, result_json, started_at_ms, finished_at_ms,
 			created_at_ms, updated_at_ms
-		) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.TaskID,
 		nullString(task.OperationID),
 		task.Status,
 		nullString(task.Phase),
 		nullString(task.CPAImage),
 		nullString(task.CPAMPImage),
+		boolInt(task.AllowCustomImages),
 		nullString(task.RollbackBackupID),
 		nullString(task.AgentBaseURL),
 		nullString(task.Message),
@@ -95,7 +96,7 @@ func (r *repository) Get(ctx context.Context, taskID string) (model.ContainerOps
 		ctx,
 		`select
 			id, task_id, operation_id, status, phase, cpa_image, cpamp_image,
-			rollback_backup_id, agent_base_url, message, error, next_action,
+			allow_custom_images, rollback_backup_id, agent_base_url, message, error, next_action,
 			request_json, result_json, started_at_ms, finished_at_ms,
 			created_at_ms, updated_at_ms
 		from container_ops_upgrade_tasks
@@ -131,6 +132,7 @@ func (r *repository) Update(ctx context.Context, task model.ContainerOpsUpgradeT
 			phase = ?,
 			cpa_image = ?,
 			cpamp_image = ?,
+			allow_custom_images = ?,
 			rollback_backup_id = ?,
 			agent_base_url = ?,
 			message = ?,
@@ -147,6 +149,7 @@ func (r *repository) Update(ctx context.Context, task model.ContainerOpsUpgradeT
 		nullString(task.Phase),
 		nullString(task.CPAImage),
 		nullString(task.CPAMPImage),
+		boolInt(task.AllowCustomImages),
 		nullString(task.RollbackBackupID),
 		nullString(task.AgentBaseURL),
 		nullString(task.Message),
@@ -170,7 +173,7 @@ func (r *repository) List(ctx context.Context, limit int) ([]model.ContainerOpsU
 		ctx,
 		`select
 			id, task_id, operation_id, status, phase, cpa_image, cpamp_image,
-			rollback_backup_id, agent_base_url, message, error, next_action,
+			allow_custom_images, rollback_backup_id, agent_base_url, message, error, next_action,
 			request_json, result_json, started_at_ms, finished_at_ms,
 			created_at_ms, updated_at_ms
 		from container_ops_upgrade_tasks
@@ -201,6 +204,7 @@ type scanner interface {
 func scanTask(row scanner) (model.ContainerOpsUpgradeTask, error) {
 	var task model.ContainerOpsUpgradeTask
 	var operationID, phase, cpaImage, cpampImage, rollbackBackupID sql.NullString
+	var allowCustomImages sql.NullInt64
 	var agentBaseURL, message, errorText, nextAction, requestJSON, resultJSON sql.NullString
 	var finishedAtMS sql.NullInt64
 	if err := row.Scan(
@@ -211,6 +215,7 @@ func scanTask(row scanner) (model.ContainerOpsUpgradeTask, error) {
 		&phase,
 		&cpaImage,
 		&cpampImage,
+		&allowCustomImages,
 		&rollbackBackupID,
 		&agentBaseURL,
 		&message,
@@ -229,6 +234,7 @@ func scanTask(row scanner) (model.ContainerOpsUpgradeTask, error) {
 	task.Phase = phase.String
 	task.CPAImage = cpaImage.String
 	task.CPAMPImage = cpampImage.String
+	task.AllowCustomImages = allowCustomImages.Valid && allowCustomImages.Int64 != 0
 	task.RollbackBackupID = rollbackBackupID.String
 	task.AgentBaseURL = agentBaseURL.String
 	task.Message = message.String
@@ -268,6 +274,13 @@ func nullString(value string) any {
 		return nil
 	}
 	return value
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func nullPositiveInt64(value int64) any {

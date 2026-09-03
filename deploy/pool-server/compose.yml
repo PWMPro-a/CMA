@@ -2,8 +2,8 @@ name: cpamp-cpa
 
 services:
   cli-proxy-api:
-    image: seakee/cli-proxy-api:pool-20260713
-    pull_policy: never
+    image: ${CPA_IMAGE:-ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.2}
+    pull_policy: ${CPA_PULL_POLICY:-always}
     container_name: cli-proxy-api
     restart: unless-stopped
     command: ["./CLIProxyAPI", "-config", "/app/data/config.yaml"]
@@ -40,6 +40,9 @@ services:
       CPA_LICENSE_CLAIM_PATH: "${CPA_LICENSE_CLAIM_PATH:-}"
     volumes:
       - /opt/cpamp/data/cpa:/app/data
+      # Keep the historical CPA data path mounted as well. Existing leases
+      # under /CLIProxyAPI/data/license must survive image upgrades.
+      - /opt/cpamp/data/cpa:/CLIProxyAPI/data
       - ${CPA_LICENSE_CLIENT_SECRET_HOST_PATH:-${CPA_LICENSE_CLIENT_SECRET_FILE:-/dev/null}}:/run/secrets/cpa-license-client-secret:ro
     healthcheck:
       test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8317'"]

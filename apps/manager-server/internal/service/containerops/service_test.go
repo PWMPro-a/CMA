@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/containeropsimage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/testutil"
 )
@@ -492,7 +493,7 @@ func TestDeployPullImagesUsesAgentEndpointAndToken(t *testing.T) {
 				t.Fatalf("decode pull request: %v", err)
 			}
 			if request.Manifest.ComposeProject != "cpamp-cpa" ||
-				!strings.Contains(request.Compose.Content, "seakee/cli-proxy-api:latest") {
+				!strings.Contains(request.Compose.Content, "image: "+containeropsimage.DefaultCPAImage) {
 				t.Fatalf("pull request = %#v", request)
 			}
 			_ = json.NewEncoder(w).Encode(struct {
@@ -501,7 +502,7 @@ func TestDeployPullImagesUsesAgentEndpointAndToken(t *testing.T) {
 			}{
 				Status: "images_pulled",
 				ImagePulls: []model.ContainerOpsImagePull{
-					{Image: "seakee/cli-proxy-api:latest", Status: "pulled"},
+					{Image: containeropsimage.DefaultCPAImage, Status: "pulled"},
 					{Image: "seakee/cpa-manager-plus:latest", Status: "pulled"},
 				},
 			})

@@ -12,15 +12,14 @@ remote-management:
   disable-control-panel: true
   panel-github-repository: "https://github.com/seakee/CPA-Manager-Plus"
 
-# CPA storefront authorization. The public key and optional client settings
-# are injected through the Compose environment at runtime; keep real values
-# out of this template and out of the repository.
+# CPA storefront authorization. The publisher keys are public release
+# metadata; client credentials remain deployment secrets.
 license:
   provider: "shop666"
   product-code: "CPA"
   api-base-url: "https://p.666ttt.net/api/storefront"
-  public-key: "__CPA_LICENSE_PUBLIC_KEY__"
-  plugin-public-key: ""
+  public-key: "kJhDRBpfneFdURvPXwiGW3XAmPrd2HVVORfHzP-eYTg"
+  plugin-public-key: "OHRHVVIlFC34K-5AQUkOPcZLeiSpeX_n_VPbrH3agXQ"
   client-id: ""
   client-secret: ""
   state-dir: "/CLIProxyAPI/data/license"

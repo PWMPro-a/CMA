@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/containeropsimage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
@@ -37,7 +38,7 @@ func (c *DockerClient) PullCPADeployImages(ctx context.Context, request model.Co
 	if err := validateDeployRenderRequest(request); err != nil {
 		return nil, err
 	}
-	images, err := deployPullImages(request.Manifest)
+	images, err := deployPullImages(request.Manifest, request.AllowCustomImages)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +56,11 @@ func (c *DockerClient) PullCPADeployImages(ctx context.Context, request model.Co
 	return result, nil
 }
 
-func deployPullImages(manifest model.ContainerOpsStackManifest) ([]string, error) {
+// deployPullImages validates every image before contacting Docker. The
+// optional argument keeps the helper source-compatible with older callers
+// while allowing an explicit custom-image opt-in for new deployments.
+func deployPullImages(manifest model.ContainerOpsStackManifest, allowCustom ...bool) ([]string, error) {
+	allowCustomImages := len(allowCustom) > 0 && allowCustom[0]
 	expectedServices := map[string]string{
 		"cpa":   "cli-proxy-api",
 		"cpamp": "cpa-manager-plus",
@@ -78,7 +83,7 @@ func deployPullImages(manifest model.ContainerOpsStackManifest) ([]string, error
 		if service.Image == "" {
 			return nil, fmt.Errorf("%s deploy image is required", service.Role)
 		}
-		if !deployImageAllowed(service.Role, service.Image) {
+		if !deployImageAllowed(service.Role, service.Image, allowCustomImages) {
 			return nil, fmt.Errorf("unsupported %s deploy image %q", service.Role, service.Image)
 		}
 		seenRoles[service.Role] = true
@@ -96,29 +101,9 @@ func deployPullImages(manifest model.ContainerOpsStackManifest) ([]string, error
 	return images, nil
 }
 
-func deployImageAllowed(role string, image string) bool {
-	repository := deployImageRepository(image)
-	switch role {
-	case "cpa":
-		return repository == "seakee/cli-proxy-api"
-	case "cpamp", "agent":
-		return repository == "seakee/cpa-manager-plus"
-	default:
-		return false
-	}
-}
-
-func deployImageRepository(image string) string {
-	reference := strings.TrimSpace(image)
-	if digestIndex := strings.Index(reference, "@"); digestIndex > 0 {
-		return reference[:digestIndex]
-	}
-	colonIndex := strings.LastIndex(reference, ":")
-	slashIndex := strings.LastIndex(reference, "/")
-	if colonIndex > slashIndex {
-		return reference[:colonIndex]
-	}
-	return reference
+func deployImageAllowed(role string, image string, allowCustom ...bool) bool {
+	allowCustomImages := len(allowCustom) > 0 && allowCustom[0]
+	return containeropsimage.Allowed(role, image, allowCustomImages)
 }
 
 func (c *DockerClient) pullImage(ctx context.Context, image string) error {

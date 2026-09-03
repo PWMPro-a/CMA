@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/containeropsimage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
 
@@ -462,14 +463,7 @@ func targetServiceForRole(role string, resources model.ContainerOpsStandardResou
 }
 
 func defaultImageForRole(role string) string {
-	switch role {
-	case roleCPA:
-		return "seakee/cli-proxy-api:latest"
-	case roleCPAMP, roleAgent:
-		return "seakee/cpa-manager-plus:latest"
-	default:
-		return ""
-	}
+	return containeropsimage.DefaultForRole(role)
 }
 
 func countRole(overview model.ContainerOpsDockerOverview, role string) int {

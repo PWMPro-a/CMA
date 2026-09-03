@@ -32,7 +32,7 @@ func (s *Service) DeployPlan(ctx context.Context, request model.ContainerOpsDepl
 		}
 	}
 
-	plan := buildDeployPlan(agent, overview, standardResources(), newAPIInfo(), baseChecks)
+	plan := buildDeployPlan(agent, overview, standardResources(), newAPIInfo(), baseChecks, request.AllowCustomImages)
 	if !request.Apply {
 		return plan, nil
 	}
@@ -81,8 +81,9 @@ func (s *Service) renderDeployFiles(ctx context.Context, plan model.ContainerOps
 		Files  []model.ContainerOpsDeployFile `json:"files"`
 	}
 	if err := s.postAgentJSON(ctx, "/deploys/cpa/render", model.ContainerOpsDeployRenderRequest{
-		Manifest: plan.Manifest,
-		Compose:  plan.Compose,
+		Manifest:          plan.Manifest,
+		Compose:           plan.Compose,
+		AllowCustomImages: plan.AllowCustomImages,
 	}, &rendered); err != nil {
 		return model.ContainerOpsDeployPlan{}, fmt.Errorf("render CPA stack deploy files: %w", err)
 	}
@@ -100,8 +101,9 @@ func (s *Service) pullDeployImages(ctx context.Context, plan model.ContainerOpsD
 		ImagePulls []model.ContainerOpsImagePull `json:"imagePulls"`
 	}
 	if err := s.postAgentJSON(ctx, "/deploys/cpa/pull-images", model.ContainerOpsDeployRenderRequest{
-		Manifest: plan.Manifest,
-		Compose:  plan.Compose,
+		Manifest:          plan.Manifest,
+		Compose:           plan.Compose,
+		AllowCustomImages: plan.AllowCustomImages,
 	}, &pulled); err != nil {
 		return model.ContainerOpsDeployPlan{}, fmt.Errorf("pull CPA stack deploy images: %w", err)
 	}
@@ -121,8 +123,9 @@ func (s *Service) startDeployServices(ctx context.Context, plan model.ContainerO
 		Overview *model.ContainerOpsDockerOverview `json:"overview,omitempty"`
 	}
 	if err := s.postAgentJSON(ctx, "/deploys/cpa/start", model.ContainerOpsDeployRenderRequest{
-		Manifest: plan.Manifest,
-		Compose:  plan.Compose,
+		Manifest:          plan.Manifest,
+		Compose:           plan.Compose,
+		AllowCustomImages: plan.AllowCustomImages,
 	}, &started); err != nil {
 		return model.ContainerOpsDeployPlan{}, fmt.Errorf("start CPA stack deploy services: %w", err)
 	}
@@ -142,6 +145,7 @@ func buildDeployPlan(
 	resources model.ContainerOpsStandardResource,
 	newAPI model.ContainerOpsNewAPIInfo,
 	baseChecks []model.ContainerOpsDeployCheck,
+	allowCustomImages bool,
 ) model.ContainerOpsDeployPlan {
 	checks := append([]model.ContainerOpsDeployCheck{}, baseChecks...)
 	addCheck := func(severity string, code string, message string, resource string, blocking bool) {
@@ -193,16 +197,17 @@ func buildDeployPlan(
 	)
 
 	return model.ContainerOpsDeployPlan{
-		Agent:       agent,
-		Status:      status,
-		Manifest:    manifest,
-		Compose:     buildDeployComposeDraft(resources, newAPI),
-		Checks:      checks,
-		Steps:       buildDeploySteps(resources, newAPI),
-		Applied:     false,
-		Destructive: false,
-		ReadOnly:    true,
-		Overview:    overview,
+		Agent:             agent,
+		Status:            status,
+		Manifest:          manifest,
+		Compose:           buildDeployComposeDraft(resources, newAPI),
+		AllowCustomImages: allowCustomImages,
+		Checks:            checks,
+		Steps:             buildDeploySteps(resources, newAPI),
+		Applied:           false,
+		Destructive:       false,
+		ReadOnly:          true,
+		Overview:          overview,
 	}
 }
 
@@ -221,10 +226,18 @@ func buildDeployComposeDraft(resources model.ContainerOpsStandardResource, newAP
 	line("    container_name: %s", resources.CPAService)
 	line("    restart: unless-stopped")
 	line("    network_mode: host")
+	line("    command: [%s, %s, %s]", quoteYAML("./CLIProxyAPI"), quoteYAML("-config"), quoteYAML("/app/data/config.yaml"))
 	writeComposeLabels(&builder, roleCPA)
 	writeCPALicenseEnvironment(&builder)
 	line("    volumes:")
-	line("      - %s", quoteYAML("cpa-data:/app/data"))
+	line("      - %s", quoteYAML("./cliproxyapi/config.yaml:/app/data/config.yaml:ro"))
+	line("      - %s", quoteYAML("./cliproxyapi/data:/CLIProxyAPI/data"))
+	// Keep the signed license lease and installation identity on the host even
+	// though the runtime config lives under /app/data. This explicit bind avoids
+	// losing grace/activation state when the container is recreated.
+	line("      - %s", quoteYAML("./cliproxyapi/data/license:/app/data/license"))
+	line("      - %s", quoteYAML("./cliproxyapi/auths:/app/data/auths"))
+	line("      - %s", quoteYAML("./cliproxyapi/logs:/CLIProxyAPI/logs"))
 	line("")
 	line("  %s:", resources.CPAMPService)
 	line("    image: %s", cpampImage)
@@ -285,7 +298,7 @@ func buildDeployComposeDraft(resources model.ContainerOpsStandardResource, newAP
 	line("")
 	line("secrets:")
 	line("  cpa_license_client_secret:")
-	line("    file: %s", quoteYAML("${CPA_LICENSE_CLIENT_SECRET_HOST_PATH:-${CPA_LICENSE_CLIENT_SECRET_FILE:-/dev/null}}"))
+	line("    file: %s", quoteYAML("${CPA_LICENSE_CLIENT_SECRET_HOST_PATH:-./secrets/cpa-license-client-secret}"))
 
 	return model.ContainerOpsComposeDraft{
 		FileName:    "compose.deploy-preview.yml",
@@ -305,14 +318,27 @@ func writeCPALicenseEnvironment(builder *strings.Builder) {
 		builder.WriteByte('\n')
 	}
 	line("    environment:")
+	line("      CPA_LICENSE_PROVIDER: %s", quoteYAML("${CPA_LICENSE_PROVIDER:-shop666}"))
+	line("      CPA_LICENSE_PRODUCT_CODE: %s", quoteYAML("${CPA_LICENSE_PRODUCT_CODE:-CPA}"))
 	line("      CPA_LICENSE_PUBLIC_KEY: %s", quoteYAML("${CPA_LICENSE_PUBLIC_KEY:?set CPA_LICENSE_PUBLIC_KEY}"))
 	line("      CPA_LICENSE_PLUGIN_PUBLIC_KEY: %s", quoteYAML("${CPA_LICENSE_PLUGIN_PUBLIC_KEY:-}"))
 	line("      CPA_LICENSE_CLIENT_ID: %s", quoteYAML("${CPA_LICENSE_CLIENT_ID:-}"))
 	line("      CPA_LICENSE_CLIENT_SECRET: %s", quoteYAML("${CPA_LICENSE_CLIENT_SECRET:-}"))
 	line("      CPA_LICENSE_CLIENT_SECRET_FILE: %s", quoteYAML("/run/secrets/cpa-license-client-secret"))
 	line("      CPA_LICENSE_API_BASE_URL: %s", quoteYAML("${CPA_LICENSE_API_BASE_URL:-https://p.666ttt.net/api/storefront}"))
+	line("      CPA_LICENSE_STATE_DIR: %s", quoteYAML("${CPA_LICENSE_STATE_DIR:-/app/data/license}"))
+	line("      CPA_LICENSE_SHOP_AUTH_URL: %s", quoteYAML("${CPA_LICENSE_SHOP_AUTH_URL:-https://p.666ttt.net/shop/?authorize=cpa}"))
+	line("      CPA_LICENSE_SHOP_EXCHANGE_PATH: %s", quoteYAML("${CPA_LICENSE_SHOP_EXCHANGE_PATH:-/licenses/exchange}"))
+	line("      CPA_LICENSE_ACTIVATE_PATH: %s", quoteYAML("${CPA_LICENSE_ACTIVATE_PATH:-/licenses/activate}"))
+	line("      CPA_LICENSE_REFRESH_PATH: %s", quoteYAML("${CPA_LICENSE_REFRESH_PATH:-/licenses/refresh}"))
+	line("      CPA_LICENSE_VERIFY_PATH: %s", quoteYAML("${CPA_LICENSE_VERIFY_PATH:-/licenses/verify}"))
 	line("      CPA_LICENSE_GRACE_PATH: %s", quoteYAML("${CPA_LICENSE_GRACE_PATH:-/licenses/grace}"))
+	line("      CPA_LICENSE_REFRESH_INTERVAL: %s", quoteYAML("${CPA_LICENSE_REFRESH_INTERVAL:-10m}"))
 	line("      CPA_LICENSE_GRACE_PERIOD: %s", quoteYAML("${CPA_LICENSE_GRACE_PERIOD:-6h}"))
+	line("      CPA_LICENSE_STORAGE_KEY: %s", quoteYAML("${CPA_LICENSE_STORAGE_KEY:-}"))
+	line("      CPA_LICENSE_EXECUTABLE_SHA256: %s", quoteYAML("${CPA_LICENSE_EXECUTABLE_SHA256:-}"))
+	line("      CPA_LICENSE_CLAIM_PATH: %s", quoteYAML("${CPA_LICENSE_CLAIM_PATH:-}"))
+	line("      MANAGEMENT_PASSWORD: %s", quoteYAML("${CPA_MANAGEMENT_KEY:?set CPA_MANAGEMENT_KEY}"))
 	line("    secrets:")
 	line("      - cpa_license_client_secret")
 }

@@ -194,7 +194,7 @@ func (s *Service) updateLifecycleAudit(ctx context.Context, state model.Containe
 func auditRequestSummary(request any) any {
 	switch value := request.(type) {
 	case model.ContainerOpsDeployRequest:
-		return map[string]any{"apply": value.Apply, "action": value.Action}
+		return map[string]any{"apply": value.Apply, "action": value.Action, "allowCustomImages": value.AllowCustomImages}
 	case model.ContainerOpsRestoreRequest:
 		return map[string]any{"backupId": value.BackupID, "apply": value.Apply}
 	case model.ContainerOpsRollbackRequest:
@@ -202,9 +202,9 @@ func auditRequestSummary(request any) any {
 	case model.ContainerOpsNetworkStandardizeRequest:
 		return map[string]any{"backupId": value.BackupID, "apply": value.Apply}
 	case model.ContainerOpsUpgradeRequest:
-		return map[string]any{"apply": value.Apply, "cpaImage": value.CPAImage, "cpampImage": value.CPAMPImage}
+		return map[string]any{"apply": value.Apply, "cpaImage": value.CPAImage, "cpampImage": value.CPAMPImage, "allowCustomImages": value.AllowCustomImages}
 	case model.ContainerOpsUpgradeTaskStartRequest:
-		return map[string]any{"taskId": value.TaskID}
+		return map[string]any{"taskId": value.TaskID, "allowCustomImages": value.AllowCustomImages}
 	case model.ContainerOpsSourceIPRequest:
 		return map[string]any{"sourceIp": value.SourceIP, "interface": value.Interface}
 	case map[string]any:

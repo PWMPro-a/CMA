@@ -584,7 +584,7 @@ func TestUpgradeCPAPlanValidatesStandardTargetsAndImages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade plan: %v", err)
 	}
-	if plan.Status != "ready" || plan.CPAImage != defaultCPAUpgradeImage || plan.CPAMPImage != defaultCPAMPUpgradeImage || !plan.ReadOnly || !plan.Destructive {
+	if plan.Status != "ready" || plan.CPAImage != "seakee/cli-proxy-api:old" || plan.CPAMPImage != "seakee/cpa-manager-plus:old" || !plan.ReadOnly || !plan.Destructive {
 		t.Fatalf("plan = %#v", plan)
 	}
 	if !hasUpgradeCheck(plan.Checks, "upgrade_cpa_image_allowed") ||
@@ -1236,10 +1236,16 @@ func TestStartCPADeployServicesCreatesAndStartsStandardStack(t *testing.T) {
 					Labels     map[string]string `json:"Labels"`
 					Env        []string          `json:"Env"`
 					Entrypoint []string          `json:"Entrypoint"`
+					Cmd        []string          `json:"Cmd"`
 					HostConfig struct {
 						Binds       []string `json:"Binds"`
 						CapAdd      []string `json:"CapAdd"`
 						NetworkMode string   `json:"NetworkMode"`
+						Mounts      []struct {
+							Type   string `json:"Type"`
+							Source string `json:"Source"`
+							Target string `json:"Target"`
+						} `json:"Mounts"`
 					} `json:"HostConfig"`
 				}
 				if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
@@ -1250,9 +1256,19 @@ func TestStartCPADeployServicesCreatesAndStartsStandardStack(t *testing.T) {
 				}
 				switch name {
 				case "cli-proxy-api":
+					hasCPAMount := false
+					for _, mount := range payload.HostConfig.Mounts {
+						if mount.Type == "volume" && mount.Source == "cpamp-cpa_cpa-data" && mount.Target == "/app/data" {
+							hasCPAMount = true
+						}
+					}
 					if payload.Labels["com.cpamp.role"] != "cpa" ||
 						payload.Image != "seakee/cli-proxy-api:latest" ||
 						payload.HostConfig.NetworkMode != "host" ||
+						!containsString(payload.Cmd, "./CLIProxyAPI") ||
+						!containsString(payload.Cmd, "-config") ||
+						!containsString(payload.Cmd, "/app/data/config.yaml") ||
+						!hasCPAMount ||
 						!containsString(payload.Env, "CPA_LICENSE_PUBLIC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") ||
 						!containsString(payload.Env, "CPA_LICENSE_GRACE_PERIOD=6h") ||
 						!containsString(payload.Env, "CPA_LICENSE_CLIENT_SECRET_FILE=/run/secrets/cpa-license-client-secret") ||
@@ -1281,6 +1297,22 @@ func TestStartCPADeployServicesCreatesAndStartsStandardStack(t *testing.T) {
 				}
 				containersCreated = append(containersCreated, name)
 				return backupJSONResponse(http.StatusCreated, map[string]string{"Id": name + "-id"})
+			case "/containers/cli-proxy-api/archive":
+				if req.Method == http.MethodGet {
+					// The freshly-created named volume has no config.yaml yet.
+					return backupJSONResponse(http.StatusNotFound, map[string]any{"message": "config missing"})
+				}
+				if req.Method != http.MethodPut || req.URL.Query().Get("path") != "/app/data" {
+					t.Fatalf("CPA config archive request = %s %s", req.Method, req.URL.String())
+				}
+				archiveData, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatalf("read CPA config archive: %v", err)
+				}
+				if len(archiveData) == 0 {
+					t.Fatal("CPA config archive is empty")
+				}
+				return backupJSONResponse(http.StatusNoContent, map[string]any{})
 			case "/containers/cli-proxy-api/start", "/containers/cpamp-agent/start", "/containers/cpa-manager-plus/start":
 				started = append(started, strings.TrimSuffix(strings.TrimPrefix(req.URL.Path, "/containers/"), "/start"))
 				return backupJSONResponse(http.StatusNoContent, map[string]any{})
@@ -1317,6 +1349,43 @@ func TestStartCPADeployServicesCreatesAndStartsStandardStack(t *testing.T) {
 	if !hasAgentDeployActionStatus(result.Actions, "healthcheck_services", "applied") ||
 		!hasAgentDeployCheck(result.Checks, "deploy_services_started") {
 		t.Fatalf("actions=%#v checks=%#v", result.Actions, result.Checks)
+	}
+	if !hasAgentDeployActionStatus(result.Actions, "seed_cpa_config", "applied") {
+		t.Fatalf("CPA config seed action = %#v", result.Actions)
+	}
+}
+
+func TestDeployStartSpecsIncludeExplicitCPACommandAndBootstrapConfig(t *testing.T) {
+	manifest := standardDeployRenderRequest().Manifest
+	specs := deployStartSpecs(manifest, map[string]string{
+		"CPA_MANAGEMENT_KEY":            "management-secret",
+		"CPA_LICENSE_PUBLIC_KEY":        "public-key",
+		"CPA_LICENSE_PLUGIN_PUBLIC_KEY": "plugin-key",
+		"CPA_LICENSE_GRACE_PERIOD":      "6h",
+	}, "/opt/cpamp/stacks/cpa", "/opt/cpamp/backups")
+	if len(specs) == 0 {
+		t.Fatal("deploy specs are empty")
+	}
+	cpa := specs[0]
+	if got, want := strings.Join(cpa.Cmd, " "), "./CLIProxyAPI -config /app/data/config.yaml"; got != want {
+		t.Fatalf("CPA command = %q, want %q", got, want)
+	}
+	if got := cpa.VolumeMounts["cpamp-cpa_cpa-data"]; got != "/app/data" {
+		t.Fatalf("CPA data mount = %q", got)
+	}
+	config := string(cpa.ConfigYAML)
+	for _, want := range []string{
+		"secret-key: \"management-secret\"",
+		"public-key: \"public-key\"",
+		"grace-period: \"6h\"",
+		"state-dir: \"/app/data/license\"",
+	} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("bootstrap config missing %q:\n%s", want, config)
+		}
+	}
+	if strings.Contains(config, "client-secret") {
+		t.Fatalf("bootstrap config must not contain client secret:\n%s", config)
 	}
 }
 
