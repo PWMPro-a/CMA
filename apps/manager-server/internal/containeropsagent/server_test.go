@@ -61,7 +61,7 @@ func TestReadDeployEnvFallsBackToLicenseValuesInCPAConfig(t *testing.T) {
 		"  public-key: \"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"",
 		"  plugin-public-key: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'",
 		"  client-id: \"client-from-config\"",
-		"  grace-period: \"6h\" # compatibility fallback",
+		"  grace-period: \"24h\" # runtime policy stays env-owned",
 		"routing:",
 		"  strategy: round-robin",
 		"",
@@ -77,8 +77,8 @@ func TestReadDeployEnvFallsBackToLicenseValuesInCPAConfig(t *testing.T) {
 	if values["CPA_LICENSE_CLIENT_ID"] != "client-from-config" {
 		t.Fatalf("client id fallback = %q", values["CPA_LICENSE_CLIENT_ID"])
 	}
-	if values["CPA_LICENSE_GRACE_PERIOD"] != "6h" {
-		t.Fatalf("grace period fallback = %q", values["CPA_LICENSE_GRACE_PERIOD"])
+	if _, ok := values["CPA_LICENSE_GRACE_PERIOD"]; ok {
+		t.Fatalf("runtime grace period unexpectedly fell back from config: %#v", values)
 	}
 	if hasAgentDeployCheck(checks, "deploy_env_license_public_key_missing") {
 		t.Fatalf("public key fallback was still reported missing: %#v", checks)

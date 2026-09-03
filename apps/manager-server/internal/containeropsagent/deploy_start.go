@@ -272,25 +272,14 @@ func readDeployEnv(root string) (map[string]string, []model.ContainerOpsDeployCh
 // file is deployment input and may contain provider-specific structures that
 // are irrelevant to the agent's preflight checks.
 func readDeployLicenseConfigValues(root string) map[string]string {
+	// Only publisher metadata and the non-secret client identifier may fall
+	// back to YAML. Runtime endpoints, durations, storage keys, and all secret
+	// values remain environment-owned so an old config cannot silently change a
+	// deployment's policy.
 	keys := map[string]string{
-		"provider":           "CPA_LICENSE_PROVIDER",
-		"product-code":       "CPA_LICENSE_PRODUCT_CODE",
-		"api-base-url":       "CPA_LICENSE_API_BASE_URL",
-		"public-key":         "CPA_LICENSE_PUBLIC_KEY",
-		"plugin-public-key":  "CPA_LICENSE_PLUGIN_PUBLIC_KEY",
-		"client-id":          "CPA_LICENSE_CLIENT_ID",
-		"state-dir":          "CPA_LICENSE_STATE_DIR",
-		"shop-auth-url":      "CPA_LICENSE_SHOP_AUTH_URL",
-		"shop-exchange-path": "CPA_LICENSE_SHOP_EXCHANGE_PATH",
-		"activate-path":      "CPA_LICENSE_ACTIVATE_PATH",
-		"refresh-path":       "CPA_LICENSE_REFRESH_PATH",
-		"verify-path":        "CPA_LICENSE_VERIFY_PATH",
-		"grace-path":         "CPA_LICENSE_GRACE_PATH",
-		"refresh-interval":   "CPA_LICENSE_REFRESH_INTERVAL",
-		"grace-period":       "CPA_LICENSE_GRACE_PERIOD",
-		"storage-key":        "CPA_LICENSE_STORAGE_KEY",
-		"executable-sha256":  "CPA_LICENSE_EXECUTABLE_SHA256",
-		"claim-path":         "CPA_LICENSE_CLAIM_PATH",
+		"public-key":        "CPA_LICENSE_PUBLIC_KEY",
+		"plugin-public-key": "CPA_LICENSE_PLUGIN_PUBLIC_KEY",
+		"client-id":         "CPA_LICENSE_CLIENT_ID",
 	}
 	result := make(map[string]string, len(keys))
 	root = cleanStackRoot(root)
@@ -327,7 +316,7 @@ func parseDeployLicenseYAML(reader io.Reader, keys map[string]string) map[string
 			continue
 		}
 		indent := len(raw) - len(strings.TrimLeft(raw, " \t"))
-		if key, value, ok := strings.Cut(trimmed, ":"); ok && strings.TrimSpace(key) == "license" && strings.TrimSpace(value) == "" {
+		if key, value, ok := strings.Cut(trimmed, ":"); ok && indent == 0 && strings.TrimSpace(key) == "license" && strings.TrimSpace(value) == "" {
 			inLicense = true
 			licenseIndent = indent
 			continue
