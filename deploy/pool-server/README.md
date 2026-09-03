@@ -69,7 +69,7 @@ docker compose --env-file /path/to/.env -f /path/to/compose.yml <command>
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `CPA_IMAGE` | `ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.3` | 已验证的公开 CPA 发布版本；建议固定 tag 或 digest |
-| `CPAMP_IMAGE` | `ghcr.io/seakee/cpa-manager-plus:v1.12.8` | 已验证的 Manager/Agent 版本；升级时显式修改并先做预检 |
+| `CPAMP_IMAGE` | `ghcr.io/abc124774961/cpa-manager-plus:v1.12.8-cpa.1` | 已验证的 Manager/Agent 版本；升级时显式修改并先做预检 |
 | `CPA_PORT` | `8317` | CPA host-network 监听端口 |
 | `CPAMP_PORT` | `18317` | 面板对外端口 |
 | `CPAMP_AGENT_PORT` | `18417` | Agent host-network 端口 |
