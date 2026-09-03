@@ -68,6 +68,10 @@ existing_install_state="fresh"
 existing_volume_name=""
 auth_validation_status="pending"
 admin_secret_missing="0"
+# Existing managed installs may still contain the legacy direct secret in
+# `.env`.  Keep track of whether that key was present so a successful
+# migration can blank it without rewriting otherwise unrelated configuration.
+legacy_license_secret_env_present="0"
 
 die() {
   printf '%s\n' "$*" >&2
@@ -424,6 +428,12 @@ read_env_value() {
 
   [ -f "$file" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
+    # Accept the common `export KEY=value` spelling as well as harmless
+    # indentation, while never evaluating the file as shell code.
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in
+      export[[:space:]]*) line="${line#export}"; line="${line#"${line%%[![:space:]]*}"}" ;;
+    esac
     case "$line" in
       "$key="*) value="${line#*=}"; found="1" ;;
     esac
@@ -665,11 +675,21 @@ load_existing_docker_config() {
   cpa_license_executable_sha256="$(read_env_value "$install_dir/.env" CPA_LICENSE_EXECUTABLE_SHA256 2>/dev/null || printf '%s' "${cpa_license_executable_sha256:-}")"
   cpa_license_claim_path="$(read_env_value "$install_dir/.env" CPA_LICENSE_CLAIM_PATH 2>/dev/null || printf '%s' "${cpa_license_claim_path:-}")"
   # Older installers may have persisted a direct secret in .env. Keep it in
-  # memory only long enough to migrate it to the local secret file during a
-  # deliberate regenerate; never echo it or write it back to .env.
+  # memory only long enough to migrate it to the local secret file; a
+  # successful managed upgrade/repair blanks the legacy .env entry without
+  # echoing the value.
+  if read_env_value "$install_dir/.env" CPA_LICENSE_CLIENT_SECRET >/dev/null 2>&1; then
+    legacy_license_secret_env_present="1"
+  fi
   cpa_license_client_secret="$(read_env_value "$install_dir/.env" CPA_LICENSE_CLIENT_SECRET 2>/dev/null || printf '%s' "${cpa_license_client_secret:-}")"
   persisted_license_secret_file="$install_dir/secrets/cpa-license-client-secret"
-  if [ -f "$persisted_license_secret_file" ]; then
+  # Prefer the canonical file only when it already contains a usable secret.
+  # Empty/placeholder files are leftovers from older installers; retaining the
+  # configured legacy source below lets preflight migrate that value instead
+  # of accidentally replacing the source path with the empty canonical file.
+  if [ -f "$persisted_license_secret_file" ] &&
+     [ ! -L "$persisted_license_secret_file" ] &&
+     license_secret_file_is_usable "$persisted_license_secret_file"; then
     cpa_license_secret_file="$persisted_license_secret_file"
     cpa_license_client_secret_source_file="$persisted_license_secret_file"
   elif [ -n "$cpa_license_client_secret_source_file" ] && [[ "$cpa_license_client_secret_source_file" != /* ]]; then
@@ -750,8 +770,10 @@ storefront_license_required() {
   local host=""
 
   [ "$install_mode" = "stack" ] || return 1
-  # Admin-login repair must remain available for an existing/orphaned data
-  # volume. It does not start a new CPA authorization flow.
+  # Repair is deliberately an admin-login recovery operation.  It may need to
+  # recreate the Compose files around an orphaned data volume, but it does not
+  # begin a new storefront authorization flow; the CPA runtime remains
+  # fail-closed until a matching credential is supplied.
   [ "$operation" != "repair" ] || return 1
 
   provider="$(printf '%s' "$cpa_license_provider" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
@@ -800,6 +822,38 @@ secret_file_mode() {
   fi
 }
 
+# A non-empty, single-line value is sufficient for deciding whether an
+# existing canonical file should take precedence over a legacy source.  This
+# probe is intentionally non-fatal: malformed files are reported by the real
+# preflight after the legacy fallback has been resolved.
+license_secret_file_is_usable() {
+  local file="$1"
+  local value=""
+  local line_count=""
+
+  [ -f "$file" ] || return 1
+  [ ! -L "$file" ] || return 1
+  [ -r "$file" ] || return 1
+  line_count="$(awk 'END { print NR }' "$file" 2>/dev/null || printf '0')"
+  [ "$line_count" -le 1 ] 2>/dev/null || return 1
+  ! LC_ALL=C grep -q $'\r' "$file" 2>/dev/null || return 1
+  value="$(< "$file")"
+  value="${value%$'\r'}"
+  value="${value%$'\n'}"
+  ! license_value_missing "$value"
+}
+
+validate_secret_file_mode() {
+  local label="$1"
+  local file="$2"
+  local mode=""
+
+  mode="$(secret_file_mode "$file")"
+  if [ -n "$mode" ] && [ "$mode" != "600" ]; then
+    die "$label must use mode 600: $file"
+  fi
+}
+
 validate_license_secret_path() {
   local value="$1"
   if [[ "$value" == *[[:space:]]* ||
@@ -815,23 +869,37 @@ validate_license_secret_path() {
 
 # Read and validate a file-backed storefront secret without ever including its
 # contents in diagnostics. Return 0 for a usable value, 1 for an empty value,
-# and fail for malformed/unreadable files.
+# 2 for a known placeholder, and 3 for malformed/unreadable files when the
+# caller asks for non-fatal probing.  Strict callers retain the historical
+# fail-fast diagnostics.
 read_license_secret_file() {
   local file="$1"
   local label="${2:-$(text license_secret_file)}"
   local fix_mode="${3:-0}"
+  local fatal_errors="${4:-1}"
   local value=""
   local mode=""
   local line_count=""
   local compact_value=""
 
   [ -f "$file" ] || return 1
-  [ -r "$file" ] || die "$label is not readable: $file"
+  if [ ! -r "$file" ]; then
+    if [ "$fatal_errors" = "1" ]; then
+      die "$label is not readable: $file"
+    fi
+    return 3
+  fi
   if line_count="$(awk 'END { print NR }' "$file" 2>/dev/null)" && [ "$line_count" -gt 1 ] 2>/dev/null; then
-    die "$label must be a single line: $file"
+    if [ "$fatal_errors" = "1" ]; then
+      die "$label must be a single line: $file"
+    fi
+    return 3
   fi
   if LC_ALL=C grep -q $'\r' "$file" 2>/dev/null; then
-    die "$label must be a single line: $file"
+    if [ "$fatal_errors" = "1" ]; then
+      die "$label must be a single line: $file"
+    fi
+    return 3
   fi
   value="$(< "$file")"
   value="${value%$'\r'}"
@@ -856,15 +924,35 @@ preflight_license_secret() {
   local target="$(license_secret_target_path)"
   local source="${cpa_license_client_secret_source_file:-}"
   local direct="${cpa_license_client_secret:-}"
+  local required="0"
   local target_status=0
   local source_status=0
+  local placeholder_seen="0"
 
   cpa_license_secret_file="$target"
+  if storefront_license_required; then
+    required="1"
+  fi
+
+  # CPAMP-only never starts or owns CPA.  Do not inspect, copy, chmod, or
+  # otherwise reinterpret a customer's external CPA credential in this mode.
+  if [ "$install_mode" != "stack" ]; then
+    return 0
+  fi
+
+  # The canonical path is installer-owned.  Refuse symlinks so a later
+  # migration cannot write through to an unrelated external file.
+  if [ -L "$target" ]; then
+    die "$(text license_secret_file) must not be a symlink: $target"
+  fi
   if [ -e "$target" ] && [ ! -f "$target" ]; then
     die "$(text license_secret_file) is not a regular file: $target"
   fi
   if [ -f "$target" ]; then
-    if read_license_secret_file "$target" "$(text license_secret_file)" 1; then
+    if read_license_secret_file "$target" "$(text license_secret_file)" 0 "$required"; then
+      if [ "$required" = "1" ]; then
+        validate_secret_file_mode "$(text license_secret_file)" "$target"
+      fi
       cpa_license_client_secret_source_file="$target"
       return 0
     else
@@ -872,9 +960,10 @@ preflight_license_secret() {
       # Empty canonical files are leftovers from older installers and may be
       # replaced by an explicitly supplied issued value below.
       if [ "$target_status" -eq 2 ]; then
-        die "$(text license_secret_file) must contain a non-placeholder, single-line secret: $target"
+        placeholder_seen="1"
       fi
-      [ "$target_status" -eq 1 ] || return "$target_status"
+      [ "$target_status" -eq 1 ] || [ "$target_status" -eq 2 ] || [ "$target_status" -eq 3 ] ||
+        return "$target_status"
     fi
   fi
 
@@ -883,15 +972,19 @@ preflight_license_secret() {
     cpa_license_client_secret_source_file="$source"
     if [ "$source" != "$target" ] && [ -e "$source" ]; then
       [ -f "$source" ] || die "$(text license_secret_file) is not a regular file: $source"
-      if read_license_secret_file "$source"; then
+      if read_license_secret_file "$source" "$(text license_secret_file)" 0 "$required"; then
+        if [ "$required" = "1" ]; then
+          validate_secret_file_mode "$(text license_secret_file)" "$source"
+        fi
         return 0
       else
         source_status=$?
       fi
       if [ "$source_status" -eq 2 ]; then
-        die "$(text license_secret_file) must contain a non-placeholder, single-line secret: $source"
+        placeholder_seen="1"
       fi
-      [ "$source_status" -eq 1 ] || return "$source_status"
+      [ "$source_status" -eq 1 ] || [ "$source_status" -eq 2 ] || [ "$source_status" -eq 3 ] ||
+        return "$source_status"
     elif [ "$source" != "$target" ] && [ "$dry_run" != "1" ] && [ -e "$source" ]; then
       die "$(text license_secret_file) is not readable: $source"
     fi
@@ -906,6 +999,9 @@ preflight_license_secret() {
     if [ "$dry_run" = "1" ]; then
       say "$(license_secret_missing_message "$target")" >&2
       return 0
+    fi
+    if [ "$placeholder_seen" = "1" ]; then
+      die "$(text license_secret_file) must contain a non-placeholder, single-line secret: $target"
     fi
     die "$(license_secret_missing_message "$target")"
   fi
@@ -1024,11 +1120,10 @@ validate_license_config() {
   if [ -n "$cpa_license_client_secret_source_file" ]; then
     validate_single_line "$(text license_secret_file)" "$cpa_license_client_secret_source_file"
     if license_value_missing "$cpa_license_client_secret_source_file"; then
-      if [ "$allow_placeholder" = "1" ]; then
-        cpa_license_client_secret_source_file=""
-      else
-        die "$(text license_secret_file) points to a placeholder."
-      fi
+      # A placeholder path is equivalent to an unset optional credential. The
+      # storefront preflight below owns the required/optional decision and can
+      # report the actionable destination without leaking a value.
+      cpa_license_client_secret_source_file=""
     else
       validate_license_secret_path "$cpa_license_client_secret_source_file"
       if [ "$cpa_license_client_secret_source_file" != "$install_dir/secrets/cpa-license-client-secret" ] &&
@@ -1040,11 +1135,11 @@ validate_license_config() {
   if [ -n "$cpa_license_client_secret" ]; then
     validate_secret_value "$(text license_client_secret)" "$cpa_license_client_secret"
     if license_value_missing "$cpa_license_client_secret"; then
-      if [ "$allow_placeholder" = "1" ]; then
-        cpa_license_client_secret=""
-      else
-        die "$(text license_client_secret) must contain a non-placeholder value."
-      fi
+      # Treat template markers as an unset fallback. If a storefront secret is
+      # required, preflight emits the single canonical-file instruction; for
+      # CPAMP-only/local/repair flows this simply leaves the optional file
+      # empty.
+      cpa_license_client_secret=""
     fi
   fi
   # When both legacy forms are supplied, preflight checks the file first and
@@ -1100,6 +1195,7 @@ validate_url_value() {
   if [[ "$value" == *[[:space:]]* ||
         "$value" == *'#'* ||
         "$value" == *'?'* ||
+        "$value" == *'@'* ||
         "$value" == *\"* ||
         "$value" == *"'"* ||
         "$value" == *\\* ||
@@ -1516,8 +1612,18 @@ populate_license_secret_file() {
   local source="${cpa_license_client_secret_source_file:-}"
   local source_value=""
   local target_status=0
+  local source_status=0
+  local required="0"
 
   cpa_license_secret_file="$target"
+  if [ "$install_mode" != "stack" ]; then
+    # CPAMP-only does not mount or own the CPA license secret. In particular,
+    # never copy a customer's external CPA credential into this install.
+    return 0
+  fi
+  if storefront_license_required; then
+    required="1"
+  fi
   if [ "$dry_run" = "1" ]; then
     # No file creation in preview mode, including the old empty-placeholder
     # behavior. The summary already shows where the issued secret belongs.
@@ -1526,12 +1632,22 @@ populate_license_secret_file() {
   fi
 
   mkdir -p "$(dirname "$target")"
+  if [ -L "$target" ]; then
+    die "$(text license_secret_file) must not be a symlink: $target"
+  fi
   if [ -e "$target" ] && [ ! -f "$target" ]; then
     die "$(text license_secret_file) is not a regular file: $target"
   fi
   if [ -f "$target" ]; then
-    if read_license_secret_file "$target" "$(text license_secret_file)" 1 >/dev/null; then
-      chmod 600 "$target" 2>/dev/null || die "Unable to restrict secret file permissions: $target"
+    # A malformed canonical file belongs to this installation and should be
+    # surfaced rather than silently truncated. Blank/placeholder files remain
+    # eligible for legacy/direct migration below.
+    if read_license_secret_file "$target" "$(text license_secret_file)" 0 1 >/dev/null; then
+      if [ "$required" = "1" ]; then
+        validate_secret_file_mode "$(text license_secret_file)" "$target"
+      else
+        chmod 600 "$target" 2>/dev/null || die "Unable to restrict secret file permissions: $target"
+      fi
       cpa_license_client_secret_source_file="$target"
       return 0
     else
@@ -1539,14 +1655,15 @@ populate_license_secret_file() {
     fi
     # A zero-byte placeholder from an older installer can be populated below;
     # a non-empty invalid file was rejected by preflight and is not replaced.
-    if [ "$target_status" -eq 2 ]; then
-      die "$(text license_secret_file) must contain a non-placeholder, single-line secret: $target"
-    fi
-    [ "$target_status" -eq 1 ] || return "$target_status"
+    [ "$target_status" -eq 1 ] || [ "$target_status" -eq 2 ] ||
+      die "$(text license_secret_file) is malformed or unreadable: $target"
   fi
 
   if [ -n "$source" ] && [ "$source" != "$target" ] && [ -f "$source" ]; then
-    if read_license_secret_file "$source" >/dev/null; then
+    if read_license_secret_file "$source" "$(text license_secret_file)" 0 "$required" >/dev/null; then
+      if [ "$required" = "1" ]; then
+        validate_secret_file_mode "$(text license_secret_file)" "$source"
+      fi
       source_value="$(< "$source")"
       source_value="${source_value%$'\r'}"
       source_value="${source_value%$'\n'}"
@@ -1554,12 +1671,23 @@ populate_license_secret_file() {
       chmod 600 "$target" 2>/dev/null || die "Unable to restrict secret file permissions: $target"
       cpa_license_client_secret_source_file="$target"
       return 0
+    else
+      source_status=$?
+      # Non-storefront/repair flows may carry a stale external source. Ignore
+      # it and continue to a valid direct value or an empty optional file.
+      [ "$source_status" -eq 1 ] || [ "$source_status" -eq 2 ] || [ "$source_status" -eq 3 ] ||
+        return "$source_status"
     fi
   fi
   if [ -n "${cpa_license_client_secret:-}" ] && ! license_value_missing "$cpa_license_client_secret"; then
     validate_secret_value "$(text license_client_secret)" "$cpa_license_client_secret"
     printf '%s\n' "$cpa_license_client_secret" > "$target"
     chmod 600 "$target" 2>/dev/null || die "Unable to restrict secret file permissions: $target"
+  elif [ "$required" = "1" ]; then
+    # Protect against a credential disappearing between preflight and file
+    # materialization. Never start a storefront-backed stack with an empty
+    # Docker secret.
+    die "$(license_secret_missing_message "$target")"
   elif [ ! -f "$target" ]; then
     # Non-storefront providers retain the Compose-compatible empty file. A
     # storefront-backed install reaches this branch only after preflight has
@@ -1571,6 +1699,50 @@ populate_license_secret_file() {
     chmod 600 "$target" 2>/dev/null || die "Unable to restrict secret file permissions: $target"
   fi
   cpa_license_client_secret_source_file="$target"
+}
+
+# Remove a legacy plaintext client secret from a managed .env only after the
+# value has been accepted and materialized into the local Docker secret. Keep
+# every unrelated line byte-for-byte stable so upgrades do not disturb runtime
+# settings, and never print the old value.
+clear_legacy_license_secret_env() {
+  local file="$install_dir/.env"
+  local tmp="${file}.tmp.$$"
+  local mode=""
+
+  [ "$legacy_license_secret_env_present" = "1" ] || return 0
+  [ "$dry_run" = "1" ] && return 0
+  [ -f "$file" ] || return 0
+  if [ -L "$file" ]; then
+    die "Refusing to rewrite symlinked environment file: $file"
+  fi
+
+  mode="$(secret_file_mode "$file")"
+  if ! awk '
+    BEGIN { key = "CPA_LICENSE_CLIENT_SECRET" }
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      if (line ~ /^export[[:space:]]+/) {
+        sub(/^export[[:space:]]+/, "", line)
+      }
+      if (index(line, key "=") == 1) { print key "="; next }
+    }
+    { print }
+  ' "$file" > "$tmp"; then
+    rm -f "$tmp"
+    die "Unable to sanitize legacy license secret from: $file"
+  fi
+  if [ -n "$mode" ]; then
+    chmod "$mode" "$tmp" 2>/dev/null || {
+      rm -f "$tmp"
+      die "Unable to preserve environment file permissions: $file"
+    }
+  fi
+  mv -f "$tmp" "$file" || {
+    rm -f "$tmp"
+    die "Unable to update environment file: $file"
+  }
 }
 
 collect_license_config() {
@@ -2596,8 +2768,10 @@ main() {
     if [ "$install_mode" = "stack" ]; then
       preflight_license_secret
       # Migrate legacy direct/file credentials before replacing an existing
-      # CPA container. This does not rewrite .env, config, or license state.
-      if [ "$dry_run" != "1" ] && [ "$skip_execute" != "1" ]; then
+      # CPA container. The migration is also performed for skip-execute plans
+      # so the rendered configuration is complete, while dry-runs remain
+      # side-effect free.
+      if [ "$dry_run" != "1" ]; then
         populate_license_secret_file
       fi
     fi
@@ -2610,6 +2784,9 @@ main() {
       run_docker_repair
     fi
     validate_docker_install
+    if [ "$install_mode" = "stack" ]; then
+      clear_legacy_license_secret_env
+    fi
     post_install_message
     return
   fi
@@ -2642,6 +2819,9 @@ main() {
       run_docker_install
     fi
     validate_docker_install
+    if [ "$install_mode" = "stack" ]; then
+      clear_legacy_license_secret_env
+    fi
   else
     backup_generated_config
     generate_native_files

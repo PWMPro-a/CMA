@@ -383,6 +383,280 @@ describe('installer script', () => {
     }
   });
 
+  it.each(['', 'replace-with-storefront-secret'])(
+    'falls back to a valid legacy source when the canonical file contains %s',
+    (canonicalValue) => {
+      const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+      const legacySource = path.join(installDir, 'legacy-secret');
+
+      try {
+        mkdirSync(path.join(installDir, 'secrets'), { recursive: true });
+        writeFileSync(
+          path.join(installDir, '.env'),
+          [
+            'COMPOSE_PROJECT_NAME=cpamp',
+            'CPAMP_IMAGE=example/cpamp:v1',
+            'CPAMP_PORT=18317',
+            'CPA_IMAGE=example/cpa:v1',
+            'CPA_PORT=8317',
+            'CPAMP_AGENT_TOKEN=agent',
+            'CPA_LICENSE_PROVIDER=shop666',
+            'CPA_LICENSE_PUBLIC_KEY=replace-with-base64url-ed25519-public-key',
+            'CPA_LICENSE_CLIENT_SECRET_FILE=legacy-secret',
+            '',
+          ].join('\n')
+        );
+        writeFileSync(
+          path.join(installDir, 'compose.yaml'),
+          'services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE}\n  cpa-manager-plus:\n    image: ${CPAMP_IMAGE}\n'
+        );
+        writeFileSync(
+          path.join(installDir, 'secrets/cpamp-admin-key'),
+          'cpamp_existing_admin_key\n'
+        );
+        writeFileSync(
+          path.join(installDir, 'secrets/cpa-license-client-secret'),
+          canonicalValue ? `${canonicalValue}\n` : ''
+        );
+        writeFileSync(legacySource, 'legacy-source-secret-for-test\n');
+        chmodSync(path.join(installDir, 'secrets/cpamp-admin-key'), 0o600);
+        chmodSync(path.join(installDir, 'secrets/cpa-license-client-secret'), 0o600);
+        chmodSync(legacySource, 0o600);
+
+        const result = spawnSync('bash', [installerPath], {
+          cwd: repoRoot,
+          env: {
+            ...process.env,
+            CPAMP_OPERATION: 'upgrade',
+            CPAMP_SKIP_EXECUTE: '1',
+            CPAMP_NON_INTERACTIVE: '1',
+            CPAMP_CONFIRM: '1',
+            CPAMP_LANG: 'en-US',
+            CPAMP_INSTALL_DIR: installDir,
+          },
+          encoding: 'utf8',
+        });
+
+        expect(result.status).toBe(0);
+        expect(
+          readFileSync(path.join(installDir, 'secrets/cpa-license-client-secret'), 'utf8')
+        ).toBe('legacy-source-secret-for-test\n');
+      } finally {
+        rmSync(installDir, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it('rejects a storefront secret file that is not mode 600', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+
+    try {
+      mkdirSync(path.join(installDir, 'secrets'), { recursive: true });
+      writeFileSync(
+        path.join(installDir, '.env'),
+        [
+          'COMPOSE_PROJECT_NAME=cpamp',
+          'CPAMP_IMAGE=example/cpamp:v1',
+          'CPAMP_PORT=18317',
+          'CPA_IMAGE=example/cpa:v1',
+          'CPA_PORT=8317',
+          'CPAMP_AGENT_TOKEN=agent',
+          'CPA_LICENSE_PROVIDER=shop666',
+          'CPA_LICENSE_PUBLIC_KEY=replace-with-base64url-ed25519-public-key',
+          '',
+        ].join('\n')
+      );
+      writeFileSync(
+        path.join(installDir, 'compose.yaml'),
+        'services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE}\n  cpa-manager-plus:\n    image: ${CPAMP_IMAGE}\n'
+      );
+      writeFileSync(path.join(installDir, 'secrets/cpamp-admin-key'), 'cpamp_existing_admin_key\n');
+      const secretFile = path.join(installDir, 'secrets/cpa-license-client-secret');
+      writeFileSync(secretFile, 'storefront-issued-secret-for-test\n');
+      chmodSync(path.join(installDir, 'secrets/cpamp-admin-key'), 0o600);
+      chmodSync(secretFile, 0o644);
+
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_OPERATION: 'upgrade',
+          CPAMP_SKIP_EXECUTE: '1',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_DIR: installDir,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(1);
+      expect(combinedOutput(result)).toContain('must use mode 600');
+      expect(statSync(secretFile).mode & 0o777).toBe(0o644);
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores a stale external license secret when installing CPAMP only', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const sourceFile = path.join(installDir, 'legacy-secret');
+
+    try {
+      writeFileSync(sourceFile, 'replace-with-storefront-secret\n');
+      chmodSync(sourceFile, 0o600);
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_SKIP_EXECUTE: '1',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_MODE: 'cpamp',
+          CPAMP_DEPLOY_METHOD: 'docker',
+          CPA_LICENSE_CLIENT_SECRET_FILE: sourceFile,
+          CPAMP_INSTALL_DIR: installDir,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(sourceFile, 'utf8')).toBe('replace-with-storefront-secret\n');
+      expect(existsSync(path.join(installDir, 'secrets/cpa-license-client-secret'))).toBe(false);
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a non-storefront stack compatible with a stale placeholder source', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const sourceFile = path.join(installDir, 'legacy-secret');
+
+    try {
+      writeFileSync(sourceFile, 'replace-with-storefront-secret\n');
+      chmodSync(sourceFile, 0o600);
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_SKIP_EXECUTE: '1',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_MODE: 'stack',
+          CPAMP_DEPLOY_METHOD: 'docker',
+          CPA_LICENSE_PROVIDER: 'local',
+          CPA_LICENSE_API_BASE_URL: 'http://127.0.0.1:9000/api',
+          CPA_LICENSE_CLIENT_SECRET_FILE: sourceFile,
+          CPAMP_INSTALL_DIR: installDir,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(path.join(installDir, 'secrets/cpa-license-client-secret'), 'utf8')).toBe(
+        ''
+      );
+      expect(readFileSync(sourceFile, 'utf8')).toBe('replace-with-storefront-secret\n');
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects storefront URLs containing userinfo so host matching cannot be bypassed', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+
+    try {
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_SKIP_EXECUTE: '1',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_MODE: 'stack',
+          CPAMP_DEPLOY_METHOD: 'docker',
+          CPA_LICENSE_PROVIDER: 'custom-storefront',
+          CPA_LICENSE_API_BASE_URL: 'https://p.666ttt.net@evil.example/api',
+          CPAMP_INSTALL_DIR: installDir,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(1);
+      expect(combinedOutput(result)).toContain('contains unsupported characters');
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['upgrade', 'regenerate'])(
+    'clears a legacy direct secret from a managed env after %s migration',
+    (operation) => {
+      const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+      const legacySecret = 'legacy-direct-secret-for-test';
+
+      try {
+        mkdirSync(path.join(installDir, 'secrets'), { recursive: true });
+        writeFileSync(
+          path.join(installDir, '.env'),
+          [
+            'COMPOSE_PROJECT_NAME=cpamp',
+            'CPAMP_IMAGE=example/cpamp:v1',
+            'CPAMP_PORT=18317',
+            'CPA_IMAGE=example/cpa:v1',
+            'CPA_PORT=8317',
+            'CPAMP_AGENT_TOKEN=agent',
+            'CPA_LICENSE_PROVIDER=shop666',
+            'CPA_LICENSE_PUBLIC_KEY=replace-with-base64url-ed25519-public-key',
+            `export CPA_LICENSE_CLIENT_SECRET=${legacySecret}`,
+            '',
+          ].join('\n')
+        );
+        writeFileSync(
+          path.join(installDir, 'compose.yaml'),
+          'services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE}\n  cpa-manager-plus:\n    image: ${CPAMP_IMAGE}\n'
+        );
+        writeFileSync(
+          path.join(installDir, 'secrets/cpamp-admin-key'),
+          'cpamp_existing_admin_key\n'
+        );
+        chmodSync(path.join(installDir, 'secrets/cpamp-admin-key'), 0o600);
+
+        const result = spawnSync('bash', [installerPath], {
+          cwd: repoRoot,
+          env: {
+            ...process.env,
+            CPAMP_OPERATION: operation,
+            CPAMP_SKIP_EXECUTE: '1',
+            CPAMP_NON_INTERACTIVE: '1',
+            CPAMP_CONFIRM: '1',
+            CPAMP_LANG: 'en-US',
+            CPAMP_INSTALL_DIR: installDir,
+          },
+          encoding: 'utf8',
+        });
+
+        expect(result.status).toBe(0);
+        expect(
+          readFileSync(path.join(installDir, 'secrets/cpa-license-client-secret'), 'utf8')
+        ).toBe(`${legacySecret}\n`);
+        const env = readFileSync(path.join(installDir, '.env'), 'utf8');
+        if (operation === 'upgrade') {
+          expect(env).toContain('CPA_LICENSE_CLIENT_SECRET=\n');
+        } else {
+          expect(env).not.toMatch(/(?:^|\n)\s*(?:export\s+)?CPA_LICENSE_CLIENT_SECRET=/);
+        }
+        expect(env).not.toContain(legacySecret);
+        expect(combinedOutput(result)).not.toContain(legacySecret);
+      } finally {
+        rmSync(installDir, { recursive: true, force: true });
+      }
+    }
+  );
+
   it('does not create an empty storefront secret during dry-run preview', () => {
     const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
 
