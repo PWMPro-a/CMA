@@ -250,8 +250,8 @@ text() {
     en-US:missing_config) printf 'The existing install directory is incomplete. Choose config regeneration.' ;;
     zh-CN:repair_failed) printf '管理员密钥修复失败，CPAMP 已使用原数据库凭证重新启动。' ;;
     en-US:repair_failed) printf 'Admin key repair failed. CPAMP was restarted with the previous database credential.' ;;
-    zh-CN:repair_restart_failed) printf '管理员密钥已重置，但 CPAMP 重启失败。请在安装目录执行 docker compose up -d。' ;;
-    en-US:repair_restart_failed) printf 'Admin key reset succeeded, but CPAMP failed to restart. Run docker compose up -d from the install directory.' ;;
+    zh-CN:repair_restart_failed) printf '管理员密钥已重置，但 CPAMP 重启失败。请在安装目录执行 docker compose --env-file "%s/.env" -f "%s/compose.yaml" up -d。' "$install_dir" "$install_dir" ;;
+    en-US:repair_restart_failed) printf 'Admin key reset succeeded, but CPAMP failed to restart. Run docker compose --env-file "%s/.env" -f "%s/compose.yaml" up -d from the install directory.' "$install_dir" "$install_dir" ;;
     zh-CN:repair_verify_failed) printf '管理员密钥修复后验证仍失败，请确认面板和修复命令使用同一个 Docker 数据卷。' ;;
     en-US:repair_verify_failed) printf 'Admin key repair completed, but verification still failed. Confirm that the panel and repair command use the same Docker volume.' ;;
     *) printf '%s' "$1" ;;
@@ -401,7 +401,8 @@ expand_path() {
   case "$1" in
     "~") printf '%s\n' "${HOME:-.}" ;;
     "~/"*) printf '%s/%s\n' "${HOME:-.}" "${1#~/}" ;;
-    *) printf '%s\n' "$1" ;;
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$PWD" "$1" ;;
   esac
 }
 
@@ -630,7 +631,7 @@ load_existing_docker_config() {
     validate_image_ref "$(text cpa_image)" "$cpa_image"
     cpa_port="$(read_env_value "$install_dir/.env" CPA_PORT 2>/dev/null || printf '8317')"
     normalize_port "$cpa_port" || die "Invalid CPA port in existing .env: $cpa_port"
-    cpa_url="http://host.docker.internal:8317"
+    cpa_url="http://host.docker.internal:${cpa_port}"
     cpa_connection_mode="env"
     cpamp_agent_token="$(read_env_value "$install_dir/.env" CPAMP_AGENT_TOKEN 2>/dev/null || true)"
   else
@@ -1022,7 +1023,7 @@ collect_choices() {
       normalize_port "$cpa_port" || die "Invalid CPA port: $cpa_port"
       cpa_image="$(prompt_line "$(text cpa_image)" "${CPAMP_CPA_IMAGE:-${cpa_image:-$default_cpa_image}}")"
       validate_image_ref "$(text cpa_image)" "$cpa_image"
-      cpa_url="http://host.docker.internal:8317"
+      cpa_url="http://host.docker.internal:${cpa_port}"
       cpa_connection_mode="env"
     fi
   else
@@ -1180,7 +1181,7 @@ check_requirements() {
   if [ "$deploy_method" = "docker" ]; then
     require_command docker
     if [ "$dry_run" != "1" ] && [ "$skip_execute" != "1" ]; then
-      if ! docker compose version >/dev/null 2>&1; then
+      if ! docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" version >/dev/null 2>&1; then
         die "docker compose is required."
       fi
       if ! docker info >/dev/null 2>&1; then
@@ -1562,7 +1563,7 @@ write_cpa_config() {
   escaped_license_claim_path="$(yaml_double_quote_escape "$cpa_license_claim_path")"
   cat > "$tmp" <<EOF
 host: "0.0.0.0"
-port: 8317
+port: $cpa_port
 
 remote-management:
   secret-key: "$escaped_cpa_management_key"
@@ -1671,7 +1672,7 @@ services:
       USAGE_DB_PATH: "/data/usage.sqlite"
       CPA_MANAGER_DATA_KEY_PATH: "/data/data.key"
       CPA_MANAGER_ADMIN_KEY_FILE: "/run/secrets/cpamp_admin_key"
-      CPA_UPSTREAM_URL: "http://host.docker.internal:8317"
+      CPA_UPSTREAM_URL: "http://host.docker.internal:${CPA_PORT:-8317}"
       CPA_MANAGEMENT_KEY_FILE: "/run/secrets/cpa_management_key"
       CPAMP_AGENT_URL: "http://host.docker.internal:18417"
       CPAMP_AGENT_TOKEN: "${CPAMP_AGENT_TOKEN:?set CPAMP_AGENT_TOKEN}"
@@ -1879,26 +1880,26 @@ generate_docker_files() {
 
 run_docker_install() {
   if [ "$dry_run" = "1" ]; then
-    say "$(text run_command): cd \"$install_dir\" && docker compose pull && docker compose up -d"
+    say "$(text run_command): cd \"$install_dir\" && docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" pull && docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" up -d"
     return
   fi
   if [ "$skip_execute" = "1" ]; then
     say "$(text skip_execute)"
-    say "cd \"$install_dir\" && docker compose pull && docker compose up -d"
+    say "cd \"$install_dir\" && docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" pull && docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" up -d"
     return
   fi
   (
     cd "$install_dir"
-    docker compose pull
-    docker compose up -d
+    docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" pull
+    docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" up -d
   )
 }
 
 run_docker_repair() {
   if [ "$dry_run" = "1" ]; then
-    say "$(text run_command): cd \"$install_dir\" && docker compose stop cpa-manager-plus"
-    say "$(text run_command): docker compose run --rm cpa-manager-plus reset-admin-key --admin-key-file /run/secrets/cpamp_admin_key"
-    say "$(text run_command): docker compose up -d"
+    say "$(text run_command): cd \"$install_dir\" && docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" stop cpa-manager-plus"
+    say "$(text run_command): docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" run --rm cpa-manager-plus reset-admin-key --admin-key-file /run/secrets/cpamp_admin_key"
+    say "$(text run_command): docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" up -d"
     return
   fi
   if [ "$skip_execute" = "1" ]; then
@@ -1909,14 +1910,14 @@ run_docker_repair() {
   (
     cd "$install_dir"
     if [ "$existing_install_state" = "orphan-volume" ]; then
-      docker compose pull
+      docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" pull
     fi
-    docker compose stop cpa-manager-plus
-    if ! docker compose run --rm cpa-manager-plus reset-admin-key --admin-key-file /run/secrets/cpamp_admin_key; then
-      docker compose up -d || true
+    docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" stop cpa-manager-plus
+    if ! docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" run --rm cpa-manager-plus reset-admin-key --admin-key-file /run/secrets/cpamp_admin_key; then
+      docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" up -d || true
       die "$(text repair_failed)"
     fi
-    if ! docker compose up -d; then
+    if ! docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" up -d; then
       die "$(text repair_restart_failed)"
     fi
   )
@@ -1929,7 +1930,7 @@ wait_docker_health() {
   while [ "$i" -le "$attempts" ]; do
     if (
       cd "$install_dir"
-      docker compose exec -T cpa-manager-plus wget -qO- http://127.0.0.1:18317/health >/dev/null 2>&1
+      docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" exec -T cpa-manager-plus wget -qO- http://127.0.0.1:18317/health >/dev/null 2>&1
     ); then
       return
     fi
@@ -1943,7 +1944,7 @@ verify_docker_admin_key() {
   [ -n "$admin_key" ] || return 1
   (
     cd "$install_dir"
-    docker compose exec -T cpa-manager-plus wget -qO- \
+    docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" exec -T cpa-manager-plus wget -qO- \
       --header="Authorization: Bearer $admin_key" \
       http://127.0.0.1:18317/status >/dev/null 2>&1
   )
@@ -1957,7 +1958,7 @@ validate_docker_install() {
     return
   fi
   if ! wait_docker_health; then
-    die "$(text health_failed) Run 'cd \"$install_dir\" && docker compose logs cpa-manager-plus' for details."
+    die "$(text health_failed) Run 'cd \"$install_dir\" && docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" logs cpa-manager-plus' for details."
   fi
   if verify_docker_admin_key; then
     auth_validation_status="verified"
