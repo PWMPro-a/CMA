@@ -39,6 +39,10 @@ bash install-cpamp.sh
 
 完整安装推荐 Docker。CPAMP 原生包只包含 Manager Server，不包含 CPA 运行时；如果要用原生包，需要先单独部署 CPA。
 
+Docker 安装默认使用固定版本镜像
+`ghcr.io/abc124774961/cpa-manager-plus:v1.12.8-cpa.1`；如需其他镜像可通过
+`CPAMP_IMAGE` 显式指定。
+
 ## 完整 Docker 安装
 
 没有现成 CPA 时选择这个组合。安装器会同时启动 CPA 和 CPAMP，并准备持久化目录和登录密钥。
@@ -106,9 +110,14 @@ http://cli-proxy-api:8317
 
 - `CPA_LICENSE_PUBLIC_KEY`：商城签名公钥，必须保留真实的 Ed25519 公钥，不能留空或写占位符。
 - `CPA_LICENSE_PLUGIN_PUBLIC_KEY`：插件签名公钥；没有独立插件公钥时可沿用发布包提供的值。
-- `CPA_LICENSE_CLIENT_ID` 与 `CPA_LICENSE_CLIENT_SECRET_FILE`：仅当
-  `p.666ttt.net` 开启客户端校验时需要，由商城为客户签发；secret 放在
-  `secrets/cpa-license-client-secret`，不会写入公开 Compose 或镜像。
+- `CPA_LICENSE_CLIENT_ID` 与 `CPA_LICENSE_CLIENT_SECRET_FILE`：完整安装连接
+  `shop666` 或 `p.666ttt.net` 时需要，由商城为客户签发；secret 必须放在
+  `secrets/cpa-license-client-secret`，单行且权限为 `600`，不会写入公开 Compose
+  或镜像。安装器不会生成随机或空的商城 secret；缺少时会在启动前阻断。
+
+如果旧版本把 secret 写在 `CPA_LICENSE_CLIENT_SECRET` 或旧的
+`CPA_LICENSE_CLIENT_SECRET_FILE` 中，安装器会在升级/重新生成时迁移到上述本机文件，
+并优先保留已经存在的非空文件。`CPAMP_DRY_RUN=1` 只显示缺少项，不会创建空文件。
 
 首次启动时 CPA 会向商城申请一次性签名宽限租约。宽限的开始和截止时间由商城
 按实例保存并通过 `grace_until` 下发；重启容器、重跑安装器或修改本地

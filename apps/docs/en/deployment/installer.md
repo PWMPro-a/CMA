@@ -39,6 +39,10 @@ The wizard walks through:
 
 Use Docker for a full CPA + CPAMP install. The CPAMP native package contains Manager Server only; CPA must already be deployed separately.
 
+Docker installs use the pinned image
+`ghcr.io/abc124774961/cpa-manager-plus:v1.12.8-cpa.1` by default. Set
+`CPAMP_IMAGE` explicitly when selecting another image.
+
 ## Full Docker Install
 
 Choose this when CPA is not installed yet. The installer starts both CPA and CPAMP and prepares persistent storage and login keys.
@@ -109,10 +113,17 @@ The full-stack installer also writes these license settings to `.env` and
   Ed25519 key; do not leave it empty or replace it with a placeholder.
 - `CPA_LICENSE_PLUGIN_PUBLIC_KEY`: plugin signing public key. When no separate
   plugin key is configured, use the value shipped with the release.
-- `CPA_LICENSE_CLIENT_ID` and `CPA_LICENSE_CLIENT_SECRET_FILE`: required only
-  when `p.666ttt.net` enables client authentication. The storefront issues
-  these values for the customer; the secret is stored in
-  `secrets/cpa-license-client-secret`, not in a public Compose file or image.
+- `CPA_LICENSE_CLIENT_ID` and `CPA_LICENSE_CLIENT_SECRET_FILE`: required when a
+  full install uses `shop666` or `p.666ttt.net`. The storefront issues these
+  values for the customer; the secret must be stored as a single-line mode-`600`
+  file at `secrets/cpa-license-client-secret`, not in a public Compose file or
+  image. The installer never generates a random or empty storefront secret and
+  blocks startup until the issued value is present.
+
+If an older release stored the value in `CPA_LICENSE_CLIENT_SECRET` or a legacy
+`CPA_LICENSE_CLIENT_SECRET_FILE`, the installer migrates it to the local file
+during upgrade/regeneration and preserves an existing non-empty file first.
+`CPAMP_DRY_RUN=1` only previews missing items and never creates an empty file.
 
 On first start CPA requests a one-time signed grace lease from the storefront.
 The storefront persists its start and end by instance and returns
