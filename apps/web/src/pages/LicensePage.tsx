@@ -17,6 +17,7 @@ type CallbackMessage = {
 };
 
 const popupFeatures = 'popup=yes,width=920,height=760,resizable=yes,scrollbars=yes';
+const EXPIRY_WARNING_SECONDS = 72 * 60 * 60;
 
 export function LicensePage() {
   const { t, i18n } = useTranslation();
@@ -48,7 +49,7 @@ export function LicensePage() {
   }, [loadStatus]);
 
   useEffect(() => {
-    if (!status?.grace_until) return;
+    if (!status?.grace_until && !status?.expires_at && !status?.expiry_grace_until) return;
     const timer = window.setInterval(() => setClock(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [status?.grace_until]);
@@ -178,6 +179,7 @@ export function LicensePage() {
 
   const statusKey = useMemo(() => {
     if (!status?.enabled) return 'disabled';
+    if (status.valid && status.expiry_grace) return 'expiry_grace';
     if (status.valid && status.in_grace) return 'grace';
     if (status.valid) return 'active';
     return status?.reason || 'not_activated';
@@ -189,6 +191,16 @@ export function LicensePage() {
 
   const active = Boolean(status?.valid);
   const graceActive = Boolean(status?.in_grace && graceRemainingSeconds > 0);
+  const expiryGraceRemainingSeconds = status?.expiry_grace_until
+    ? Math.max(0, Math.ceil(status.expiry_grace_until - clock / 1000))
+    : Math.max(0, status?.expiry_grace_remaining_seconds || 0);
+  const expiryGraceActive = Boolean(status?.expiry_grace && expiryGraceRemainingSeconds > 0);
+  const expiryRemainingSeconds = status?.expires_at
+    ? Math.max(0, Math.ceil(status.expires_at - clock / 1000))
+    : 0;
+  const expiryWarningActive = Boolean(
+    status?.valid && !status?.in_grace && !expiryGraceActive && expiryRemainingSeconds > 0 && expiryRemainingSeconds <= EXPIRY_WARNING_SECONDS
+  );
   const graceEnded = Boolean(status?.grace_until && !graceActive && status?.reason === 'not_activated');
   return (
     <div className={styles.page}>
@@ -229,11 +241,31 @@ export function LicensePage() {
           </div>
         </div>
         {!status?.enabled ? <p className={styles.notice}>{t('license.disabled_notice')}</p> : null}
+        {expiryWarningActive ? (
+          <div className={`${styles.graceNotice} ${styles.expiryWarning}`}>
+            <strong>{t('license.expiry_warning_title')}</strong>
+            <span>{formatCountdown(expiryRemainingSeconds)}</span>
+            <p>{t('license.expiry_warning_notice', { countdown: formatCountdown(expiryRemainingSeconds), grace: formatCountdown(status?.grace_period_seconds || 0) })}</p>
+          </div>
+        ) : null}
         {graceActive ? (
           <div className={styles.graceNotice}>
             <strong>{t('license.grace_title')}</strong>
             <span>{formatCountdown(graceRemainingSeconds)}</span>
             <p>{t('license.grace_notice', { until: formatTime(status?.grace_until) })}</p>
+          </div>
+        ) : null}
+        {expiryGraceActive ? (
+          <div className={`${styles.graceNotice} ${styles.expiryGrace}`}>
+            <strong>{t('license.expiry_grace_title')}</strong>
+            <span>{formatCountdown(expiryGraceRemainingSeconds)}</span>
+            <p>{t('license.expiry_grace_notice', { expiredAt: formatTime(status?.expires_at), until: formatTime(status?.expiry_grace_until), countdown: formatCountdown(expiryGraceRemainingSeconds) })}</p>
+          </div>
+        ) : null}
+        {status?.expiry_grace_until && !expiryGraceActive && status?.reason === 'license_expired' ? (
+          <div className={`${styles.graceNotice} ${styles.graceExpired}`}>
+            <strong>{t('license.expiry_grace_expired_title')}</strong>
+            <p>{t('license.expiry_grace_expired_notice')}</p>
           </div>
         ) : null}
         {graceEnded ? <div className={`${styles.graceNotice} ${styles.graceExpired}`}><strong>{t('license.grace_expired_title')}</strong><p>{t('license.grace_expired_notice')}</p></div> : null}

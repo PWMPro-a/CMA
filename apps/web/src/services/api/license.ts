@@ -24,6 +24,10 @@ export interface LicenseStatus {
   grace_started_at?: number;
   grace_until?: number;
   grace_remaining_seconds?: number;
+  expiry_grace?: boolean;
+  expiry_grace_started_at?: number;
+  expiry_grace_until?: number;
+  expiry_grace_remaining_seconds?: number;
 }
 
 export interface ShopAuthorization {

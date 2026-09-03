@@ -120,6 +120,10 @@
 .graceNotice p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
 .graceExpired { border-color: var(--failure-badge-border); background: var(--failure-badge-bg); }
 .graceExpired strong { color: var(--failure-badge-text); }
+.expiryWarning { border-color: color-mix(in srgb, #0ea5e9 48%, var(--border-color)); background: color-mix(in srgb, #0ea5e9 10%, var(--bg-primary)); }
+.expiryWarning strong { color: color-mix(in srgb, #0284c7 82%, var(--text-primary)); }
+.expiryGrace { border-color: color-mix(in srgb, #f97316 58%, var(--border-color)); background: color-mix(in srgb, #f97316 12%, var(--bg-primary)); }
+.expiryGrace strong { color: color-mix(in srgb, #ea580c 82%, var(--text-primary)); }
 
 .detailsPanel { display: grid; gap: 12px; padding: 16px; }
 .detailsPanel h2,
