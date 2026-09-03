@@ -10,8 +10,16 @@ CPA release 镜像和 CPAMP GHCR 镜像，不依赖本地 `local/*` 镜像，也
 
 ```bash
 chmod +x bootstrap.sh preflight.sh
+# 将商城为本实例签发的 client secret 放入本地文件（单行）
+mkdir -p -m 700 secrets
+install -m 600 /path/to/storefront-issued-secret secrets/cpa-license-client-secret
 ./bootstrap.sh
 ```
+
+`CPA_LICENSE_PROVIDER=shop666` 或 `CPA_LICENSE_API_BASE_URL` 使用
+`p.666ttt.net` 时，client secret 是启动前置条件。`bootstrap.sh` 不会生成随机值；
+如果文件缺失、为空、不可读或权限不是 600，脚本会在启动前停止并只提示文件路径，
+不会输出 secret 内容。先注入商城签发且与 client ID 匹配的值，再重新执行脚本。
 
 脚本会：
 
@@ -85,13 +93,19 @@ CPA、Agent 使用 host network，因此三个监听端口必须互不相同。C
 租约写入 `CPA_LICENSE_STATE_DIR`，容器重建时会保留同一个目录及 installation identity。
 
 `CPA_LICENSE_GRACE_PERIOD=6h` 只是刷新暂时失败时的本地回退值；实际有效宽限期由商城
-签名租约控制，客户修改本地配置不会把租约变成无限期。商城客户端 ID/密钥是可选项：
+签名租约控制，客户修改本地配置不会把租约变成无限期。商城客户端 ID 可按商城配置填写；
+client secret 对 `shop666` 或 `p.666ttt.net` 场景是必填项：
 
 - 推荐将客户端密钥放在 `CPA_LICENSE_CLIENT_SECRET_HOST_PATH` 指定的本地文件（权限 600）；
 - 旧版只设置 `CPA_LICENSE_CLIENT_SECRET` 或 `CPA_LICENSE_CLIENT_SECRET_FILE` 的配置仍能
   被 bootstrap 识别，并迁移到本地 secret 文件；
+- 外部商城场景缺少可读 secret 文件时，preflight/bootstrap 会阻断并提示注入匹配的商城
+  secret；不会创建伪 secret 或空的可用凭据；
 - 不要把真实 `.env`、`secrets/`、`data/` 或 `backups/` 提交到 Git；模板目录已通过
   `.gitignore` 忽略这些运行时文件。
+
+如果使用完全本地的授权 provider 和非商城 API 地址，secret 文件仍会按 mode 600
+创建，保持旧版 key-only 部署流程。
 
 ## 升级建议
 

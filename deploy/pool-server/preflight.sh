@@ -21,7 +21,8 @@ Options:
   --compose-file PATH   Compose file (default: ./compose.yml)
   --skip-docker         Skip Docker daemon and compose config checks
   --dry-run             Skip Docker checks (same as --skip-docker)
-  --allow-missing-secrets  Do not fail when optional/generated secret files are absent
+  --allow-missing-secrets  Do not fail when optional local secret files are absent
+                           (storefront client secret is always required for shop666/p.666ttt.net)
   -h, --help            Show this help
 USAGE
 }
@@ -139,6 +140,36 @@ is_placeholder() {
     replace-with*|changeme*|change-me*|set-me*|your-*|'<*>') return 0 ;;
     *) return 1 ;;
   esac
+}
+
+is_blank_or_placeholder_secret() {
+  local value="${1:-}"
+  if [ -z "$value" ] || [[ "$value" =~ ^[[:space:]]*$ ]]; then
+    return 0
+  fi
+  is_placeholder "$value"
+}
+
+storefront_secret_required() {
+  local provider=""
+  local api_base=""
+  local authority=""
+  local host=""
+
+  provider="$(value_or CPA_LICENSE_PROVIDER shop666 | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  provider="${provider//[[:space:]]/}"
+  [ "$provider" = "shop666" ] && return 0
+
+  api_base="$(value_or CPA_LICENSE_API_BASE_URL https://p.666ttt.net/api/storefront)"
+  api_base="$(printf '%s' "$api_base" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  case "$api_base" in
+    http://*|https://*) authority="${api_base#*://}" ;;
+    *) return 1 ;;
+  esac
+  authority="${authority%%/*}"
+  authority="${authority##*@}"
+  host="${authority%%:*}"
+  [ "$host" = "p.666ttt.net" ]
 }
 
 check_nonempty() {
@@ -283,6 +314,44 @@ check_secret_file() {
   fi
 }
 
+check_storefront_secret_file() {
+  local name="$1"
+  local value="$2"
+  local resolved="$value"
+  local contents=""
+  local mode=""
+
+  if [ -z "$resolved" ] || is_placeholder "$resolved" || [ "$resolved" = "/dev/null" ]; then
+    fail "$name is required for the configured storefront; set it to a host-readable file containing the storefront-issued secret (the value is never printed)"
+    return
+  fi
+  if [ "${resolved#/}" = "$resolved" ]; then
+    resolved="$script_dir/${resolved#./}"
+  fi
+  if [ ! -f "$resolved" ]; then
+    fail "$name must point to a readable storefront secret file before CPA can start: $resolved (inject the matching secret and rerun bootstrap)"
+    return
+  fi
+  if [ ! -r "$resolved" ]; then
+    fail "$name points to an unreadable storefront secret file: $resolved"
+    return
+  fi
+  if ! contents="$(cat "$resolved" 2>/dev/null)"; then
+    fail "$name could not be read: $resolved"
+    return
+  fi
+  contents="${contents%$'\r'}"
+  if [ -z "$contents" ] || [[ "$contents" =~ ^[[:space:]]*$ ]] || is_placeholder "$contents"; then
+    fail "$name must contain the matching storefront-issued secret (one line); an empty or generated placeholder is not accepted"
+  elif [[ "$contents" == *$'\n'* || "$contents" == *$'\r'* ]]; then
+    fail "$name must contain a single-line storefront secret: $resolved"
+  fi
+  if mode="$(stat -c '%a' "$resolved" 2>/dev/null)"; then :; elif mode="$(stat -f '%Lp' "$resolved" 2>/dev/null)"; then :; else mode=""; fi
+  if [ -n "$mode" ] && [ "$mode" != "600" ]; then
+    fail "$name must use mode 600; run chmod 600 '$resolved' before starting CPA"
+  fi
+}
+
 check_listener() {
   local name="$1"
   local port="$2"
@@ -408,7 +477,9 @@ for license_path_key in CPA_LICENSE_SHOP_EXCHANGE_PATH CPA_LICENSE_ACTIVATE_PATH
 done
 check_secret_file CPAMP_ADMIN_KEY_FILE "$admin_key_file"
 check_secret_file CPA_MANAGEMENT_KEY_FILE "$management_key_file"
-if [ "$license_secret_file" != "/dev/null" ]; then
+if storefront_secret_required; then
+  check_storefront_secret_file CPA_LICENSE_CLIENT_SECRET_HOST_PATH "$license_secret_file"
+elif [ "$license_secret_file" != "/dev/null" ]; then
   check_secret_file CPA_LICENSE_CLIENT_SECRET_HOST_PATH "$license_secret_file"
 fi
 
@@ -420,7 +491,7 @@ if [ "$skip_docker" != "1" ] && [ "$dry_run" != "1" ]; then
   if ! command -v docker >/dev/null 2>&1; then
     fail "docker command is required (or use --skip-docker for a file-only check)"
   else
-    if ! docker compose version >/dev/null 2>&1; then
+    if ! docker compose --env-file "$env_file" -f "$compose_file" version >/dev/null 2>&1; then
       fail "docker compose plugin is required"
     fi
     if ! docker info >/dev/null 2>&1; then

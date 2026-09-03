@@ -171,6 +171,40 @@ is_placeholder() {
   esac
 }
 
+is_blank_or_placeholder_secret() {
+  local value="${1:-}"
+  # A storefront secret is opaque, but it must contain at least one
+  # non-whitespace character and must not be one of the template markers.
+  if [ -z "$value" ] || [[ "$value" =~ ^[[:space:]]*$ ]]; then
+    return 0
+  fi
+  is_placeholder "$value"
+}
+
+storefront_secret_required() {
+  local provider=""
+  local api_base=""
+  local authority=""
+  local host=""
+
+  provider="$(value_or CPA_LICENSE_PROVIDER shop666 | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  provider="${provider//[[:space:]]/}"
+  [ "$provider" = "shop666" ] && return 0
+
+  api_base="$(value_or CPA_LICENSE_API_BASE_URL https://p.666ttt.net/api/storefront)"
+  api_base="$(printf '%s' "$api_base" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  case "$api_base" in
+    http://*|https://*) authority="${api_base#*://}" ;;
+    *) return 1 ;;
+  esac
+  authority="${authority%%/*}"
+  # URLs accepted by preflight cannot contain userinfo. Strip an optional
+  # port so the production host remains protected when it is non-default.
+  authority="${authority##*@}"
+  host="${authority%%:*}"
+  [ "$host" = "p.666ttt.net" ]
+}
+
 random_alnum() {
   local length="${1:-32}"
   local value=""
@@ -469,17 +503,63 @@ if [ -z "$(value_or CPA_DEMO_API_KEY '')" ] || is_placeholder "$(value_or CPA_DE
 fi
 
 # Migrate a legacy direct/file client secret into the canonical local secret.
+# A storefront-backed deployment must receive the matching secret issued by
+# the storefront.  In particular, never fill this file with a generated value:
+# such a value looks configured to Compose but is rejected by /licenses/grace.
 legacy_secret="$(value_or CPA_LICENSE_CLIENT_SECRET '')"
 legacy_source="$(value_or CPA_LICENSE_CLIENT_SECRET_FILE '')"
 if [ -n "$legacy_source" ] && [ "${legacy_source#/}" = "$legacy_source" ]; then legacy_source="$project_dir/${legacy_source#./}"; fi
-if [ ! -f "$license_secret_path" ] || [ ! -s "$license_secret_path" ]; then
-  if [ -n "$legacy_source" ] && [ -r "$legacy_source" ] && [ "$legacy_source" != "$license_secret_path" ]; then
-    cp "$legacy_source" "$license_secret_path"
-    chmod 600 "$license_secret_path"
-  elif [ -n "$legacy_secret" ] && ! is_placeholder "$legacy_secret"; then
+license_secret_ready=0
+license_secret_value=""
+if [ -f "$license_secret_path" ]; then
+  if [ ! -r "$license_secret_path" ]; then
+    if storefront_secret_required; then
+      die "Storefront client secret file is not readable: $license_secret_path. Inject the matching storefront-issued secret and rerun bootstrap (the value is never printed)."
+    fi
+  elif license_secret_value="$(trim_file_value "$license_secret_path" 2>/dev/null)" && ! is_blank_or_placeholder_secret "$license_secret_value"; then
+    license_secret_ready=1
+    # Existing files may have been copied with permissive permissions. Tighten
+    # them before Compose mounts the Docker secret.
+    if [ "$dry_run" != "1" ]; then chmod 600 "$license_secret_path"; fi
+  fi
+fi
+
+if [ "$license_secret_ready" -ne 1 ] && [ -n "$legacy_source" ] && [ "$legacy_source" != "$license_secret_path" ]; then
+  if [ -r "$legacy_source" ] && [ -f "$legacy_source" ] &&
+     legacy_source_value="$(trim_file_value "$legacy_source" 2>/dev/null)" &&
+     ! is_blank_or_placeholder_secret "$legacy_source_value"; then
+    if [ "$dry_run" != "1" ]; then
+      cp "$legacy_source" "$license_secret_path"
+      chmod 600 "$license_secret_path"
+    fi
+    license_secret_ready=1
+  elif [ "$dry_run" != "1" ] && storefront_secret_required && [ -e "$legacy_source" ]; then
+    die "Storefront client secret source is not a readable, single-line secret: $legacy_source. Inject the matching storefront-issued secret and rerun bootstrap (the value is never printed)."
+  fi
+fi
+
+if [ "$license_secret_ready" -ne 1 ] && ! is_blank_or_placeholder_secret "$legacy_secret"; then
+  case "$legacy_secret" in
+    *$'\n'*|*$'\r'*) die "CPA_LICENSE_CLIENT_SECRET must be a single-line secret" ;;
+  esac
+  if [ "$dry_run" != "1" ]; then
     printf '%s\n' "$legacy_secret" > "$license_secret_path"
     chmod 600 "$license_secret_path"
+  fi
+  license_secret_ready=1
+fi
+
+if [ "$license_secret_ready" -ne 1 ]; then
+  if storefront_secret_required; then
+    if [ "$dry_run" = "1" ]; then
+      warn "Storefront client secret is required for this deployment; dry-run will not create a placeholder. Inject the matching secret at $license_secret_path before starting CPA."
+    else
+      die "Storefront client secret is required for CPA_LICENSE_PROVIDER=shop666 or p.666ttt.net. Inject the matching storefront-issued secret at $license_secret_path (one line, mode 600), then rerun bootstrap; the value is never printed."
+    fi
   elif [ "$dry_run" != "1" ]; then
+    # Local/non-storefront providers remain compatible with key-only installs.
+    # Keep a real mode-600 Docker secret file, but never treat it as a
+    # storefront credential.
     : > "$license_secret_path"
     chmod 600 "$license_secret_path"
   fi

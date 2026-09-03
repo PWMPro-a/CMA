@@ -80,6 +80,7 @@ services:
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
       CPAMP_AGENT_ADDR: "0.0.0.0:${CPAMP_AGENT_PORT:-18417}"
+      CPAMP_AGENT_PORT: "${CPAMP_AGENT_PORT:-18417}"
       CPAMP_STACK_ROOT: "${CPAMP_STACK_ROOT:-.}"
       CPAMP_BACKUP_ROOT: "${CPAMP_BACKUP_ROOT:-./backups}"
       CPAMP_AGENT_TOKEN: "${CPAMP_AGENT_TOKEN:?set CPAMP_AGENT_TOKEN}"
@@ -141,7 +142,7 @@ services:
       - cpamp_admin_key
       - cpa_management_key
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:$${CPAMP_INTERNAL_PORT:-18317}/health"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${CPAMP_INTERNAL_PORT:-18317}/health >/dev/null"]
       interval: 10s
       timeout: 3s
       retries: 12
@@ -161,6 +162,7 @@ secrets:
   cpa_management_key:
     file: "${CPA_MANAGEMENT_KEY_FILE:-./secrets/cpa-management-key}"
   cpa_license_client_secret:
-    # The /dev/null fallback keeps legacy key-only/direct-secret deployments
-    # startable; bootstrap.sh replaces it with a mode-600 local secret file.
+    # The /dev/null fallback keeps legacy local/key-only deployments startable.
+    # For shop666 or p.666ttt.net, preflight/bootstrap require a mode-600
+    # storefront-issued file before Compose is allowed to start CPA.
     file: "${CPA_LICENSE_CLIENT_SECRET_HOST_PATH:-${CPA_LICENSE_CLIENT_SECRET_FILE:-/dev/null}}"
