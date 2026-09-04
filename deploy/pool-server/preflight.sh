@@ -22,7 +22,8 @@ Options:
   --skip-docker         Skip Docker daemon and compose config checks
   --dry-run             Skip Docker checks (same as --skip-docker)
   --allow-missing-secrets  Do not fail when optional local secret files are absent
-                           (storefront client secret is always required for shop666/p.666ttt.net)
+                           (storefront client secret is checked only when
+                           CPA_LICENSE_REQUIRE_CLIENT_SECRET=true)
   -h, --help            Show this help
 USAGE
 }
@@ -150,12 +151,26 @@ is_blank_or_placeholder_secret() {
   is_placeholder "$value"
 }
 
+license_secret_requirement_enabled() {
+  local value="$(value_or CPA_LICENSE_REQUIRE_CLIENT_SECRET false)"
+  value="$(printf '%s' "$value" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  value="${value//[[:space:]]/}"
+  case "$value" in
+    1|true|yes|on) return 0 ;;
+    0|false|no|off|"") return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 storefront_secret_required() {
   local provider=""
   local api_base=""
   local authority=""
   local host=""
 
+  # Public releases leave the server-to-server credential optional. An
+  # operator can opt into the stricter check with REQUIRE_CLIENT_SECRET=true.
+  license_secret_requirement_enabled || return 1
   provider="$(value_or CPA_LICENSE_PROVIDER shop666 | LC_ALL=C tr '[:upper:]' '[:lower:]')"
   provider="${provider//[[:space:]]/}"
   [ "$provider" = "shop666" ] && return 0
@@ -185,6 +200,18 @@ check_single_line() {
   local value="${2:-}"
   case "$value" in
     *$'\n'*|*$'\r'*) fail "$name must be a single line" ;;
+  esac
+}
+
+check_boolean() {
+  local name="$1"
+  local value="${2:-}"
+  local normalized=""
+  normalized="$(printf '%s' "$value" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  normalized="${normalized//[[:space:]]/}"
+  case "$normalized" in
+    0|1|true|false|yes|no|on|off|"") ;;
+    *) fail "$name must be true or false (got $value)" ;;
   esac
 }
 
@@ -311,6 +338,33 @@ check_secret_file() {
     if [ -n "$mode" ] && [ "$mode" -gt 600 ] 2>/dev/null; then
       warn "$name file is readable by group/other; chmod 600 is recommended: $resolved"
     fi
+  fi
+}
+
+check_optional_secret_file() {
+  local name="$1"
+  local value="$2"
+  local resolved="$value"
+  local mode=""
+  [ -n "$resolved" ] || return 0
+  if [ "${resolved#/}" = "$resolved" ]; then
+    resolved="$script_dir/${resolved#./}"
+  fi
+  if [ ! -e "$resolved" ]; then
+    warn "$name file is not present yet (optional; bootstrap will create it): $resolved"
+    return 0
+  fi
+  if [ ! -f "$resolved" ]; then
+    fail "$name must point to a regular file: $resolved"
+    return 0
+  fi
+  if [ ! -r "$resolved" ]; then
+    fail "$name points to an unreadable file: $resolved"
+    return 0
+  fi
+  if mode="$(stat -c '%a' "$resolved" 2>/dev/null)"; then :; elif mode="$(stat -f '%Lp' "$resolved" 2>/dev/null)"; then :; else mode=""; fi
+  if [ -n "$mode" ] && [ "$mode" -gt 600 ] 2>/dev/null; then
+    warn "$name file is readable by group/other; chmod 600 is recommended: $resolved"
   fi
 }
 
@@ -456,6 +510,7 @@ check_nonempty CPA_MANAGER_ADMIN_KEY "$(value_or CPA_MANAGER_ADMIN_KEY '')"
 for single_line_key in COMPOSE_PROJECT_NAME CPA_IMAGE CPAMP_IMAGE CPA_MANAGEMENT_KEY CPA_MANAGER_ADMIN_KEY CPAMP_AGENT_TOKEN CPA_LICENSE_PUBLIC_KEY CPA_LICENSE_CLIENT_ID CPA_LICENSE_API_BASE_URL CPA_LICENSE_SHOP_AUTH_URL; do
   check_single_line "$single_line_key" "$(value_or "$single_line_key" '')"
 done
+check_boolean CPA_LICENSE_REQUIRE_CLIENT_SECRET "$(value_or CPA_LICENSE_REQUIRE_CLIENT_SECRET false)"
 check_public_key CPA_LICENSE_PUBLIC_KEY "$(value_or CPA_LICENSE_PUBLIC_KEY '')"
 if plugin_key="$(value_or CPA_LICENSE_PLUGIN_PUBLIC_KEY '')"; then
   if [ -n "$plugin_key" ]; then check_public_key CPA_LICENSE_PLUGIN_PUBLIC_KEY "$plugin_key"; fi
@@ -485,7 +540,7 @@ check_secret_file CPA_MANAGEMENT_KEY_FILE "$management_key_file"
 if storefront_secret_required; then
   check_storefront_secret_file CPA_LICENSE_CLIENT_SECRET_HOST_PATH "$license_secret_file"
 elif [ "$license_secret_file" != "/dev/null" ]; then
-  check_secret_file CPA_LICENSE_CLIENT_SECRET_HOST_PATH "$license_secret_file"
+  check_optional_secret_file CPA_LICENSE_CLIENT_SECRET_HOST_PATH "$license_secret_file"
 fi
 
 check_listener CPA "$cpa_port"

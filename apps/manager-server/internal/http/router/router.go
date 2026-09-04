@@ -63,6 +63,10 @@ func New(appCtx *app.Context) http.Handler {
 	mux.HandleFunc("/setup", middleware.WithCORS(appCtx.Config, setupHandler.Setup))
 	mux.HandleFunc("/management.html", panelHandler.ManagementHTML)
 	mux.HandleFunc("/license/shop/callback", proxyHandler.LicenseShopCallback)
+	// Keep the admin-prefixed callback alias available for older panel bundles.
+	// Both paths are public one-time callback bridges; authentication happens
+	// later when the opener exchanges the returned code.
+	mux.HandleFunc("/api/admin/license/shop/callback", proxyHandler.LicenseShopCallback)
 	mux.HandleFunc("/", rootHandler(appCtx, usageHandler, modelPriceHandler, apiKeyAliasHandler, accountActionHandler, codexInspectionHandler, quotaThresholdHandler, codexQuotaHandler, containerOpsHandler, dashboardHandler, databaseHandler, monitoringHandler, quotaSnapshotHandler, supplyHandler, proxyHandler))
 
 	return middleware.Recovery(middleware.RequestLogger(middleware.CompressLargeResponses(mux)))

@@ -181,12 +181,24 @@ is_blank_or_placeholder_secret() {
   is_placeholder "$value"
 }
 
+license_secret_requirement_enabled() {
+  local value="$(value_or CPA_LICENSE_REQUIRE_CLIENT_SECRET false)"
+  value="$(printf '%s' "$value" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  value="${value//[[:space:]]/}"
+  case "$value" in
+    1|true|yes|on) return 0 ;;
+    0|false|no|off|"") return 1 ;;
+    *) die "CPA_LICENSE_REQUIRE_CLIENT_SECRET must be true or false (got $value)" ;;
+  esac
+}
+
 storefront_secret_required() {
   local provider=""
   local api_base=""
   local authority=""
   local host=""
 
+  license_secret_requirement_enabled || return 1
   provider="$(value_or CPA_LICENSE_PROVIDER shop666 | LC_ALL=C tr '[:upper:]' '[:lower:]')"
   provider="${provider//[[:space:]]/}"
   [ "$provider" = "shop666" ] && return 0
@@ -594,6 +606,7 @@ set_env CPA_LICENSE_GRACE_PATH "$(value_or CPA_LICENSE_GRACE_PATH /licenses/grac
 set_env CPA_LICENSE_REFRESH_INTERVAL "$(value_or CPA_LICENSE_REFRESH_INTERVAL 10m)"
 set_env CPA_LICENSE_GRACE_PERIOD "$(value_or CPA_LICENSE_GRACE_PERIOD 6h)"
 set_env CPA_LICENSE_CLIENT_ID "$(value_or CPA_LICENSE_CLIENT_ID '')"
+set_env CPA_LICENSE_REQUIRE_CLIENT_SECRET "$(value_or CPA_LICENSE_REQUIRE_CLIENT_SECRET false)"
 set_env CPA_LICENSE_STORAGE_KEY "$(value_or CPA_LICENSE_STORAGE_KEY '')"
 set_env CPA_LICENSE_EXECUTABLE_SHA256 "$(value_or CPA_LICENSE_EXECUTABLE_SHA256 '')"
 set_env CPA_LICENSE_CLAIM_PATH "$(value_or CPA_LICENSE_CLAIM_PATH '')"

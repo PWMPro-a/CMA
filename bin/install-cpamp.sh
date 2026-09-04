@@ -41,6 +41,7 @@ cpa_license_plugin_public_key="${CPA_LICENSE_PLUGIN_PUBLIC_KEY:-${CPAMP_CPA_LICE
 cpa_license_client_id="${CPA_LICENSE_CLIENT_ID:-${CPAMP_CPA_LICENSE_CLIENT_ID:-}}"
 cpa_license_client_secret="${CPA_LICENSE_CLIENT_SECRET:-${CPAMP_CPA_LICENSE_CLIENT_SECRET:-}}"
 cpa_license_client_secret_source_file="${CPA_LICENSE_CLIENT_SECRET_FILE:-${CPAMP_CPA_LICENSE_CLIENT_SECRET_FILE:-}}"
+cpa_license_client_secret_required="${CPA_LICENSE_REQUIRE_CLIENT_SECRET:-${CPA_LICENSE_CLIENT_SECRET_REQUIRE:-${CPAMP_CPA_LICENSE_REQUIRE_CLIENT_SECRET:-false}}}"
 cpa_license_secret_file=""
 cpa_license_provider="${CPA_LICENSE_PROVIDER:-${CPAMP_CPA_LICENSE_PROVIDER:-shop666}}"
 cpa_license_product_code="${CPA_LICENSE_PRODUCT_CODE:-${CPAMP_CPA_LICENSE_PRODUCT_CODE:-CPA}}"
@@ -658,6 +659,7 @@ load_existing_docker_config() {
   cpa_license_public_key="$(read_env_value "$install_dir/.env" CPA_LICENSE_PUBLIC_KEY 2>/dev/null || printf '%s' "${cpa_license_public_key:-}")"
   cpa_license_plugin_public_key="$(read_env_value "$install_dir/.env" CPA_LICENSE_PLUGIN_PUBLIC_KEY 2>/dev/null || printf '%s' "${cpa_license_plugin_public_key:-}")"
   cpa_license_client_id="$(read_env_value "$install_dir/.env" CPA_LICENSE_CLIENT_ID 2>/dev/null || printf '%s' "${cpa_license_client_id:-}")"
+  cpa_license_client_secret_required="$(read_env_value "$install_dir/.env" CPA_LICENSE_REQUIRE_CLIENT_SECRET 2>/dev/null || printf '%s' "${cpa_license_client_secret_required:-false}")"
   cpa_license_provider="$(read_env_value "$install_dir/.env" CPA_LICENSE_PROVIDER 2>/dev/null || printf '%s' "${cpa_license_provider:-shop666}")"
   cpa_license_product_code="$(read_env_value "$install_dir/.env" CPA_LICENSE_PRODUCT_CODE 2>/dev/null || printf '%s' "${cpa_license_product_code:-CPA}")"
   cpa_license_client_secret_source_file="$(read_env_value "$install_dir/.env" CPA_LICENSE_CLIENT_SECRET_FILE 2>/dev/null || printf '%s' "${cpa_license_client_secret_source_file:-}")"
@@ -775,6 +777,10 @@ storefront_license_required() {
   # begin a new storefront authorization flow; the CPA runtime remains
   # fail-closed until a matching credential is supplied.
   [ "$operation" != "repair" ] || return 1
+  # Public storefront releases do not distribute a shared client secret. The
+  # server-side guard is opt-in; only an explicit local REQUIRE flag makes the
+  # installer enforce a matching secret file.
+  license_secret_requirement_enabled || return 1
 
   provider="$(printf '%s' "$cpa_license_provider" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
   provider="${provider//[[:space:]]/}"
@@ -789,6 +795,17 @@ storefront_license_required() {
   authority="${authority##*@}"
   host="${authority%%:*}"
   [ "$host" = "p.666ttt.net" ]
+}
+
+license_secret_requirement_enabled() {
+  local value="${cpa_license_client_secret_required:-false}"
+  value="$(printf '%s' "$value" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  value="${value//[[:space:]]/}"
+  case "$value" in
+    1|true|yes|on) cpa_license_client_secret_required="true"; return 0 ;;
+    0|false|no|off|"") cpa_license_client_secret_required="false"; return 1 ;;
+    *) die "CPA_LICENSE_REQUIRE_CLIENT_SECRET must be true or false (got $value)" ;;
+  esac
 }
 
 license_secret_target_path() {
@@ -1071,6 +1088,7 @@ validate_license_path_value() {
 validate_license_config() {
   local allow_placeholder="0"
   local license_required="1"
+  license_secret_requirement_enabled >/dev/null || true
   if [ "$dry_run" = "1" ] || [ "$skip_execute" = "1" ] ||
      [ "$operation" = "upgrade" ] || [ "$operation" = "repair" ]; then
     allow_placeholder="1"
@@ -1359,6 +1377,7 @@ print_summary() {
   say "$(text license_api_base_url): $cpa_license_api_base_url"
   say "$(text license_grace_path): $cpa_license_grace_path"
   say "$(text license_grace_period): $cpa_license_grace_period"
+  say "CPA_LICENSE_REQUIRE_CLIENT_SECRET: $cpa_license_client_secret_required"
   if storefront_license_required && [ -z "$cpa_license_client_secret_source_file" ] &&
      [ -z "$cpa_license_client_secret" ]; then
     say "$(text license_secret_file): required at $(license_secret_target_path)"
@@ -1833,6 +1852,7 @@ write_env_file() {
     printf 'CPA_LICENSE_PUBLIC_KEY=%s\n' "$cpa_license_public_key"
     printf 'CPA_LICENSE_PLUGIN_PUBLIC_KEY=%s\n' "$cpa_license_plugin_public_key"
     printf 'CPA_LICENSE_CLIENT_ID=%s\n' "$cpa_license_client_id"
+    printf 'CPA_LICENSE_REQUIRE_CLIENT_SECRET=%s\n' "$cpa_license_client_secret_required"
     printf 'CPA_LICENSE_CLIENT_SECRET_FILE=%s\n' "${cpa_license_secret_file:-$install_dir/secrets/cpa-license-client-secret}"
     printf 'CPA_LICENSE_API_BASE_URL=%s\n' "$cpa_license_api_base_url"
     printf 'CPA_LICENSE_STATE_DIR=%s\n' "$cpa_license_state_dir"

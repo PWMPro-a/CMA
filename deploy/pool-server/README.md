@@ -10,16 +10,17 @@ CPA release 镜像和 CPAMP GHCR 镜像，不依赖本地 `local/*` 镜像，也
 
 ```bash
 chmod +x bootstrap.sh preflight.sh
-# 将商城为本实例签发的 client secret 放入本地文件（单行）
+# 若商城启用了客户端密钥校验，再将本实例签发的 client secret 放入本地文件（单行）
 mkdir -p -m 700 secrets
-install -m 600 /path/to/storefront-issued-secret secrets/cpa-license-client-secret
+install -m 600 /path/to/storefront-issued-secret secrets/cpa-license-client-secret  # REQUIRE=true 时需要
 ./bootstrap.sh
 ```
 
-`CPA_LICENSE_PROVIDER=shop666` 或 `CPA_LICENSE_API_BASE_URL` 使用
-`p.666ttt.net` 时，client secret 是启动前置条件。`bootstrap.sh` 不会生成随机值；
-如果文件缺失、为空、不可读或权限不是 600，脚本会在启动前停止并只提示文件路径，
-不会输出 secret 内容。先注入商城签发且与 client ID 匹配的值，再重新执行脚本。
+公开发布默认不要求 client secret，签名租约、实例绑定和商城登录流程仍会正常工作。
+只有将 `CPA_LICENSE_REQUIRE_CLIENT_SECRET=true`（或 `1`）写入 `.env`，并在商城端
+启用对应的 `STOREFRONT_REQUIRE_LICENSE_CLIENT_SECRET=true` 时，才会把 client secret
+作为启动前置条件。启用后 `bootstrap.sh` 不会生成随机值；如果文件缺失、为空、不可读
+或权限不是 600，脚本会在启动前停止并只提示文件路径，不会输出 secret 内容。
 
 脚本会：
 
@@ -77,6 +78,7 @@ docker compose --env-file /path/to/.env -f /path/to/compose.yml <command>
 | `CPAMP_DATA_DIR` | `./data/manager` | Manager SQLite 与 `data.key` |
 | `CPAMP_STACK_ROOT` | `.` | Agent 管理的 Compose 根目录 |
 | `CPAMP_BACKUP_ROOT` | `./backups` | 备份归档目录 |
+| `CPA_LICENSE_REQUIRE_CLIENT_SECRET` | `false` | 是否强制校验商城 client secret；公开发布默认关闭 |
 
 CPA、Agent 使用 host network，因此三个监听端口必须互不相同。CPAMP 容器通过
 `host.docker.internal:host-gateway` 访问 CPA 和 Agent。
@@ -94,13 +96,13 @@ CPA、Agent 使用 host network，因此三个监听端口必须互不相同。C
 
 `CPA_LICENSE_GRACE_PERIOD=6h` 只是刷新暂时失败时的本地回退值；实际有效宽限期由商城
 签名租约控制，客户修改本地配置不会把租约变成无限期。商城客户端 ID 可按商城配置填写；
-client secret 对 `shop666` 或 `p.666ttt.net` 场景是必填项：
+client secret 默认可选，只有显式设置 `CPA_LICENSE_REQUIRE_CLIENT_SECRET=true` 才会强制：
 
 - 推荐将客户端密钥放在 `CPA_LICENSE_CLIENT_SECRET_HOST_PATH` 指定的本地文件（权限 600）；
 - 旧版只设置 `CPA_LICENSE_CLIENT_SECRET` 或 `CPA_LICENSE_CLIENT_SECRET_FILE` 的配置仍能
   被 bootstrap 识别，并迁移到本地 secret 文件；
-- 外部商城场景缺少可读 secret 文件时，preflight/bootstrap 会阻断并提示注入匹配的商城
-  secret；不会创建伪 secret 或空的可用凭据；
+- 开启强制校验时，外部商城场景缺少可读 secret 文件会让 preflight/bootstrap 阻断并提示
+  注入匹配的商城 secret；默认可选模式会保留空的 mode-600 文件；
 - 不要把真实 `.env`、`secrets/`、`data/` 或 `backups/` 提交到 Git；模板目录已通过
   `.gitignore` 忽略这些运行时文件。
 

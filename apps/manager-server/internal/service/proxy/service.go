@@ -189,7 +189,7 @@ func (s *Service) ProxyManagement(w http.ResponseWriter, r *http.Request, writeE
 }
 
 func (s *Service) ProxyLicenseShopCallback(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error)) {
-	if r == nil || r.Method != http.MethodGet || strings.TrimRight(r.URL.Path, "/") != "/license/shop/callback" {
+	if r == nil || r.Method != http.MethodGet || !isLicenseShopCallbackPath(r.URL.Path) {
 		writeError(w, http.StatusNotFound, errors.New("license callback path is invalid"))
 		return
 	}
@@ -221,6 +221,11 @@ func (s *Service) ProxyLicenseShopCallback(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadGateway, proxyErr)
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+func isLicenseShopCallbackPath(path string) bool {
+	cleaned := strings.TrimRight(path, "/")
+	return cleaned == "/license/shop/callback" || cleaned == "/api/admin/license/shop/callback"
 }
 
 func (s *Service) ProxyPluginManagement(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error)) {
