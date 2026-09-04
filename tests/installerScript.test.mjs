@@ -1146,6 +1146,356 @@ describe('installer script', () => {
     }
   });
 
+  it('backfills missing official storefront keys during a managed upgrade', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const oldEnv = [
+      '# preserve this environment comment',
+      'COMPOSE_PROJECT_NAME=cpamp',
+      'CPAMP_IMAGE=example/cpamp:v1',
+      'CPAMP_PORT=18317',
+      'CPA_IMAGE=example/cpa:v1',
+      'CPA_PORT=8317',
+      'CPAMP_AGENT_TOKEN=agent',
+      'CPA_LICENSE_PROVIDER=shop666',
+      'CPA_LICENSE_API_BASE_URL=https://p.666ttt.net/api/storefront',
+      'CPA_LICENSE_PUBLIC_KEY=replace-with-base64url-ed25519-public-key',
+      'CPA_LICENSE_PLUGIN_PUBLIC_KEY=',
+      'CPA_LICENSE_REQUIRE_CLIENT_SECRET=false',
+      '',
+    ].join('\n');
+    const oldConfig = [
+      '# preserve this config comment',
+      'license:',
+      '  provider: "shop666"',
+      '  api-base-url: "https://p.666ttt.net/api/storefront"',
+      '  public-key: "" # keep this inline comment',
+      '  plugin-public-key: replace-with-plugin-key',
+      '  client-secret: "authorization-state-sentinel"',
+      '# preserve trailing comment',
+      '',
+    ].join('\n');
+    const compose =
+      'services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE}\n  cpa-manager-plus:\n    image: ${CPAMP_IMAGE}\n';
+
+    try {
+      mkdirSync(path.join(installDir, 'secrets'), { recursive: true });
+      mkdirSync(path.join(installDir, 'cliproxyapi'), { recursive: true });
+      writeFileSync(path.join(installDir, '.env'), oldEnv, { mode: 0o600 });
+      writeFileSync(path.join(installDir, 'compose.yaml'), compose);
+      writeFileSync(path.join(installDir, 'cliproxyapi/config.yaml'), oldConfig, { mode: 0o600 });
+      writeFileSync(path.join(installDir, 'secrets/cpamp-admin-key'), 'cpamp_existing_admin_key\n');
+      chmodSync(path.join(installDir, 'secrets/cpamp-admin-key'), 0o600);
+
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_OPERATION: 'upgrade',
+          CPAMP_SKIP_EXECUTE: '1',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_DIR: installDir,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(0);
+      const env = readFileSync(path.join(installDir, '.env'), 'utf8');
+      const config = readFileSync(path.join(installDir, 'cliproxyapi/config.yaml'), 'utf8');
+      expect(env).toContain(
+        'CPA_LICENSE_PUBLIC_KEY=kJhDRBpfneFdURvPXwiGW3XAmPrd2HVVORfHzP-eYTg'
+      );
+      expect(env).toContain(
+        'CPA_LICENSE_PLUGIN_PUBLIC_KEY=OHRHVVIlFC34K-5AQUkOPcZLeiSpeX_n_VPbrH3agXQ'
+      );
+      expect(config).toContain(
+        'public-key: "kJhDRBpfneFdURvPXwiGW3XAmPrd2HVVORfHzP-eYTg" # keep this inline comment'
+      );
+      expect(config).toContain(
+        'plugin-public-key: "OHRHVVIlFC34K-5AQUkOPcZLeiSpeX_n_VPbrH3agXQ"'
+      );
+      expect(config).toContain('client-secret: "authorization-state-sentinel"');
+      expect(config).toContain('# preserve trailing comment');
+      expect(readFileSync(path.join(installDir, 'compose.yaml'), 'utf8')).toBe(compose);
+      expect(result.stdout).toContain('Backfilled official CPA_LICENSE_PUBLIC_KEY');
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not inject release keys into a customer-managed provider or endpoint', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const oldEnv = [
+      'COMPOSE_PROJECT_NAME=cpamp',
+      'CPAMP_IMAGE=example/cpamp:v1',
+      'CPAMP_PORT=18317',
+      'CPA_IMAGE=example/cpa:v1',
+      'CPA_PORT=8317',
+      'CPAMP_AGENT_TOKEN=agent',
+      'CPA_LICENSE_PROVIDER=local',
+      'CPA_LICENSE_API_BASE_URL=http://customer.example/api',
+      'CPA_LICENSE_PUBLIC_KEY=',
+      'CPA_LICENSE_PLUGIN_PUBLIC_KEY=',
+      '',
+    ].join('\n');
+    const oldConfig = [
+      'license:',
+      '  provider: "local"',
+      '  api-base-url: "http://customer.example/api"',
+      '  public-key: "" # customer key is intentionally unset',
+      '  plugin-public-key: ""',
+      '',
+    ].join('\n');
+
+    try {
+      mkdirSync(path.join(installDir, 'secrets'), { recursive: true });
+      mkdirSync(path.join(installDir, 'cliproxyapi'), { recursive: true });
+      writeFileSync(path.join(installDir, '.env'), oldEnv, { mode: 0o600 });
+      writeFileSync(
+        path.join(installDir, 'compose.yaml'),
+        'services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE}\n  cpa-manager-plus:\n    image: ${CPAMP_IMAGE}\n'
+      );
+      writeFileSync(path.join(installDir, 'cliproxyapi/config.yaml'), oldConfig, { mode: 0o600 });
+      writeFileSync(path.join(installDir, 'secrets/cpamp-admin-key'), 'cpamp_existing_admin_key\n');
+      chmodSync(path.join(installDir, 'secrets/cpamp-admin-key'), 0o600);
+
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_OPERATION: 'upgrade',
+          CPAMP_SKIP_EXECUTE: '1',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_DIR: installDir,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(path.join(installDir, '.env'), 'utf8')).toBe(oldEnv);
+      expect(readFileSync(path.join(installDir, 'cliproxyapi/config.yaml'), 'utf8')).toBe(oldConfig);
+      expect(result.stdout).not.toContain('Backfilled official');
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
+  it('inserts missing official key fields without replacing other license settings', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const oldEnv = [
+      'COMPOSE_PROJECT_NAME=cpamp',
+      'CPAMP_IMAGE=example/cpamp:v1',
+      'CPAMP_PORT=18317',
+      'CPA_IMAGE=example/cpa:v1',
+      'CPA_PORT=8317',
+      'CPAMP_AGENT_TOKEN=agent',
+      'CPA_LICENSE_PROVIDER=shop666',
+      'CPA_LICENSE_API_BASE_URL=https://p.666ttt.net/api/storefront',
+      'CPA_LICENSE_PUBLIC_KEY=',
+      'CPA_LICENSE_PLUGIN_PUBLIC_KEY=',
+      '',
+    ].join('\n');
+    const oldConfig = [
+      'license:',
+      '  provider: "shop666"',
+      '  api-base-url: "https://p.666ttt.net/api/storefront"',
+      '  client-secret: "keep"',
+      '',
+      'debug: true',
+      '',
+    ].join('\n');
+
+    try {
+      mkdirSync(path.join(installDir, 'secrets'), { recursive: true });
+      mkdirSync(path.join(installDir, 'cliproxyapi'), { recursive: true });
+      writeFileSync(path.join(installDir, '.env'), oldEnv, { mode: 0o600 });
+      writeFileSync(
+        path.join(installDir, 'compose.yaml'),
+        'services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE}\n  cpa-manager-plus:\n    image: ${CPAMP_IMAGE}\n'
+      );
+      writeFileSync(path.join(installDir, 'cliproxyapi/config.yaml'), oldConfig, { mode: 0o600 });
+      writeFileSync(path.join(installDir, 'secrets/cpamp-admin-key'), 'cpamp_existing_admin_key\n');
+      chmodSync(path.join(installDir, 'secrets/cpamp-admin-key'), 0o600);
+
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_OPERATION: 'upgrade',
+          CPAMP_SKIP_EXECUTE: '1',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_DIR: installDir,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(0);
+      const config = readFileSync(path.join(installDir, 'cliproxyapi/config.yaml'), 'utf8');
+      expect(config).toContain(
+        '  public-key: "kJhDRBpfneFdURvPXwiGW3XAmPrd2HVVORfHzP-eYTg"'
+      );
+      expect(config).toContain(
+        '  plugin-public-key: "OHRHVVIlFC34K-5AQUkOPcZLeiSpeX_n_VPbrH3agXQ"'
+      );
+      expect(config).toContain('  client-secret: "keep"');
+      expect(config).toContain('debug: true');
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
+  it('follows a Compose -config path and repairs an active CPA config file', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const activeConfig = path.join(installDir, 'data/cpa/config.active-76a1a7b5.yaml');
+    const oldEnv = [
+      'COMPOSE_PROJECT_NAME=cpamp',
+      'CPAMP_IMAGE=example/cpamp:v1',
+      'CPAMP_PORT=18317',
+      'CPA_IMAGE=example/cpa:v1',
+      'CPA_PORT=8317',
+      'CPA_DATA_DIR=./data/cpa',
+      'CPAMP_AGENT_TOKEN=agent',
+      'CPA_LICENSE_PROVIDER=shop666',
+      'CPA_LICENSE_API_BASE_URL=https://p.666ttt.net/api/storefront',
+      'CPA_LICENSE_PUBLIC_KEY=',
+      'CPA_LICENSE_PLUGIN_PUBLIC_KEY=',
+      '',
+    ].join('\n');
+    const compose = [
+      'services:',
+      '  cli-proxy-api:',
+      '    image: ${CPA_IMAGE}',
+      '    command: ["./CLIProxyAPI", "-config", "/app/data/config.active-76a1a7b5.yaml"]',
+      '  cpa-manager-plus:',
+      '    image: ${CPAMP_IMAGE}',
+      '',
+    ].join('\n');
+    const config = [
+      '# active config is selected by Compose',
+      'license:',
+      '  provider: "shop666"',
+      '  api-base-url: "https://p.666ttt.net/api/storefront"',
+      '  public-key: "" # preserve active comment',
+      '  plugin-public-key: "replace-with-plugin-key"',
+      '  client-secret: "keep-active-license-state"',
+      '',
+    ].join('\n');
+
+    try {
+      mkdirSync(path.join(installDir, 'secrets'), { recursive: true });
+      mkdirSync(path.dirname(activeConfig), { recursive: true });
+      writeFileSync(path.join(installDir, '.env'), oldEnv, { mode: 0o600 });
+      writeFileSync(path.join(installDir, 'compose.yaml'), compose);
+      writeFileSync(activeConfig, config, { mode: 0o600 });
+      writeFileSync(path.join(installDir, 'secrets/cpamp-admin-key'), 'cpamp_existing_admin_key\n');
+      chmodSync(path.join(installDir, 'secrets/cpamp-admin-key'), 0o600);
+
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_OPERATION: 'upgrade',
+          CPAMP_SKIP_EXECUTE: '1',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_DIR: installDir,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(0);
+      const repaired = readFileSync(activeConfig, 'utf8');
+      expect(repaired).toContain(
+        'public-key: "kJhDRBpfneFdURvPXwiGW3XAmPrd2HVVORfHzP-eYTg" # preserve active comment'
+      );
+      expect(repaired).toContain(
+        'plugin-public-key: "OHRHVVIlFC34K-5AQUkOPcZLeiSpeX_n_VPbrH3agXQ"'
+      );
+      expect(repaired).toContain('client-secret: "keep-active-license-state"');
+      expect(result.stdout).toContain(`Backfilled official CPA license key(s): ${activeConfig}`);
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
+  it('prefers valid keys from the active config before using bundled release keys', () => {
+    const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
+    const activeConfig = path.join(installDir, 'data/cpa/config.active-preferred.yaml');
+    const configuredPublicKey =
+      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    const configuredPluginKey =
+      'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+    const oldEnv = [
+      'COMPOSE_PROJECT_NAME=cpamp',
+      'CPAMP_IMAGE=example/cpamp:v1',
+      'CPAMP_PORT=18317',
+      'CPA_IMAGE=example/cpa:v1',
+      'CPA_PORT=8317',
+      'CPA_DATA_DIR=./data/cpa',
+      'CPAMP_AGENT_TOKEN=agent',
+      'CPA_LICENSE_PROVIDER=shop666',
+      'CPA_LICENSE_API_BASE_URL=https://p.666ttt.net/api/storefront',
+      'CPA_LICENSE_PUBLIC_KEY=',
+      'CPA_LICENSE_PLUGIN_PUBLIC_KEY=',
+      '',
+    ].join('\n');
+    const compose = [
+      'services:',
+      '  cli-proxy-api:',
+      '    command: ["./CLIProxyAPI", "-config", "/app/data/config.active-preferred.yaml"]',
+      '  cpa-manager-plus:',
+      '    image: ${CPAMP_IMAGE}',
+      '',
+    ].join('\n');
+    const config = [
+      'license:',
+      '  provider: "shop666"',
+      '  api-base-url: "https://p.666ttt.net/api/storefront"',
+      `  public-key: "${configuredPublicKey}"`,
+      `  plugin-public-key: "${configuredPluginKey}"`,
+      '',
+    ].join('\n');
+
+    try {
+      mkdirSync(path.join(installDir, 'secrets'), { recursive: true });
+      mkdirSync(path.dirname(activeConfig), { recursive: true });
+      writeFileSync(path.join(installDir, '.env'), oldEnv, { mode: 0o600 });
+      writeFileSync(path.join(installDir, 'compose.yaml'), compose);
+      writeFileSync(activeConfig, config, { mode: 0o600 });
+      writeFileSync(path.join(installDir, 'secrets/cpamp-admin-key'), 'cpamp_existing_admin_key\n');
+      chmodSync(path.join(installDir, 'secrets/cpamp-admin-key'), 0o600);
+
+      const result = spawnSync('bash', [installerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CPAMP_OPERATION: 'upgrade',
+          CPAMP_SKIP_EXECUTE: '1',
+          CPAMP_NON_INTERACTIVE: '1',
+          CPAMP_CONFIRM: '1',
+          CPAMP_LANG: 'en-US',
+          CPAMP_INSTALL_DIR: installDir,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(0);
+      const env = readFileSync(path.join(installDir, '.env'), 'utf8');
+      expect(env).toContain(`CPA_LICENSE_PUBLIC_KEY=${configuredPublicKey}`);
+      expect(env).toContain(`CPA_LICENSE_PLUGIN_PUBLIC_KEY=${configuredPluginKey}`);
+      expect(readFileSync(activeConfig, 'utf8')).toBe(config);
+      expect(result.stdout).toContain('Recovered CPA_LICENSE_PUBLIC_KEY from the active CPA config');
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
   it('repairs a managed Docker login without pulling unrelated service images', () => {
     const installDir = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-'));
     const fakeBin = mkdtempSync(path.join(os.tmpdir(), 'cpamp-installer-bin-'));
