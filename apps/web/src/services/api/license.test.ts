@@ -9,7 +9,12 @@ vi.mock('./client', () => ({
   apiClient: mocks,
 }));
 
-import { licenseApi } from './license';
+import {
+  getLicenseErrorCode,
+  getLicenseErrorMessage,
+  licenseApi,
+  normalizeActivationCode,
+} from './license';
 
 describe('licenseApi paths', () => {
   beforeEach(() => {
@@ -41,5 +46,20 @@ describe('licenseApi paths', () => {
       ['/license/refresh'],
       ['/license/activate', { code: 'activation-code' }],
     ]);
+  });
+
+  it('normalizes copied activation codes before sending them', () => {
+    expect(normalizeActivationCode('  ```text\nabc\\_def\\-ghi\n```  ')).toBe('abc_def-ghi');
+    licenseApi.activate('  abc\\_def\n');
+    expect(mocks.post).toHaveBeenLastCalledWith('/license/activate', { code: 'abc_def' });
+  });
+
+  it('extracts stable provider codes and preserves human-readable messages', () => {
+    const error = Object.assign(new Error('授权操作未完成'), {
+      details: { code: 'authorization_invalid', error: '授权链接已使用或与当前 CPA 不匹配' },
+    });
+    expect(getLicenseErrorCode(error)).toBe('authorization_invalid');
+    expect(getLicenseErrorMessage(error)).toBe('授权链接已使用或与当前 CPA 不匹配');
+    expect(getLicenseErrorCode('provider_rejected')).toBe('provider_rejected');
   });
 });

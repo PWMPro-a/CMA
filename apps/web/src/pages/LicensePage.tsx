@@ -5,7 +5,13 @@ import { Input } from '@/components/ui/Input';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { Modal } from '@/components/ui/Modal';
 import { IconKey, IconRefreshCw, IconShield, IconShieldCheck } from '@/components/ui/icons';
-import { licenseApi, type LicenseStatus } from '@/services/api/license';
+import {
+  getLicenseErrorCode,
+  getLicenseErrorMessage,
+  licenseApi,
+  normalizeActivationCode,
+  type LicenseStatus,
+} from '@/services/api/license';
 import { useNotificationStore } from '@/stores';
 import styles from './LicensePage.module.scss';
 
@@ -55,10 +61,15 @@ export function LicensePage() {
   }, [status?.grace_until]);
 
   const errorText = useCallback(
-    (code: string) =>
-      t(`license.errors.${code}`, {
-        defaultValue: t('license.errors.provider_error'),
-      }),
+    (error: unknown) => {
+      const code = getLicenseErrorCode(error);
+      if (code) {
+        const key = `license.errors.${code}`;
+        const translated = t(key, { defaultValue: '' });
+        if (translated && translated !== key) return translated;
+      }
+      return getLicenseErrorMessage(error) || t('license.errors.provider_error');
+    },
     [t]
   );
 
@@ -90,7 +101,7 @@ export function LicensePage() {
           showNotification(t('license.authorization_success'), 'success');
         })
         .catch((error) => {
-          showNotification(errorText(error instanceof Error ? error.message : 'provider_error'), 'error');
+          showNotification(errorText(error), 'error');
         })
         .finally(() => setAuthorizing(false));
     };
@@ -121,7 +132,7 @@ export function LicensePage() {
       popup.close();
       popupRef.current = null;
       setAuthorizing(false);
-      showNotification(errorText(error instanceof Error ? error.message : 'provider_error'), 'error');
+      showNotification(errorText(error), 'error');
     }
   };
 
@@ -132,15 +143,16 @@ export function LicensePage() {
       setStatus(result.license);
       showNotification(t('license.refresh_success'), 'success');
     } catch (error) {
-      showNotification(errorText(error instanceof Error ? error.message : 'provider_error'), 'error');
+      showNotification(errorText(error), 'error');
     } finally {
       setRefreshing(false);
     }
   };
 
   const handleActivate = async () => {
-    const code = activationCode.trim();
+    const code = normalizeActivationCode(activationCode);
     if (!code) return;
+    if (code !== activationCode) setActivationCode(code);
     setActivating(true);
     try {
       const result = await licenseApi.activate(code);
@@ -149,7 +161,7 @@ export function LicensePage() {
       setActivateOpen(false);
       showNotification(t('license.activation_success'), 'success');
     } catch (error) {
-      showNotification(errorText(error instanceof Error ? error.message : 'provider_error'), 'error');
+      showNotification(errorText(error), 'error');
     } finally {
       setActivating(false);
     }
@@ -305,7 +317,11 @@ export function LicensePage() {
             <Button variant="secondary" onClick={() => setActivateOpen(false)} disabled={activating}>
               {t('common.cancel')}
             </Button>
-            <Button onClick={() => void handleActivate()} loading={activating} disabled={!activationCode.trim()}>
+            <Button
+              onClick={() => void handleActivate()}
+              loading={activating}
+              disabled={!normalizeActivationCode(activationCode)}
+            >
               {t('license.activate')}
             </Button>
           </>
