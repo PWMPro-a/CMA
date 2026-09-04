@@ -20,6 +20,15 @@ no_start="${CPA_POOL_NO_START:-0}"
 health_timeout="${CPA_POOL_HEALTH_TIMEOUT:-120}"
 tmp_env=""
 
+# The public release is tied to the p.666ttt.net storefront signer.  These
+# values are used only to repair an omitted/template key in an official
+# storefront deployment; customer-managed providers and endpoints keep their
+# own values untouched.
+release_license_public_key="kJhDRBpfneFdURvPXwiGW3XAmPrd2HVVORfHzP-eYTg"
+release_plugin_public_key="OHRHVVIlFC34K-5AQUkOPcZLeiSpeX_n_VPbrH3agXQ"
+release_license_provider="shop666"
+release_license_api_base_url="https://p.666ttt.net/api/storefront"
+
 usage() {
   cat <<USAGE
 Usage: $(basename "$0") [options]
@@ -166,9 +175,58 @@ is_placeholder() {
   lower="$(printf '%s' "$value" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
   [ -z "$lower" ] && return 0
   case "$lower" in
-    replace-with*|changeme*|change-me*|set-me*|your-*|'<*>') return 0 ;;
+    replace-with*|changeme*|change-me*|set-me*|your-*|your_*|placeholder*|__*__|'<*>'|"<*>") return 0 ;;
     *) return 1 ;;
   esac
+}
+
+license_value_missing_or_placeholder() {
+  local value="${1:-}"
+  local compact="${value//[[:space:]]/}"
+  [ -z "$compact" ] && return 0
+  is_placeholder "$value"
+}
+
+normalize_storefront_api_base() {
+  local value="${1:-}"
+  value="$(printf '%s' "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  value="${value%/}"
+  printf '%s' "$(printf '%s' "$value" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+}
+
+is_official_storefront_values() {
+  local provider="${1:-}"
+  local api_base="${2:-}"
+  provider="$(printf '%s' "$provider" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  api_base="$(normalize_storefront_api_base "$api_base")"
+  [ "$provider" = "$release_license_provider" ] &&
+    [ "$api_base" = "$release_license_api_base_url" ]
+}
+
+is_official_storefront_env() {
+  is_official_storefront_values \
+    "$(value_or CPA_LICENSE_PROVIDER "$release_license_provider")" \
+    "$(value_or CPA_LICENSE_API_BASE_URL "$release_license_api_base_url")"
+}
+
+# Fill only omitted/template public keys for the official storefront.  A
+# custom provider or endpoint must supply its own key and is never silently
+# changed to the publisher key.
+backfill_release_license_env_keys() {
+  local current=""
+  is_official_storefront_env || return 0
+
+  current="$(env_get CPA_LICENSE_PUBLIC_KEY 2>/dev/null || true)"
+  if license_value_missing_or_placeholder "$current"; then
+    set_env CPA_LICENSE_PUBLIC_KEY "$release_license_public_key"
+    info "Backfilled official CPA_LICENSE_PUBLIC_KEY in $env_file"
+  fi
+
+  current="$(env_get CPA_LICENSE_PLUGIN_PUBLIC_KEY 2>/dev/null || true)"
+  if license_value_missing_or_placeholder "$current"; then
+    set_env CPA_LICENSE_PLUGIN_PUBLIC_KEY "$release_plugin_public_key"
+    info "Backfilled official CPA_LICENSE_PLUGIN_PUBLIC_KEY in $env_file"
+  fi
 }
 
 is_blank_or_placeholder_secret() {
@@ -319,6 +377,176 @@ backup_existing_config() {
   backup_file="$backup_dir/config-$(date '+%Y%m%d-%H%M%S').yaml"
   cp -p "$config_file" "$backup_file"
   info "Existing CPA config backed up to $backup_file"
+}
+
+config_license_value() {
+  local config_file="$1"
+  local wanted="$2"
+  [ -f "$config_file" ] || return 1
+  awk -v wanted="$wanted" '
+    function indent_of(value,    m) {
+      match(value, /^[[:space:]]*/)
+      return RLENGTH
+    }
+    BEGIN { in_license = 0; license_indent = -1; found = 0 }
+    {
+      line = $0
+      indent = indent_of(line)
+      if (line ~ /^[[:space:]]*license:[[:space:]]*(#.*)?$/) {
+        in_license = 1
+        license_indent = indent
+        next
+      }
+      if (!in_license) next
+      if (line !~ /^[[:space:]]*($|#)/ && indent <= license_indent) {
+        in_license = 0
+      }
+      if (in_license && indent > license_indent &&
+          line ~ ("^[[:space:]]*" wanted "[[:space:]]*:")) {
+        sub(("^[[:space:]]*" wanted "[[:space:]]*:[[:space:]]*"), "", line)
+        sub(/[[:space:]]+#.*$/, "", line)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+        if (length(line) >= 2 && substr(line, 1, 1) == "\"" &&
+            substr(line, length(line), 1) == "\"") {
+          line = substr(line, 2, length(line) - 2)
+        } else if (length(line) >= 2 && substr(line, 1, 1) == "'" &&
+                   substr(line, length(line), 1) == "'") {
+          line = substr(line, 2, length(line) - 2)
+        }
+        print line
+        found = 1
+        exit
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$config_file"
+}
+
+config_has_license_section() {
+  local config_file="$1"
+  [ -f "$config_file" ] || return 1
+  awk '
+    /^[[:space:]]*license:[[:space:]]*(#.*)?$/ { found = 1; exit }
+    END { exit(found ? 0 : 1) }
+  ' "$config_file"
+}
+
+# Update only missing/template public-key entries in an existing config.  The
+# line-oriented rewrite keeps unrelated settings and comments byte-for-byte
+# stable and preserves the original file mode.
+backfill_release_license_config() {
+  local config_file="$1"
+  local provider=""
+  local api_base=""
+  local public_key=""
+  local plugin_key=""
+  local need_public="0"
+  local need_plugin="0"
+  local tmp=""
+  local mode=""
+
+  [ -f "$config_file" ] || return 0
+  [ -L "$config_file" ] && die "Refusing to rewrite symlinked CPA config: $config_file"
+  config_has_license_section "$config_file" || return 0
+
+  provider="$(config_license_value "$config_file" provider 2>/dev/null || true)"
+  [ -n "$provider" ] || provider="$(value_or CPA_LICENSE_PROVIDER "$release_license_provider")"
+  api_base="$(config_license_value "$config_file" api-base-url 2>/dev/null || true)"
+  [ -n "$api_base" ] || api_base="$(value_or CPA_LICENSE_API_BASE_URL "$release_license_api_base_url")"
+  is_official_storefront_values "$provider" "$api_base" || return 0
+
+  public_key="$(config_license_value "$config_file" public-key 2>/dev/null || true)"
+  plugin_key="$(config_license_value "$config_file" plugin-public-key 2>/dev/null || true)"
+  license_value_missing_or_placeholder "$public_key" && need_public="1"
+  license_value_missing_or_placeholder "$plugin_key" && need_plugin="1"
+  [ "$need_public" = "1" ] || [ "$need_plugin" = "1" ] || return 0
+
+  tmp="${config_file}.tmp.$$"
+  if ! awk \
+    -v public_key="$release_license_public_key" \
+    -v plugin_key="$release_plugin_public_key" \
+    -v need_public="$need_public" \
+    -v need_plugin="$need_plugin" '
+    function indent_of(value,    m) {
+      match(value, /^[[:space:]]*/)
+      return RLENGTH
+    }
+    function emit_missing(    prefix) {
+      if (!in_license || emitted) return
+      prefix = ""
+      if (child_indent >= 0) {
+        prefix = substr("                                                                ", 1, child_indent)
+      } else {
+        prefix = substr("                                                                ", 1, license_indent + 2)
+      }
+      if (need_public && !seen_public) print prefix "public-key: \"" public_key "\""
+      if (need_plugin && !seen_plugin) print prefix "plugin-public-key: \"" plugin_key "\""
+      emitted = 1
+    }
+    function inline_comment(value,    at) {
+      if (match(value, /[[:space:]]+#/)) return substr(value, RSTART)
+      return ""
+    }
+    BEGIN {
+      in_license = 0
+      license_indent = -1
+      child_indent = -1
+      seen_public = 0
+      seen_plugin = 0
+      emitted = 0
+    }
+    {
+      line = $0
+      indent = indent_of(line)
+      if (line ~ /^[[:space:]]*license:[[:space:]]*(#.*)?$/) {
+        if (in_license) emit_missing()
+        in_license = 1
+        license_indent = indent
+        child_indent = -1
+        seen_public = 0
+        seen_plugin = 0
+        emitted = 0
+        print line
+        next
+      }
+      if (in_license && line !~ /^[[:space:]]*($|#)/ && indent <= license_indent) {
+        emit_missing()
+        in_license = 0
+      }
+      if (in_license && indent > license_indent) {
+        if (child_indent < 0 && line !~ /^[[:space:]]*($|#)/) child_indent = indent
+        if (line ~ /^[[:space:]]*public-key[[:space:]]*:/) {
+          seen_public = 1
+          if (need_public) {
+            comment = inline_comment(line)
+            prefix = substr(line, 1, indent)
+            print prefix "public-key: \"" public_key "\"" comment
+            next
+          }
+        }
+        if (line ~ /^[[:space:]]*plugin-public-key[[:space:]]*:/) {
+          seen_plugin = 1
+          if (need_plugin) {
+            comment = inline_comment(line)
+            prefix = substr(line, 1, indent)
+            print prefix "plugin-public-key: \"" plugin_key "\"" comment
+            next
+          }
+        }
+      }
+      print line
+    }
+    END { emit_missing() }
+  ' "$config_file" > "$tmp"; then
+    rm -f "$tmp"
+    die "Unable to backfill official license keys in: $config_file"
+  fi
+  if mode="$(stat -c '%a' "$config_file" 2>/dev/null)"; then :
+  elif mode="$(stat -f '%Lp' "$config_file" 2>/dev/null)"; then :
+  else mode=""; fi
+  if [ -n "$mode" ]; then chmod "$mode" "$tmp" 2>/dev/null || true; fi
+  mv -f "$tmp" "$config_file"
+  info "Backfilled official CPA license key(s) in $config_file"
 }
 
 sed_escape() {
@@ -487,6 +715,10 @@ copy_env_template
 copy_compose_template
 copy_support_files
 if [ "$dry_run" != "1" ]; then chmod 600 "$env_file" 2>/dev/null || true; fi
+# Existing public installs can carry a placeholder or omitted storefront key.
+# Repair only the official p.666ttt.net configuration before Compose
+# interpolation; customer-managed providers retain their own values.
+backfill_release_license_env_keys
 cpa_data_dir="$(normalize_path_var CPA_DATA_DIR "$project_dir/data/cpa")"
 cpamp_data_dir="$(normalize_path_var CPAMP_DATA_DIR "$project_dir/data/manager")"
 stack_root="$(normalize_path_var CPAMP_STACK_ROOT "$project_dir")"
@@ -591,8 +823,8 @@ set_env CPAMP_PORT "$(value_or CPAMP_PORT 18317)"
 set_env CPAMP_INTERNAL_PORT "$(value_or CPAMP_INTERNAL_PORT 18317)"
 set_env CPAMP_AGENT_PORT "$(value_or CPAMP_AGENT_PORT 18417)"
 set_env CPAMP_NETWORK_NAME "$(value_or CPAMP_NETWORK_NAME cpamp-cpa_default)"
-set_env CPA_LICENSE_PUBLIC_KEY "$(value_or CPA_LICENSE_PUBLIC_KEY kJhDRBpfneFdURvPXwiGW3XAmPrd2HVVORfHzP-eYTg)"
-set_env CPA_LICENSE_PLUGIN_PUBLIC_KEY "$(value_or CPA_LICENSE_PLUGIN_PUBLIC_KEY OHRHVVIlFC34K-5AQUkOPcZLeiSpeX_n_VPbrH3agXQ)"
+set_env CPA_LICENSE_PUBLIC_KEY "$(value_or CPA_LICENSE_PUBLIC_KEY "$release_license_public_key")"
+set_env CPA_LICENSE_PLUGIN_PUBLIC_KEY "$(value_or CPA_LICENSE_PLUGIN_PUBLIC_KEY "$release_plugin_public_key")"
 set_env CPA_LICENSE_PROVIDER "$(value_or CPA_LICENSE_PROVIDER shop666)"
 set_env CPA_LICENSE_PRODUCT_CODE "$(value_or CPA_LICENSE_PRODUCT_CODE CPA)"
 set_env CPA_LICENSE_API_BASE_URL "$(value_or CPA_LICENSE_API_BASE_URL https://p.666ttt.net/api/storefront)"
@@ -613,6 +845,12 @@ set_env CPA_LICENSE_CLAIM_PATH "$(value_or CPA_LICENSE_CLAIM_PATH '')"
 
 config_file="$cpa_data_dir/config.yaml"
 render_config "$config_file"
+# render_config intentionally preserves an existing file.  Apply the same
+# narrowly-scoped key repair to that preserved file so upgrades do not leave
+# a legacy license section without the official verification keys.
+if [ -f "$config_file" ]; then
+  backfill_release_license_config "$config_file"
+fi
 
 preflight_compose_file="$compose_file"
 if [ "$dry_run" = "1" ] && [ ! -f "$preflight_compose_file" ]; then
