@@ -62,6 +62,14 @@ describe('pool-server deployment template', () => {
     expect(compose).toContain('test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${CPAMP_INTERNAL_PORT:-18317}/health >/dev/null"]');
   });
 
+  it('uses Docker short-form secret mount paths for manager credentials', () => {
+    const compose = readFileSync(path.join(sourceDir, 'compose.yml'), 'utf8');
+    expect(compose).toContain('CPA_MANAGEMENT_KEY_FILE: "/run/secrets/cpa_management_key"');
+    expect(compose).toContain('CPA_MANAGER_ADMIN_KEY_FILE: "/run/secrets/cpamp_admin_key"');
+    expect(compose).not.toContain('/run/secrets/cpa-management-key');
+    expect(compose).not.toContain('/run/secrets/cpamp-admin-key');
+  });
+
   it.each(shellFiles)('%s passes shell syntax validation', (name) => {
     const result = spawnSync('bash', ['-n', path.join(sourceDir, name)], {
       cwd: repoRoot,

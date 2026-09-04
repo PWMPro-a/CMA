@@ -118,8 +118,10 @@ services:
       USAGE_DB_PATH: "/data/usage.sqlite"
       CPA_MANAGER_DATA_KEY_PATH: "/data/data.key"
       CPA_UPSTREAM_URL: "http://host.docker.internal:${CPA_PORT:-8317}"
-      CPA_MANAGEMENT_KEY_FILE: "/run/secrets/cpa-management-key"
-      CPA_MANAGER_ADMIN_KEY_FILE: "/run/secrets/cpamp-admin-key"
+      # Short-form Compose secrets use the declared name as the mount path.
+      # Keep these paths in sync with cpa_management_key/cpamp_admin_key.
+      CPA_MANAGEMENT_KEY_FILE: "/run/secrets/cpa_management_key"
+      CPA_MANAGER_ADMIN_KEY_FILE: "/run/secrets/cpamp_admin_key"
       CPAMP_AGENT_URL: "http://host.docker.internal:${CPAMP_AGENT_PORT:-18417}"
       CPAMP_AGENT_TOKEN: "${CPAMP_AGENT_TOKEN:?set CPAMP_AGENT_TOKEN}"
       USAGE_COLLECTOR_MODE: "http"
