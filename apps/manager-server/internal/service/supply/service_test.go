@@ -1896,7 +1896,11 @@ func TestAccountPoolStatsKeepsRequestFaultsAvailable(t *testing.T) {
 		},
 	}
 	results := []store.CodexInspectionResult{
-		{FileName: "unsupported-model.json", Provider: "codex", AuthIndex: "unsupported-model", Action: "keep"},
+		{
+			FileName: "unsupported-model.json", Provider: "codex", AuthIndex: "unsupported-model",
+			Action: "reauth", StatusCode: intPtr(http.StatusUnauthorized), ErrorKind: "http_status",
+			ErrorDetail: `{"status":401,"error":{"code":"token_revoked"}}`,
+		},
 		{FileName: "invalid-parameter.json", Provider: "codex", AuthIndex: "invalid-parameter", Action: "keep"},
 		{FileName: "invalid-token.json", Provider: "codex", AuthIndex: "invalid-token", Action: "keep"},
 	}

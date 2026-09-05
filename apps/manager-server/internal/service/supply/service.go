@@ -6809,15 +6809,23 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 		bucket := operatorAccountUnconfirmed
 		temporaryLimit := operatorAccountTemporaryLimit{}
 		remainingFraction := 1.0
+		liveRequestFault := smartAccountHasRequestFault(file.Raw)
+		headerOverridesInspection := headerMatched &&
+			(!inspectionAuthoritative || !matched || header.TimestampMS > result.CreatedAtMS)
 		if isAvailableCodexFile(file) && len(resultsByFile[strings.TrimSpace(file.Name)]) == 0 {
 			// Preserve live capacity behavior when the selected inspection does not
 			// contain this file. The credential summary still uses authoritative
 			// inspection evidence whenever a matching row exists.
 			bucket = operatorAccountNormal
 		}
-		if smartAccountNeedsAttention(file.Raw) {
+		if liveRequestFault && !headerOverridesInspection {
+			// A live CPA row carrying a deterministic 400/model validation error
+			// is healthy credential evidence. Do not let an older scheduled probe
+			// that happened to receive 401 replace this state.
+			bucket = operatorAccountNormal
+		} else if smartAccountNeedsAttention(file.Raw) {
 			bucket = operatorAccountNeedsAttention
-		} else if headerMatched && (!inspectionAuthoritative || !matched || header.TimestampMS > result.CreatedAtMS) {
+		} else if headerOverridesInspection {
 			bucket = classifyOperatorAccountFromHeader(header)
 			temporaryLimit, _ = operatorAccountTemporaryLimitFromHeader(header)
 			if usedPercent, hasQuota := operatorHeaderSnapshotUsedPercent(header); hasQuota {

@@ -3169,6 +3169,22 @@ func smartAccountRequestFault(values map[string]any, message string) bool {
 	return smartAccountRequestFaultText(combined)
 }
 
+// smartAccountHasRequestFault reports whether the live CPA auth-file snapshot
+// contains a request/model validation error. This is deliberately separate
+// from smartAccountNeedsAttention: a request fault is healthy credential
+// evidence that must also prevent an older inspection result from overriding
+// the live classification.
+func smartAccountHasRequestFault(values map[string]any) bool {
+	message := textField(
+		values,
+		"status_message", "statusMessage",
+		"error_kind", "errorKind",
+		"header_error_kind", "headerErrorKind",
+		"last_error", "lastError",
+	)
+	return message != "" && smartAccountRequestFault(values, message)
+}
+
 func smartAccountRequestFaultText(value string) bool {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {
