@@ -176,7 +176,7 @@ jobs:
       RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
       DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
       DOCKERHUB_IMAGE: seakee/cpa-manager-plus
-      GHCR_IMAGE: ghcr.io/seakee/cpa-manager-plus
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/cpa-manager-plus
 
     steps:
       - name: Checkout release source
