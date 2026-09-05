@@ -13,6 +13,7 @@ import { isValidQuotaResetAtMs } from '@/utils/quota/formatters';
 import {
   classifyAuthFileOperationalState,
   isAuthFileCoolingStatusText,
+  isAuthFileRequestFaultStatusText,
   isAuthFileTransientUpstreamStatusText,
 } from '@/features/authFiles/constants';
 
@@ -696,6 +697,11 @@ const resolveHealthStatus = (
   }
 
   const diagnosticText = getExceptionDetail(row);
+  const requestFaultDiagnostic = isAuthFileRequestFaultStatusText(
+    [row.statusMessage, row.quota.error, row.quota.observedErrorKind, row.quota.observedErrorCode]
+      .filter(Boolean)
+      .join(' ')
+  );
   if (
     row.quota.status !== 'error' &&
     (!row.inspection || row.inspection.action === 'keep') &&
@@ -731,10 +737,11 @@ const resolveHealthStatus = (
       antigravityAvailability?.state !== 'partial') ||
     (row.statusMessage &&
       !isAuthFileCoolingStatusText(row.statusMessage, row.usage.success > 0) &&
+      !requestFaultDiagnostic &&
       antigravityAvailability?.state !== 'partial') ||
-    row.quota.error ||
-    row.quota.observedErrorKind ||
-    row.quota.observedErrorCode ||
+    (row.quota.error && !requestFaultDiagnostic) ||
+    (row.quota.observedErrorKind && !requestFaultDiagnostic) ||
+    (row.quota.observedErrorCode && !requestFaultDiagnostic) ||
     (row.inspection && row.inspection.action !== 'keep')
   ) {
     return {

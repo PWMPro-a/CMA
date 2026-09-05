@@ -173,6 +173,13 @@ export const getAuthFileStatusMessage = (file: AuthFileItem): string => {
   const raw = file['status_message'] ?? file.statusMessage;
   if (typeof raw === 'string') return raw.trim();
   if (raw == null) return '';
+  if (typeof raw === 'object') {
+    try {
+      return JSON.stringify(raw).trim();
+    } catch {
+      return String(raw).trim();
+    }
+  }
   return String(raw).trim();
 };
 
@@ -227,6 +234,68 @@ const AUTH_FILE_TRANSIENT_UPSTREAM_MARKERS = [
   'status_code:499',
   'status_code":499',
 ];
+
+const AUTH_FILE_HARD_FAILURE_MARKERS = [
+  'usage_limit_reached',
+  'quota_exhausted',
+  'insufficient_quota',
+  'billing_hard_limit',
+  'hard_limit_reached',
+  'credit_grant_exhausted',
+  'exceeded your current quota',
+  'credential invalidated',
+  'token_invalidated',
+  'invalid_grant',
+  'invalid token',
+  'invalid_token',
+  'login_required',
+  'reauth',
+  'unauthorized',
+  'forbidden',
+  'revoked',
+  'expired',
+  'http 401',
+  'status 401',
+  'status_code:401',
+  'status_code":401',
+  '"status":401',
+  'http 403',
+  'status 403',
+  'status_code:403',
+  'status_code":403',
+  '"status":403',
+];
+
+const AUTH_FILE_REQUEST_FAULT_MARKERS = [
+  'invalid_request_error',
+  'invalid_request',
+  'unsupported model',
+  'unsupported_model',
+  'model_not_found',
+  'model is not supported',
+  'model is unsupported',
+  'not supported when using codex',
+  'unknown parameter',
+  'unknown_parameter',
+  'invalid parameter',
+  'invalid_parameter',
+  'unsupported parameter',
+  'unsupported_parameter',
+  'unsupported value',
+  'unsupported_value',
+  'context length exceeded',
+  'context_length_exceeded',
+  'maximum context length',
+  'input is too long',
+  'request too large',
+];
+
+export const isAuthFileRequestFaultStatusText = (value: string): boolean => {
+  const message = value.trim().toLowerCase();
+  if (!message) return false;
+  if (AUTH_FILE_HARD_FAILURE_MARKERS.some((marker) => message.includes(marker))) return false;
+  return AUTH_FILE_REQUEST_FAULT_MARKERS.some((marker) => message.includes(marker));
+};
 
 export const isAuthFileTransientUpstreamStatusText = (
   value: string,
@@ -334,9 +403,11 @@ const isCapacityOnlyRuntimeStatus = (file: AuthFileItem): boolean => {
 export const isHealthyAuthFile = (file: AuthFileItem): boolean => {
   if (file.disabled === true) return false;
   if (hasDefiniteAuthFileAvailabilityFailure(file)) return false;
-  if (isAuthFileCoolingStatusText(getAuthFileStatusMessage(file), hasRecentAuthFileSuccess(file))) {
+  const statusMessage = getAuthFileStatusMessage(file);
+  if (isAuthFileCoolingStatusText(statusMessage, hasRecentAuthFileSuccess(file))) {
     return true;
   }
+  if (isAuthFileRequestFaultStatusText(statusMessage)) return true;
   if (file.unavailable === true) return false;
   const successRate = getAuthFileSuccessRate(file);
   if (successRate !== null) return successRate >= AUTH_FILE_HEALTH_SUCCESS_RATE;
@@ -350,9 +421,11 @@ export const isHealthyAuthFile = (file: AuthFileItem): boolean => {
 export const classifyAuthFileOperationalState = (file: AuthFileItem): AuthFileOperationalState => {
   if (file.disabled === true) return 'failed';
   if (hasDefiniteAuthCredentialFailure(file)) return 'failed';
-  if (isAuthFileCoolingStatusText(getAuthFileStatusMessage(file), hasRecentAuthFileSuccess(file))) {
+  const statusMessage = getAuthFileStatusMessage(file);
+  if (isAuthFileCoolingStatusText(statusMessage, hasRecentAuthFileSuccess(file))) {
     return 'cooldown';
   }
+  if (isAuthFileRequestFaultStatusText(statusMessage)) return 'healthy';
   if (file.unavailable === true || hasAuthFileStatusMessage(file)) return 'failed';
   return 'healthy';
 };

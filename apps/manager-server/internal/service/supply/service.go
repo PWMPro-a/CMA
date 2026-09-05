@@ -6899,6 +6899,12 @@ func classifyOperatorAccountFromHeader(snapshot store.HeaderSnapshot) operatorAc
 		}
 		return operatorAccountNormal
 	}
+	if smartAccountRequestFaultText(strings.TrimSpace(errorKind + " " + errorCode)) {
+		if hasQuota && usedPercent >= (1-smartNormalAccountMinimumRemainingFraction)*100 {
+			return operatorAccountQuotaRisk
+		}
+		return operatorAccountNormal
+	}
 	if errorKind != "" || errorCode != "" {
 		return operatorAccountNeedsAttention
 	}
@@ -7133,7 +7139,8 @@ func classifyOperatorAccount(file cpaauthfiles.File, result store.CodexInspectio
 	if action != "" && action != "keep" {
 		return operatorAccountNeedsAttention
 	}
-	if strings.TrimSpace(result.ErrorKind) != "" || strings.TrimSpace(result.Error) != "" || strings.TrimSpace(result.ErrorDetail) != "" {
+	requestFault := smartAccountRequestFaultText(strings.Join([]string{result.ErrorKind, result.Error, result.ErrorDetail}, " "))
+	if !requestFault && (strings.TrimSpace(result.ErrorKind) != "" || strings.TrimSpace(result.Error) != "" || strings.TrimSpace(result.ErrorDetail) != "") {
 		return operatorAccountNeedsAttention
 	}
 	if remaining, hasQuota := inspectionResultRemainingQuotaFraction(result); hasQuota && remaining < smartNormalAccountMinimumRemainingFraction {

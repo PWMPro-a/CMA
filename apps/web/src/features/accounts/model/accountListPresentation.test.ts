@@ -391,6 +391,31 @@ describe('accountListPresentation', () => {
     expect(exceptionItem.health.reasonParams).toEqual({ detail: 'custom problem' });
     expect(exceptionItem.health.reasonTone).toBe('danger');
 
+    const requestFaultMessage =
+      '{"status":400,"error":{"type":"invalid_request_error","message":"The gpt-5.3-codex-spark model is not supported when using Codex with a ChatGPT account."}}';
+    const requestFaultRaw: AuthFileItem = {
+      name: 'unsupported-model.json',
+      type: 'codex',
+      status: 'error',
+      unavailable: false,
+      status_message: JSON.parse(requestFaultMessage),
+    };
+    const requestFaultItem = buildAccountListItem(
+      makeRow({
+        statusMessage: requestFaultMessage,
+        raw: requestFaultRaw,
+        usage: {
+          success: 189,
+          failure: 2,
+          successRate: 98.95,
+          recentRequests: [{ time: 'now', success: 189, failed: 2 }],
+        },
+      })
+    );
+    expect(requestFaultItem.health.status).toBe('available');
+    expect(requestFaultItem.health.reasonKey).toBe('accounts.health_reason_available');
+    expect(requestFaultItem.health.reasonTone).toBe('muted');
+
     const cooldownItem = buildAccountListItem(
       makeRow({
         statusMessage: '{"detail":"Rate limit exceeded"}',

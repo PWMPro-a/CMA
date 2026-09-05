@@ -137,4 +137,39 @@ describe('auth file runtime limits', () => {
       })
     ).toBe('cooldown');
   });
+
+  it('keeps request and model validation faults separate from credential health', () => {
+    const unsupportedModel = {
+      status: 400,
+      error: {
+        type: 'invalid_request_error',
+        message:
+          "The 'gpt-5.3-codex-spark' model is not supported when using Codex with a ChatGPT account.",
+      },
+    };
+    expect(
+      classifyAuthFileOperationalState({
+        name: 'unsupported-model.json',
+        status: 'error',
+        unavailable: false,
+        status_message: unsupportedModel,
+      })
+    ).toBe('healthy');
+    expect(
+      classifyAuthFileOperationalState({
+        name: 'invalid-parameter.json',
+        status: 'error',
+        statusMessage:
+          '{"status":400,"error":{"type":"invalid_request_error","message":"Unknown parameter: OFFSET"}}',
+      })
+    ).toBe('healthy');
+    expect(
+      classifyAuthFileOperationalState({
+        name: 'invalid-token.json',
+        status: 'error',
+        statusMessage:
+          '{"status":401,"error":{"type":"invalid_request_error","message":"invalid_token login_required"}}',
+      })
+    ).toBe('failed');
+  });
 });

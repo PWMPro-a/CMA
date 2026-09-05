@@ -1860,6 +1860,74 @@ func TestAccountPoolStatsKeepsRateLimitedCredentialsAvailable(t *testing.T) {
 	}
 }
 
+func TestAccountPoolStatsKeepsRequestFaultsAvailable(t *testing.T) {
+	files := []cpaauthfiles.File{
+		{
+			Name: "unsupported-model.json", Provider: "codex", AuthIndex: "unsupported-model",
+			Raw: map[string]any{
+				"status": "error",
+				"status_message": map[string]any{
+					"status": float64(http.StatusBadRequest),
+					"error": map[string]any{
+						"type":    "invalid_request_error",
+						"message": "The 'gpt-5.3-codex-spark' model is not supported when using Codex with a ChatGPT account.",
+					},
+				},
+				"unavailable":                 false,
+				"runtime_current_concurrency": float64(3),
+				"recent_requests": []any{
+					map[string]any{"success": float64(189), "failed": float64(2)},
+				},
+			},
+		},
+		{
+			Name: "invalid-parameter.json", Provider: "codex", AuthIndex: "invalid-parameter",
+			Raw: map[string]any{
+				"status":         "error",
+				"status_message": `{"status":400,"error":{"type":"invalid_request_error","message":"Unknown parameter: OFFSET"}}`,
+			},
+		},
+		{
+			Name: "invalid-token.json", Provider: "codex", AuthIndex: "invalid-token",
+			Raw: map[string]any{
+				"status":         "error",
+				"status_message": `{"status":401,"error":{"type":"invalid_request_error","message":"invalid_token login_required"}}`,
+			},
+		},
+	}
+	results := []store.CodexInspectionResult{
+		{FileName: "unsupported-model.json", Provider: "codex", AuthIndex: "unsupported-model", Action: "keep"},
+		{FileName: "invalid-parameter.json", Provider: "codex", AuthIndex: "invalid-parameter", Action: "keep"},
+		{FileName: "invalid-token.json", Provider: "codex", AuthIndex: "invalid-token", Action: "keep"},
+	}
+
+	stats := accountPoolStatsFromFilesAndInspection(files, results)
+	if stats.schedulable != 2 || stats.normal != 2 || stats.needsAttention != 1 ||
+		stats.quotaRisk != 0 || stats.unconfirmed != 0 || stats.operatorUsable != 2 {
+		t.Fatalf("request-fault account buckets = %#v", stats)
+	}
+}
+
+func TestOperatorEvidenceKeepsRequestFaultsAvailable(t *testing.T) {
+	if got := classifyOperatorAccountFromHeader(store.HeaderSnapshot{
+		HeaderErrorKind: "invalid_request_error",
+		HeaderErrorCode: "model_not_supported",
+	}); got != operatorAccountNormal {
+		t.Fatalf("request-fault header bucket = %v, want normal", got)
+	}
+
+	file := cpaauthfiles.File{
+		Name: "request-fault.json", Provider: "codex", AuthIndex: "request-fault",
+		Raw: map[string]any{"status": "active"},
+	}
+	if got := classifyOperatorAccount(file, store.CodexInspectionResult{
+		FileName: "request-fault.json", Provider: "codex", AuthIndex: "request-fault",
+		Action: "keep", ErrorKind: "invalid_request_error", Error: "unsupported model",
+	}); got != operatorAccountNormal {
+		t.Fatalf("request-fault inspection bucket = %v, want normal", got)
+	}
+}
+
 func TestAccountPoolStatsKeepsTransientRequestFailuresAvailable(t *testing.T) {
 	transientMessages := []string{
 		"context canceled",

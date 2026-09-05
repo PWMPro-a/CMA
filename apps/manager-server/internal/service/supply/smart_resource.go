@@ -3149,7 +3149,96 @@ func smartAccountNeedsAttention(values map[string]any) bool {
 	if message == "" || smartAccountHealthyStatusMessage(message) {
 		return false
 	}
+	if smartAccountRequestFault(values, message) {
+		return false
+	}
 	return !smartAccountRuntimeCooling(values, message)
+}
+
+// smartAccountRequestFault separates request/model validation failures from
+// credential health. CPA keeps the last request error on the auth-file row, so
+// treating every non-empty status_message as an account failure makes a
+// healthy, schedulable credential look unavailable after one unsupported-model
+// request. Authentication and hard-capacity markers always win before this
+// helper is reached.
+func smartAccountRequestFault(values map[string]any, message string) bool {
+	combined := strings.ToLower(strings.TrimSpace(strings.Join([]string{
+		textField(values, "status_code", "statusCode", "http_status", "httpStatus", "last_status_code", "lastStatusCode"),
+		message,
+	}, " ")))
+	return smartAccountRequestFaultText(combined)
+}
+
+func smartAccountRequestFaultText(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return false
+	}
+	// OAuth endpoints commonly return HTTP 400 for invalid_grant. Keep those,
+	// explicit authentication failures, and hard quota failures actionable even
+	// if the payload also contains generic invalid-request wording.
+	for _, marker := range []string{
+		"usage_limit_reached",
+		"quota_exhausted",
+		"insufficient_quota",
+		"billing_hard_limit",
+		"hard_limit_reached",
+		"credit_grant_exhausted",
+		"exceeded your current quota",
+		"credential invalidated",
+		"token_invalidated",
+		"invalid_grant",
+		"invalid token",
+		"invalid_token",
+		"login_required",
+		"reauth",
+		"unauthorized",
+		"forbidden",
+		"revoked",
+		"expired",
+		"http 401",
+		"status 401",
+		"status_code:401",
+		"status_code\":401",
+		"\"status\":401",
+		"http 403",
+		"status 403",
+		"status_code:403",
+		"status_code\":403",
+		"\"status\":403",
+	} {
+		if strings.Contains(value, marker) {
+			return false
+		}
+	}
+	for _, marker := range []string{
+		"invalid_request_error",
+		"invalid_request",
+		"unsupported model",
+		"unsupported_model",
+		"model_not_found",
+		"model is not supported",
+		"model is unsupported",
+		"not supported when using codex",
+		"unknown parameter",
+		"unknown_parameter",
+		"invalid parameter",
+		"invalid_parameter",
+		"unsupported parameter",
+		"unsupported_parameter",
+		"unsupported value",
+		"unsupported_value",
+		"context length exceeded",
+		"context_length_exceeded",
+		"maximum context length",
+		"input is too long",
+		"request too large",
+	} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func smartAccountHealthyStatusMessage(message string) bool {
