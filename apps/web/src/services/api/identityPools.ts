@@ -34,12 +34,32 @@ export type IdentityValidationRecord = {
   mode: string;
   profile_id?: string;
   client_mode?: string;
+  version?: string;
+  platform?: string;
+  architecture?: string;
+  evidence_status?: string;
+  evidence_hash?: string;
   valid: boolean;
   exact_match: boolean;
   score: number;
   proxy_exposure: boolean;
+  dynamic_fields_valid?: boolean;
+  header_names?: string[];
+  body_keys?: string[];
+  request_hash?: string;
   issue_codes?: string[];
   issues?: Array<{ code: string; severity: string; field: string; expected?: string; actual?: string; message: string }>;
+};
+export type IdentityCatalogValidation = {
+  valid: boolean;
+  count: number;
+  observed: number;
+  artifact_verified: number;
+  routable: number;
+  latest_versions?: string[];
+  platform_counts?: Record<string, number>;
+  architecture_counts?: Record<string, number>;
+  issues?: Array<{ profile_id: string; code: string; field: string; message: string }>;
 };
 export type IdentityPool = {
   id: string;
@@ -242,13 +262,20 @@ export const identityPoolsApi = {
     scope
       ? apiClient.get<{ count?: number; items?: IdentityCatalogEntry[] }>('/identity-pools/catalog', createScopedApiRequestConfig(scope))
       : apiClient.get<{ count?: number; items?: IdentityCatalogEntry[] }>('/identity-pools/catalog'),
+  catalogValidation: (scope?: IdentityPoolsApiScope) =>
+    scope
+      ? apiClient.get<IdentityCatalogValidation>(
+          '/identity-pools/catalog/validation',
+          createScopedApiRequestConfig(scope)
+        )
+      : apiClient.get<IdentityCatalogValidation>('/identity-pools/catalog/validation'),
   validation: (limit = 100, scope?: IdentityPoolsApiScope) =>
     scope
-      ? apiClient.get<{ total?: number; valid?: number; invalid?: number; proxy_exposure?: number; records?: IdentityValidationRecord[] }>(
+      ? apiClient.get<{ total?: number; valid?: number; invalid?: number; exact_match?: number; dynamic_fields_valid?: number; proxy_exposure?: number; by_mode?: Record<string, number>; by_profile?: Record<string, number>; by_issue?: Record<string, number>; records?: IdentityValidationRecord[] }>(
           `/identity-pools/validation?limit=${encodeURIComponent(String(limit))}`,
           createScopedApiRequestConfig(scope)
         )
-      : apiClient.get<{ total?: number; valid?: number; invalid?: number; proxy_exposure?: number; records?: IdentityValidationRecord[] }>(
+      : apiClient.get<{ total?: number; valid?: number; invalid?: number; exact_match?: number; dynamic_fields_valid?: number; proxy_exposure?: number; by_mode?: Record<string, number>; by_profile?: Record<string, number>; by_issue?: Record<string, number>; records?: IdentityValidationRecord[] }>(
           `/identity-pools/validation?limit=${encodeURIComponent(String(limit))}`
         ),
 };

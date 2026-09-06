@@ -16,6 +16,7 @@ import {
 import {
   identityPoolsApi,
   type IdentityAccount,
+  type IdentityCatalogValidation,
   type IdentityPool,
   type IdentityProfile,
   type IdentitySession,
@@ -72,7 +73,8 @@ function IdentityPoolsConnection({
   const [loadError, setLoadError] = useState('');
   const [sessionError, setSessionError] = useState('');
   const [catalog, setCatalog] = useState<IdentityProfile[]>([]);
-  const [validation, setValidation] = useState<{ total?: number; valid?: number; invalid?: number; proxy_exposure?: number; records?: Array<{ id: number; score: number; valid: boolean; issue_codes?: string[]; mode: string; profile_id?: string }> }>({});
+  const [catalogValidation, setCatalogValidation] = useState<IdentityCatalogValidation | null>(null);
+  const [validation, setValidation] = useState<{ total?: number; valid?: number; invalid?: number; exact_match?: number; dynamic_fields_valid?: number; proxy_exposure?: number; by_mode?: Record<string, number>; by_profile?: Record<string, number>; by_issue?: Record<string, number>; records?: Array<{ id: number; score: number; valid: boolean; exact_match?: boolean; dynamic_fields_valid?: boolean; proxy_exposure?: boolean; issue_codes?: string[]; mode: string; profile_id?: string; version?: string; platform?: string; architecture?: string; evidence_status?: string; request_hash?: string; header_names?: string[]; body_keys?: string[] }> }>({});
   const [copiedIdentity, setCopiedIdentity] = useState('');
   const generationRef = useRef(0);
   const sessionGenerationRef = useRef(0);
@@ -134,6 +136,7 @@ function IdentityPoolsConnection({
     setSessions([]);
     setSelectedAccount(null);
     setCatalog([]);
+    setCatalogValidation(null);
     setValidation({});
     setLoadError('');
     try {
@@ -145,11 +148,16 @@ function IdentityPoolsConnection({
         typeof identityPoolsApi.validation === 'function'
           ? identityPoolsApi.validation(30, scope)
           : Promise.resolve({});
-      const [runtime, response, catalogResponse, validationResponse] = await Promise.all([
+      const catalogValidationPromise =
+        typeof identityPoolsApi.catalogValidation === 'function'
+          ? identityPoolsApi.catalogValidation(scope)
+          : Promise.resolve(null);
+      const [runtime, response, catalogResponse, validationResponse, catalogValidationResponse] = await Promise.all([
         identityPoolsApi.get(scope),
         identityPoolsApi.accounts(POOL_ID, scope),
         catalogPromise,
         validationPromise,
+        catalogValidationPromise,
       ]);
       if (!isCurrent(generation)) return;
       const nextPool = runtime.pools?.find((item) => item.id === POOL_ID) ?? null;
@@ -167,6 +175,7 @@ function IdentityPoolsConnection({
       setRuntimeEnabled(runtime.enabled);
       setAccounts(nextAccounts);
       setCatalog(catalogResponse.items ?? []);
+      setCatalogValidation(catalogValidationResponse);
       setValidation(validationResponse);
     } catch (error) {
       if (!isCurrent(generation)) return;
@@ -282,7 +291,7 @@ function IdentityPoolsConnection({
   const catalogObserved = catalog.filter((item) => item.evidence_status === 'request_observed' || item.source === 'real_request').length;
   const catalogArtifacts = catalog.filter((item) => item.evidence_status === 'artifact_verified' || item.source === 'npm_release').length;
   const catalogEligible = catalog.filter((item) => item.eligible).length;
-	const catalogRoutable = catalog.filter((item) => item.routable).length;
+  const catalogRoutable = catalog.filter((item) => item.routable).length;
 
   const filteredAccounts = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -370,7 +379,8 @@ function IdentityPoolsConnection({
         <span>{t('identity_pools.accounts_bound', { count: boundAccounts })}</span>
         <span>{t('identity_pools.sessions_total', { count: totalSessions })}</span>
         <span>{t('identity_pools.environments_total', { count: environments.length })}</span>
-		<span>{`Catalog ${catalog.length} · request-observed ${catalogObserved} · artifacts ${catalogArtifacts} · evidence-ready ${catalogEligible} · active ${catalogRoutable}`}</span>
+        <span>{`Catalog ${catalog.length} · request-observed ${catalogObserved} · artifacts ${catalogArtifacts} · evidence-ready ${catalogEligible} · active ${catalogRoutable}`}</span>
+        <span>{`Catalog audit ${catalogValidation?.valid ? 'valid' : 'needs attention'} · latest ${(catalogValidation?.latest_versions ?? []).slice(0, 5).join(', ') || '—'}`}</span>
         <span>{`Validation ${validation.valid ?? 0}/${validation.total ?? 0}`}</span>
       </section>
 
@@ -536,6 +546,20 @@ function IdentityPoolsConnection({
             </div>
           </div>
           <div className={styles.environmentList}>
+            {catalogValidation && (
+              <article className={styles.environmentRow}>
+                <div className={styles.environmentMain}>
+                  <div className={styles.environmentTitleLine}>
+                    <strong>Environment catalog integrity</strong>
+                    <span className={catalogValidation.valid ? styles.accountStatusActive : styles.accountStatusDisabled}>
+                      {catalogValidation.valid ? 'valid' : `${catalogValidation.issues?.length ?? 0} issues`}
+                    </span>
+                  </div>
+                  <p>{`100-entry catalog · ${catalogValidation.observed} request-observed · ${catalogValidation.artifact_verified} artifact-only · ${catalogValidation.routable} active`}</p>
+                  <small>{`Latest client versions: ${(catalogValidation.latest_versions ?? []).slice(0, 8).join(', ') || '—'}`}</small>
+                </div>
+              </article>
+            )}
             {environments.map((environment) => (
               <article key={environment.id} className={styles.environmentRow}>
                 <div className={styles.environmentMain}>
@@ -631,20 +655,27 @@ function IdentityPoolsConnection({
               <h2>Request validation</h2>
               <p>Outbound summaries only; credentials and request bodies are never shown.</p>
             </div>
-            <span className={styles.resultCount}>{validation.valid ?? 0}/{validation.total ?? 0} valid</span>
+            <span className={styles.resultCount}>{`${validation.valid ?? 0}/${validation.total ?? 0} valid · ${validation.exact_match ?? 0} exact`}</span>
           </div>
           <div className={styles.tableWrap}>
             <table className={styles.table}>
-              <thead><tr><th>ID</th><th>Mode</th><th>Profile</th><th>Score</th><th>Status</th><th>Issues</th></tr></thead>
+              <thead><tr><th>ID</th><th>Mode</th><th>Environment</th><th>Evidence</th><th>Score</th><th>Status</th><th>Issues</th></tr></thead>
               <tbody>
                 {(validation.records ?? []).map((record) => (
                   <tr key={record.id}>
                     <td>{record.id}</td>
                     <td>{record.mode}</td>
-                    <td>{record.profile_id || '—'}</td>
+                    <td>
+                      <strong>{record.profile_id || '—'}</strong>
+                      <small>{[record.version, record.platform, record.architecture].filter(Boolean).join(' · ') || '—'}</small>
+                    </td>
+                    <td>
+                      <strong>{record.evidence_status || 'unknown'}</strong>
+                      <small title={record.request_hash}>{record.request_hash ? `${record.request_hash.slice(0, 19)}…` : '—'}</small>
+                    </td>
                     <td>{record.score}</td>
                     <td className={record.valid ? styles.accountStatusActive : styles.accountStatusDisabled}>
-                      {record.valid ? 'valid' : '异常'}
+                      {record.valid && record.exact_match ? 'exact' : record.valid ? 'valid' : '异常'}
                     </td>
                     <td>{(record.issue_codes ?? []).join(', ') || '—'}</td>
                   </tr>
@@ -653,7 +684,7 @@ function IdentityPoolsConnection({
             </table>
             {(validation.records ?? []).length === 0 && <div className={styles.empty}>No validation records</div>}
           </div>
-          <p className={styles.muted}>Proxy exposure detections: {validation.proxy_exposure ?? 0}</p>
+          <p className={styles.muted}>{`Dynamic fields valid: ${validation.dynamic_fields_valid ?? 0}/${validation.total ?? 0} · Proxy exposure detections: ${validation.proxy_exposure ?? 0}`}</p>
         </section>
       )}
 
