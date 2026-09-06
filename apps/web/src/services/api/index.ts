@@ -22,3 +22,4 @@ export * from './antigravitySubscription';
 export * from './license';
 
 export * from './quotaThresholdRules';
+export * from './identityPools';

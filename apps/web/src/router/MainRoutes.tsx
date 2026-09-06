@@ -32,6 +32,7 @@ import { LicensePage } from '@/pages/LicensePage';
 import { PluginResourcePage } from '@/pages/PluginResourcePage';
 import { PluginsPage } from '@/pages/PluginsPage';
 import { SystemPage } from '@/pages/SystemPage';
+import { IdentityPoolsPage } from '@/pages/IdentityPoolsPage';
 import { SupplyPage } from '@/pages/SupplyPage';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
@@ -228,6 +229,7 @@ const mainRoutes: RouteObject[] = [
       </FeatureGate>
     ),
   },
+  { path: '/identity-pools', element: <IdentityPoolsPage /> },
   {
     path: '/monitoring/account-actions',
     element: (

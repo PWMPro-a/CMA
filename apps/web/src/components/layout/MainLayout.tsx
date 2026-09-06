@@ -69,6 +69,7 @@ const sidebarIcons: Record<string, ReactNode> = {
   quota: <IconSidebarQuota size={SIDEBAR_ICON_SIZE} />,
   usageAnalytics: <IconSidebarUsage size={SIDEBAR_ICON_SIZE} />,
   monitoring: <IconSidebarMonitor size={SIDEBAR_ICON_SIZE} />,
+  identityPools: <IconShield size={SIDEBAR_ICON_SIZE} />,
   containerOps: <IconSidebarContainerOps size={SIDEBAR_ICON_SIZE} />,
   plugins: <IconSidebarPlugins size={SIDEBAR_ICON_SIZE} />,
   config: <IconSidebarConfig size={SIDEBAR_ICON_SIZE} />,
@@ -590,6 +591,7 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
       dashboardNavItem,
       ...(usageAnalyticsNavItem ? [usageAnalyticsNavItem] : []),
       ...(monitoringNavItem ? [monitoringNavItem] : []),
+      { path: '/identity-pools', label: t('nav.identity_pools', { defaultValue: 'Identity Pools' }), shortLabel: t('nav.identity_pools', { defaultValue: 'Identity Pools' }), icon: sidebarIcons.identityPools },
     ],
     [
       {
