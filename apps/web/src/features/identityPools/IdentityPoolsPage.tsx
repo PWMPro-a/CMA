@@ -1,35 +1,45 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { sha256Hex } from '@/utils/apiKeyHash';
 import { Button } from '@/components/ui/Button';
-import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
+import { Drawer } from '@/components/ui/Drawer';
+import { Input } from '@/components/ui/Input';
+import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
+import { Select } from '@/components/ui/Select';
+import {
+  IconCheck,
+  IconChevronRight,
+  IconCopy,
+  IconRefreshCw,
+  IconSearch,
+  IconTrash2,
+} from '@/components/ui/icons';
 import {
   identityPoolsApi,
-  type CacheAffinityStats,
   type IdentityAccount,
   type IdentityPool,
+  type IdentityProfile,
   type IdentitySession,
   type IdentityPoolsApiScope,
 } from '@/services/api';
 import { useAuthStore, useNotificationStore } from '@/stores';
+import { sha256Hex } from '@/utils/apiKeyHash';
 import styles from './IdentityPoolsPage.module.scss';
 
 const POOL_ID = 'codex';
+type ViewTab = 'accounts' | 'environments';
 
-const formatRate = (value: number | null | undefined): string =>
-  value === null || value === undefined ? '—' : `${(value * 100).toFixed(1)}%`;
+type EnvironmentRow = IdentityProfile & {
+  accounts: IdentityAccount[];
+  accountCount: number;
+  sessionCount: number;
+};
 
 export function IdentityPoolsPage() {
   const apiBase = useAuthStore((state) => state.apiBase);
   const managementKey = useAuthStore((state) => state.managementKey);
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
-  const scope = useMemo<IdentityPoolsApiScope>(
-    () => ({ apiBase, managementKey }),
-    [apiBase, managementKey]
-  );
+  const scope = useMemo<IdentityPoolsApiScope>(() => ({ apiBase, managementKey }), [apiBase, managementKey]);
   const connected = connectionStatus === 'connected' && Boolean(apiBase && managementKey);
-  // Remount connection-owned state before the replacement pool is rendered.
-  // The React key contains only a digest, never the management credential.
   const connectionKey = useMemo(
     () => sha256Hex(JSON.stringify([apiBase, managementKey, connected])),
     [apiBase, managementKey, connected]
@@ -45,25 +55,30 @@ function IdentityPoolsConnection({
   connected: boolean;
 }) {
   const { t } = useTranslation();
-  const showNotification = useNotificationStore((state) => state.showNotification);
+  const notify = useNotificationStore((state) => state.showNotification);
+  const translateRef = useRef(t);
+  translateRef.current = t;
   const [pool, setPool] = useState<IdentityPool | null>(null);
   const [runtimeEnabled, setRuntimeEnabled] = useState<boolean | null>(null);
   const [accounts, setAccounts] = useState<IdentityAccount[]>([]);
   const [sessions, setSessions] = useState<IdentitySession[]>([]);
-  const [stats, setStats] = useState<CacheAffinityStats | null>(null);
-  const [selectedAccount, setSelectedAccount] = useState('');
+  const [selectedAccount, setSelectedAccount] = useState<IdentityAccount | null>(null);
+  const [tab, setTab] = useState<ViewTab>('accounts');
+  const [query, setQuery] = useState('');
+  const [environmentFilter, setEnvironmentFilter] = useState('all');
+  const [sessionFilter, setSessionFilter] = useState('all');
   const [loading, setLoading] = useState(connected);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [sessionError, setSessionError] = useState('');
+  const [copiedIdentity, setCopiedIdentity] = useState('');
   const generationRef = useRef(0);
   const sessionGenerationRef = useRef(0);
-  const selectedAccountRef = useRef('');
   const mountedRef = useRef(false);
 
   useLayoutEffect(() => {
-    generationRef.current++;
     mountedRef.current = true;
+    generationRef.current += 1;
     return () => {
       mountedRef.current = false;
     };
@@ -75,53 +90,48 @@ function IdentityPoolsConnection({
   );
 
   const loadSessions = useCallback(
-    async (account: string, generation: number) => {
-      if (!isCurrent(generation)) return;
+    async (account: IdentityAccount | null, generation: number) => {
       const sessionGeneration = ++sessionGenerationRef.current;
-      const sessionIsCurrent = () =>
-        isCurrent(generation) && sessionGeneration === sessionGenerationRef.current;
       setSessions([]);
       setSessionError('');
-      setSessionsLoading(Boolean(account));
       if (!account) return;
+      setSessionsLoading(true);
       try {
-        const response = await identityPoolsApi.sessions(POOL_ID, account, scope);
-        if (sessionIsCurrent()) {
+        const response = await identityPoolsApi.sessions(POOL_ID, account.account_id, scope);
+        if (isCurrent(generation) && sessionGeneration === sessionGenerationRef.current) {
           setSessions(
             (response.sessions ?? []).filter(
-              (item) => item.pool_id === POOL_ID && item.account_id === account
+              (item) => item.pool_id === POOL_ID && item.account_id === account.account_id
             )
           );
         }
       } catch (error) {
-        if (!sessionIsCurrent()) return;
-        const message = error instanceof Error ? error.message : 'Failed to load sessions';
-        setSessionError(message);
-        showNotification(message, 'error');
+        if (isCurrent(generation) && sessionGeneration === sessionGenerationRef.current) {
+          const message =
+            error instanceof Error ? error.message : translateRef.current('identity_pools.load_failed');
+          setSessionError(message);
+          notify(message, 'error');
+        }
       } finally {
-        if (sessionIsCurrent()) setSessionsLoading(false);
+        if (isCurrent(generation) && sessionGeneration === sessionGenerationRef.current) {
+          setSessionsLoading(false);
+        }
       }
     },
-    [isCurrent, scope, showNotification]
+    [isCurrent, notify, scope]
   );
 
   const load = useCallback(async () => {
-    if (!mountedRef.current || !connected) return;
+    if (!connected || !mountedRef.current) return;
     const generation = ++generationRef.current;
-    sessionGenerationRef.current++;
+    ++sessionGenerationRef.current;
     setLoading(true);
     setPool(null);
     setRuntimeEnabled(null);
     setAccounts([]);
     setSessions([]);
-    setSessionsLoading(false);
-    setStats(null);
-    setSelectedAccount('');
+    setSelectedAccount(null);
     setLoadError('');
-    setSessionError('');
-    // Attach rejection handling immediately, but never await optional diagnostics
-    // or a session query before making the account list available.
-    const diagnostics = identityPoolsApi.stats(scope).catch(() => null);
     try {
       const [runtime, response] = await Promise.all([
         identityPoolsApi.get(scope),
@@ -129,117 +139,162 @@ function IdentityPoolsConnection({
       ]);
       if (!isCurrent(generation)) return;
       const nextPool = runtime.pools?.find((item) => item.id === POOL_ID) ?? null;
+      const profiles = nextPool?.profiles ?? [];
       const nextAccounts = nextPool
-        ? (response.accounts ?? []).filter((item) => item.pool_id === POOL_ID)
+        ? (response.accounts ?? [])
+            .filter((item) => item.pool_id === POOL_ID)
+            .map((item) => ({
+              ...item,
+              environment:
+                item.environment ?? profiles.find((profile) => profile.id === item.profile_id),
+            }))
         : [];
-      const currentAccount = selectedAccountRef.current;
-      const nextAccount = nextAccounts.some((item) => item.account_id === currentAccount)
-        ? currentAccount
-        : (nextAccounts[0]?.account_id ?? '');
       setPool(nextPool);
       setRuntimeEnabled(runtime.enabled);
       setAccounts(nextAccounts);
-      setSelectedAccount(nextAccount);
-      selectedAccountRef.current = nextAccount;
-      void diagnostics.then((value) => {
-        if (isCurrent(generation)) setStats(value);
-      });
-      void loadSessions(nextAccount, generation);
     } catch (error) {
       if (!isCurrent(generation)) return;
-      selectedAccountRef.current = '';
-      const message = error instanceof Error ? error.message : 'Failed to load identity pools';
+      const message =
+        error instanceof Error ? error.message : translateRef.current('identity_pools.load_failed');
       setLoadError(message);
-      showNotification(message, 'error');
+      notify(message, 'error');
     } finally {
       if (isCurrent(generation)) setLoading(false);
     }
-  }, [connected, isCurrent, loadSessions, scope, showNotification]);
+  }, [connected, isCurrent, notify, scope]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  const selectAccount = (account: string) => {
-    if (
-      !connected ||
-      !mountedRef.current ||
-      !accounts.some((item) => item.account_id === account) ||
-      selectedAccountRef.current === account
-    )
-      return;
+  const openAccount = (account: IdentityAccount) => {
     setSelectedAccount(account);
-    selectedAccountRef.current = account;
     void loadSessions(account, generationRef.current);
   };
 
-  const rotate = async () => {
-    if (!selectedAccount) return;
-    const requestScope = { ...scope };
-    const generation = generationRef.current;
+  const rotate = async (account = selectedAccount) => {
+    if (!account) return;
+    if (typeof window !== 'undefined' && !window.confirm(t('identity_pools.rotate_confirm'))) return;
     try {
-      await identityPoolsApi.rotate(POOL_ID, selectedAccount, requestScope);
-      if (!isCurrent(generation)) return;
-      showNotification('Account identity rotated', 'success');
+      await identityPoolsApi.rotate(POOL_ID, account.account_id, scope);
+      notify(t('identity_pools.rotate_success'), 'success');
+      setSelectedAccount(null);
       await load();
     } catch (error) {
-      if (!isCurrent(generation)) return;
-      showNotification(
-        error instanceof Error ? error.message : 'Failed to rotate identity',
-        'error'
-      );
+      notify(error instanceof Error ? error.message : t('identity_pools.rotate_failed'), 'error');
     }
   };
-  const toggleProfile = async (id: string, enabled: boolean) => {
-    const requestScope = { ...scope };
-    const generation = generationRef.current;
-    try {
-      await identityPoolsApi.patchProfile(POOL_ID, id, { enabled: !enabled }, requestScope);
-      if (!isCurrent(generation)) return;
-      await load();
-    } catch (error) {
-      if (!isCurrent(generation)) return;
-      showNotification(
-        error instanceof Error ? error.message : 'Failed to update profile',
-        'error'
-      );
-    }
-  };
+
   const removeSession = async (session: IdentitySession) => {
-    const requestScope = { ...scope };
-    const account = session.account_id;
-    if (
-      session.pool_id !== POOL_ID ||
-      account !== selectedAccountRef.current ||
-      !mountedRef.current
-    )
-      return;
-    const sessionGeneration = sessionGenerationRef.current;
-    const generation = generationRef.current;
+    if (!selectedAccount) return;
     try {
       await identityPoolsApi.deleteSession(
         POOL_ID,
-        account,
+        selectedAccount.account_id,
         session.logical_session_id,
-        requestScope
+        scope
       );
-      if (
-        isCurrent(generation) &&
-        sessionGeneration === sessionGenerationRef.current &&
-        account === selectedAccountRef.current
-      )
-        setSessions((items) =>
-          items.filter(
-            (item) =>
-              item.account_id !== account || item.logical_session_id !== session.logical_session_id
-          )
-        );
+      setSessions((items) =>
+        items.filter((item) => item.logical_session_id !== session.logical_session_id)
+      );
+      setAccounts((items) =>
+        items.map((item) =>
+          item.account_id === selectedAccount.account_id
+            ? { ...item, session_count: Math.max(0, (item.session_count ?? 0) - 1) }
+            : item
+        )
+      );
+      setSelectedAccount((item) =>
+        item ? { ...item, session_count: Math.max(0, (item.session_count ?? 0) - 1) } : item
+      );
     } catch (error) {
-      if (!isCurrent(generation) || sessionGeneration !== sessionGenerationRef.current) return;
-      showNotification(error instanceof Error ? error.message : 'Failed to clear session', 'error');
+      notify(error instanceof Error ? error.message : t('identity_pools.clear_failed'), 'error');
     }
   };
-  const configurationStatus = !connected
+
+  const copyIdentity = async (account: IdentityAccount) => {
+    const identity = account.identity_id || account.installation_id || '';
+    if (!identity || typeof navigator === 'undefined' || !navigator.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(identity);
+      setCopiedIdentity(account.account_id);
+      notify(t('identity_pools.identity_copied'), 'success');
+      window.setTimeout(() => setCopiedIdentity(''), 1600);
+    } catch {
+      notify(t('identity_pools.identity_copy_failed'), 'error');
+    }
+  };
+
+  const assignEnvironment = async (profileID: string) => {
+    if (!selectedAccount || !profileID || profileID === selectedAccount.profile_id) return;
+    try {
+      await identityPoolsApi.patchAccountProfile(
+        POOL_ID,
+        selectedAccount.account_id,
+        profileID,
+        scope
+      );
+      const environment = pool?.profiles.find((profile) => profile.id === profileID);
+      const update = (account: IdentityAccount): IdentityAccount =>
+        account.account_id === selectedAccount.account_id
+          ? { ...account, profile_id: profileID, environment }
+          : account;
+      setAccounts((items) => items.map(update));
+      setSelectedAccount(update(selectedAccount));
+      notify(t('identity_pools.environment_assigned'), 'success');
+    } catch (error) {
+      notify(
+        error instanceof Error ? error.message : t('identity_pools.environment_assign_failed'),
+        'error'
+      );
+    }
+  };
+
+  const environments = useMemo<EnvironmentRow[]>(() => {
+    const profiles = pool?.profiles ?? [];
+    return profiles.map((profile) => {
+      const boundAccounts = accounts.filter((account) => account.profile_id === profile.id);
+      return {
+        ...profile,
+        accounts: boundAccounts,
+        accountCount: boundAccounts.length,
+        sessionCount: boundAccounts.reduce((sum, account) => sum + (account.session_count ?? 0), 0),
+      };
+    });
+  }, [accounts, pool]);
+
+  const filteredAccounts = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return accounts.filter((account) => {
+      const haystack = [
+        account.email,
+        account.account_label,
+        account.auth_file,
+        account.auth_index,
+        account.account_id,
+        account.fingerprint,
+        account.identity_id,
+        account.installation_id,
+        account.environment?.id,
+        account.environment?.version,
+      ]
+        .join(' ')
+        .toLowerCase();
+      const matchesQuery = !needle || haystack.includes(needle);
+      const matchesEnvironment =
+        environmentFilter === 'all' || account.profile_id === environmentFilter;
+      const matchesSessions =
+        sessionFilter === 'all' ||
+        (sessionFilter === 'active'
+          ? (account.session_count ?? 0) > 0
+          : (account.session_count ?? 0) === 0);
+      return matchesQuery && matchesEnvironment && matchesSessions;
+    });
+  }, [accounts, environmentFilter, query, sessionFilter]);
+
+  const totalSessions = accounts.reduce((sum, account) => sum + (account.session_count ?? 0), 0);
+  const boundAccounts = accounts.filter((account) => account.identity_bound).length;
+  const status = !connected
     ? 'disconnected'
     : runtimeEnabled === null
       ? 'unavailable'
@@ -248,143 +303,408 @@ function IdentityPoolsConnection({
         : runtimeEnabled
           ? 'enabled'
           : 'disabled';
-  if (loading) return <LoadingSpinner />;
+  const tabs: ReadonlyArray<SegmentedTabItem<ViewTab>> = [
+    { id: 'accounts', label: t('identity_pools.account_identities') },
+    { id: 'environments', label: t('identity_pools.environment_templates') },
+  ];
+
+  if (loading) {
+    return (
+      <div className={styles.loading}>
+        <span className="loading-spinner" />
+        {t('identity_pools.loading')}
+      </div>
+    );
+  }
+
   return (
     <main className={styles.page}>
-      <header className={styles.hero}>
+      <header className={styles.header}>
         <div>
           <span className={styles.eyebrow}>CODEX RUNTIME</span>
           <h1>{t('identity_pools.title')}</h1>
-          <p>{t('identity_pools.description')}</p>
+          <p>{t('identity_pools.management_description')}</p>
         </div>
-        <Button size="sm" variant="secondary" disabled={!connected} onClick={() => void load()}>
-          {t('identity_pools.refresh')}
-        </Button>
-      </header>
-      {loadError && <p role="alert">{loadError}</p>}
-      <section className={styles.metrics}>
-        <div>
-          <span>{t('identity_pools.configuration')}</span>
-          <strong>{t(`identity_pools.status.${configurationStatus}`)}</strong>
-        </div>
-        <div>
-          <span>{t('identity_pools.accounts')}</span>
-          <strong>{accounts.length}</strong>
-        </div>
-        <div>
-          <span>{t('identity_pools.profiles')}</span>
-          <strong>{pool?.profiles.length ?? 0}</strong>
-        </div>
-        <div>
-          <span>{t('identity_pools.sessions')}</span>
-          <strong>{sessions.length}</strong>
-        </div>
-        <div>
-          <span>{t('identity_pools.token_hit_rate')}</span>
-          <strong>{formatRate(stats?.token_weighted_hit_rate)}</strong>
-        </div>
-        <div>
-          <span>{t('identity_pools.request_hit_rate')}</span>
-          <strong>{formatRate(stats?.request_hit_rate)}</strong>
-        </div>
-        <div>
-          <span>{t('identity_pools.route_rebinds')}</span>
-          <strong>{stats?.route_rebinds ?? '—'}</strong>
-        </div>
-        <div>
-          <span>{t('identity_pools.prefix_heat_matches')}</span>
-          <strong>{stats?.prefix_heat_matches ?? '—'}</strong>
-        </div>
-        <div>
-          <span>{t('identity_pools.tail_burst_fallbacks')}</span>
-          <strong>{stats?.tail_burst_fallbacks ?? '—'}</strong>
-        </div>
-        <div>
-          <span>{t('identity_pools.fingerprint_rejections')}</span>
-          <strong>{stats?.engine_fingerprint_rejections ?? '—'}</strong>
-        </div>
-      </section>
-      <section className={styles.panel}>
-        <div className={styles.panelHeader}>
-          <div>
-            <h2>{t('identity_pools.observed_profiles')}</h2>
-            <p>{t('identity_pools.metadata_note')}</p>
-          </div>
-        </div>
-        <div className={styles.profileGrid}>
-          {(pool?.profiles ?? []).map((profile) => (
-            <article key={profile.id}>
-              <strong>{profile.id}</strong>
-              <span>
-                {profile.version || t('identity_pools.unknown')} · {profile.platform || t('identity_pools.platform_unknown')}
-              </span>
-              <Button
-                size="xs"
-                variant={profile.enabled ? 'secondary' : 'primary'}
-                onClick={() => void toggleProfile(profile.id, profile.enabled)}
-              >
-                {profile.enabled ? t('identity_pools.disable') : t('identity_pools.enable')}
-              </Button>
-            </article>
-          ))}
-        </div>
-      </section>
-      <section className={styles.workspace}>
-        <div className={styles.panelHeader}>
-          <div>
-            <h2>{t('identity_pools.account_bindings')}</h2>
-            <p>{t('identity_pools.binding_note')}</p>
-          </div>
-          <Button
-            size="sm"
-            variant="danger"
-            disabled={!selectedAccount}
-            onClick={() => void rotate()}
-          >
-            {t('identity_pools.rotate_identity')}
+        <div className={styles.headerActions}>
+          <span className={`${styles.status} ${styles[`status_${status}`]}`}>
+            {t(`identity_pools.status.${status}`)}
+          </span>
+          <Button size="sm" variant="secondary" disabled={!connected} onClick={() => void load()}>
+            <IconRefreshCw size={15} />
+            {t('identity_pools.refresh')}
           </Button>
         </div>
-        <div className={styles.accountList}>
-          {accounts.map((account) => (
-            <button
-              className={account.account_id === selectedAccount ? styles.selected : ''}
-              aria-pressed={account.account_id === selectedAccount}
-              key={account.account_id}
-              onClick={() => selectAccount(account.account_id)}
-            >
-              <strong>{account.account_id}</strong>
-              <span>
-                {t('identity_pools.profile_label')} {account.profile_id || t('identity_pools.unassigned')} · v{account.identity_version}
-              </span>
-            </button>
-          ))}
-        </div>
-        {selectedAccount && (
-          <div className={styles.sessions}>
-            <h3>{t('identity_pools.sessions')}</h3>
-            {sessionsLoading ? (
-              <p>{t('identity_pools.loading_sessions')}</p>
-            ) : sessionError ? (
-              <p role="alert">{sessionError}</p>
-            ) : sessions.length === 0 ? (
-              <p>{t('identity_pools.no_active_sessions')}</p>
-            ) : (
-              sessions.map((session) => (
-                <div
-                  className={styles.session}
-                  key={`${session.account_id}:${session.logical_session_id}`}
-                >
-                  <span>{session.logical_session_id}</span>
-                  <code>{session.prompt_cache_key.slice(0, 16)}…</code>
-                  <Button size="xs" variant="ghost" onClick={() => void removeSession(session)}>
-                    {t('identity_pools.clear')}
+      </header>
+
+      {loadError && (
+        <p role="alert" className={styles.error}>
+          {loadError}
+        </p>
+      )}
+
+      <section className={styles.operationsBar} aria-label={t('identity_pools.summary')}>
+        <strong>{t('identity_pools.operations_title')}</strong>
+        <span>{t('identity_pools.accounts_total', { count: accounts.length })}</span>
+        <span>{t('identity_pools.accounts_bound', { count: boundAccounts })}</span>
+        <span>{t('identity_pools.sessions_total', { count: totalSessions })}</span>
+        <span>{t('identity_pools.environments_total', { count: environments.length })}</span>
+      </section>
+
+      <SegmentedTabs items={tabs} activeTab={tab} onChange={setTab} ariaLabel={t('identity_pools.view')} />
+
+      {tab === 'accounts' ? (
+        <section className={styles.workspace}>
+          <div className={styles.sectionHeading}>
+            <div>
+              <h2>{t('identity_pools.account_list_title')}</h2>
+              <p>{t('identity_pools.account_list_note')}</p>
+            </div>
+            <span className={styles.resultCount}>
+              {t('identity_pools.result_count', { count: filteredAccounts.length })}
+            </span>
+          </div>
+          <div className={styles.toolbar}>
+            <Input
+              aria-label={t('identity_pools.search')}
+              placeholder={t('identity_pools.search_placeholder')}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              rightElement={<IconSearch size={16} />}
+            />
+            <Select
+              ariaLabel={t('identity_pools.environment_filter')}
+              value={environmentFilter}
+              onChange={setEnvironmentFilter}
+              options={[
+                { value: 'all', label: t('identity_pools.all_environments') },
+                ...environments.map((item) => ({
+                  value: item.id,
+                  label: `${item.id}${item.version ? ` · ${item.version}` : ''}`,
+                })),
+              ]}
+            />
+            <Select
+              ariaLabel={t('identity_pools.session_filter')}
+              value={sessionFilter}
+              onChange={setSessionFilter}
+              options={[
+                { value: 'all', label: t('identity_pools.all_sessions') },
+                { value: 'active', label: t('identity_pools.with_sessions') },
+                { value: 'empty', label: t('identity_pools.without_sessions') },
+              ]}
+            />
+          </div>
+          <div className={styles.tableWrap}>
+            <table className={styles.table}>
+              <thead>
+                <tr>
+                  <th>{t('identity_pools.account')}</th>
+                  <th>{t('identity_pools.identity')}</th>
+                  <th>{t('identity_pools.environment')}</th>
+                  <th>{t('identity_pools.session_count')}</th>
+                  <th>{t('identity_pools.account_status')}</th>
+                  <th>{t('identity_pools.actions')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredAccounts.map((account) => {
+                  const identity = account.identity_id || account.installation_id || '';
+                  const isBound = Boolean(account.identity_bound);
+                  return (
+                    <tr
+                      key={account.account_id}
+                      onClick={() => openAccount(account)}
+                      tabIndex={0}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') openAccount(account);
+                      }}
+                    >
+                      <td>
+                        <strong>{account.email || account.account_label || t('identity_pools.unnamed_account')}</strong>
+                        <small>{account.auth_file || account.auth_index || account.account_id}</small>
+                      </td>
+                      <td>
+                        <div className={styles.identityCell} title={identity || t('identity_pools.identity_not_created')}>
+                          <code>{identity ? `${identity.slice(0, 8)}…${identity.slice(-6)}` : '—'}</code>
+                          {identity && (
+                            <button
+                              type="button"
+                              className={styles.iconButton}
+                              aria-label={t('identity_pools.copy_identity')}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void copyIdentity(account);
+                              }}
+                            >
+                              {copiedIdentity === account.account_id ? <IconCheck size={14} /> : <IconCopy size={14} />}
+                            </button>
+                          )}
+                        </div>
+                        <small>
+                          {isBound
+                            ? `${t('identity_pools.identity_version')} v${account.identity_version}`
+                            : t('identity_pools.identity_not_created')}
+                        </small>
+                      </td>
+                      <td>
+                        <strong>{account.environment?.id || account.profile_id || t('identity_pools.unassigned')}</strong>
+                        <small>
+                          {[
+                            account.environment?.version,
+                            account.environment?.platform,
+                            account.environment?.architecture,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ') || t('identity_pools.environment_unknown')}
+                        </small>
+                      </td>
+                      <td>
+                        <span className={styles.sessionCount}>{account.session_count ?? 0}</span>
+                      </td>
+                      <td>
+                        <span className={`${styles.accountStatus} ${account.disabled ? styles.accountStatusDisabled : styles.accountStatusActive}`}>
+                          {account.disabled
+                            ? t('identity_pools.disabled')
+                            : isBound
+                              ? account.runtime_status || t('identity_pools.active')
+                              : t('identity_pools.not_started')}
+                        </span>
+                      </td>
+                      <td>
+                        <div className={styles.rowActions}>
+                          <Button
+                            size="xs"
+                            variant="secondary"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openAccount(account);
+                            }}
+                          >
+                            {t('identity_pools.view_details')}
+                          </Button>
+                          <button
+                            type="button"
+                            className={styles.rowChevron}
+                            aria-label={t('identity_pools.view_details')}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openAccount(account);
+                            }}
+                          >
+                            <IconChevronRight size={16} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {filteredAccounts.length === 0 && <div className={styles.empty}>{t('identity_pools.no_accounts')}</div>}
+          </div>
+        </section>
+      ) : (
+        <section className={styles.workspace}>
+          <div className={styles.sectionHeading}>
+            <div>
+              <h2>{t('identity_pools.environment_management_title')}</h2>
+              <p>{t('identity_pools.environment_management_note')}</p>
+            </div>
+          </div>
+          <div className={styles.environmentList}>
+            {environments.map((environment) => (
+              <article key={environment.id} className={styles.environmentRow}>
+                <div className={styles.environmentMain}>
+                  <div className={styles.environmentTitleLine}>
+                    <strong>{environment.id}</strong>
+                    <span className={environment.enabled ? styles.accountStatusActive : styles.accountStatusDisabled}>
+                      {environment.enabled ? t('identity_pools.enabled') : t('identity_pools.disabled')}
+                    </span>
+                  </div>
+                  <p>
+                    {[environment.version, environment.platform, environment.architecture, environment.originator]
+                      .filter(Boolean)
+                      .join(' · ') || t('identity_pools.environment_unknown')}
+                  </p>
+                  <small>{environment.user_agent || t('identity_pools.user_agent_unknown')}</small>
+                </div>
+                <div className={styles.environmentCounts}>
+                  <strong>{environment.accountCount}</strong>
+                  <span>{t('identity_pools.bound_accounts')}</span>
+                  <strong>{environment.sessionCount}</strong>
+                  <span>{t('identity_pools.sessions')}</span>
+                </div>
+                <div className={styles.environmentAccounts}>
+                  {environment.accounts.length === 0 ? (
+                    <span className={styles.muted}>{t('identity_pools.no_bound_accounts')}</span>
+                  ) : (
+                    environment.accounts.slice(0, 4).map((account) => (
+                      <button key={account.account_id} type="button" onClick={() => openAccount(account)}>
+                        {account.email || account.account_label || account.auth_file || account.account_id}
+                      </button>
+                    ))
+                  )}
+                  {environment.accounts.length > 4 && (
+                    <span className={styles.muted}>
+                      {t('identity_pools.more_accounts', { count: environment.accounts.length - 4 })}
+                    </span>
+                  )}
+                </div>
+                <div className={styles.environmentActions}>
+                  <Button
+                    size="xs"
+                    variant="secondary"
+                    onClick={() => {
+                      setTab('accounts');
+                      setEnvironmentFilter(environment.id);
+                    }}
+                  >
+                    {t('identity_pools.view_accounts')}
+                  </Button>
+                  <Button
+                    size="xs"
+                    variant={environment.enabled ? 'secondary' : 'primary'}
+                    onClick={() =>
+                      void (async () => {
+                        try {
+                          await identityPoolsApi.patchProfile(
+                            POOL_ID,
+                            environment.id,
+                            { enabled: !environment.enabled },
+                            scope
+                          );
+                          await load();
+                        } catch (error) {
+                          notify(
+                            error instanceof Error
+                              ? error.message
+                              : t('identity_pools.profile_update_failed'),
+                            'error'
+                          );
+                        }
+                      })()
+                    }
+                  >
+                    {environment.enabled ? t('identity_pools.disable') : t('identity_pools.enable')}
                   </Button>
                 </div>
-              ))
-            )}
+              </article>
+            ))}
+          </div>
+          {environments.length === 0 && <div className={styles.empty}>{t('identity_pools.no_environments')}</div>}
+        </section>
+      )}
+
+      <Drawer
+        open={Boolean(selectedAccount)}
+        onClose={() => setSelectedAccount(null)}
+        title={
+          selectedAccount
+            ? selectedAccount.email || selectedAccount.account_label || t('identity_pools.account_details')
+            : undefined
+        }
+        width={620}
+      >
+        {selectedAccount && (
+          <div className={styles.drawerBody}>
+            <div className={styles.drawerActions}>
+              <span className={`${styles.accountStatus} ${selectedAccount.identity_bound ? styles.accountStatusActive : styles.accountStatusDisabled}`}>
+                {selectedAccount.identity_bound ? t('identity_pools.identity_bound') : t('identity_pools.identity_not_created')}
+              </span>
+              <Button
+                size="sm"
+                variant="danger"
+                disabled={!selectedAccount.identity_bound}
+                title={!selectedAccount.identity_bound ? t('identity_pools.rotate_requires_bound') : undefined}
+                onClick={() => void rotate()}
+              >
+                {t('identity_pools.rotate_identity')}
+              </Button>
+            </div>
+            <div className={styles.detailGrid}>
+              <div className={styles.detailWide}>
+                <span>{t('identity_pools.identity')}</span>
+                <code>{selectedAccount.identity_id || selectedAccount.installation_id || '—'}</code>
+              </div>
+              <div>
+                <span>{t('identity_pools.environment')}</span>
+                <Select
+                  ariaLabel={t('identity_pools.environment')}
+                  value={selectedAccount.profile_id || ''}
+                  onChange={(value) => void assignEnvironment(value)}
+                  options={[
+                    { value: '', label: t('identity_pools.unassigned') },
+                    ...(pool?.profiles ?? [])
+                      .filter((profile) => profile.enabled && profile.observed)
+                      .map((profile) => ({
+                        value: profile.id,
+                        label: `${profile.id}${profile.version ? ` · ${profile.version}` : ''}`,
+                      })),
+                  ]}
+                />
+                <small>
+                  {[selectedAccount.environment?.version, selectedAccount.environment?.platform, selectedAccount.environment?.architecture]
+                    .filter(Boolean)
+                    .join(' · ') || t('identity_pools.environment_unknown')}
+                </small>
+              </div>
+              <div>
+                <span>{t('identity_pools.auth_file')}</span>
+                <strong>{selectedAccount.auth_file || selectedAccount.auth_index || '—'}</strong>
+              </div>
+              <div>
+                <span>{t('identity_pools.identity_version')}</span>
+                <strong>{selectedAccount.identity_bound ? `v${selectedAccount.identity_version}` : '—'}</strong>
+              </div>
+              <div>
+                <span>{t('identity_pools.status_label')}</span>
+                <strong>
+                  {selectedAccount.disabled
+                    ? t('identity_pools.disabled')
+                    : selectedAccount.runtime_status || t('identity_pools.not_started')}
+                </strong>
+              </div>
+            </div>
+            <div className={styles.drawerSection}>
+              <div className={styles.sectionHeading}>
+                <div>
+                  <h2>{t('identity_pools.sessions')}</h2>
+                  <p>{t('identity_pools.session_mapping_note')}</p>
+                </div>
+                <span className={styles.sessionSummary}>{t('identity_pools.session_count_value', { count: selectedAccount.session_count ?? 0 })}</span>
+              </div>
+              {sessionsLoading ? (
+                <p>{t('identity_pools.loading_sessions')}</p>
+              ) : sessionError ? (
+                <p role="alert" className={styles.error}>{sessionError}</p>
+              ) : sessions.length === 0 ? (
+                <p>{t('identity_pools.no_active_sessions')}</p>
+              ) : (
+                <div className={styles.sessionList}>
+                  {sessions.map((session) => (
+                    <div className={styles.sessionRow} key={`${session.account_id}:${session.logical_session_id}`}>
+                      <div>
+                        <strong>{session.logical_session_id}</strong>
+                        <small>{[session.thread_id, session.window_id].filter(Boolean).join(' · ')}</small>
+                        <code>{session.prompt_cache_key || t('identity_pools.no_cache_key')}</code>
+                      </div>
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        iconOnly
+                        aria-label={t('identity_pools.clear')}
+                        onClick={() => void removeSession(session)}
+                      >
+                        <IconTrash2 size={15} />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
-      </section>
+      </Drawer>
     </main>
   );
 }

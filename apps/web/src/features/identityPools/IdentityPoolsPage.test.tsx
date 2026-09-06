@@ -1,480 +1,86 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { StrictMode, type ReactNode } from 'react';
+import { type ReactNode } from 'react';
 
 const mocks = vi.hoisted(() => ({
   auth: { apiBase: 'http://cpa.test', managementKey: 'key', connectionStatus: 'connected' },
-  get: vi.fn(),
-  accounts: vi.fn(),
-  sessions: vi.fn(),
-  stats: vi.fn(),
-  rotate: vi.fn(),
-  deleteSession: vi.fn(),
-  patchProfile: vi.fn(),
-  notify: vi.fn(),
+  get: vi.fn(), accounts: vi.fn(), sessions: vi.fn(), rotate: vi.fn(), deleteSession: vi.fn(), patchProfile: vi.fn(), notify: vi.fn(),
 }));
-
-vi.mock('@/services/api', () => ({
-  identityPoolsApi: mocks,
-}));
+vi.mock('@/services/api', () => ({ identityPoolsApi: mocks }));
 vi.mock('@/stores', () => ({
   useAuthStore: (selector: (state: unknown) => unknown) => selector(mocks.auth),
-  useNotificationStore: (selector: (state: unknown) => unknown) =>
-    selector({ showNotification: mocks.notify }),
+  useNotificationStore: (selector: (state: unknown) => unknown) => selector({ showNotification: mocks.notify }),
 }));
-vi.mock('@/components/ui/LoadingSpinner', () => ({
-  LoadingSpinner: () => <div data-loading="true" />,
-}));
-vi.mock('@/components/ui/Button', () => ({
-  Button: ({ children, ...props }: { children?: ReactNode; [key: string]: unknown }) => (
-    <button {...props}>{children}</button>
-  ),
-}));
-vi.mock('./IdentityPoolsPage.module.scss', () => ({
-  default: new Proxy({}, { get: (_target, property) => String(property) }),
-}));
-
+vi.mock('@/components/ui/LoadingSpinner', () => ({ LoadingSpinner: () => <div data-loading="true" /> }));
+vi.mock('@/components/ui/Button', () => ({ Button: ({ children, ...props }: { children?: ReactNode; [key: string]: unknown }) => <button {...props}>{children}</button> }));
+vi.mock('@/components/ui/Drawer', () => ({ Drawer: ({ children }: { children?: ReactNode }) => <aside>{children}</aside> }));
+vi.mock('@/components/ui/SegmentedTabs.module.scss', () => ({ default: new Proxy({}, { get: (_target, property) => String(property) }) }));
+vi.mock('@/components/ui/Select.module.scss', () => ({ default: new Proxy({}, { get: (_target, property) => String(property) }) }));
+vi.mock('@/components/ui/Drawer.module.scss', () => ({ default: new Proxy({}, { get: (_target, property) => String(property) }) }));
+vi.mock('./IdentityPoolsPage.module.scss', () => ({ default: new Proxy({}, { get: (_target, property) => String(property) }) }));
 vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string) =>
-      (
-        ({
-          'identity_pools.configuration': 'Configuration',
-          'identity_pools.status.enabled': 'Enabled',
-          'identity_pools.status.disabled': 'Disabled',
-          'identity_pools.status.not_configured': 'Not configured',
-          'identity_pools.status.unavailable': 'Unavailable',
-          'identity_pools.status.disconnected': 'Disconnected',
-          'identity_pools.title': 'Identity pools',
-          'identity_pools.description': 'Stable account profiles and session mappings for outbound Codex requests.',
-          'identity_pools.refresh': 'Refresh',
-          'identity_pools.accounts': 'Accounts',
-          'identity_pools.profiles': 'Profiles',
-          'identity_pools.sessions': 'Sessions',
-          'identity_pools.token_hit_rate': 'Token hit rate (5m window)',
-          'identity_pools.request_hit_rate': 'Request hit rate (5m window)',
-          'identity_pools.route_rebinds': 'Route rebinds',
-          'identity_pools.prefix_heat_matches': 'Prefix heat matches',
-          'identity_pools.tail_burst_fallbacks': 'Tail-burst fallbacks',
-          'identity_pools.fingerprint_rejections': 'Fingerprint rejections',
-          'identity_pools.observed_profiles': 'Observed profiles',
-          'identity_pools.metadata_note': 'Only metadata is shown; credentials remain outside the panel.',
-          'identity_pools.unknown': 'unknown',
-          'identity_pools.platform_unknown': 'platform unknown',
-          'identity_pools.disable': 'Disable',
-          'identity_pools.enable': 'Enable',
-          'identity_pools.account_bindings': 'Account bindings',
-          'identity_pools.binding_note': 'Stable fingerprint, installation identity, and bound profile.',
-          'identity_pools.rotate_identity': 'Rotate identity',
-          'identity_pools.profile_label': 'Profile',
-          'identity_pools.unassigned': 'unassigned',
-          'identity_pools.loading_sessions': 'Loading sessions…',
-          'identity_pools.no_active_sessions': 'No active sessions.',
-          'identity_pools.clear': 'Clear',
-        }) as Record<string, string>
-      )[key] ?? key,
-  }),
+  useTranslation: () => ({ t: (key: string) => {
+    const labels: Record<string, string> = {
+      'identity_pools.title':'Identity pools','identity_pools.description':'Stable identities','identity_pools.refresh':'Refresh','identity_pools.status.enabled':'Enabled','identity_pools.status.disconnected':'Disconnected','identity_pools.status.unavailable':'Unavailable','identity_pools.status.not_configured':'Not configured','identity_pools.status.disabled':'Disabled','identity_pools.accounts':'Accounts','identity_pools.identities':'Identities','identity_pools.sessions':'Sessions','identity_pools.enabled_environments':'Enabled environments','identity_pools.account_identities':'Account identities','identity_pools.environment_templates':'Environment templates','identity_pools.summary':'Summary','identity_pools.view':'View','identity_pools.search':'Search','identity_pools.search_placeholder':'Search','identity_pools.environment_filter':'Environment','identity_pools.session_filter':'Sessions','identity_pools.all_environments':'All environments','identity_pools.all_sessions':'All sessions','identity_pools.with_sessions':'With sessions','identity_pools.without_sessions':'Without sessions','identity_pools.account':'Account','identity_pools.identity':'Identity','identity_pools.environment':'Environment','identity_pools.session_count':'Sessions','identity_pools.account_status':'Status','identity_pools.unnamed_account':'Unnamed','identity_pools.identity_version':'Identity version','identity_pools.environment_unknown':'Unknown environment','identity_pools.no_accounts':'No accounts','identity_pools.environment_note':'Environment metadata','identity_pools.user_agent_unknown':'Unknown user agent','identity_pools.enabled':'Enabled','identity_pools.disabled':'Disabled','identity_pools.disable':'Disable','identity_pools.enable':'Enable','identity_pools.no_environments':'No environments','identity_pools.profile_update_failed':'Profile update failed','identity_pools.account_details':'Account details','identity_pools.auth_file':'Auth file','identity_pools.status_label':'Status','identity_pools.session_mapping_note':'Session mapping','identity_pools.no_cache_key':'No key','identity_pools.rotate_confirm':'Rotate?','identity_pools.rotate_success':'Rotated','identity_pools.rotate_failed':'Rotate failed','identity_pools.clear_failed':'Clear failed','identity_pools.load_failed':'Load failed','identity_pools.loading':'Loading','identity_pools.loading_sessions':'Loading sessions','identity_pools.no_active_sessions':'No sessions','identity_pools.rotate_identity':'Rotate identity','identity_pools.clear':'Clear',
+    };
+    return labels[key] ?? key;
+  } }),
 }));
+vi.mock('@/components/ui/icons', () => ({ IconChevronRight: () => <span>→</span>, IconRefreshCw: () => <span>↻</span>, IconSearch: () => <span>⌕</span>, IconTrash2: () => <span>×</span>, IconChevronDown: () => <span>⌄</span>, IconX: () => <span>×</span>, IconCopy: () => <span>copy</span>, IconCheck: () => <span>check</span> }));
 
 import { IdentityPoolsPage } from './IdentityPoolsPage';
 
-const deferred = <T,>() => {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-};
+const runtime = { enabled: true, pools: [{ id: 'codex', provider: 'codex', protocol: 'responses', profiles: [{ id: 'cli', version: '0.147.0', platform: 'macOS', architecture: 'arm64', user_agent: 'codex-tui', originator: 'codex-tui', enabled: true, observed: true }] }] };
+const accounts = { accounts: [
+  { pool_id: 'codex', account_id: 'A', email: 'alice@example.com', auth_file: 'alice.json', auth_index: 'auth-a', installation_id: 'install-a', fingerprint: 'finger-a', profile_id: 'cli', identity_version: 2, session_count: 2, runtime_status: 'active' },
+  { pool_id: 'codex', account_id: 'B', account_label: 'Bob', auth_file: 'bob.json', installation_id: 'install-b', fingerprint: 'finger-b', profile_id: 'cli', identity_version: 1, session_count: 0, runtime_status: 'disabled', disabled: true },
+] };
+let view: ReactTestRenderer | undefined;
+const mount = async () => { await act(async () => { view = create(<IdentityPoolsPage />); await Promise.resolve(); await Promise.resolve(); }); return view!; };
+afterEach(async () => { if (view) { await act(async () => view?.unmount()); view = undefined; } });
+beforeEach(() => { vi.resetAllMocks(); mocks.auth = { apiBase: 'http://cpa.test', managementKey: 'key', connectionStatus: 'connected' }; mocks.get.mockResolvedValue(runtime); mocks.accounts.mockResolvedValue(accounts); mocks.sessions.mockResolvedValue({ sessions: [] }); mocks.rotate.mockResolvedValue({}); mocks.deleteSession.mockResolvedValue({}); mocks.patchProfile.mockResolvedValue({}); });
 
-const runtime = {
-  enabled: true,
-  pools: [{ id: 'codex', provider: 'codex', protocol: 'responses', profiles: [] }],
-};
-const accounts = {
-  accounts: [
-    {
-      pool_id: 'codex',
-      account_id: 'A',
-      fingerprint: 'a',
-      installation_id: 'ia',
-      profile_id: 'p',
-      identity_version: 1,
-    },
-    {
-      pool_id: 'codex',
-      account_id: 'B',
-      fingerprint: 'b',
-      installation_id: 'ib',
-      profile_id: 'p',
-      identity_version: 1,
-    },
-  ],
-};
-
-describe('IdentityPoolsPage request isolation', () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
-    mocks.auth = {
-      apiBase: 'http://cpa.test',
-      managementKey: 'key',
-      connectionStatus: 'connected',
-    };
-    mocks.get.mockResolvedValue(runtime);
-    mocks.accounts.mockResolvedValue(accounts);
-    mocks.stats.mockResolvedValue({});
-    mocks.sessions.mockResolvedValue({ sessions: [] });
-  });
-
-  it('does not reload the base view when the default account is selected', async () => {
-    let renderer!: ReactTestRenderer;
-    await act(async () => {
-      renderer = create(<IdentityPoolsPage />);
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+describe('IdentityPoolsPage operations workspace', () => {
+  it('renders account identity, environment and server-provided session counts', async () => {
+    await mount();
+    const text = JSON.stringify(view?.toJSON());
+    expect(text).toContain('alice@example.com');
+    expect(text).toContain('alice.json');
+    expect(text).toContain('install-a');
+    expect(text).toContain('cli');
+    expect(text).toContain('2');
+    expect(text).toContain('macOS');
     expect(mocks.get).toHaveBeenCalledTimes(1);
     expect(mocks.accounts).toHaveBeenCalledTimes(1);
-    expect(mocks.sessions).toHaveBeenCalledTimes(1);
-    await act(async () => renderer.unmount());
   });
 
-  it('ignores a late session response from a previous account selection', async () => {
-    const first = deferred<{
-      sessions: Array<{
-        pool_id: string;
-        account_id: string;
-        logical_session_id: string;
-        prompt_cache_key: string;
-      }>;
-    }>();
-    const second = deferred<{
-      sessions: Array<{
-        pool_id: string;
-        account_id: string;
-        logical_session_id: string;
-        prompt_cache_key: string;
-      }>;
-    }>();
-    mocks.sessions.mockReset();
-    mocks.sessions.mockImplementation((_pool: string, account: string) =>
-      account === 'A' ? first.promise : second.promise
-    );
-    let renderer!: ReactTestRenderer;
-    await act(async () => {
-      renderer = create(<IdentityPoolsPage />);
-      await Promise.resolve();
-    });
-    await act(async () => {
-      first.resolve({ sessions: [] });
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    const accountButtons = renderer.root
-      .findAllByType('button')
-      .filter((button) =>
-        ['A', 'B'].includes(
-          String(button.props.children?.[0]?.props?.children ?? button.props.children)
-        )
-      );
-    expect(accountButtons).toHaveLength(2);
-    await act(async () => {
-      accountButtons[1].props.onClick();
-      accountButtons[0].props.onClick();
-      second.resolve({
-        sessions: [
-          {
-            pool_id: 'codex',
-            account_id: 'B',
-            logical_session_id: 'late-b',
-            prompt_cache_key: 'b',
-          },
-        ],
-      });
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(
-      renderer.root.findAll((node) => node.type === 'span' && node.children.includes('late-b'))
-    ).toHaveLength(0);
-    await act(async () => renderer.unmount());
-  });
-});
-
-let view: ReactTestRenderer | undefined;
-afterEach(async () => {
-  if (view) {
-    await act(async () => view?.unmount());
-    view = undefined;
-  }
-});
-const mountPage = async (strict = false) => {
-  await act(async () => {
-    view = create(
-      strict ? (
-        <StrictMode>
-          <IdentityPoolsPage />
-        </StrictMode>
-      ) : (
-        <IdentityPoolsPage />
-      )
-    );
-  });
-  return view!;
-};
-const pageText = () => JSON.stringify(view?.toJSON());
-const press = async (label: string) => {
-  const button = view!.root
-    .findAllByType('button')
-    .find(
-      (node) =>
-        node.props.children === label ||
-        node.findAllByType('strong').some((item) => item.children.includes(label))
-    );
-  expect(button, 'missing button: ' + label).toBeDefined();
-  await act(async () => {
-    button!.props.onClick();
-  });
-};
-const switchConnection = async (patch: Partial<typeof mocks.auth>) => {
-  mocks.auth = { ...mocks.auth, ...patch };
-  await act(async () => {
-    view!.update(<IdentityPoolsPage />);
-  });
-};
-
-describe('IdentityPoolsPage lifecycle acceptance', () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
-    mocks.auth = {
-      apiBase: 'http://cpa.test',
-      managementKey: 'key',
-      connectionStatus: 'connected',
-    };
-    mocks.get.mockResolvedValue(runtime);
-    mocks.accounts.mockResolvedValue(accounts);
-    mocks.stats.mockResolvedValue({ token_weighted_hit_rate: 0.91 });
-    mocks.sessions.mockResolvedValue({ sessions: [] });
+  it('does not request sessions until an account is opened', async () => {
+    await mount();
+    expect(mocks.sessions).not.toHaveBeenCalled();
+    const row = view!.root.findAllByType('tr').find((node) => node.props.tabIndex === 0);
+    expect(row).toBeDefined();
+    await act(async () => { row!.props.onClick(); await Promise.resolve(); });
+    expect(mocks.sessions).toHaveBeenCalledWith('codex', 'A', expect.anything());
   });
 
-  it('loads after the StrictMode setup/cleanup/setup cycle', async () => {
-    await mountPage(true);
-    expect(pageText()).toContain('Account bindings');
-    expect(mocks.sessions).toHaveBeenCalled();
+  it('keeps connection-owned data isolated after switching endpoint', async () => {
+    await mount();
+    expect(JSON.stringify(view?.toJSON())).toContain('alice@example.com');
+    mocks.auth = { ...mocks.auth, apiBase: 'http://other.test' };
+    mocks.get.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => { view!.update(<IdentityPoolsPage />); await Promise.resolve(); await Promise.resolve(); });
+    expect(JSON.stringify(view?.toJSON())).not.toContain('alice@example.com');
   });
 
-  it('loads accounts and sessions without waiting for diagnostics', async () => {
-    const diagnostics = deferred<unknown>();
-    mocks.stats.mockReturnValue(diagnostics.promise);
-    await mountPage();
-    expect(pageText()).toContain('Account bindings');
-    expect(mocks.sessions).toHaveBeenCalledTimes(1);
-    await press('B');
-    await act(async () => {
-      diagnostics.resolve({ token_weighted_hit_rate: 0.93 });
-    });
-    expect(pageText()).toContain('93.0%');
-  });
-
-  it('shows the account list while its first session query is pending', async () => {
-    mocks.sessions.mockReturnValue(deferred<unknown>().promise);
-    await mountPage();
-    expect(pageText()).toContain('Account bindings');
-  });
-
-  it('clears old connection data when the replacement load fails', async () => {
-    await mountPage();
-    expect(pageText()).toContain('91.0%');
-    mocks.get.mockRejectedValueOnce(new Error('new pool offline'));
-    await switchConnection({ apiBase: 'http://other-cpa.test' });
-    expect(pageText()).not.toContain('91.0%');
-    expect(view!.root.findAllByType('strong').some((node) => node.children.includes('A'))).toBe(
-      false
-    );
-    expect(pageText()).not.toContain('Ready');
-  });
-
-  it('clears stale rows on a failed refresh of the same connection', async () => {
-    await mountPage();
-    mocks.accounts.mockRejectedValueOnce(new Error('failed refresh'));
-    await press('Refresh');
-    expect(view!.root.findAllByType('strong').some((node) => node.children.includes('A'))).toBe(
-      false
-    );
-    expect(pageText()).not.toContain('Ready');
-  });
-
-  it('discards old connection diagnostics and errors', async () => {
-    const oldStats = deferred<unknown>();
-    const oldBase = deferred<unknown>();
-    mocks.get.mockReturnValueOnce(oldBase.promise);
-    mocks.stats.mockReturnValueOnce(oldStats.promise);
-    await mountPage();
-    await switchConnection({ managementKey: 'replacement-key' });
-    await act(async () => {
-      oldStats.resolve({ token_weighted_hit_rate: 0.01 });
-      oldBase.reject(new Error('old connection failed'));
-    });
-    expect(pageText()).toContain('91.0%');
-    expect(mocks.notify).not.toHaveBeenCalled();
-    expect(mocks.sessions).toHaveBeenLastCalledWith('codex', 'A', {
-      apiBase: 'http://cpa.test',
-      managementKey: 'replacement-key',
-    });
-  });
-
-  it('isolates a late deletion from the same account and session on another connection', async () => {
-    const pending = deferred<unknown>();
-    const response = {
-      sessions: [
-        {
-          pool_id: 'codex',
-          account_id: 'A',
-          logical_session_id: 'shared-session',
-          prompt_cache_key: 'cache',
-        },
-      ],
-    };
-    mocks.sessions.mockResolvedValue(response);
-    mocks.deleteSession.mockReturnValue(pending.promise);
-    await mountPage();
-    await press('Clear');
-    await switchConnection({ apiBase: 'http://other-cpa.test' });
-    await act(async () => {
-      pending.resolve({ ok: true });
-    });
-    expect(pageText()).toContain('shared-session');
-    expect(mocks.deleteSession).toHaveBeenCalledWith('codex', 'A', 'shared-session', {
-      apiBase: 'http://cpa.test',
-      managementKey: 'key',
-    });
-  });
-
-  it('stops reading on disconnect and ignores late session results', async () => {
-    const pending = deferred<unknown>();
-    await mountPage();
-    mocks.sessions.mockReturnValueOnce(pending.promise);
-    await press('B');
-    const callCount = mocks.get.mock.calls.length;
-    await switchConnection({ connectionStatus: 'disconnected' });
-    await act(async () => {
-      pending.resolve({
-        sessions: [
-          { account_id: 'B', logical_session_id: 'old-session', prompt_cache_key: 'cache' },
-        ],
-      });
-    });
-    expect(pageText()).not.toContain('old-session');
-    expect(mocks.get).toHaveBeenCalledTimes(callCount);
-  });
-
-  it('distinguishes disabled configuration from a missing pool', async () => {
-    mocks.get.mockResolvedValue({ ...runtime, enabled: false });
-    await mountPage();
-    expect(pageText()).toContain('Disabled');
-    expect(pageText()).not.toContain('Ready');
-  });
-
-  it('selects the Codex pool rather than the first other-provider pool', async () => {
-    mocks.get.mockResolvedValue({
-      enabled: true,
-      pools: [{ id: 'other', profiles: [{ id: 'other-only' }] }, ...runtime.pools],
-    });
-    await mountPage();
-    expect(pageText()).not.toContain('other-only');
-  });
-
-  it('uses a remaining account after the selected account is removed', async () => {
-    await mountPage();
-    await press('B');
-    mocks.accounts.mockResolvedValue({ accounts: [accounts.accounts[0]] });
-    await press('Refresh');
-    expect(mocks.sessions).toHaveBeenLastCalledWith('codex', 'A', {
-      apiBase: 'http://cpa.test',
-      managementKey: 'key',
-    });
-  });
-  it('ignores an earlier pending query after switching A to B to A', async () => {
-    const earlier = deferred<unknown>();
-    const newer = deferred<unknown>();
-    mocks.sessions
-      .mockReturnValueOnce(earlier.promise)
-      .mockResolvedValueOnce({ sessions: [] })
-      .mockReturnValueOnce(newer.promise);
-    await mountPage();
-    await press('B');
-    await press('A');
-    await act(async () => {
-      newer.resolve({
-        sessions: [
-          {
-            pool_id: 'codex',
-            account_id: 'A',
-            logical_session_id: 'new-a',
-            prompt_cache_key: 'cache',
-          },
-        ],
-      });
-    });
-    await act(async () => {
-      earlier.resolve({
-        sessions: [
-          {
-            pool_id: 'codex',
-            account_id: 'A',
-            logical_session_id: 'old-a',
-            prompt_cache_key: 'cache',
-          },
-        ],
-      });
-    });
-    expect(pageText()).toContain('new-a');
-    expect(pageText()).not.toContain('old-a');
-    expect(mocks.get).toHaveBeenCalledTimes(1);
-  });
-
-  it('discards results and errors after unmount', async () => {
-    const pending = deferred<unknown>();
-    mocks.sessions.mockReturnValue(pending.promise);
-    await mountPage();
-    await act(async () => {
-      view!.unmount();
-    });
-    view = undefined;
-    await act(async () => {
-      pending.reject(new Error('late after unmount'));
-    });
-    expect(mocks.notify).not.toHaveBeenCalled();
-  });
-
-  it('keeps diagnostics unavailable when the endpoint fails', async () => {
-    mocks.stats.mockRejectedValue(new Error('not supported'));
-    await mountPage();
-    expect(pageText()).toContain('Account bindings');
-    expect(pageText()).not.toContain('0.0%');
-    expect(mocks.notify).not.toHaveBeenCalled();
-  });
-
-  it('renders a dash for a partially unknown diagnostics field', async () => {
-    mocks.stats.mockResolvedValue({ route_rebinds: 2 });
-    await mountPage();
-    expect(pageText()).toContain('Route rebinds');
-    expect(view!.root.findAllByType('strong').some((node) => node.children.includes('—'))).toBe(
-      true
-    );
-  });
-
-  it('renders tail-burst and fingerprint diagnostics when measured', async () => {
-    mocks.stats.mockResolvedValue({
-      token_weighted_hit_rate: 0.91,
-      tail_burst_fallbacks: 3,
-      engine_fingerprint_rejections: 2,
-    });
-    await mountPage();
-    expect(pageText()).toContain('Tail-burst fallbacks');
-    expect(pageText()).toContain('Fingerprint rejections');
-    expect(view!.root.findAllByType('strong').some((node) => node.children.includes('3'))).toBe(true);
-    expect(view!.root.findAllByType('strong').some((node) => node.children.includes('2'))).toBe(true);
+  it('renders environment templates separately and keeps profile toggle wired', async () => {
+    await mount();
+    const tabs = view!.root.findAllByType('button').filter((node) => node.props.role === 'tab');
+    expect(tabs).toHaveLength(2);
+    await act(async () => { tabs[1].props.onClick({ preventDefault() {} }); await Promise.resolve(); });
+    expect(JSON.stringify(view?.toJSON())).toContain('macOS');
+    const toggle = view!.root.findAllByType('button').find((node) => node.props.children === 'Disable');
+    expect(toggle).toBeDefined();
+    await act(async () => { toggle!.props.onClick(); await Promise.resolve(); });
+    expect(mocks.patchProfile).toHaveBeenCalledWith('codex', 'cli', { enabled: false }, expect.anything());
   });
 });

@@ -7,6 +7,10 @@ export type IdentityProfile = {
   enabled: boolean;
   platform?: string;
   architecture?: string;
+  user_agent?: string;
+  originator?: string;
+  account_count?: number;
+  session_count?: number;
 };
 export type IdentityPool = {
   id: string;
@@ -19,8 +23,22 @@ export type IdentityAccount = {
   account_id: string;
   fingerprint: string;
   installation_id: string;
+  identity_id?: string;
   profile_id: string;
   identity_version: number;
+  session_count?: number;
+  account_label?: string;
+  email?: string;
+  auth_index?: string;
+  auth_file?: string;
+  runtime_status?: string;
+  disabled?: boolean;
+  unavailable?: boolean;
+  source_ip?: string;
+  updated_at?: string;
+  environment?: IdentityProfile;
+  identity_bound?: boolean;
+  account_state?: string;
 };
 export type IdentitySession = {
   pool_id: string;
@@ -59,6 +77,8 @@ export const normalizeIdentityProfile = (value: Partial<IdentityProfile>): Ident
   enabled: Boolean(value.enabled),
   platform: String(value.platform ?? '').trim(),
   architecture: String(value.architecture ?? '').trim(),
+  user_agent: String(value.user_agent ?? '').trim(),
+  originator: String(value.originator ?? '').trim(),
 });
 
 // Missing measurements stay null; coercion must not turn blanks, booleans or
@@ -169,7 +189,18 @@ export const identityPoolsApi = {
         )
       : apiClient.patch(
           `/identity-pools/${encodeURIComponent(pool)}/profiles/${encodeURIComponent(profile)}`,
-          patch
+        patch
+      ),
+  patchAccountProfile: (pool: string, account: string, profileId: string, scope?: IdentityPoolsApiScope) =>
+    scope
+      ? apiClient.patch(
+          `/identity-pools/${encodeURIComponent(pool)}/accounts/${encodeURIComponent(account)}`,
+          { profile_id: profileId },
+          createScopedApiRequestConfig(scope)
+        )
+      : apiClient.patch(
+          `/identity-pools/${encodeURIComponent(pool)}/accounts/${encodeURIComponent(account)}`,
+          { profile_id: profileId }
         ),
   stats: async (scope?: IdentityPoolsApiScope): Promise<CacheAffinityStats | null> => {
     const response = await (scope
