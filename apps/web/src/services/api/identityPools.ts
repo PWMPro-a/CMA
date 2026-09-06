@@ -7,6 +7,7 @@ export type IdentityProfile = {
   enabled: boolean;
   platform?: string;
   architecture?: string;
+  os_version?: string;
   user_agent?: string;
   originator?: string;
   terminal?: string;
@@ -22,6 +23,10 @@ export type IdentityProfile = {
   capture_method?: string;
   evidence_hash?: string;
   observed_at?: string;
+  observed_header_names?: string[];
+  observed_body_keys?: string[];
+  observed_turn_metadata_keys?: string[];
+  transport?: string;
   account_count?: number;
   session_count?: number;
 };

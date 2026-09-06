@@ -588,11 +588,14 @@ function IdentityPoolsConnection({
                     </span>
                   </div>
                   <p>
-                    {[environment.version, environment.platform, environment.architecture, environment.terminal, environment.client_mode, environment.source, environment.evidence_status]
+                    {[environment.version, environment.platform, environment.architecture, environment.os_version, environment.terminal, environment.client_mode, environment.transport, environment.source, environment.evidence_status]
                       .filter(Boolean)
                       .join(' · ') || t('identity_pools.environment_unknown')}
                   </p>
                   <small>{environment.user_agent || t('identity_pools.user_agent_unknown')}</small>
+                  {environment.observed && (
+                    <small>{`Observed shape: ${environment.observed_header_names?.length ?? 0} headers · ${environment.observed_body_keys?.length ?? 0} body keys · ${environment.observed_turn_metadata_keys?.length ?? 0} turn metadata keys`}</small>
+                  )}
                 </div>
                 <div className={styles.environmentCounts}>
                   <strong>{environment.accountCount}</strong>
@@ -684,7 +687,7 @@ function IdentityPoolsConnection({
                           {result?.valid && result.exact_match ? 'exact wire match' : 'review required'}
                         </span>
                       </div>
-                      <p>{[profile?.version, profile?.platform, profile?.architecture, profile?.client_mode, profile?.source, profile?.evidence_status].filter(Boolean).join(' · ') || '—'}</p>
+                      <p>{[profile?.version, profile?.platform, profile?.architecture, profile?.os_version, profile?.client_mode, profile?.transport, profile?.source, profile?.evidence_status].filter(Boolean).join(' · ') || '—'}</p>
                       <small>{timestamp || 'observed time unavailable'}</small>
                     </div>
                     <div className={styles.evidenceMeta}>
