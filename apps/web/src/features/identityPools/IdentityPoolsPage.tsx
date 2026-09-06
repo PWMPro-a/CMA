@@ -17,6 +17,7 @@ import {
   identityPoolsApi,
   type IdentityAccount,
   type IdentityCatalogValidation,
+  type IdentityEvidenceEntry,
   type IdentityPool,
   type IdentityProfile,
   type IdentitySession,
@@ -74,6 +75,7 @@ function IdentityPoolsConnection({
   const [sessionError, setSessionError] = useState('');
   const [catalog, setCatalog] = useState<IdentityProfile[]>([]);
   const [catalogValidation, setCatalogValidation] = useState<IdentityCatalogValidation | null>(null);
+  const [evidence, setEvidence] = useState<IdentityEvidenceEntry[]>([]);
   const [validation, setValidation] = useState<{ total?: number; valid?: number; invalid?: number; exact_match?: number; dynamic_fields_valid?: number; proxy_exposure?: number; by_mode?: Record<string, number>; by_profile?: Record<string, number>; by_issue?: Record<string, number>; records?: Array<{ id: number; score: number; valid: boolean; exact_match?: boolean; dynamic_fields_valid?: boolean; proxy_exposure?: boolean; issue_codes?: string[]; mode: string; profile_id?: string; version?: string; platform?: string; architecture?: string; evidence_status?: string; request_hash?: string; header_names?: string[]; body_keys?: string[] }> }>({});
   const [copiedIdentity, setCopiedIdentity] = useState('');
   const generationRef = useRef(0);
@@ -137,6 +139,7 @@ function IdentityPoolsConnection({
     setSelectedAccount(null);
     setCatalog([]);
     setCatalogValidation(null);
+    setEvidence([]);
     setValidation({});
     setLoadError('');
     try {
@@ -152,12 +155,17 @@ function IdentityPoolsConnection({
         typeof identityPoolsApi.catalogValidation === 'function'
           ? identityPoolsApi.catalogValidation(scope)
           : Promise.resolve(null);
-      const [runtime, response, catalogResponse, validationResponse, catalogValidationResponse] = await Promise.all([
+      const evidencePromise =
+        typeof identityPoolsApi.evidence === 'function'
+          ? identityPoolsApi.evidence(30, scope).catch(() => ({ entries: [] }))
+          : Promise.resolve({ entries: [] as IdentityEvidenceEntry[] });
+      const [runtime, response, catalogResponse, validationResponse, catalogValidationResponse, evidenceResponse] = await Promise.all([
         identityPoolsApi.get(scope),
         identityPoolsApi.accounts(POOL_ID, scope),
         catalogPromise,
         validationPromise,
         catalogValidationPromise,
+        evidencePromise,
       ]);
       if (!isCurrent(generation)) return;
       const nextPool = runtime.pools?.find((item) => item.id === POOL_ID) ?? null;
@@ -177,6 +185,7 @@ function IdentityPoolsConnection({
       setCatalog(catalogResponse.items ?? []);
       setCatalogValidation(catalogValidationResponse);
       setValidation(validationResponse);
+      setEvidence(evidenceResponse.entries ?? []);
     } catch (error) {
       if (!isCurrent(generation)) return;
       const message =
@@ -381,6 +390,7 @@ function IdentityPoolsConnection({
         <span>{t('identity_pools.environments_total', { count: environments.length })}</span>
         <span>{`Catalog ${catalog.length} · request-observed ${catalogObserved} · artifacts ${catalogArtifacts} · evidence-ready ${catalogEligible} · active ${catalogRoutable}`}</span>
         <span>{`Catalog structure ${catalogValidation?.valid ? 'valid' : 'needs attention'} · request evidence ${catalogValidation ? `${Math.round(catalogValidation.evidence_coverage * 100)}%` : '—'} · latest ${(catalogValidation?.latest_versions ?? []).slice(0, 5).join(', ') || '—'}`}</span>
+        <span>{`Wire evidence ${evidence.length} recent · observed versions ${Array.from(new Set(evidence.map((item) => item.profile?.version).filter(Boolean))).slice(0, 5).join(', ') || '—'}`}</span>
         <span>{`Validation ${validation.valid ?? 0}/${validation.total ?? 0}`}</span>
       </section>
 
@@ -659,6 +669,40 @@ function IdentityPoolsConnection({
             </div>
             <span className={styles.resultCount}>{`${validation.valid ?? 0}/${validation.total ?? 0} valid · ${validation.exact_match ?? 0} exact`}</span>
           </div>
+          {evidence.length > 0 && (
+            <div className={styles.evidenceList} aria-label="Recent wire evidence">
+              {evidence.slice(0, 8).map((item, index) => {
+                const profile = item.profile;
+                const result = item.validation;
+                const timestamp = profile?.observed_at || item.captured_at || item.at || '';
+                return (
+                  <article className={styles.evidenceRow} key={`${item.evidence_hash ?? 'evidence'}-${index}`}>
+                    <div className={styles.evidenceMain}>
+                      <div className={styles.environmentTitleLine}>
+                        <strong>{profile?.id || result?.profile_id || 'Observed request'}</strong>
+                        <span className={result?.valid && result.exact_match ? styles.accountStatusActive : styles.accountStatusDisabled}>
+                          {result?.valid && result.exact_match ? 'exact wire match' : 'review required'}
+                        </span>
+                      </div>
+                      <p>{[profile?.version, profile?.platform, profile?.architecture, profile?.client_mode, profile?.source, profile?.evidence_status].filter(Boolean).join(' · ') || '—'}</p>
+                      <small>{timestamp || 'observed time unavailable'}</small>
+                    </div>
+                    <div className={styles.evidenceMeta}>
+                      <strong>{result?.score ?? '—'}</strong>
+                      <span>score</span>
+                      <strong>{result?.proxy_exposure ? 'yes' : 'no'}</strong>
+                      <span>proxy exposure</span>
+                    </div>
+                    <div className={styles.evidenceShape}>
+                      <span>headers {item.header_names?.length ?? 0}</span>
+                      <span>body keys {item.body_keys?.length ?? 0}</span>
+                      <code title={item.evidence_hash}>{item.evidence_hash ? `${item.evidence_hash.slice(0, 20)}…` : 'hash unavailable'}</code>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
           <div className={styles.tableWrap}>
             <table className={styles.table}>
               <thead><tr><th>ID</th><th>Mode</th><th>Environment</th><th>Evidence</th><th>Score</th><th>Status</th><th>Issues</th></tr></thead>

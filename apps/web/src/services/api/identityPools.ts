@@ -65,6 +65,24 @@ export type IdentityCatalogValidation = {
   architecture_counts?: Record<string, number>;
   issues?: Array<{ profile_id: string; code: string; field: string; message: string }>;
 };
+export type IdentityEvidenceEntry = {
+  profile?: IdentityProfile;
+  validation?: {
+    valid?: boolean;
+    exact_match?: boolean;
+    score?: number;
+    profile_id?: string;
+    proxy_exposure?: boolean;
+    dynamic_fields_valid?: boolean;
+    issue_codes?: string[];
+  };
+  evidence_hash?: string;
+  header_names?: string[];
+  body_keys?: string[];
+  turn_metadata_keys?: string[];
+  captured_at?: string;
+  at?: string;
+};
 export type IdentityPool = {
   id: string;
   provider: string;
@@ -273,6 +291,15 @@ export const identityPoolsApi = {
           createScopedApiRequestConfig(scope)
         )
       : apiClient.get<IdentityCatalogValidation>('/identity-pools/catalog/validation'),
+  evidence: (limit = 30, scope?: IdentityPoolsApiScope) =>
+    scope
+      ? apiClient.get<{ count?: number; entries?: IdentityEvidenceEntry[] }>(
+          `/identity-pools/evidence?limit=${encodeURIComponent(String(limit))}`,
+          createScopedApiRequestConfig(scope)
+        )
+      : apiClient.get<{ count?: number; entries?: IdentityEvidenceEntry[] }>(
+          `/identity-pools/evidence?limit=${encodeURIComponent(String(limit))}`
+        ),
   validation: (limit = 100, scope?: IdentityPoolsApiScope) =>
     scope
       ? apiClient.get<{ total?: number; valid?: number; invalid?: number; exact_match?: number; dynamic_fields_valid?: number; proxy_exposure?: number; by_mode?: Record<string, number>; by_profile?: Record<string, number>; by_issue?: Record<string, number>; records?: IdentityValidationRecord[] }>(
