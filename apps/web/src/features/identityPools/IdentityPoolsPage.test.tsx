@@ -30,7 +30,7 @@ vi.mock('@/components/ui/icons', () => ({ IconChevronRight: () => <span>→</spa
 
 import { IdentityPoolsPage } from './IdentityPoolsPage';
 
-const runtime = { enabled: true, pools: [{ id: 'codex', provider: 'codex', protocol: 'responses', profiles: [{ id: 'cli', version: '0.147.0', platform: 'macOS', architecture: 'arm64', user_agent: 'codex-tui', originator: 'codex-tui', enabled: true, observed: true }] }] };
+const runtime = { enabled: true, pools: [{ id: 'codex', provider: 'codex', protocol: 'responses', profiles: [{ id: 'cli', version: '0.153.4', platform: 'darwin', architecture: 'arm64', user_agent: 'codex-tui', originator: 'codex-tui', enabled: true, observed: true, eligible: true, evidence_status: 'request_observed' }] }] };
 const accounts = { accounts: [
   { pool_id: 'codex', account_id: 'A', email: 'alice@example.com', auth_file: 'alice.json', auth_index: 'auth-a', installation_id: 'install-a', fingerprint: 'finger-a', profile_id: 'cli', identity_version: 2, session_count: 2, runtime_status: 'active' },
   { pool_id: 'codex', account_id: 'B', account_label: 'Bob', auth_file: 'bob.json', installation_id: 'install-b', fingerprint: 'finger-b', profile_id: 'cli', identity_version: 1, session_count: 0, runtime_status: 'disabled', disabled: true },
@@ -49,7 +49,7 @@ describe('IdentityPoolsPage operations workspace', () => {
     expect(text).toContain('install-a');
     expect(text).toContain('cli');
     expect(text).toContain('2');
-    expect(text).toContain('macOS');
+    expect(text).toContain('darwin');
     expect(mocks.get).toHaveBeenCalledTimes(1);
     expect(mocks.accounts).toHaveBeenCalledTimes(1);
   });
@@ -75,9 +75,9 @@ describe('IdentityPoolsPage operations workspace', () => {
   it('renders environment templates separately and keeps profile toggle wired', async () => {
     await mount();
     const tabs = view!.root.findAllByType('button').filter((node) => node.props.role === 'tab');
-    expect(tabs).toHaveLength(2);
+    expect(tabs).toHaveLength(3);
     await act(async () => { tabs[1].props.onClick({ preventDefault() {} }); await Promise.resolve(); });
-    expect(JSON.stringify(view?.toJSON())).toContain('macOS');
+    expect(JSON.stringify(view?.toJSON())).toContain('darwin');
     const toggle = view!.root.findAllByType('button').find((node) => node.props.children === 'Disable');
     expect(toggle).toBeDefined();
     await act(async () => { toggle!.props.onClick(); await Promise.resolve(); });

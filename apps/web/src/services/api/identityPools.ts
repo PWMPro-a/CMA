@@ -9,8 +9,37 @@ export type IdentityProfile = {
   architecture?: string;
   user_agent?: string;
   originator?: string;
+  terminal?: string;
+  client_mode?: string;
+  protocol?: string;
+  source?: string;
+  evidence_status?: string;
+  eligible?: boolean;
+  routable?: boolean;
+  artifact_package?: string;
+  artifact_ref?: string;
+  artifact_integrity?: string;
+  capture_method?: string;
+  evidence_hash?: string;
+  observed_at?: string;
   account_count?: number;
   session_count?: number;
+};
+export type IdentityCatalogEntry = IdentityProfile & { id: string; version: string; observed: boolean; enabled: boolean };
+export type IdentityValidationRecord = {
+  id: number;
+  at: string;
+  method: string;
+  path: string;
+  mode: string;
+  profile_id?: string;
+  client_mode?: string;
+  valid: boolean;
+  exact_match: boolean;
+  score: number;
+  proxy_exposure: boolean;
+  issue_codes?: string[];
+  issues?: Array<{ code: string; severity: string; field: string; expected?: string; actual?: string; message: string }>;
 };
 export type IdentityPool = {
   id: string;
@@ -77,8 +106,6 @@ export const normalizeIdentityProfile = (value: Partial<IdentityProfile>): Ident
   enabled: Boolean(value.enabled),
   platform: String(value.platform ?? '').trim(),
   architecture: String(value.architecture ?? '').trim(),
-  user_agent: String(value.user_agent ?? '').trim(),
-  originator: String(value.originator ?? '').trim(),
 });
 
 // Missing measurements stay null; coercion must not turn blanks, booleans or
@@ -211,4 +238,17 @@ export const identityPoolsApi = {
       : apiClient.get<{ stats?: unknown; window_5m?: unknown }>('/codex/cache-affinity/stats'));
     return normalizeCacheAffinityStats(response?.window_5m ?? response?.stats);
   },
+  catalog: (scope?: IdentityPoolsApiScope) =>
+    scope
+      ? apiClient.get<{ count?: number; items?: IdentityCatalogEntry[] }>('/identity-pools/catalog', createScopedApiRequestConfig(scope))
+      : apiClient.get<{ count?: number; items?: IdentityCatalogEntry[] }>('/identity-pools/catalog'),
+  validation: (limit = 100, scope?: IdentityPoolsApiScope) =>
+    scope
+      ? apiClient.get<{ total?: number; valid?: number; invalid?: number; proxy_exposure?: number; records?: IdentityValidationRecord[] }>(
+          `/identity-pools/validation?limit=${encodeURIComponent(String(limit))}`,
+          createScopedApiRequestConfig(scope)
+        )
+      : apiClient.get<{ total?: number; valid?: number; invalid?: number; proxy_exposure?: number; records?: IdentityValidationRecord[] }>(
+          `/identity-pools/validation?limit=${encodeURIComponent(String(limit))}`
+        ),
 };

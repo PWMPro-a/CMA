@@ -26,7 +26,7 @@ import { sha256Hex } from '@/utils/apiKeyHash';
 import styles from './IdentityPoolsPage.module.scss';
 
 const POOL_ID = 'codex';
-type ViewTab = 'accounts' | 'environments';
+type ViewTab = 'accounts' | 'environments' | 'validation';
 
 type EnvironmentRow = IdentityProfile & {
   accounts: IdentityAccount[];
@@ -71,6 +71,8 @@ function IdentityPoolsConnection({
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [sessionError, setSessionError] = useState('');
+  const [catalog, setCatalog] = useState<IdentityProfile[]>([]);
+  const [validation, setValidation] = useState<{ total?: number; valid?: number; invalid?: number; proxy_exposure?: number; records?: Array<{ id: number; score: number; valid: boolean; issue_codes?: string[]; mode: string; profile_id?: string }> }>({});
   const [copiedIdentity, setCopiedIdentity] = useState('');
   const generationRef = useRef(0);
   const sessionGenerationRef = useRef(0);
@@ -131,11 +133,23 @@ function IdentityPoolsConnection({
     setAccounts([]);
     setSessions([]);
     setSelectedAccount(null);
+    setCatalog([]);
+    setValidation({});
     setLoadError('');
     try {
-      const [runtime, response] = await Promise.all([
+      const catalogPromise =
+        typeof identityPoolsApi.catalog === 'function'
+          ? identityPoolsApi.catalog(scope)
+          : Promise.resolve({ items: [] });
+      const validationPromise =
+        typeof identityPoolsApi.validation === 'function'
+          ? identityPoolsApi.validation(30, scope)
+          : Promise.resolve({});
+      const [runtime, response, catalogResponse, validationResponse] = await Promise.all([
         identityPoolsApi.get(scope),
         identityPoolsApi.accounts(POOL_ID, scope),
+        catalogPromise,
+        validationPromise,
       ]);
       if (!isCurrent(generation)) return;
       const nextPool = runtime.pools?.find((item) => item.id === POOL_ID) ?? null;
@@ -152,6 +166,8 @@ function IdentityPoolsConnection({
       setPool(nextPool);
       setRuntimeEnabled(runtime.enabled);
       setAccounts(nextAccounts);
+      setCatalog(catalogResponse.items ?? []);
+      setValidation(validationResponse);
     } catch (error) {
       if (!isCurrent(generation)) return;
       const message =
@@ -263,6 +279,11 @@ function IdentityPoolsConnection({
     });
   }, [accounts, pool]);
 
+  const catalogObserved = catalog.filter((item) => item.evidence_status === 'request_observed' || item.source === 'real_request').length;
+  const catalogArtifacts = catalog.filter((item) => item.evidence_status === 'artifact_verified' || item.source === 'npm_release').length;
+  const catalogEligible = catalog.filter((item) => item.eligible).length;
+	const catalogRoutable = catalog.filter((item) => item.routable).length;
+
   const filteredAccounts = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return accounts.filter((account) => {
@@ -306,6 +327,7 @@ function IdentityPoolsConnection({
   const tabs: ReadonlyArray<SegmentedTabItem<ViewTab>> = [
     { id: 'accounts', label: t('identity_pools.account_identities') },
     { id: 'environments', label: t('identity_pools.environment_templates') },
+    { id: 'validation', label: 'Request validation' },
   ];
 
   if (loading) {
@@ -348,6 +370,8 @@ function IdentityPoolsConnection({
         <span>{t('identity_pools.accounts_bound', { count: boundAccounts })}</span>
         <span>{t('identity_pools.sessions_total', { count: totalSessions })}</span>
         <span>{t('identity_pools.environments_total', { count: environments.length })}</span>
+		<span>{`Catalog ${catalog.length} · request-observed ${catalogObserved} · artifacts ${catalogArtifacts} · evidence-ready ${catalogEligible} · active ${catalogRoutable}`}</span>
+        <span>{`Validation ${validation.valid ?? 0}/${validation.total ?? 0}`}</span>
       </section>
 
       <SegmentedTabs items={tabs} activeTab={tab} onChange={setTab} ariaLabel={t('identity_pools.view')} />
@@ -503,7 +527,7 @@ function IdentityPoolsConnection({
             {filteredAccounts.length === 0 && <div className={styles.empty}>{t('identity_pools.no_accounts')}</div>}
           </div>
         </section>
-      ) : (
+      ) : tab === 'environments' ? (
         <section className={styles.workspace}>
           <div className={styles.sectionHeading}>
             <div>
@@ -517,12 +541,18 @@ function IdentityPoolsConnection({
                 <div className={styles.environmentMain}>
                   <div className={styles.environmentTitleLine}>
                     <strong>{environment.id}</strong>
-                    <span className={environment.enabled ? styles.accountStatusActive : styles.accountStatusDisabled}>
-                      {environment.enabled ? t('identity_pools.enabled') : t('identity_pools.disabled')}
+                    <span className={environment.routable ? styles.accountStatusActive : styles.accountStatusDisabled}>
+                      {environment.routable
+                        ? t('identity_pools.enabled')
+                        : environment.evidence_status === 'artifact_verified'
+                          ? 'Artifact verified · request capture pending'
+                          : environment.observed
+                            ? t('identity_pools.disabled')
+                            : 'Pending capture'}
                     </span>
                   </div>
                   <p>
-                    {[environment.version, environment.platform, environment.architecture, environment.originator]
+                    {[environment.version, environment.platform, environment.architecture, environment.terminal, environment.client_mode, environment.source, environment.evidence_status]
                       .filter(Boolean)
                       .join(' · ') || t('identity_pools.environment_unknown')}
                   </p>
@@ -564,6 +594,7 @@ function IdentityPoolsConnection({
                   <Button
                     size="xs"
                     variant={environment.enabled ? 'secondary' : 'primary'}
+                    disabled={!environment.eligible}
                     onClick={() =>
                       void (async () => {
                         try {
@@ -592,6 +623,37 @@ function IdentityPoolsConnection({
             ))}
           </div>
           {environments.length === 0 && <div className={styles.empty}>{t('identity_pools.no_environments')}</div>}
+        </section>
+      ) : (
+        <section className={styles.workspace}>
+          <div className={styles.sectionHeading}>
+            <div>
+              <h2>Request validation</h2>
+              <p>Outbound summaries only; credentials and request bodies are never shown.</p>
+            </div>
+            <span className={styles.resultCount}>{validation.valid ?? 0}/{validation.total ?? 0} valid</span>
+          </div>
+          <div className={styles.tableWrap}>
+            <table className={styles.table}>
+              <thead><tr><th>ID</th><th>Mode</th><th>Profile</th><th>Score</th><th>Status</th><th>Issues</th></tr></thead>
+              <tbody>
+                {(validation.records ?? []).map((record) => (
+                  <tr key={record.id}>
+                    <td>{record.id}</td>
+                    <td>{record.mode}</td>
+                    <td>{record.profile_id || '—'}</td>
+                    <td>{record.score}</td>
+                    <td className={record.valid ? styles.accountStatusActive : styles.accountStatusDisabled}>
+                      {record.valid ? 'valid' : '异常'}
+                    </td>
+                    <td>{(record.issue_codes ?? []).join(', ') || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {(validation.records ?? []).length === 0 && <div className={styles.empty}>No validation records</div>}
+          </div>
+          <p className={styles.muted}>Proxy exposure detections: {validation.proxy_exposure ?? 0}</p>
         </section>
       )}
 
@@ -635,7 +697,7 @@ function IdentityPoolsConnection({
                   options={[
                     { value: '', label: t('identity_pools.unassigned') },
                     ...(pool?.profiles ?? [])
-                      .filter((profile) => profile.enabled && profile.observed)
+                      .filter((profile) => profile.enabled && profile.eligible)
                       .map((profile) => ({
                         value: profile.id,
                         label: `${profile.id}${profile.version ? ` · ${profile.version}` : ''}`,
