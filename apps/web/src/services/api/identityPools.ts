@@ -56,6 +56,10 @@ export type IdentityCatalogValidation = {
   observed: number;
   artifact_verified: number;
   routable: number;
+  evidence_complete: boolean;
+  evidence_gap: number;
+  evidence_coverage: number;
+  routable_evidence_coverage: number;
   latest_versions?: string[];
   platform_counts?: Record<string, number>;
   architecture_counts?: Record<string, number>;

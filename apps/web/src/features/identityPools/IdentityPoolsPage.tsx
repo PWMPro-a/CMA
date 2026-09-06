@@ -380,7 +380,7 @@ function IdentityPoolsConnection({
         <span>{t('identity_pools.sessions_total', { count: totalSessions })}</span>
         <span>{t('identity_pools.environments_total', { count: environments.length })}</span>
         <span>{`Catalog ${catalog.length} · request-observed ${catalogObserved} · artifacts ${catalogArtifacts} · evidence-ready ${catalogEligible} · active ${catalogRoutable}`}</span>
-        <span>{`Catalog audit ${catalogValidation?.valid ? 'valid' : 'needs attention'} · latest ${(catalogValidation?.latest_versions ?? []).slice(0, 5).join(', ') || '—'}`}</span>
+        <span>{`Catalog structure ${catalogValidation?.valid ? 'valid' : 'needs attention'} · request evidence ${catalogValidation ? `${Math.round(catalogValidation.evidence_coverage * 100)}%` : '—'} · latest ${(catalogValidation?.latest_versions ?? []).slice(0, 5).join(', ') || '—'}`}</span>
         <span>{`Validation ${validation.valid ?? 0}/${validation.total ?? 0}`}</span>
       </section>
 
@@ -552,10 +552,12 @@ function IdentityPoolsConnection({
                   <div className={styles.environmentTitleLine}>
                     <strong>Environment catalog integrity</strong>
                     <span className={catalogValidation.valid ? styles.accountStatusActive : styles.accountStatusDisabled}>
-                      {catalogValidation.valid ? 'valid' : `${catalogValidation.issues?.length ?? 0} issues`}
+                      {catalogValidation.evidence_complete
+                        ? '100% request evidence'
+                        : `${Math.round(catalogValidation.evidence_coverage * 100)}% request evidence`}
                     </span>
                   </div>
-                  <p>{`100-entry catalog · ${catalogValidation.observed} request-observed · ${catalogValidation.artifact_verified} artifact-only · ${catalogValidation.routable} active`}</p>
+                  <p>{`100-entry catalog · ${catalogValidation.observed} request-observed · ${catalogValidation.artifact_verified} artifact-only · evidence gap ${catalogValidation.evidence_gap} · ${catalogValidation.routable} active`}</p>
                   <small>{`Latest client versions: ${(catalogValidation.latest_versions ?? []).slice(0, 8).join(', ') || '—'}`}</small>
                 </div>
               </article>
