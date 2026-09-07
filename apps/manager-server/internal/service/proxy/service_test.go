@@ -19,8 +19,10 @@ import (
 	"testing"
 	"time"
 
+	collectorpkg "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaauthfiles"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
@@ -75,6 +77,55 @@ func TestAuthFileRuntimeStatusRequestRequiresExactReadView(t *testing.T) {
 	request.Method = http.MethodPatch
 	if isAuthFileRuntimeStatusRequest(request) {
 		t.Fatal("mutation request must not use the runtime status view")
+	}
+}
+
+func TestProxyLicenseShopCallbackAcceptsLegacyAdminAliasWithoutForwardingAuth(t *testing.T) {
+	for _, path := range []string{"/license/shop/callback", "/api/admin/license/shop/callback"} {
+		t.Run(path, func(t *testing.T) {
+			observed := make(chan struct {
+				path  string
+				query string
+				auth  string
+			}, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				observed <- struct {
+					path  string
+					query string
+					auth  string
+				}{r.URL.Path, r.URL.RawQuery, r.Header.Get("Authorization")}
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				_, _ = w.Write([]byte("callback-ok"))
+			}))
+			defer upstream.Close()
+
+			cfg := config.Config{DBPath: filepath.Join(t.TempDir(), "usage.sqlite")}
+			db, err := store.Open(cfg.DBPath)
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			defer db.Close()
+			if err := db.SaveSetup(context.Background(), store.Setup{CPAUpstreamURL: upstream.URL, ManagementKey: "saved-management-key"}); err != nil {
+				t.Fatalf("save setup: %v", err)
+			}
+
+			collector := collectorpkg.NewManager(cfg, db)
+			service := New(managerconfig.New(cfg, db, collectorservice.New(collector)), db)
+			request := httptest.NewRequest(http.MethodGet, path+"?state=state-1&code=code-1", nil)
+			request.Header.Set("Authorization", "Bearer caller-key")
+			recorder := httptest.NewRecorder()
+			service.ProxyLicenseShopCallback(recorder, request, func(w http.ResponseWriter, status int, err error) {
+				http.Error(w, err.Error(), status)
+			})
+
+			if recorder.Code != http.StatusOK || recorder.Body.String() != "callback-ok" {
+				t.Fatalf("callback response status=%d body=%q", recorder.Code, recorder.Body.String())
+			}
+			got := <-observed
+			if got.path != path || got.query != "state=state-1&code=code-1" || got.auth != "" {
+				t.Fatalf("forwarded callback = %#v", got)
+			}
+		})
 	}
 }
 

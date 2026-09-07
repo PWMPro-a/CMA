@@ -283,12 +283,12 @@
   position: relative;
   z-index: 2;
   display: grid;
-  grid-template-columns: 64px 1px 54px;
+  grid-template-columns: 64px 1px 92px;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  width: 131px;
-  min-width: 131px;
+  width: 169px;
+  min-width: 169px;
   white-space: nowrap;
 
   :global(.btn) {
@@ -319,7 +319,7 @@
     132px
     176px
     minmax(168px, 1fr)
-    132px;
+    176px;
   column-gap: clamp(10px, 0.8vw, 14px);
   min-width: 0;
 }
@@ -387,15 +387,15 @@
       138px
       176px
       minmax(220px, 1.65fr)
-      176px;
+      210px;
     justify-content: space-between;
     column-gap: clamp(12px, 1vw, 16px);
   }
 
   .rowActions {
-    grid-template-columns: 98px 1px 54px;
-    width: 165px;
-    min-width: 165px;
+    grid-template-columns: 98px 1px 92px;
+    width: 203px;
+    min-width: 203px;
   }
 }
 
@@ -1251,20 +1251,54 @@
   align-items: center;
   justify-items: center;
   gap: 4px;
-  width: 54px;
+  width: 92px;
 }
 
 .accountStatusSwitch {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 54px;
+  gap: 5px;
+  width: 92px;
   height: 30px;
 
   :global(label) {
     transform: scale(0.9);
     transform-origin: center;
   }
+}
+
+.accountStatusSwitchWithThreshold {
+  padding: 2px 4px 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--accounts-warning) 30%, var(--accounts-border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accounts-warning) 7%, var(--bg-primary));
+
+  :global(label) {
+    transform: scale(0.82);
+  }
+}
+
+.quotaThresholdTogglePill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  height: 22px;
+  padding: 0 5px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accounts-warning) 14%, transparent);
+  color: color-mix(in srgb, var(--accounts-warning) 86%, var(--accounts-text));
+  font-size: 11px;
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.quotaThresholdTogglePillDisabled {
+  background: var(--accounts-muted-surface);
+  color: var(--accounts-muted);
+  opacity: 0.72;
 }
 
 .accountIconButton:global(.btn.btn-sm),
@@ -1316,8 +1350,8 @@
 
 .rowDetailButton:global(.btn.btn-xs) {
   flex: 0 0 auto;
-  width: 54px;
-  min-width: 54px;
+  width: 92px;
+  min-width: 92px;
   padding: 0 8px;
   background: color-mix(in srgb, var(--primary-color) 7%, var(--bg-primary));
   color: var(--primary-color);
@@ -5804,7 +5838,7 @@
 
   .rowActions {
     justify-content: start;
-    width: 131px;
+    width: 169px;
     padding-top: 2px;
     border-top: 0;
   }

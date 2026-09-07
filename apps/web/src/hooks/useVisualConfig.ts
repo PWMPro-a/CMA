@@ -1705,6 +1705,12 @@ export function useVisualConfig() {
             values.transientErrorCooldownSeconds
           );
         }
+        // Temporary network handling is code-owned. Drop the legacy YAML
+        // block when writing a visual configuration so old overrides do not
+        // linger in the source editor.
+        if (docHas(doc, ['error-handling'])) {
+          doc.deleteIn(['error-handling']);
+        }
         if (isDirty('disableClaudeCloakMode')) {
           setBooleanInDoc(doc, ['disable-claude-cloak-mode'], values.disableClaudeCloakMode);
         }

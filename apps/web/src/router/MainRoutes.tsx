@@ -28,9 +28,11 @@ import { ModelPricesPage } from '@/pages/ModelPricesPage';
 import { ContainerOpsPage } from '@/pages/ContainerOpsPage';
 import { ConfigPage } from '@/pages/ConfigPage';
 import { LogsPage } from '@/pages/LogsPage';
+import { LicensePage } from '@/pages/LicensePage';
 import { PluginResourcePage } from '@/pages/PluginResourcePage';
 import { PluginsPage } from '@/pages/PluginsPage';
 import { SystemPage } from '@/pages/SystemPage';
+import { IdentityPoolsPage } from '@/pages/IdentityPoolsPage';
 import { SupplyPage } from '@/pages/SupplyPage';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
@@ -227,6 +229,7 @@ const mainRoutes: RouteObject[] = [
       </FeatureGate>
     ),
   },
+  { path: '/identity-pools', element: <IdentityPoolsPage /> },
   {
     path: '/monitoring/account-actions',
     element: (
@@ -289,6 +292,7 @@ const mainRoutes: RouteObject[] = [
     ),
   },
   { path: '/system', element: <SystemPage /> },
+  { path: '/license', element: <LicensePage /> },
   { path: '*', element: <Navigate to="/" replace /> },
 ];
 

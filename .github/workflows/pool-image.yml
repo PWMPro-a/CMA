@@ -1,0 +1,277 @@
+name: CPA Pool Image
+
+on:
+  push:
+    tags:
+      - 'cpamp-pool-*'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Published image tag, for example v1.12.8-cpa.1'
+        required: true
+        type: string
+      source_ref:
+        description: 'Immutable source tag or 40-character commit SHA to build'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: cpa-pool-image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve_context:
+    name: Resolve pool image context
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.context.outputs.image_tag }}
+      source_ref: ${{ steps.context.outputs.source_ref }}
+
+    steps:
+      - name: Resolve tag and source ref
+        id: context
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF_NAME: ${{ github.ref_name }}
+          EVENT_SHA: ${{ github.sha }}
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          set -euo pipefail
+
+          if [ "${EVENT_NAME}" = "push" ]; then
+            case "${EVENT_REF_NAME}" in
+              cpamp-pool-*)
+                image_tag="${EVENT_REF_NAME#cpamp-pool-}"
+                source_ref="${EVENT_REF_NAME}"
+                ;;
+              *)
+                echo "Pool image workflow must run from a cpamp-pool-* tag." >&2
+                exit 1
+                ;;
+            esac
+          else
+            image_tag="${INPUT_IMAGE_TAG}"
+            source_ref="${INPUT_SOURCE_REF}"
+          fi
+
+          if ! [[ "${image_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Image tag must look like v1.12.8-cpa.1; received ${image_tag}." >&2
+            exit 1
+          fi
+          source_ref_check="${source_ref#refs/tags/}"
+          if [ -z "${source_ref}" ] || [[ "${source_ref}" == *$'\n'* || "${source_ref}" == *$'\r'* ]]; then
+            echo "An immutable source tag or 40-character commit SHA is required." >&2
+            exit 1
+          fi
+          if ! [[ "${source_ref_check}" =~ ^[0-9a-fA-F]{40}$ ]] &&
+             ! [[ "${source_ref_check}" =~ ^(cpamp-pool-)?v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "source_ref must be an immutable version tag or a 40-character commit SHA; received ${source_ref}." >&2
+            exit 1
+          fi
+
+          echo "image_tag=${image_tag}" >> "${GITHUB_OUTPUT}"
+          echo "source_ref=${source_ref}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### CPA Pool image context"
+            echo "- Source ref: \`${source_ref}\`"
+            echo "- Image tag: \`${image_tag}\`"
+            echo "- Trigger SHA: \`${EVENT_SHA}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  build_test_publish:
+    name: Test and publish CPA pool image
+    needs: resolve_context
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/cpa-manager-plus
+      IMAGE_TAG: ${{ needs.resolve_context.outputs.image_tag }}
+      SOURCE_REF: ${{ needs.resolve_context.outputs.source_ref }}
+
+    steps:
+      - name: Checkout exact source ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve_context.outputs.source_ref }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Record source commit
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          echo "source_sha=${source_sha}" >> "${GITHUB_OUTPUT}"
+          echo "Building source commit ${source_sha} from ${SOURCE_REF}."
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.24.x'
+          cache-dependency-path: apps/manager-server/go.sum
+
+      - name: Install web dependencies
+        run: npm ci
+
+      - name: Run web tests
+        run: npm run test -- --run
+
+      - name: Build web bundle
+        run: npm run build
+        env:
+          VERSION: ${{ env.IMAGE_TAG }}
+
+      - name: Check demo isolation
+        run: npm run check:demo-isolation
+
+      - name: Run Manager and Agent Go tests
+        working-directory: apps/manager-server
+        run: go test ./...
+
+      - name: Check Dockerfile bundle contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Eq 'COPY --from=service-build /out/cpa-manager-plus /usr/local/bin/cpa-manager-plus' Dockerfile.manager-server
+          grep -Eq 'COPY --from=service-build /out/cpamp-agent /usr/local/bin/cpamp-agent' Dockerfile.manager-server
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE_REPOSITORY }}
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=${{ env.IMAGE_TAG }}
+          labels: |
+            org.opencontainers.image.title=CPA Manager Plus pool bundle
+            org.opencontainers.image.description=CPA Manager Plus Manager Server and cpamp-agent pool image
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}#readme
+            org.opencontainers.image.revision=${{ steps.source.outputs.source_sha }}
+
+      - name: Set image build timestamp
+        id: build_meta
+        shell: bash
+        run: echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and publish multi-arch image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile.manager-server
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ env.IMAGE_TAG }}
+            COMMIT=${{ steps.source.outputs.source_sha }}
+            BUILD_DATE=${{ steps.build_meta.outputs.build_date }}
+
+      - name: Verify published image contains Manager and Agent
+        shell: bash
+        env:
+          PUBLISHED_IMAGE: ${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}
+        run: |
+          set -euo pipefail
+          for platform in linux/amd64 linux/arm64; do
+            echo "Checking ${PUBLISHED_IMAGE} (${platform})"
+            docker run --rm --pull=always --platform="${platform}" --entrypoint /bin/sh "${PUBLISHED_IMAGE}" -ceu \
+              'test -x /usr/local/bin/cpa-manager-plus && test -x /usr/local/bin/cpamp-agent'
+          done
+
+      - name: Verify GHCR image is publicly pullable
+        shell: bash
+        env:
+          GHCR_REPOSITORY: ${{ github.repository_owner }}/cpa-manager-plus
+        run: |
+          set -euo pipefail
+          token_json="$(curl --fail-with-body --silent --show-error --location \
+            --get 'https://ghcr.io/token' \
+            --data-urlencode 'service=ghcr.io' \
+            --data-urlencode "scope=repository:${GHCR_REPOSITORY}:pull")"
+          token="$(printf '%s' "${token_json}" | python3 -c 'import json,sys; value=json.load(sys.stdin).get("token", ""); print(value)')"
+          if [ -z "${token}" ]; then
+            echo "GHCR did not issue an anonymous pull token for ${GHCR_REPOSITORY}; set the package visibility to public and rerun this tag." >&2
+            exit 1
+          fi
+
+          manifest_file="$(mktemp)"
+          headers_file="$(mktemp)"
+          trap 'rm -f "${manifest_file}" "${headers_file}"' EXIT
+          http_status="$(curl --silent --show-error --location \
+            --output "${manifest_file}" \
+            --dump-header "${headers_file}" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer ${token}" \
+            --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+            "https://ghcr.io/v2/${GHCR_REPOSITORY}/manifests/${IMAGE_TAG}")"
+          if [ "${http_status}" != "200" ]; then
+            echo "Anonymous GHCR manifest check returned HTTP ${http_status}; package visibility or tag is not ready." >&2
+            cat "${manifest_file}" >&2
+            exit 1
+          fi
+
+          python3 - "${manifest_file}" "${GHCR_REPOSITORY}" "${IMAGE_TAG}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          manifest = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+          platforms = {
+              (entry.get('platform', {}).get('os'), entry.get('platform', {}).get('architecture'))
+              for entry in manifest.get('manifests', [])
+          }
+          required = {('linux', 'amd64'), ('linux', 'arm64')}
+          missing = sorted(required - platforms)
+          if missing:
+              raise SystemExit(
+                  f"Anonymous GHCR manifest for {sys.argv[2]}:{sys.argv[3]} is missing platforms: {missing}"
+              )
+          print(f"Anonymous GHCR pull verified for {sys.argv[2]}:{sys.argv[3]} ({len(platforms)} platforms)")
+          PY
+
+          digest="$(awk 'BEGIN{IGNORECASE=1} /^docker-content-digest:/ {gsub("\r", "", $2); print $2; exit}' "${headers_file}")"
+          if [ -z "${digest}" ]; then
+            echo "Anonymous GHCR manifest response did not include Docker-Content-Digest." >&2
+            exit 1
+          fi
+          {
+            echo "### CPA Pool image published"
+            echo "- Image: \`${IMAGE_REPOSITORY}:${IMAGE_TAG}\`"
+            echo "- Source ref: \`${SOURCE_REF}\`"
+            echo "- Source commit: \`${{ steps.source.outputs.source_sha }}\`"
+            echo "- Platforms: linux/amd64, linux/arm64"
+            echo "- Public digest: \`${digest}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

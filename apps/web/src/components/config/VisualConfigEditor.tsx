@@ -225,10 +225,6 @@ export function VisualConfigEditor({
     t,
     validationErrors?.redisUsageQueueRetentionSeconds
   );
-  const transientErrorCooldownError = getValidationMessage(
-    t,
-    validationErrors?.transientErrorCooldownSeconds
-  );
   const requestRetryError = getValidationMessage(t, validationErrors?.requestRetry);
   const maxRetryCredentialsError = getValidationMessage(t, validationErrors?.maxRetryCredentials);
   const maxRetryIntervalError = getValidationMessage(t, validationErrors?.maxRetryInterval);
@@ -387,7 +383,6 @@ export function VisualConfigEditor({
           'requestRetry',
           'maxRetryCredentials',
           'maxRetryInterval',
-          'transientErrorCooldownSeconds',
           'authAutoRefreshWorkers',
         ]),
       },
@@ -1077,20 +1072,9 @@ export function VisualConfigEditor({
                   )}
                   error={authAutoRefreshWorkersError}
                 />
-                <Input
-                  label={t(
-                    'config_management.visual.sections.network.transient_error_cooldown_seconds'
-                  )}
-                  type="number"
-                  placeholder="0"
-                  value={values.transientErrorCooldownSeconds}
-                  onChange={(e) => onChange({ transientErrorCooldownSeconds: e.target.value })}
-                  disabled={disabled}
-                  hint={t(
-                    'config_management.visual.sections.network.transient_error_cooldown_seconds_hint'
-                  )}
-                  error={transientErrorCooldownError}
-                />
+              </SectionGrid>
+
+              <SectionGrid>
                 <FieldShell
                   label={t('config_management.visual.sections.network.disable_image_generation')}
                   labelId={disableImageGenerationLabelId}

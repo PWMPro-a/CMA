@@ -2,9 +2,17 @@
 set -euo pipefail
 
 repo="seakee/CPA-Manager-Plus"
-default_cpamp_image="seakee/cpa-manager-plus:latest"
-default_cpa_image="eceasy/cli-proxy-api:latest"
+default_cpamp_image="ghcr.io/abc124774961/cpa-manager-plus:v1.12.8-cpa.1"
+# New CPA+CPAMP installs use the pinned CPA build that contains the
+# storefront-license runtime. Existing installs keep their CPA_IMAGE value
+# when the installer is run in upgrade/repair mode; an alternate image is
+# only selected when the operator explicitly supplies CPAMP_CPA_IMAGE.
+default_cpa_image="ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.3"
 default_install_dir="${HOME:-.}/cpa-manager-plus"
+release_license_public_key="kJhDRBpfneFdURvPXwiGW3XAmPrd2HVVORfHzP-eYTg"
+release_plugin_public_key="OHRHVVIlFC34K-5AQUkOPcZLeiSpeX_n_VPbrH3agXQ"
+release_license_provider="shop666"
+release_license_api_base_url="https://p.666ttt.net/api/storefront"
 
 dry_run="${CPAMP_DRY_RUN:-0}"
 non_interactive="${CPAMP_NON_INTERACTIVE:-0}"
@@ -30,6 +38,28 @@ cpa_connection_mode=""
 cpa_url=""
 cpa_management_key=""
 cpamp_agent_token=""
+cpa_license_public_key="${CPA_LICENSE_PUBLIC_KEY:-${CPAMP_CPA_LICENSE_PUBLIC_KEY:-$release_license_public_key}}"
+cpa_license_plugin_public_key="${CPA_LICENSE_PLUGIN_PUBLIC_KEY:-${CPAMP_CPA_LICENSE_PLUGIN_PUBLIC_KEY:-$release_plugin_public_key}}"
+cpa_license_client_id="${CPA_LICENSE_CLIENT_ID:-${CPAMP_CPA_LICENSE_CLIENT_ID:-}}"
+cpa_license_client_secret="${CPA_LICENSE_CLIENT_SECRET:-${CPAMP_CPA_LICENSE_CLIENT_SECRET:-}}"
+cpa_license_client_secret_source_file="${CPA_LICENSE_CLIENT_SECRET_FILE:-${CPAMP_CPA_LICENSE_CLIENT_SECRET_FILE:-}}"
+cpa_license_client_secret_required="${CPA_LICENSE_REQUIRE_CLIENT_SECRET:-${CPA_LICENSE_CLIENT_SECRET_REQUIRE:-${CPAMP_CPA_LICENSE_REQUIRE_CLIENT_SECRET:-false}}}"
+cpa_license_secret_file=""
+cpa_license_provider="${CPA_LICENSE_PROVIDER:-${CPAMP_CPA_LICENSE_PROVIDER:-shop666}}"
+cpa_license_product_code="${CPA_LICENSE_PRODUCT_CODE:-${CPAMP_CPA_LICENSE_PRODUCT_CODE:-CPA}}"
+cpa_license_api_base_url="${CPA_LICENSE_API_BASE_URL:-${CPAMP_CPA_LICENSE_API_BASE_URL:-https://p.666ttt.net/api/storefront}}"
+cpa_license_state_dir="${CPA_LICENSE_STATE_DIR:-${CPAMP_CPA_LICENSE_STATE_DIR:-/CLIProxyAPI/data/license}}"
+cpa_license_shop_auth_url="${CPA_LICENSE_SHOP_AUTH_URL:-${CPAMP_CPA_LICENSE_SHOP_AUTH_URL:-https://p.666ttt.net/shop/?authorize=cpa}}"
+cpa_license_shop_exchange_path="${CPA_LICENSE_SHOP_EXCHANGE_PATH:-${CPAMP_CPA_LICENSE_SHOP_EXCHANGE_PATH:-/licenses/exchange}}"
+cpa_license_activate_path="${CPA_LICENSE_ACTIVATE_PATH:-${CPAMP_CPA_LICENSE_ACTIVATE_PATH:-/licenses/activate}}"
+cpa_license_refresh_path="${CPA_LICENSE_REFRESH_PATH:-${CPAMP_CPA_LICENSE_REFRESH_PATH:-/licenses/refresh}}"
+cpa_license_verify_path="${CPA_LICENSE_VERIFY_PATH:-${CPAMP_CPA_LICENSE_VERIFY_PATH:-/licenses/verify}}"
+cpa_license_grace_path="${CPA_LICENSE_GRACE_PATH:-${CPAMP_CPA_LICENSE_GRACE_PATH:-/licenses/grace}}"
+cpa_license_refresh_interval="${CPA_LICENSE_REFRESH_INTERVAL:-${CPAMP_CPA_LICENSE_REFRESH_INTERVAL:-10m}}"
+cpa_license_grace_period="${CPA_LICENSE_GRACE_PERIOD:-${CPAMP_CPA_LICENSE_GRACE_PERIOD:-6h}}"
+cpa_license_storage_key="${CPA_LICENSE_STORAGE_KEY:-${CPAMP_CPA_LICENSE_STORAGE_KEY:-}}"
+cpa_license_executable_sha256="${CPA_LICENSE_EXECUTABLE_SHA256:-${CPAMP_CPA_LICENSE_EXECUTABLE_SHA256:-}}"
+cpa_license_claim_path="${CPA_LICENSE_CLAIM_PATH:-${CPAMP_CPA_LICENSE_CLAIM_PATH:-}}"
 admin_key=""
 demo_client_key=""
 generated_admin_key=""
@@ -41,6 +71,10 @@ existing_install_state="fresh"
 existing_volume_name=""
 auth_validation_status="pending"
 admin_secret_missing="0"
+# Existing managed installs may still contain the legacy direct secret in
+# `.env`.  Keep track of whether that key was present so a successful
+# migration can blank it without rewriting otherwise unrelated configuration.
+legacy_license_secret_env_present="0"
 
 die() {
   printf '%s\n' "$*" >&2
@@ -131,6 +165,26 @@ text() {
     en-US:admin_key_file) printf 'Admin key file' ;;
     zh-CN:cpa_key_file) printf 'CPA Management Key 文件' ;;
     en-US:cpa_key_file) printf 'CPA Management Key file' ;;
+    zh-CN:license_public_key) printf 'CPA 商城授权公钥' ;;
+    en-US:license_public_key) printf 'CPA storefront license public key' ;;
+    zh-CN:license_client_id) printf 'CPA 商城客户端 ID（可选）' ;;
+    en-US:license_client_id) printf 'CPA storefront client ID (optional)' ;;
+    zh-CN:license_client_secret) printf 'CPA 商城客户端密钥（可选）' ;;
+    en-US:license_client_secret) printf 'CPA storefront client secret (optional)' ;;
+    zh-CN:license_plugin_public_key) printf 'CPA 插件授权公钥（可选）' ;;
+    en-US:license_plugin_public_key) printf 'CPA plugin license public key (optional)' ;;
+    zh-CN:license_api_base_url) printf 'CPA 商城授权接口地址' ;;
+    en-US:license_api_base_url) printf 'CPA storefront license API base URL' ;;
+    zh-CN:license_grace_path) printf '宽限租约接口路径' ;;
+    en-US:license_grace_path) printf 'Grace lease endpoint path' ;;
+    zh-CN:license_grace_period) printf '本地刷新回退宽限期' ;;
+    en-US:license_grace_period) printf 'Local refresh fallback grace period' ;;
+    zh-CN:license_secret_file) printf '商城客户端密钥文件' ;;
+    en-US:license_secret_file) printf 'Storefront client secret file' ;;
+    zh-CN:license_configured) printf '商城授权配置已写入；宽限租约由商城签名控制，本地回退值为 %s' ;;
+    en-US:license_configured) printf 'Storefront license settings written; grace leases are signed by the storefront, with a local fallback of %s' ;;
+    zh-CN:license_missing) printf 'CPA_LICENSE_PUBLIC_KEY 必须设置商城 Ed25519 公钥；宽限租约由商城服务器签发并控制。' ;;
+    en-US:license_missing) printf 'CPA_LICENSE_PUBLIC_KEY must contain the storefront Ed25519 public key; grace leases are issued and controlled by the storefront server.' ;;
     zh-CN:demo_client_key_file) printf '演示客户端 API Key 文件' ;;
     en-US:demo_client_key_file) printf 'Demo client API key file' ;;
     zh-CN:systemd_file) printf 'systemd service 文件' ;;
@@ -203,8 +257,8 @@ text() {
     en-US:missing_config) printf 'The existing install directory is incomplete. Choose config regeneration.' ;;
     zh-CN:repair_failed) printf '管理员密钥修复失败，CPAMP 已使用原数据库凭证重新启动。' ;;
     en-US:repair_failed) printf 'Admin key repair failed. CPAMP was restarted with the previous database credential.' ;;
-    zh-CN:repair_restart_failed) printf '管理员密钥已重置，但 CPAMP 重启失败。请在安装目录执行 docker compose up -d。' ;;
-    en-US:repair_restart_failed) printf 'Admin key reset succeeded, but CPAMP failed to restart. Run docker compose up -d from the install directory.' ;;
+    zh-CN:repair_restart_failed) printf '管理员密钥已重置，但 CPAMP 重启失败。请在安装目录执行 docker compose --env-file "%s/.env" -f "%s/compose.yaml" up -d。' "$install_dir" "$install_dir" ;;
+    en-US:repair_restart_failed) printf 'Admin key reset succeeded, but CPAMP failed to restart. Run docker compose --env-file "%s/.env" -f "%s/compose.yaml" up -d from the install directory.' "$install_dir" "$install_dir" ;;
     zh-CN:repair_verify_failed) printf '管理员密钥修复后验证仍失败，请确认面板和修复命令使用同一个 Docker 数据卷。' ;;
     en-US:repair_verify_failed) printf 'Admin key repair completed, but verification still failed. Confirm that the panel and repair command use the same Docker volume.' ;;
     *) printf '%s' "$1" ;;
@@ -354,7 +408,8 @@ expand_path() {
   case "$1" in
     "~") printf '%s\n' "${HOME:-.}" ;;
     "~/"*) printf '%s/%s\n' "${HOME:-.}" "${1#~/}" ;;
-    *) printf '%s\n' "$1" ;;
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$PWD" "$1" ;;
   esac
 }
 
@@ -376,6 +431,12 @@ read_env_value() {
 
   [ -f "$file" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
+    # Accept the common `export KEY=value` spelling as well as harmless
+    # indentation, while never evaluating the file as shell code.
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in
+      export[[:space:]]*) line="${line#export}"; line="${line#"${line%%[![:space:]]*}"}" ;;
+    esac
     case "$line" in
       "$key="*) value="${line#*=}"; found="1" ;;
     esac
@@ -568,6 +629,7 @@ read_existing_secret() {
 
 load_existing_docker_config() {
   local value=""
+  local persisted_license_secret_file=""
 
   [ -f "$install_dir/.env" ] || die "Missing existing config: $install_dir/.env"
   [ -f "$install_dir/compose.yaml" ] || die "Missing existing config: $install_dir/compose.yaml"
@@ -582,7 +644,7 @@ load_existing_docker_config() {
     validate_image_ref "$(text cpa_image)" "$cpa_image"
     cpa_port="$(read_env_value "$install_dir/.env" CPA_PORT 2>/dev/null || printf '8317')"
     normalize_port "$cpa_port" || die "Invalid CPA port in existing .env: $cpa_port"
-    cpa_url="http://host.docker.internal:8317"
+    cpa_url="http://host.docker.internal:${cpa_port}"
     cpa_connection_mode="env"
     cpamp_agent_token="$(read_env_value "$install_dir/.env" CPAMP_AGENT_TOKEN 2>/dev/null || true)"
   else
@@ -593,6 +655,51 @@ load_existing_docker_config() {
     else
       cpa_connection_mode="setup"
     fi
+  fi
+  # Preserve all existing storefront settings. Upgrade and repair paths do
+  # not regenerate files, while regenerate reuses these values as defaults.
+  cpa_license_public_key="$(read_env_value "$install_dir/.env" CPA_LICENSE_PUBLIC_KEY 2>/dev/null || printf '%s' "${cpa_license_public_key:-}")"
+  cpa_license_plugin_public_key="$(read_env_value "$install_dir/.env" CPA_LICENSE_PLUGIN_PUBLIC_KEY 2>/dev/null || printf '%s' "${cpa_license_plugin_public_key:-}")"
+  cpa_license_client_id="$(read_env_value "$install_dir/.env" CPA_LICENSE_CLIENT_ID 2>/dev/null || printf '%s' "${cpa_license_client_id:-}")"
+  cpa_license_client_secret_required="$(read_env_value "$install_dir/.env" CPA_LICENSE_REQUIRE_CLIENT_SECRET 2>/dev/null || printf '%s' "${cpa_license_client_secret_required:-false}")"
+  cpa_license_provider="$(read_env_value "$install_dir/.env" CPA_LICENSE_PROVIDER 2>/dev/null || printf '%s' "${cpa_license_provider:-shop666}")"
+  cpa_license_product_code="$(read_env_value "$install_dir/.env" CPA_LICENSE_PRODUCT_CODE 2>/dev/null || printf '%s' "${cpa_license_product_code:-CPA}")"
+  cpa_license_client_secret_source_file="$(read_env_value "$install_dir/.env" CPA_LICENSE_CLIENT_SECRET_FILE 2>/dev/null || printf '%s' "${cpa_license_client_secret_source_file:-}")"
+  cpa_license_api_base_url="$(read_env_value "$install_dir/.env" CPA_LICENSE_API_BASE_URL 2>/dev/null || printf '%s' "${cpa_license_api_base_url:-https://p.666ttt.net/api/storefront}")"
+  cpa_license_state_dir="$(read_env_value "$install_dir/.env" CPA_LICENSE_STATE_DIR 2>/dev/null || printf '%s' "${cpa_license_state_dir:-/CLIProxyAPI/data/license}")"
+  cpa_license_shop_auth_url="$(read_env_value "$install_dir/.env" CPA_LICENSE_SHOP_AUTH_URL 2>/dev/null || printf '%s' "${cpa_license_shop_auth_url:-https://p.666ttt.net/shop/?authorize=cpa}")"
+  cpa_license_shop_exchange_path="$(read_env_value "$install_dir/.env" CPA_LICENSE_SHOP_EXCHANGE_PATH 2>/dev/null || printf '%s' "${cpa_license_shop_exchange_path:-/licenses/exchange}")"
+  cpa_license_activate_path="$(read_env_value "$install_dir/.env" CPA_LICENSE_ACTIVATE_PATH 2>/dev/null || printf '%s' "${cpa_license_activate_path:-/licenses/activate}")"
+  cpa_license_refresh_path="$(read_env_value "$install_dir/.env" CPA_LICENSE_REFRESH_PATH 2>/dev/null || printf '%s' "${cpa_license_refresh_path:-/licenses/refresh}")"
+  cpa_license_verify_path="$(read_env_value "$install_dir/.env" CPA_LICENSE_VERIFY_PATH 2>/dev/null || printf '%s' "${cpa_license_verify_path:-/licenses/verify}")"
+  cpa_license_grace_path="$(read_env_value "$install_dir/.env" CPA_LICENSE_GRACE_PATH 2>/dev/null || printf '%s' "${cpa_license_grace_path:-/licenses/grace}")"
+  cpa_license_refresh_interval="$(read_env_value "$install_dir/.env" CPA_LICENSE_REFRESH_INTERVAL 2>/dev/null || printf '%s' "${cpa_license_refresh_interval:-10m}")"
+  cpa_license_grace_period="$(read_env_value "$install_dir/.env" CPA_LICENSE_GRACE_PERIOD 2>/dev/null || printf '%s' "${cpa_license_grace_period:-6h}")"
+  cpa_license_storage_key="$(read_env_value "$install_dir/.env" CPA_LICENSE_STORAGE_KEY 2>/dev/null || printf '%s' "${cpa_license_storage_key:-}")"
+  cpa_license_executable_sha256="$(read_env_value "$install_dir/.env" CPA_LICENSE_EXECUTABLE_SHA256 2>/dev/null || printf '%s' "${cpa_license_executable_sha256:-}")"
+  cpa_license_claim_path="$(read_env_value "$install_dir/.env" CPA_LICENSE_CLAIM_PATH 2>/dev/null || printf '%s' "${cpa_license_claim_path:-}")"
+  # Older installers may have persisted a direct secret in .env. Keep it in
+  # memory only long enough to migrate it to the local secret file; a
+  # successful managed upgrade/repair blanks the legacy .env entry without
+  # echoing the value.
+  if read_env_value "$install_dir/.env" CPA_LICENSE_CLIENT_SECRET >/dev/null 2>&1; then
+    legacy_license_secret_env_present="1"
+  fi
+  cpa_license_client_secret="$(read_env_value "$install_dir/.env" CPA_LICENSE_CLIENT_SECRET 2>/dev/null || printf '%s' "${cpa_license_client_secret:-}")"
+  persisted_license_secret_file="$install_dir/secrets/cpa-license-client-secret"
+  # Prefer the canonical file only when it already contains a usable secret.
+  # Empty/placeholder files are leftovers from older installers; retaining the
+  # configured legacy source below lets preflight migrate that value instead
+  # of accidentally replacing the source path with the empty canonical file.
+  if [ -f "$persisted_license_secret_file" ] &&
+     [ ! -L "$persisted_license_secret_file" ] &&
+     license_secret_file_is_usable "$persisted_license_secret_file"; then
+    cpa_license_secret_file="$persisted_license_secret_file"
+    cpa_license_client_secret_source_file="$persisted_license_secret_file"
+  elif [ -n "$cpa_license_client_secret_source_file" ] && [[ "$cpa_license_client_secret_source_file" != /* ]]; then
+    # Resolve a relative path from the installation directory for the agent
+    # and Compose bind mount checks.
+    cpa_license_client_secret_source_file="$install_dir/${cpa_license_client_secret_source_file#./}"
   fi
   if value="$(read_existing_secret "$install_dir/secrets/cpamp-admin-key")"; then
     admin_key="$value"
@@ -644,6 +751,824 @@ validate_secret_value() {
   validate_single_line "$1" "$2"
 }
 
+license_placeholder_public_key="replace-with-base64url-ed25519-public-key"
+
+license_value_missing() {
+  local value="${1:-}"
+  value="${value//[[:space:]]/}"
+  [ -z "$value" ] && return 0
+  value="$(printf '%s' "$value" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  case "$value" in
+    replace-with*|changeme*|change-me*|set-me*|your-*|'<*>') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_storefront_api_base() {
+  local value="${1:-}"
+  value="${value#${value%%[![:space:]]*}}"
+  value="${value%${value##*[![:space:]]}}"
+  value="${value%/}"
+  printf '%s' "$(printf '%s' "$value" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+}
+
+is_official_storefront_values() {
+  local provider="${1:-}"
+  local api_base="${2:-}"
+  provider="${provider#${provider%%[![:space:]]*}}"
+  provider="${provider%${provider##*[![:space:]]}}"
+  provider="$(printf '%s' "$provider" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  api_base="$(normalize_storefront_api_base "$api_base")"
+  [ "$provider" = "$release_license_provider" ] &&
+    [ "$api_base" = "$release_license_api_base_url" ]
+}
+
+license_public_key_looks_valid() {
+  local value="${1:-}"
+  value="${value#${value%%[![:space:]]*}}"
+  value="${value%${value##*[![:space:]]}}"
+  [[ "$value" =~ ^(0x)?[A-Fa-f0-9]{64}$ ||
+     "$value" =~ ^[A-Za-z0-9+/_-]{43}={0,1}$ ]]
+}
+
+config_license_value() {
+  local config_file="$1"
+  local wanted="$2"
+  [ -f "$config_file" ] || return 1
+  awk -v wanted="$wanted" '
+    function indent_of(value) {
+      match(value, /^[[:space:]]*/)
+      return RLENGTH
+    }
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    BEGIN { in_license = 0; license_indent = -1; found = 0 }
+    {
+      line = $0
+      indent = indent_of(line)
+      if (line ~ /^[[:space:]]*license:[[:space:]]*(#.*)?$/) {
+        in_license = 1
+        license_indent = indent
+        next
+      }
+      if (!in_license) next
+      if (line !~ /^[[:space:]]*($|#)/ && indent <= license_indent) in_license = 0
+      if (in_license && indent > license_indent &&
+          line ~ ("^[[:space:]]*" wanted "[[:space:]]*:")) {
+        sub(("^[[:space:]]*" wanted "[[:space:]]*:[[:space:]]*"), "", line)
+        sub(/[[:space:]]+#.*$/, "", line)
+        line = trim(line)
+        if (length(line) >= 2 && substr(line, 1, 1) == "\"" &&
+            substr(line, length(line), 1) == "\"") {
+          line = substr(line, 2, length(line) - 2)
+        } else if (length(line) >= 2 && substr(line, 1, 1) == "\047" &&
+                   substr(line, length(line), 1) == "\047") {
+          line = substr(line, 2, length(line) - 2)
+        }
+        print line
+        found = 1
+        exit
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$config_file"
+}
+
+config_has_license_section() {
+  local config_file="$1"
+  [ -f "$config_file" ] || return 1
+  awk '/^[[:space:]]*license:[[:space:]]*(#.*)?$/ { found = 1; exit } END { exit(found ? 0 : 1) }' "$config_file"
+}
+
+extract_cpa_config_reference() {
+  local compose_file="$1"
+  [ -f "$compose_file" ] || return 1
+  awk '
+    {
+      line = $0
+      gsub(/[\[\],]/, " ", line)
+      count = split(line, tokens, /[[:space:]]+/)
+      for (i = 1; i <= count; i++) {
+        token = tokens[i]
+        gsub(/^["\047]+|["\047]+$/, "", token)
+        if (pending && token != "" && token != "-" && token !~ /^--?config(=|$)/) {
+          print token
+          exit
+        }
+        if (token ~ /^--?config=/) {
+          sub(/^--?config=/, "", token)
+          if (token != "") {
+            print token
+            exit
+          }
+        }
+        if (token != "-config" && token != "--config") continue
+        for (j = i + 1; j <= count; j++) {
+          candidate = tokens[j]
+          gsub(/^["\047]+|["\047]+$/, "", candidate)
+          if (candidate != "" && candidate != "-") {
+            print candidate
+            exit
+          }
+        }
+        pending = 1
+      }
+    }
+  ' "$compose_file"
+}
+
+resolve_existing_cpa_config_file() {
+  local compose_file="$install_dir/compose.yaml"
+  local reference=""
+  local data_dir=""
+  local candidate=""
+  local relative=""
+  local candidates=()
+
+  [ -f "$compose_file" ] || return 1
+  reference="$(extract_cpa_config_reference "$compose_file" 2>/dev/null || true)"
+  data_dir="$(read_env_value "$install_dir/.env" CPA_DATA_DIR 2>/dev/null || true)"
+  if [ -z "$data_dir" ]; then data_dir="$install_dir/cliproxyapi/data"; fi
+  if [ "${data_dir#/}" = "$data_dir" ]; then data_dir="$install_dir/${data_dir#./}"; fi
+
+  if [ -n "$reference" ]; then
+    case "$reference" in
+      /app/data/*)
+        relative="${reference#/app/data/}"
+        candidates+=("$data_dir/$relative")
+        ;;
+      /CLIProxyAPI/*)
+        relative="${reference#/CLIProxyAPI/}"
+        candidates+=("$install_dir/cliproxyapi/$relative")
+        ;;
+      /*)
+        candidates+=("$reference")
+        ;;
+      *)
+        candidates+=("$install_dir/$reference" "$data_dir/$reference")
+        ;;
+    esac
+  fi
+  candidates+=(
+    "$install_dir/cliproxyapi/config.yaml"
+    "$install_dir/data/cpa/config.yaml"
+    "$install_dir/config.yaml"
+  )
+  for candidate in "${candidates[@]}"; do
+    [ -f "$candidate" ] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
+set_env_value_preserving() {
+  local file="$1"
+  local wanted="$2"
+  local replacement="$3"
+  local tmp="${file}.tmp.$$"
+  local mode=""
+
+  [ -f "$file" ] || return 1
+  [ -L "$file" ] && die "Refusing to rewrite symlinked environment file: $file"
+  if ! awk -v wanted="$wanted" -v replacement="$replacement" '
+    BEGIN { updated = 0 }
+    {
+      line = $0
+      key = line
+      sub(/^[[:space:]]*/, "", key)
+      if (key ~ /^export[[:space:]]+/) sub(/^export[[:space:]]+/, "", key)
+      sub(/=.*/, "", key)
+      gsub(/[[:space:]]+/, "", key)
+      if (key == wanted) {
+        indent = $0
+        sub(/[^[:space:]].*/, "", indent)
+        prefix = indent
+        rest = substr(line, length(indent) + 1)
+        if (rest ~ /^export[[:space:]]+/) prefix = prefix "export "
+        print prefix wanted "=" replacement
+        updated = 1
+        next
+      }
+      print line
+    }
+    END { if (!updated) print wanted "=" replacement }
+  ' "$file" > "$tmp"; then
+    rm -f "$tmp"
+    die "Unable to update environment file: $file"
+  fi
+  if mode="$(stat -c '%a' "$file" 2>/dev/null)"; then :
+  elif mode="$(stat -f '%Lp' "$file" 2>/dev/null)"; then :
+  else mode=""; fi
+  if [ -n "$mode" ]; then chmod "$mode" "$tmp" 2>/dev/null || true; fi
+  mv -f "$tmp" "$file"
+}
+
+backfill_license_config_file() {
+  local config_file="$1"
+  local provider=""
+  local api_base=""
+  local public_key=""
+  local plugin_key=""
+  local need_public="0"
+  local need_plugin="0"
+  local tmp=""
+  local mode=""
+
+  [ -f "$config_file" ] || return 0
+  [ -L "$config_file" ] && die "Refusing to rewrite symlinked CPA config: $config_file"
+  config_has_license_section "$config_file" || return 0
+  provider="$(config_license_value "$config_file" provider 2>/dev/null || true)"
+  [ -n "$provider" ] || provider="$cpa_license_provider"
+  api_base="$(config_license_value "$config_file" api-base-url 2>/dev/null || true)"
+  [ -n "$api_base" ] || api_base="$cpa_license_api_base_url"
+  is_official_storefront_values "$provider" "$api_base" || return 0
+  public_key="$(config_license_value "$config_file" public-key 2>/dev/null || true)"
+  plugin_key="$(config_license_value "$config_file" plugin-public-key 2>/dev/null || true)"
+  license_value_missing "$public_key" && need_public="1"
+  license_value_missing "$plugin_key" && need_plugin="1"
+  [ "$need_public" = "1" ] || [ "$need_plugin" = "1" ] || return 0
+
+  tmp="${config_file}.tmp.$$"
+  if ! awk \
+    -v public_key="$release_license_public_key" \
+    -v plugin_key="$release_plugin_public_key" \
+    -v need_public="$need_public" \
+    -v need_plugin="$need_plugin" '
+    function indent_of(value) {
+      match(value, /^[[:space:]]*/)
+      return RLENGTH
+    }
+    function emit_missing(    prefix) {
+      if (!in_license || emitted) return
+      if (child_indent >= 0) {
+        prefix = sprintf("%*s", child_indent, "")
+      } else {
+        prefix = sprintf("%*s", license_indent + 2, "")
+      }
+      if (need_public && !seen_public) print prefix "public-key: \"" public_key "\""
+      if (need_plugin && !seen_plugin) print prefix "plugin-public-key: \"" plugin_key "\""
+      emitted = 1
+    }
+    function inline_comment(value) {
+      if (match(value, /[[:space:]]+#/)) return substr(value, RSTART)
+      return ""
+    }
+    BEGIN { in_license = 0; license_indent = -1; child_indent = -1; emitted = 0 }
+    {
+      line = $0
+      indent = indent_of(line)
+      if (line ~ /^[[:space:]]*license:[[:space:]]*(#.*)?$/) {
+        if (in_license) emit_missing()
+        in_license = 1
+        license_indent = indent
+        child_indent = -1
+        seen_public = 0
+        seen_plugin = 0
+        emitted = 0
+        print line
+        next
+      }
+      if (in_license && line !~ /^[[:space:]]*($|#)/ && indent <= license_indent) {
+        emit_missing()
+        in_license = 0
+      }
+      if (in_license && indent > license_indent) {
+        if (child_indent < 0 && line !~ /^[[:space:]]*($|#)/) child_indent = indent
+        if (line ~ /^[[:space:]]*public-key[[:space:]]*:/) {
+          seen_public = 1
+          if (need_public) {
+            prefix = substr(line, 1, indent)
+            print prefix "public-key: \"" public_key "\"" inline_comment(line)
+            next
+          }
+        }
+        if (line ~ /^[[:space:]]*plugin-public-key[[:space:]]*:/) {
+          seen_plugin = 1
+          if (need_plugin) {
+            prefix = substr(line, 1, indent)
+            print prefix "plugin-public-key: \"" plugin_key "\"" inline_comment(line)
+            next
+          }
+        }
+      }
+      print line
+    }
+    END { emit_missing() }
+  ' "$config_file" > "$tmp"; then
+    rm -f "$tmp"
+    die "Unable to backfill official license keys in: $config_file"
+  fi
+  if mode="$(stat -c '%a' "$config_file" 2>/dev/null)"; then :
+  elif mode="$(stat -f '%Lp' "$config_file" 2>/dev/null)"; then :
+  else mode=""; fi
+  if [ -n "$mode" ]; then chmod "$mode" "$tmp" 2>/dev/null || true; fi
+  mv -f "$tmp" "$config_file"
+  say "Backfilled official CPA license key(s): $config_file"
+}
+
+backfill_existing_license_settings() {
+  local env_file="$install_dir/.env"
+  local config_file=""
+  local env_provider=""
+  local env_api=""
+  local config_provider=""
+  local config_api=""
+  local provider=""
+  local api_base=""
+  local current=""
+  local config_public_key=""
+  local config_plugin_key=""
+  local replacement=""
+
+  [ "$install_mode" = "stack" ] || return 0
+  [ -f "$env_file" ] || return 0
+  config_file="$(resolve_existing_cpa_config_file 2>/dev/null || true)"
+  env_provider="$(read_env_value "$env_file" CPA_LICENSE_PROVIDER 2>/dev/null || true)"
+  env_api="$(read_env_value "$env_file" CPA_LICENSE_API_BASE_URL 2>/dev/null || true)"
+  if [ -f "$config_file" ]; then
+    config_provider="$(config_license_value "$config_file" provider 2>/dev/null || true)"
+    config_api="$(config_license_value "$config_file" api-base-url 2>/dev/null || true)"
+  fi
+  provider="${env_provider:-${config_provider:-$release_license_provider}}"
+  api_base="${env_api:-${config_api:-$release_license_api_base_url}}"
+  is_official_storefront_values "$provider" "$api_base" || return 0
+
+  if [ -n "$config_file" ]; then
+    config_public_key="$(config_license_value "$config_file" public-key 2>/dev/null || true)"
+    config_plugin_key="$(config_license_value "$config_file" plugin-public-key 2>/dev/null || true)"
+  fi
+
+  current="$(read_env_value "$env_file" CPA_LICENSE_PUBLIC_KEY 2>/dev/null || true)"
+  if license_value_missing "$current"; then
+    replacement="$release_license_public_key"
+    if license_public_key_looks_valid "$config_public_key"; then replacement="$config_public_key"; fi
+    set_env_value_preserving "$env_file" CPA_LICENSE_PUBLIC_KEY "$replacement"
+    cpa_license_public_key="$replacement"
+    if [ "$replacement" = "$release_license_public_key" ]; then
+      say "Backfilled official CPA_LICENSE_PUBLIC_KEY in $env_file"
+    else
+      say "Recovered CPA_LICENSE_PUBLIC_KEY from the active CPA config into $env_file"
+    fi
+  fi
+  current="$(read_env_value "$env_file" CPA_LICENSE_PLUGIN_PUBLIC_KEY 2>/dev/null || true)"
+  if license_value_missing "$current"; then
+    replacement="$release_plugin_public_key"
+    if license_public_key_looks_valid "$config_plugin_key"; then replacement="$config_plugin_key"; fi
+    set_env_value_preserving "$env_file" CPA_LICENSE_PLUGIN_PUBLIC_KEY "$replacement"
+    cpa_license_plugin_public_key="$replacement"
+    if [ "$replacement" = "$release_plugin_public_key" ]; then
+      say "Backfilled official CPA_LICENSE_PLUGIN_PUBLIC_KEY in $env_file"
+    else
+      say "Recovered CPA_LICENSE_PLUGIN_PUBLIC_KEY from the active CPA config into $env_file"
+    fi
+  fi
+  backfill_license_config_file "$config_file"
+}
+
+# The storefront guard is only owned by a full CPA + CPAMP install. A
+# CPAMP-only install may point at a customer-managed CPA and must not require
+# (or replace) that CPA's storefront credential.
+storefront_license_required() {
+  local provider=""
+  local api_base=""
+  local authority=""
+  local host=""
+
+  [ "$install_mode" = "stack" ] || return 1
+  # Repair is deliberately an admin-login recovery operation.  It may need to
+  # recreate the Compose files around an orphaned data volume, but it does not
+  # begin a new storefront authorization flow; the CPA runtime remains
+  # fail-closed until a matching credential is supplied.
+  [ "$operation" != "repair" ] || return 1
+  # Public storefront releases do not distribute a shared client secret. The
+  # server-side guard is opt-in; only an explicit local REQUIRE flag makes the
+  # installer enforce a matching secret file.
+  license_secret_requirement_enabled || return 1
+
+  provider="$(printf '%s' "$cpa_license_provider" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  provider="${provider//[[:space:]]/}"
+  [ "$provider" = "shop666" ] && return 0
+
+  api_base="$(printf '%s' "$cpa_license_api_base_url" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  case "$api_base" in
+    http://*|https://*) authority="${api_base#*://}" ;;
+    *) return 1 ;;
+  esac
+  authority="${authority%%/*}"
+  authority="${authority##*@}"
+  host="${authority%%:*}"
+  [ "$host" = "p.666ttt.net" ]
+}
+
+license_secret_requirement_enabled() {
+  local value="${cpa_license_client_secret_required:-false}"
+  value="$(printf '%s' "$value" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  value="${value//[[:space:]]/}"
+  case "$value" in
+    1|true|yes|on) cpa_license_client_secret_required="true"; return 0 ;;
+    0|false|no|off|"") cpa_license_client_secret_required="false"; return 1 ;;
+    *) die "CPA_LICENSE_REQUIRE_CLIENT_SECRET must be true or false (got $value)" ;;
+  esac
+}
+
+license_secret_target_path() {
+  printf '%s\n' "$install_dir/secrets/cpa-license-client-secret"
+}
+
+license_secret_missing_message() {
+  local target="$1"
+  if [ "${lang_code:-zh-CN}" = "en-US" ]; then
+    printf 'A storefront-issued client secret is required for this full CPA install. Put the single-line secret in %s (mode 600) and rerun; the installer never prints the secret.' "$target"
+  else
+    printf '完整 CPA 安装需要商城签发的客户端密钥。请将单行 secret 写入 %s（权限 600）后重新运行；安装器不会输出密钥内容。' "$target"
+  fi
+}
+
+license_secret_path_value() {
+  local value="${1:-}"
+  case "$value" in
+    /*) printf '%s\n' "$value" ;;
+    *) printf '%s\n' "$install_dir/${value#./}" ;;
+  esac
+}
+
+secret_file_mode() {
+  local file="$1"
+  local mode=""
+  if mode="$(stat -c '%a' "$file" 2>/dev/null)"; then
+    printf '%s\n' "$mode"
+  elif mode="$(stat -f '%Lp' "$file" 2>/dev/null)"; then
+    printf '%s\n' "$mode"
+  fi
+}
+
+# A non-empty, single-line value is sufficient for deciding whether an
+# existing canonical file should take precedence over a legacy source.  This
+# probe is intentionally non-fatal: malformed files are reported by the real
+# preflight after the legacy fallback has been resolved.
+license_secret_file_is_usable() {
+  local file="$1"
+  local value=""
+  local line_count=""
+
+  [ -f "$file" ] || return 1
+  [ ! -L "$file" ] || return 1
+  [ -r "$file" ] || return 1
+  line_count="$(awk 'END { print NR }' "$file" 2>/dev/null || printf '0')"
+  [ "$line_count" -le 1 ] 2>/dev/null || return 1
+  ! LC_ALL=C grep -q $'\r' "$file" 2>/dev/null || return 1
+  value="$(< "$file")"
+  value="${value%$'\r'}"
+  value="${value%$'\n'}"
+  ! license_value_missing "$value"
+}
+
+validate_secret_file_mode() {
+  local label="$1"
+  local file="$2"
+  local mode=""
+
+  mode="$(secret_file_mode "$file")"
+  if [ -n "$mode" ] && [ "$mode" != "600" ]; then
+    die "$label must use mode 600: $file"
+  fi
+}
+
+validate_license_secret_path() {
+  local value="$1"
+  if [[ "$value" == *[[:space:]]* ||
+        "$value" == *'#'* ||
+        "$value" == *'$'* ||
+        "$value" == *'`'* ||
+        "$value" == *'\\'* ||
+        "$value" == *'"'* ||
+        "$value" == *"'"* ]]; then
+    die "$(text license_secret_file) contains unsupported characters."
+  fi
+}
+
+# Read and validate a file-backed storefront secret without ever including its
+# contents in diagnostics. Return 0 for a usable value, 1 for an empty value,
+# 2 for a known placeholder, and 3 for malformed/unreadable files when the
+# caller asks for non-fatal probing.  Strict callers retain the historical
+# fail-fast diagnostics.
+read_license_secret_file() {
+  local file="$1"
+  local label="${2:-$(text license_secret_file)}"
+  local fix_mode="${3:-0}"
+  local fatal_errors="${4:-1}"
+  local value=""
+  local mode=""
+  local line_count=""
+  local compact_value=""
+
+  [ -f "$file" ] || return 1
+  if [ ! -r "$file" ]; then
+    if [ "$fatal_errors" = "1" ]; then
+      die "$label is not readable: $file"
+    fi
+    return 3
+  fi
+  if line_count="$(awk 'END { print NR }' "$file" 2>/dev/null)" && [ "$line_count" -gt 1 ] 2>/dev/null; then
+    if [ "$fatal_errors" = "1" ]; then
+      die "$label must be a single line: $file"
+    fi
+    return 3
+  fi
+  if LC_ALL=C grep -q $'\r' "$file" 2>/dev/null; then
+    if [ "$fatal_errors" = "1" ]; then
+      die "$label must be a single line: $file"
+    fi
+    return 3
+  fi
+  value="$(< "$file")"
+  value="${value%$'\r'}"
+  value="${value%$'\n'}"
+  if license_value_missing "$value"; then
+    compact_value="${value//[[:space:]]/}"
+    [ -n "$compact_value" ] && return 2
+    return 1
+  fi
+  mode="$(secret_file_mode "$file")"
+  if [ "$fix_mode" = "1" ] && [ -n "$mode" ] && [ "$mode" != "600" ] && [ "$dry_run" != "1" ]; then
+    chmod 600 "$file" 2>/dev/null || die "Unable to restrict secret file permissions: $file"
+  fi
+  return 0
+}
+
+# Validate the secret before any generated file is written or a service is
+# restarted. Existing canonical files win; an empty placeholder can be
+# populated from a legacy source/direct value, while a non-empty malformed
+# canonical file is surfaced instead of silently replaced.
+preflight_license_secret() {
+  local target="$(license_secret_target_path)"
+  local source="${cpa_license_client_secret_source_file:-}"
+  local direct="${cpa_license_client_secret:-}"
+  local required="0"
+  local target_status=0
+  local source_status=0
+  local placeholder_seen="0"
+
+  cpa_license_secret_file="$target"
+  if storefront_license_required; then
+    required="1"
+  fi
+
+  # CPAMP-only never starts or owns CPA.  Do not inspect, copy, chmod, or
+  # otherwise reinterpret a customer's external CPA credential in this mode.
+  if [ "$install_mode" != "stack" ]; then
+    return 0
+  fi
+
+  # The canonical path is installer-owned.  Refuse symlinks so a later
+  # migration cannot write through to an unrelated external file.
+  if [ -L "$target" ]; then
+    die "$(text license_secret_file) must not be a symlink: $target"
+  fi
+  if [ -e "$target" ] && [ ! -f "$target" ]; then
+    die "$(text license_secret_file) is not a regular file: $target"
+  fi
+  if [ -f "$target" ]; then
+    if read_license_secret_file "$target" "$(text license_secret_file)" 0 "$required"; then
+      if [ "$required" = "1" ]; then
+        validate_secret_file_mode "$(text license_secret_file)" "$target"
+      fi
+      cpa_license_client_secret_source_file="$target"
+      return 0
+    else
+      target_status=$?
+      # Empty canonical files are leftovers from older installers and may be
+      # replaced by an explicitly supplied issued value below.
+      if [ "$target_status" -eq 2 ]; then
+        placeholder_seen="1"
+      fi
+      [ "$target_status" -eq 1 ] || [ "$target_status" -eq 2 ] || [ "$target_status" -eq 3 ] ||
+        return "$target_status"
+    fi
+  fi
+
+  if [ -n "$source" ]; then
+    source="$(license_secret_path_value "$source")"
+    cpa_license_client_secret_source_file="$source"
+    if [ "$source" != "$target" ] && [ -e "$source" ]; then
+      [ -f "$source" ] || die "$(text license_secret_file) is not a regular file: $source"
+      if read_license_secret_file "$source" "$(text license_secret_file)" 0 "$required"; then
+        if [ "$required" = "1" ]; then
+          validate_secret_file_mode "$(text license_secret_file)" "$source"
+        fi
+        return 0
+      else
+        source_status=$?
+      fi
+      if [ "$source_status" -eq 2 ]; then
+        placeholder_seen="1"
+      fi
+      [ "$source_status" -eq 1 ] || [ "$source_status" -eq 2 ] || [ "$source_status" -eq 3 ] ||
+        return "$source_status"
+    elif [ "$source" != "$target" ] && [ "$dry_run" != "1" ] && [ -e "$source" ]; then
+      die "$(text license_secret_file) is not readable: $source"
+    fi
+  fi
+
+  if [ -n "$direct" ] && ! license_value_missing "$direct"; then
+    validate_secret_value "$(text license_client_secret)" "$direct"
+    return 0
+  fi
+
+  if storefront_license_required; then
+    if [ "$dry_run" = "1" ]; then
+      say "$(license_secret_missing_message "$target")" >&2
+      return 0
+    fi
+    if [ "$placeholder_seen" = "1" ]; then
+      die "$(text license_secret_file) must contain a non-placeholder, single-line secret: $target"
+    fi
+    die "$(license_secret_missing_message "$target")"
+  fi
+  return 0
+}
+
+validate_license_public_key() {
+  local value="$1"
+  validate_single_line "$(text license_public_key)" "$value"
+  if [[ "$value" == *[[:space:]]* ||
+        "$value" == *'#'* ||
+        "$value" == *'$'* ||
+        "$value" == *'`'* ||
+        "$value" == *'\\'* ||
+        "$value" == *'"'* ||
+        "$value" == *"'"* ]]; then
+    die "$(text license_public_key) contains unsupported characters."
+  fi
+  # Preview modes intentionally accept a readable placeholder or fixture. A
+  # real deployment must provide a 32-byte Ed25519 public key encoded as
+  # base64/base64url (43 raw characters or 44 padded characters) or hex.
+  if [ "$dry_run" = "1" ] || [ "$skip_execute" = "1" ] || license_value_missing "$value"; then
+    return 0
+  fi
+  if [[ ! "$value" =~ ^[A-Za-z0-9+/_-]{43}={0,1}$ && ! "$value" =~ ^(0x)?[0-9A-Fa-f]{64}$ ]]; then
+    die "$(text license_public_key) must be a 32-byte Ed25519 key encoded as base64/base64url or hex."
+  fi
+}
+
+validate_duration_value() {
+  local label="$1"
+  local value="$2"
+  validate_single_line "$label" "$value"
+  # Go-style durations are accepted. Keep a positive bounded value so a
+  # malformed setting cannot turn the local fallback into an open-ended one.
+  case "$value" in
+    0|0s|0m|0h|0d) die "$label must be greater than zero." ;;
+    *[!0-9a-zA-Z.+-]*) die "$label contains unsupported characters." ;;
+  esac
+  if [[ ! "$value" =~ ^[0-9]+(ns|us|µs|ms|s|m|h)([0-9]+(ns|us|µs|ms|s|m|h))*$ ]]; then
+    die "$label must use a duration such as 6h or 30m."
+  fi
+}
+
+validate_license_path_value() {
+  local label="$1"
+  local value="$2"
+  local allow_empty="${3:-0}"
+  if [ -z "$value" ] && [ "$allow_empty" = "1" ]; then
+    return 0
+  fi
+  validate_single_line "$label" "$value"
+  case "$value" in
+    /*) ;;
+    *) die "$label must start with /." ;;
+  esac
+  if [[ "$value" == *[[:space:]]* ||
+        "$value" == *'#'* ||
+        "$value" == *'$'* ||
+        "$value" == *'`'* ||
+        "$value" == *'"'* ||
+        "$value" == *"'"* ]]; then
+    die "$label contains unsupported characters."
+  fi
+}
+
+validate_license_config() {
+  local allow_placeholder="0"
+  local license_required="1"
+  license_secret_requirement_enabled >/dev/null || true
+  if [ "$dry_run" = "1" ] || [ "$skip_execute" = "1" ] ||
+     [ "$operation" = "upgrade" ] || [ "$operation" = "repair" ]; then
+    allow_placeholder="1"
+  fi
+  # CPAMP-only installs connect to an already-running CPA instance and do not
+  # own that instance's storefront credential. Repairing an existing/orphaned
+  # deployment must likewise remain available so an operator can recover the
+  # manager login before restoring CPA authorization. A fresh or regenerated
+  # CPA stack still requires the publisher key before it can be started.
+  if [ "$install_mode" != "stack" ] || [ "$operation" = "repair" ]; then
+    license_required="0"
+  fi
+
+  if license_value_missing "$cpa_license_public_key"; then
+    if [ "$allow_placeholder" = "1" ] || [ "$license_required" = "0" ]; then
+      cpa_license_public_key="$license_placeholder_public_key"
+    else
+      die "$(text license_missing)"
+    fi
+  fi
+  validate_license_public_key "$cpa_license_public_key"
+
+  if [ -n "$cpa_license_plugin_public_key" ]; then
+    if license_value_missing "$cpa_license_plugin_public_key"; then
+      if [ "$allow_placeholder" = "1" ]; then
+        cpa_license_plugin_public_key=""
+      else
+        die "$(text license_plugin_public_key) contains a placeholder."
+      fi
+    else
+      validate_license_public_key "$cpa_license_plugin_public_key"
+    fi
+  fi
+
+  if [ -n "$cpa_license_client_id" ]; then
+    validate_secret_value "$(text license_client_id)" "$cpa_license_client_id"
+    if [[ "$cpa_license_client_id" == *[[:space:]]* ||
+          "$cpa_license_client_id" == *'$'* ||
+          "$cpa_license_client_id" == *'`'* ||
+          "$cpa_license_client_id" == *'\\'* ||
+          "$cpa_license_client_id" == *'"'* ||
+          "$cpa_license_client_id" == *"'"* ]]; then
+      die "$(text license_client_id) contains unsupported characters."
+    fi
+  fi
+
+  if [ -n "$cpa_license_client_secret_source_file" ]; then
+    validate_single_line "$(text license_secret_file)" "$cpa_license_client_secret_source_file"
+    if license_value_missing "$cpa_license_client_secret_source_file"; then
+      # A placeholder path is equivalent to an unset optional credential. The
+      # storefront preflight below owns the required/optional decision and can
+      # report the actionable destination without leaking a value.
+      cpa_license_client_secret_source_file=""
+    else
+      validate_license_secret_path "$cpa_license_client_secret_source_file"
+      if [ "$cpa_license_client_secret_source_file" != "$install_dir/secrets/cpa-license-client-secret" ] &&
+         [[ "$cpa_license_client_secret_source_file" != /* ]]; then
+        cpa_license_client_secret_source_file="$(license_secret_path_value "$cpa_license_client_secret_source_file")"
+      fi
+    fi
+  fi
+  if [ -n "$cpa_license_client_secret" ]; then
+    validate_secret_value "$(text license_client_secret)" "$cpa_license_client_secret"
+    if license_value_missing "$cpa_license_client_secret"; then
+      # Treat template markers as an unset fallback. If a storefront secret is
+      # required, preflight emits the single canonical-file instruction; for
+      # CPAMP-only/local/repair flows this simply leaves the optional file
+      # empty.
+      cpa_license_client_secret=""
+    fi
+  fi
+  # When both legacy forms are supplied, preflight checks the file first and
+  # falls back to the direct value only if that file is absent or empty.
+
+  validate_single_line "CPA_LICENSE_PROVIDER" "$cpa_license_provider"
+  validate_single_line "CPA_LICENSE_PRODUCT_CODE" "$cpa_license_product_code"
+  validate_single_line "CPA_LICENSE_STATE_DIR" "$cpa_license_state_dir"
+  if [[ "$cpa_license_state_dir" != /* ]]; then
+    die "CPA_LICENSE_STATE_DIR must be an absolute container path."
+  fi
+  validate_single_line "CPA_LICENSE_SHOP_AUTH_URL" "$cpa_license_shop_auth_url"
+  case "$cpa_license_shop_auth_url" in
+    http://*|https://*) ;;
+    *) die "CPA_LICENSE_SHOP_AUTH_URL must start with http:// or https://." ;;
+  esac
+  if [[ "$cpa_license_shop_auth_url" == *[[:space:]]* ||
+        "$cpa_license_shop_auth_url" == *'#'* ||
+        "$cpa_license_shop_auth_url" == *'"'* ||
+        "$cpa_license_shop_auth_url" == *"'"* ||
+        "$cpa_license_shop_auth_url" == *'\\'* ||
+        "$cpa_license_shop_auth_url" == *'$'* ||
+        "$cpa_license_shop_auth_url" == *'`'* ]]; then
+    die "CPA_LICENSE_SHOP_AUTH_URL contains unsupported characters."
+  fi
+  validate_license_path_value "CPA_LICENSE_SHOP_EXCHANGE_PATH" "$cpa_license_shop_exchange_path"
+  validate_license_path_value "CPA_LICENSE_ACTIVATE_PATH" "$cpa_license_activate_path"
+  validate_license_path_value "CPA_LICENSE_REFRESH_PATH" "$cpa_license_refresh_path"
+  validate_license_path_value "CPA_LICENSE_VERIFY_PATH" "$cpa_license_verify_path"
+  validate_url_value "$(text license_api_base_url)" "$cpa_license_api_base_url"
+  validate_license_path_value "$(text license_grace_path)" "$cpa_license_grace_path"
+  validate_duration_value "CPA_LICENSE_REFRESH_INTERVAL" "$cpa_license_refresh_interval"
+  validate_duration_value "$(text license_grace_period)" "$cpa_license_grace_period"
+  if [ -n "$cpa_license_storage_key" ]; then
+    validate_secret_value "CPA_LICENSE_STORAGE_KEY" "$cpa_license_storage_key"
+  fi
+  if [ -n "$cpa_license_executable_sha256" ]; then
+    validate_secret_value "CPA_LICENSE_EXECUTABLE_SHA256" "$cpa_license_executable_sha256"
+  fi
+  if [ -n "$cpa_license_claim_path" ]; then
+    validate_license_path_value "CPA_LICENSE_CLAIM_PATH" "$cpa_license_claim_path"
+  fi
+}
+
 validate_url_value() {
   local label="$1"
   local value="$2"
@@ -655,6 +1580,7 @@ validate_url_value() {
   if [[ "$value" == *[[:space:]]* ||
         "$value" == *'#'* ||
         "$value" == *'?'* ||
+        "$value" == *'@'* ||
         "$value" == *\"* ||
         "$value" == *"'"* ||
         "$value" == *\\* ||
@@ -679,6 +1605,22 @@ yaml_double_quote_escape() {
   local value="$1"
   value="${value//\\/\\\\}"
   value="${value//\"/\\\"}"
+  printf '%s\n' "$value"
+}
+
+json_double_quote_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\t'/\\t}"
+  printf '%s\n' "$value"
+}
+
+shell_single_quote_escape() {
+  local value="$1"
+  value="${value//\'/\'\\\'\'}"
   printf '%s\n' "$value"
 }
 
@@ -743,7 +1685,7 @@ collect_choices() {
       normalize_port "$cpa_port" || die "Invalid CPA port: $cpa_port"
       cpa_image="$(prompt_line "$(text cpa_image)" "${CPAMP_CPA_IMAGE:-${cpa_image:-$default_cpa_image}}")"
       validate_image_ref "$(text cpa_image)" "$cpa_image"
-      cpa_url="http://host.docker.internal:8317"
+      cpa_url="http://host.docker.internal:${cpa_port}"
       cpa_connection_mode="env"
     fi
   else
@@ -786,12 +1728,31 @@ collect_choices() {
       fi
     fi
   fi
+
+  collect_license_config
 }
 
 print_summary() {
   say ""
   say "== $(text summary) =="
   say "$(text operation_label): $(text "operation_${operation}")"
+  if license_value_missing "$cpa_license_public_key"; then
+    say "$(text license_public_key): placeholder (accepted only for dry-run/config preview)"
+  else
+    say "$(text license_public_key): configured"
+  fi
+  say "$(text license_api_base_url): $cpa_license_api_base_url"
+  say "$(text license_grace_path): $cpa_license_grace_path"
+  say "$(text license_grace_period): $cpa_license_grace_period"
+  say "CPA_LICENSE_REQUIRE_CLIENT_SECRET: $cpa_license_client_secret_required"
+  if storefront_license_required && [ -z "$cpa_license_client_secret_source_file" ] &&
+     [ -z "$cpa_license_client_secret" ]; then
+    say "$(text license_secret_file): required at $(license_secret_target_path)"
+  elif [ -n "$cpa_license_client_secret_source_file" ] || [ -n "$cpa_license_client_secret" ]; then
+    say "$(text license_secret_file): local secret"
+  else
+    say "$(text license_secret_file): empty optional secret file"
+  fi
   if [ "$install_mode" = "stack" ]; then
     say "$(text install_mode_label): $(text stack_mode)"
   else
@@ -886,7 +1847,7 @@ check_requirements() {
   if [ "$deploy_method" = "docker" ]; then
     require_command docker
     if [ "$dry_run" != "1" ] && [ "$skip_execute" != "1" ]; then
-      if ! docker compose version >/dev/null 2>&1; then
+      if ! docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" version >/dev/null 2>&1; then
         die "docker compose is required."
       fi
       if ! docker info >/dev/null 2>&1; then
@@ -1032,6 +1993,207 @@ ensure_secret_file() {
   printf '%s\n' "$value"
 }
 
+populate_license_secret_file() {
+  local target="$(license_secret_target_path)"
+  local source="${cpa_license_client_secret_source_file:-}"
+  local source_value=""
+  local target_status=0
+  local source_status=0
+  local required="0"
+
+  cpa_license_secret_file="$target"
+  if [ "$install_mode" != "stack" ]; then
+    # CPAMP-only does not mount or own the CPA license secret. In particular,
+    # never copy a customer's external CPA credential into this install.
+    return 0
+  fi
+  if storefront_license_required; then
+    required="1"
+  fi
+  if [ "$dry_run" = "1" ]; then
+    # No file creation in preview mode, including the old empty-placeholder
+    # behavior. The summary already shows where the issued secret belongs.
+    cpa_license_client_secret_source_file="$target"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$target")"
+  if [ -L "$target" ]; then
+    die "$(text license_secret_file) must not be a symlink: $target"
+  fi
+  if [ -e "$target" ] && [ ! -f "$target" ]; then
+    die "$(text license_secret_file) is not a regular file: $target"
+  fi
+  if [ -f "$target" ]; then
+    # A malformed canonical file belongs to this installation and should be
+    # surfaced rather than silently truncated. Blank/placeholder files remain
+    # eligible for legacy/direct migration below.
+    if read_license_secret_file "$target" "$(text license_secret_file)" 0 1 >/dev/null; then
+      if [ "$required" = "1" ]; then
+        validate_secret_file_mode "$(text license_secret_file)" "$target"
+      else
+        chmod 600 "$target" 2>/dev/null || die "Unable to restrict secret file permissions: $target"
+      fi
+      cpa_license_client_secret_source_file="$target"
+      return 0
+    else
+      target_status=$?
+    fi
+    # A zero-byte placeholder from an older installer can be populated below;
+    # a non-empty invalid file was rejected by preflight and is not replaced.
+    [ "$target_status" -eq 1 ] || [ "$target_status" -eq 2 ] ||
+      die "$(text license_secret_file) is malformed or unreadable: $target"
+  fi
+
+  if [ -n "$source" ] && [ "$source" != "$target" ] && [ -f "$source" ]; then
+    if read_license_secret_file "$source" "$(text license_secret_file)" 0 "$required" >/dev/null; then
+      if [ "$required" = "1" ]; then
+        validate_secret_file_mode "$(text license_secret_file)" "$source"
+      fi
+      source_value="$(< "$source")"
+      source_value="${source_value%$'\r'}"
+      source_value="${source_value%$'\n'}"
+      printf '%s\n' "$source_value" > "$target"
+      chmod 600 "$target" 2>/dev/null || die "Unable to restrict secret file permissions: $target"
+      cpa_license_client_secret_source_file="$target"
+      return 0
+    else
+      source_status=$?
+      # Non-storefront/repair flows may carry a stale external source. Ignore
+      # it and continue to a valid direct value or an empty optional file.
+      [ "$source_status" -eq 1 ] || [ "$source_status" -eq 2 ] || [ "$source_status" -eq 3 ] ||
+        return "$source_status"
+    fi
+  fi
+  if [ -n "${cpa_license_client_secret:-}" ] && ! license_value_missing "$cpa_license_client_secret"; then
+    validate_secret_value "$(text license_client_secret)" "$cpa_license_client_secret"
+    printf '%s\n' "$cpa_license_client_secret" > "$target"
+    chmod 600 "$target" 2>/dev/null || die "Unable to restrict secret file permissions: $target"
+  elif [ "$required" = "1" ]; then
+    # Protect against a credential disappearing between preflight and file
+    # materialization. Never start a storefront-backed stack with an empty
+    # Docker secret.
+    die "$(license_secret_missing_message "$target")"
+  elif [ ! -f "$target" ]; then
+    # Non-storefront providers retain the Compose-compatible empty file. A
+    # storefront-backed install reaches this branch only after preflight has
+    # already rejected the missing credential.
+    : > "$target"
+    chmod 600 "$target" 2>/dev/null || die "Unable to restrict secret file permissions: $target"
+  fi
+  if [ -f "$target" ]; then
+    chmod 600 "$target" 2>/dev/null || die "Unable to restrict secret file permissions: $target"
+  fi
+  cpa_license_client_secret_source_file="$target"
+}
+
+# Remove a legacy plaintext client secret from a managed .env only after the
+# value has been accepted and materialized into the local Docker secret. Keep
+# every unrelated line byte-for-byte stable so upgrades do not disturb runtime
+# settings, and never print the old value.
+clear_legacy_license_secret_env() {
+  local file="$install_dir/.env"
+  local tmp="${file}.tmp.$$"
+  local mode=""
+
+  [ "$legacy_license_secret_env_present" = "1" ] || return 0
+  [ "$dry_run" = "1" ] && return 0
+  [ -f "$file" ] || return 0
+  if [ -L "$file" ]; then
+    die "Refusing to rewrite symlinked environment file: $file"
+  fi
+
+  mode="$(secret_file_mode "$file")"
+  if ! awk '
+    BEGIN { key = "CPA_LICENSE_CLIENT_SECRET" }
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      if (line ~ /^export[[:space:]]+/) {
+        sub(/^export[[:space:]]+/, "", line)
+      }
+      if (index(line, key "=") == 1) { print key "="; next }
+    }
+    { print }
+  ' "$file" > "$tmp"; then
+    rm -f "$tmp"
+    die "Unable to sanitize legacy license secret from: $file"
+  fi
+  if [ -n "$mode" ]; then
+    chmod "$mode" "$tmp" 2>/dev/null || {
+      rm -f "$tmp"
+      die "Unable to preserve environment file permissions: $file"
+    }
+  fi
+  mv -f "$tmp" "$file" || {
+    rm -f "$tmp"
+    die "Unable to update environment file: $file"
+  }
+}
+
+collect_license_config() {
+  local default_value=""
+  local secret_file_choice=""
+
+  default_value="${CPA_LICENSE_PUBLIC_KEY:-${CPAMP_CPA_LICENSE_PUBLIC_KEY:-${cpa_license_public_key:-}}}"
+  if [ -z "$default_value" ] && { [ "$dry_run" = "1" ] || [ "$skip_execute" = "1" ]; }; then
+    default_value="$license_placeholder_public_key"
+  fi
+  cpa_license_public_key="$(prompt_line "$(text license_public_key)" "$default_value")"
+
+  default_value="${CPA_LICENSE_PLUGIN_PUBLIC_KEY:-${CPAMP_CPA_LICENSE_PLUGIN_PUBLIC_KEY:-${cpa_license_plugin_public_key:-}}}"
+  if [ "$non_interactive" != "1" ]; then
+    cpa_license_plugin_public_key="$(prompt_line "$(text license_plugin_public_key)" "$default_value")"
+  else
+    cpa_license_plugin_public_key="$default_value"
+  fi
+
+  default_value="${CPA_LICENSE_CLIENT_ID:-${CPAMP_CPA_LICENSE_CLIENT_ID:-${cpa_license_client_id:-}}}"
+  if [ "$non_interactive" != "1" ]; then
+    cpa_license_client_id="$(prompt_line "$(text license_client_id)" "$default_value")"
+  else
+    cpa_license_client_id="$default_value"
+  fi
+
+  secret_file_choice="${CPA_LICENSE_CLIENT_SECRET_FILE:-${CPAMP_CPA_LICENSE_CLIENT_SECRET_FILE:-${cpa_license_client_secret_source_file:-}}}"
+  if [ "$non_interactive" != "1" ]; then
+    secret_file_choice="$(prompt_line "$(text license_secret_file)" "$secret_file_choice")"
+  fi
+  cpa_license_client_secret_source_file="$secret_file_choice"
+  if [ -z "$cpa_license_client_secret_source_file" ]; then
+    if [ "$non_interactive" != "1" ]; then
+      cpa_license_client_secret="$(prompt_secret "$(text license_client_secret)" "${CPA_LICENSE_CLIENT_SECRET:-${CPAMP_CPA_LICENSE_CLIENT_SECRET:-$cpa_license_client_secret}}")"
+    else
+      cpa_license_client_secret="${CPA_LICENSE_CLIENT_SECRET:-${CPAMP_CPA_LICENSE_CLIENT_SECRET:-$cpa_license_client_secret}}"
+    fi
+  else
+    # A file is preferred when both forms are supplied, but retain the direct
+    # value as a fallback when the legacy path is absent or empty.
+    cpa_license_client_secret="${CPA_LICENSE_CLIENT_SECRET:-${CPAMP_CPA_LICENSE_CLIENT_SECRET:-$cpa_license_client_secret}}"
+  fi
+
+  default_value="${CPA_LICENSE_API_BASE_URL:-${CPAMP_CPA_LICENSE_API_BASE_URL:-${cpa_license_api_base_url:-https://p.666ttt.net/api/storefront}}}"
+  if [ "$non_interactive" != "1" ]; then
+    cpa_license_api_base_url="$(prompt_line "$(text license_api_base_url)" "$default_value")"
+  else
+    cpa_license_api_base_url="$default_value"
+  fi
+  default_value="${CPA_LICENSE_GRACE_PATH:-${CPAMP_CPA_LICENSE_GRACE_PATH:-${cpa_license_grace_path:-/licenses/grace}}}"
+  if [ "$non_interactive" != "1" ]; then
+    cpa_license_grace_path="$(prompt_line "$(text license_grace_path)" "$default_value")"
+  else
+    cpa_license_grace_path="$default_value"
+  fi
+  default_value="${CPA_LICENSE_GRACE_PERIOD:-${CPAMP_CPA_LICENSE_GRACE_PERIOD:-${cpa_license_grace_period:-6h}}}"
+  if [ "$non_interactive" != "1" ]; then
+    cpa_license_grace_period="$(prompt_line "$(text license_grace_period)" "$default_value")"
+  else
+    cpa_license_grace_period="$default_value"
+  fi
+
+  validate_license_config
+}
+
 write_env_file() {
   local file="$install_dir/.env"
   local tmp="${file}.tmp.$$"
@@ -1051,6 +2213,27 @@ write_env_file() {
     elif [ "$cpa_connection_mode" = "env" ]; then
       printf 'CPA_UPSTREAM_URL=%s\n' "$cpa_url"
     fi
+    printf '\n# CPA storefront license settings (public key is required at runtime)\n'
+    printf 'CPA_LICENSE_PROVIDER=%s\n' "$cpa_license_provider"
+    printf 'CPA_LICENSE_PRODUCT_CODE=%s\n' "$cpa_license_product_code"
+    printf 'CPA_LICENSE_PUBLIC_KEY=%s\n' "$cpa_license_public_key"
+    printf 'CPA_LICENSE_PLUGIN_PUBLIC_KEY=%s\n' "$cpa_license_plugin_public_key"
+    printf 'CPA_LICENSE_CLIENT_ID=%s\n' "$cpa_license_client_id"
+    printf 'CPA_LICENSE_REQUIRE_CLIENT_SECRET=%s\n' "$cpa_license_client_secret_required"
+    printf 'CPA_LICENSE_CLIENT_SECRET_FILE=%s\n' "${cpa_license_secret_file:-$install_dir/secrets/cpa-license-client-secret}"
+    printf 'CPA_LICENSE_API_BASE_URL=%s\n' "$cpa_license_api_base_url"
+    printf 'CPA_LICENSE_STATE_DIR=%s\n' "$cpa_license_state_dir"
+    printf 'CPA_LICENSE_SHOP_AUTH_URL=%s\n' "$cpa_license_shop_auth_url"
+    printf 'CPA_LICENSE_SHOP_EXCHANGE_PATH=%s\n' "$cpa_license_shop_exchange_path"
+    printf 'CPA_LICENSE_ACTIVATE_PATH=%s\n' "$cpa_license_activate_path"
+    printf 'CPA_LICENSE_REFRESH_PATH=%s\n' "$cpa_license_refresh_path"
+    printf 'CPA_LICENSE_VERIFY_PATH=%s\n' "$cpa_license_verify_path"
+    printf 'CPA_LICENSE_GRACE_PATH=%s\n' "$cpa_license_grace_path"
+    printf 'CPA_LICENSE_REFRESH_INTERVAL=%s\n' "$cpa_license_refresh_interval"
+    printf 'CPA_LICENSE_GRACE_PERIOD=%s\n' "$cpa_license_grace_period"
+    printf 'CPA_LICENSE_STORAGE_KEY=%s\n' "$cpa_license_storage_key"
+    printf 'CPA_LICENSE_EXECUTABLE_SHA256=%s\n' "$cpa_license_executable_sha256"
+    printf 'CPA_LICENSE_CLAIM_PATH=%s\n' "$cpa_license_claim_path"
   } > "$tmp"
   mv -f "$tmp" "$file"
 }
@@ -1060,6 +2243,24 @@ write_cpa_config() {
   local tmp="${file}.tmp.$$"
   local escaped_cpa_management_key=""
   local escaped_demo_client_key=""
+  local escaped_license_provider=""
+  local escaped_license_product_code=""
+  local escaped_license_public_key=""
+  local escaped_license_plugin_public_key=""
+  local escaped_license_client_id=""
+  local escaped_license_api_base_url=""
+  local escaped_license_state_dir=""
+  local escaped_license_shop_auth_url=""
+  local escaped_license_shop_exchange_path=""
+  local escaped_license_activate_path=""
+  local escaped_license_refresh_path=""
+  local escaped_license_verify_path=""
+  local escaped_license_grace_path=""
+  local escaped_license_refresh_interval=""
+  local escaped_license_grace_period=""
+  local escaped_license_storage_key=""
+  local escaped_license_executable_sha256=""
+  local escaped_license_claim_path=""
   if [ "$dry_run" = "1" ]; then
     say "$(text write_file): $file"
     return
@@ -1067,9 +2268,27 @@ write_cpa_config() {
   prepare_file "$file"
   escaped_cpa_management_key="$(yaml_double_quote_escape "$cpa_management_key")"
   escaped_demo_client_key="$(yaml_double_quote_escape "$demo_client_key")"
+  escaped_license_provider="$(yaml_double_quote_escape "$cpa_license_provider")"
+  escaped_license_product_code="$(yaml_double_quote_escape "$cpa_license_product_code")"
+  escaped_license_public_key="$(yaml_double_quote_escape "$cpa_license_public_key")"
+  escaped_license_plugin_public_key="$(yaml_double_quote_escape "$cpa_license_plugin_public_key")"
+  escaped_license_client_id="$(yaml_double_quote_escape "$cpa_license_client_id")"
+  escaped_license_api_base_url="$(yaml_double_quote_escape "$cpa_license_api_base_url")"
+  escaped_license_state_dir="$(yaml_double_quote_escape "$cpa_license_state_dir")"
+  escaped_license_shop_auth_url="$(yaml_double_quote_escape "$cpa_license_shop_auth_url")"
+  escaped_license_shop_exchange_path="$(yaml_double_quote_escape "$cpa_license_shop_exchange_path")"
+  escaped_license_activate_path="$(yaml_double_quote_escape "$cpa_license_activate_path")"
+  escaped_license_refresh_path="$(yaml_double_quote_escape "$cpa_license_refresh_path")"
+  escaped_license_verify_path="$(yaml_double_quote_escape "$cpa_license_verify_path")"
+  escaped_license_grace_path="$(yaml_double_quote_escape "$cpa_license_grace_path")"
+  escaped_license_refresh_interval="$(yaml_double_quote_escape "$cpa_license_refresh_interval")"
+  escaped_license_grace_period="$(yaml_double_quote_escape "$cpa_license_grace_period")"
+  escaped_license_storage_key="$(yaml_double_quote_escape "$cpa_license_storage_key")"
+  escaped_license_executable_sha256="$(yaml_double_quote_escape "$cpa_license_executable_sha256")"
+  escaped_license_claim_path="$(yaml_double_quote_escape "$cpa_license_claim_path")"
   cat > "$tmp" <<EOF
 host: "0.0.0.0"
-port: 8317
+port: $cpa_port
 
 remote-management:
   secret-key: "$escaped_cpa_management_key"
@@ -1077,6 +2296,28 @@ remote-management:
   disable-control-panel: false
   disable-auto-update-panel: true
   panel-github-repository: "https://github.com/seakee/CPA-Manager-Plus"
+
+license:
+  provider: "$escaped_license_provider"
+  product-code: "$escaped_license_product_code"
+  api-base-url: "$escaped_license_api_base_url"
+  public-key: "$escaped_license_public_key"
+  plugin-public-key: "$escaped_license_plugin_public_key"
+  client-id: "$escaped_license_client_id"
+  client-secret: ""
+  state-dir: "$escaped_license_state_dir"
+  shop-auth-url: "$escaped_license_shop_auth_url"
+  shop-exchange-path: "$escaped_license_shop_exchange_path"
+  activate-path: "$escaped_license_activate_path"
+  refresh-path: "$escaped_license_refresh_path"
+  verify-path: "$escaped_license_verify_path"
+  grace-path: "$escaped_license_grace_path"
+  refresh-interval: "$escaped_license_refresh_interval"
+  grace-period: "$escaped_license_grace_period"
+  instance-binding: "strict"
+  storage-key: "$escaped_license_storage_key"
+  executable-sha256: "$escaped_license_executable_sha256"
+  claim-path: "$escaped_license_claim_path"
 
 usage-statistics-enabled: true
 redis-usage-queue-retention-seconds: 60
@@ -1120,6 +2361,31 @@ services:
       - ./cliproxyapi/config.yaml:/CLIProxyAPI/config.yaml
       - ./cliproxyapi/auths:/root/.cli-proxy-api
       - ./cliproxyapi/logs:/CLIProxyAPI/logs
+      - ./cliproxyapi/data:/CLIProxyAPI/data
+      - ./cliproxyapi/data:/app/data
+    environment:
+      CPA_LICENSE_PROVIDER: "${CPA_LICENSE_PROVIDER:-shop666}"
+      CPA_LICENSE_PRODUCT_CODE: "${CPA_LICENSE_PRODUCT_CODE:-CPA}"
+      CPA_LICENSE_PUBLIC_KEY: "${CPA_LICENSE_PUBLIC_KEY:?set CPA_LICENSE_PUBLIC_KEY}"
+      CPA_LICENSE_PLUGIN_PUBLIC_KEY: "${CPA_LICENSE_PLUGIN_PUBLIC_KEY:-}"
+      CPA_LICENSE_CLIENT_ID: "${CPA_LICENSE_CLIENT_ID:-}"
+      CPA_LICENSE_CLIENT_SECRET_FILE: "/run/secrets/cpa-license-client-secret"
+      CPA_LICENSE_API_BASE_URL: "${CPA_LICENSE_API_BASE_URL:-https://p.666ttt.net/api/storefront}"
+      CPA_LICENSE_STATE_DIR: "${CPA_LICENSE_STATE_DIR:-/CLIProxyAPI/data/license}"
+      CPA_LICENSE_SHOP_AUTH_URL: "${CPA_LICENSE_SHOP_AUTH_URL:-https://p.666ttt.net/shop/?authorize=cpa}"
+      CPA_LICENSE_SHOP_EXCHANGE_PATH: "${CPA_LICENSE_SHOP_EXCHANGE_PATH:-/licenses/exchange}"
+      CPA_LICENSE_ACTIVATE_PATH: "${CPA_LICENSE_ACTIVATE_PATH:-/licenses/activate}"
+      CPA_LICENSE_REFRESH_PATH: "${CPA_LICENSE_REFRESH_PATH:-/licenses/refresh}"
+      CPA_LICENSE_VERIFY_PATH: "${CPA_LICENSE_VERIFY_PATH:-/licenses/verify}"
+      CPA_LICENSE_GRACE_PATH: "${CPA_LICENSE_GRACE_PATH:-/licenses/grace}"
+      CPA_LICENSE_REFRESH_INTERVAL: "${CPA_LICENSE_REFRESH_INTERVAL:-10m}"
+      CPA_LICENSE_GRACE_PERIOD: "${CPA_LICENSE_GRACE_PERIOD:-6h}"
+      CPA_LICENSE_STORAGE_KEY: "${CPA_LICENSE_STORAGE_KEY:-}"
+      CPA_LICENSE_EXECUTABLE_SHA256: "${CPA_LICENSE_EXECUTABLE_SHA256:-}"
+      CPA_LICENSE_CLAIM_PATH: "${CPA_LICENSE_CLAIM_PATH:-}"
+    secrets:
+      - source: cpa_license_client_secret
+        target: cpa-license-client-secret
 
   cpa-manager-plus:
     image: ${CPAMP_IMAGE}
@@ -1131,7 +2397,7 @@ services:
       USAGE_DB_PATH: "/data/usage.sqlite"
       CPA_MANAGER_DATA_KEY_PATH: "/data/data.key"
       CPA_MANAGER_ADMIN_KEY_FILE: "/run/secrets/cpamp_admin_key"
-      CPA_UPSTREAM_URL: "http://host.docker.internal:8317"
+      CPA_UPSTREAM_URL: "http://host.docker.internal:${CPA_PORT:-8317}"
       CPA_MANAGEMENT_KEY_FILE: "/run/secrets/cpa_management_key"
       CPAMP_AGENT_URL: "http://host.docker.internal:18417"
       CPAMP_AGENT_TOKEN: "${CPAMP_AGENT_TOKEN:?set CPAMP_AGENT_TOKEN}"
@@ -1196,6 +2462,8 @@ secrets:
     file: ./secrets/cpamp-admin-key
   cpa_management_key:
     file: ./secrets/cpa-management-key
+  cpa_license_client_secret:
+    file: ./secrets/cpa-license-client-secret
 EOF
   elif [ "$cpa_connection_mode" = "env" ]; then
     cat > "$tmp" <<'EOF'
@@ -1303,6 +2571,7 @@ generate_docker_files() {
   ensure_dir "$install_dir/secrets"
   ensure_dir "$install_dir/cliproxyapi/auths"
   ensure_dir "$install_dir/cliproxyapi/logs"
+  ensure_dir "$install_dir/cliproxyapi/data"
   ensure_dir "$install_dir/backups"
 
   generated_admin_key="cpamp_$(random_alnum 32)"
@@ -1318,6 +2587,7 @@ generate_docker_files() {
     validate_secret_value "CPAMP_AGENT_TOKEN" "$cpamp_agent_token"
   fi
 
+  populate_license_secret_file
   write_env_file
 
   if [ "$install_mode" = "stack" ]; then
@@ -1335,26 +2605,26 @@ generate_docker_files() {
 
 run_docker_install() {
   if [ "$dry_run" = "1" ]; then
-    say "$(text run_command): cd \"$install_dir\" && docker compose pull && docker compose up -d"
+    say "$(text run_command): cd \"$install_dir\" && docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" pull && docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" up -d"
     return
   fi
   if [ "$skip_execute" = "1" ]; then
     say "$(text skip_execute)"
-    say "cd \"$install_dir\" && docker compose pull && docker compose up -d"
+    say "cd \"$install_dir\" && docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" pull && docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" up -d"
     return
   fi
   (
     cd "$install_dir"
-    docker compose pull
-    docker compose up -d
+    docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" pull
+    docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" up -d
   )
 }
 
 run_docker_repair() {
   if [ "$dry_run" = "1" ]; then
-    say "$(text run_command): cd \"$install_dir\" && docker compose stop cpa-manager-plus"
-    say "$(text run_command): docker compose run --rm cpa-manager-plus reset-admin-key --admin-key-file /run/secrets/cpamp_admin_key"
-    say "$(text run_command): docker compose up -d"
+    say "$(text run_command): cd \"$install_dir\" && docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" stop cpa-manager-plus"
+    say "$(text run_command): docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" run --rm cpa-manager-plus reset-admin-key --admin-key-file /run/secrets/cpamp_admin_key"
+    say "$(text run_command): docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" up -d"
     return
   fi
   if [ "$skip_execute" = "1" ]; then
@@ -1365,14 +2635,14 @@ run_docker_repair() {
   (
     cd "$install_dir"
     if [ "$existing_install_state" = "orphan-volume" ]; then
-      docker compose pull
+      docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" pull
     fi
-    docker compose stop cpa-manager-plus
-    if ! docker compose run --rm cpa-manager-plus reset-admin-key --admin-key-file /run/secrets/cpamp_admin_key; then
-      docker compose up -d || true
+    docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" stop cpa-manager-plus
+    if ! docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" run --rm cpa-manager-plus reset-admin-key --admin-key-file /run/secrets/cpamp_admin_key; then
+      docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" up -d || true
       die "$(text repair_failed)"
     fi
-    if ! docker compose up -d; then
+    if ! docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" up -d; then
       die "$(text repair_restart_failed)"
     fi
   )
@@ -1385,7 +2655,7 @@ wait_docker_health() {
   while [ "$i" -le "$attempts" ]; do
     if (
       cd "$install_dir"
-      docker compose exec -T cpa-manager-plus wget -qO- http://127.0.0.1:18317/health >/dev/null 2>&1
+      docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" exec -T cpa-manager-plus wget -qO- http://127.0.0.1:18317/health >/dev/null 2>&1
     ); then
       return
     fi
@@ -1399,7 +2669,7 @@ verify_docker_admin_key() {
   [ -n "$admin_key" ] || return 1
   (
     cd "$install_dir"
-    docker compose exec -T cpa-manager-plus wget -qO- \
+    docker compose --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" exec -T cpa-manager-plus wget -qO- \
       --header="Authorization: Bearer $admin_key" \
       http://127.0.0.1:18317/status >/dev/null 2>&1
   )
@@ -1413,7 +2683,7 @@ validate_docker_install() {
     return
   fi
   if ! wait_docker_health; then
-    die "$(text health_failed) Run 'cd \"$install_dir\" && docker compose logs cpa-manager-plus' for details."
+    die "$(text health_failed) Run 'cd \"$install_dir\" && docker compose --env-file \"$install_dir/.env\" -f \"$install_dir/compose.yaml\" logs cpa-manager-plus' for details."
   fi
   if verify_docker_admin_key; then
     auth_validation_status="verified"
@@ -1458,11 +2728,47 @@ write_native_config() {
   local binary_dir="$1"
   local file="$binary_dir/config.json"
   local tmp="${file}.tmp.$$"
+  local escaped_license_provider=""
+  local escaped_license_product_code=""
+  local escaped_license_public_key=""
+  local escaped_license_plugin_public_key=""
+  local escaped_license_client_id=""
+  local escaped_license_api_base_url=""
+  local escaped_license_state_dir=""
+  local escaped_license_shop_auth_url=""
+  local escaped_license_shop_exchange_path=""
+  local escaped_license_activate_path=""
+  local escaped_license_refresh_path=""
+  local escaped_license_verify_path=""
+  local escaped_license_grace_path=""
+  local escaped_license_refresh_interval=""
+  local escaped_license_grace_period=""
+  local escaped_license_storage_key=""
+  local escaped_license_executable_sha256=""
+  local escaped_license_claim_path=""
   if [ "$dry_run" = "1" ]; then
     say "$(text write_file): $file"
     return
   fi
   prepare_file "$file"
+  escaped_license_provider="$(json_double_quote_escape "$cpa_license_provider")"
+  escaped_license_product_code="$(json_double_quote_escape "$cpa_license_product_code")"
+  escaped_license_public_key="$(json_double_quote_escape "$cpa_license_public_key")"
+  escaped_license_plugin_public_key="$(json_double_quote_escape "$cpa_license_plugin_public_key")"
+  escaped_license_client_id="$(json_double_quote_escape "$cpa_license_client_id")"
+  escaped_license_api_base_url="$(json_double_quote_escape "$cpa_license_api_base_url")"
+  escaped_license_state_dir="$(json_double_quote_escape "$cpa_license_state_dir")"
+  escaped_license_shop_auth_url="$(json_double_quote_escape "$cpa_license_shop_auth_url")"
+  escaped_license_shop_exchange_path="$(json_double_quote_escape "$cpa_license_shop_exchange_path")"
+  escaped_license_activate_path="$(json_double_quote_escape "$cpa_license_activate_path")"
+  escaped_license_refresh_path="$(json_double_quote_escape "$cpa_license_refresh_path")"
+  escaped_license_verify_path="$(json_double_quote_escape "$cpa_license_verify_path")"
+  escaped_license_grace_path="$(json_double_quote_escape "$cpa_license_grace_path")"
+  escaped_license_refresh_interval="$(json_double_quote_escape "$cpa_license_refresh_interval")"
+  escaped_license_grace_period="$(json_double_quote_escape "$cpa_license_grace_period")"
+  escaped_license_storage_key="$(json_double_quote_escape "$cpa_license_storage_key")"
+  escaped_license_executable_sha256="$(json_double_quote_escape "$cpa_license_executable_sha256")"
+  escaped_license_claim_path="$(json_double_quote_escape "$cpa_license_claim_path")"
   if [ "$cpa_connection_mode" = "env" ]; then
     cat > "$tmp" <<EOF
 {
@@ -1472,6 +2778,28 @@ write_native_config() {
   "dataKeyPath": "../../data/data.key",
   "cpaUpstreamUrl": "$cpa_url",
   "managementKeyFile": "../../secrets/cpa-management-key",
+  "license": {
+    "provider": "$escaped_license_provider",
+    "productCode": "$escaped_license_product_code",
+    "apiBaseUrl": "$escaped_license_api_base_url",
+    "publicKey": "$escaped_license_public_key",
+    "pluginPublicKey": "$escaped_license_plugin_public_key",
+    "clientId": "$escaped_license_client_id",
+    "clientSecretFile": "../../secrets/cpa-license-client-secret",
+    "stateDir": "$escaped_license_state_dir",
+    "shopAuthUrl": "$escaped_license_shop_auth_url",
+    "shopExchangePath": "$escaped_license_shop_exchange_path",
+    "activatePath": "$escaped_license_activate_path",
+    "refreshPath": "$escaped_license_refresh_path",
+    "verifyPath": "$escaped_license_verify_path",
+    "gracePath": "$escaped_license_grace_path",
+    "refreshInterval": "$escaped_license_refresh_interval",
+    "gracePeriod": "$escaped_license_grace_period",
+    "instanceBinding": "strict",
+    "storageKey": "$escaped_license_storage_key",
+    "executableSha256": "$escaped_license_executable_sha256",
+    "claimPath": "$escaped_license_claim_path"
+  },
   "collectorMode": "auto",
   "queue": "usage",
   "popSide": "right",
@@ -1487,6 +2815,28 @@ EOF
   "dataDir": "../../data",
   "adminKeyFile": "../../secrets/cpamp-admin-key",
   "dataKeyPath": "../../data/data.key",
+  "license": {
+    "provider": "$escaped_license_provider",
+    "productCode": "$escaped_license_product_code",
+    "apiBaseUrl": "$escaped_license_api_base_url",
+    "publicKey": "$escaped_license_public_key",
+    "pluginPublicKey": "$escaped_license_plugin_public_key",
+    "clientId": "$escaped_license_client_id",
+    "clientSecretFile": "../../secrets/cpa-license-client-secret",
+    "stateDir": "$escaped_license_state_dir",
+    "shopAuthUrl": "$escaped_license_shop_auth_url",
+    "shopExchangePath": "$escaped_license_shop_exchange_path",
+    "activatePath": "$escaped_license_activate_path",
+    "refreshPath": "$escaped_license_refresh_path",
+    "verifyPath": "$escaped_license_verify_path",
+    "gracePath": "$escaped_license_grace_path",
+    "refreshInterval": "$escaped_license_refresh_interval",
+    "gracePeriod": "$escaped_license_grace_period",
+    "instanceBinding": "strict",
+    "storageKey": "$escaped_license_storage_key",
+    "executableSha256": "$escaped_license_executable_sha256",
+    "claimPath": "$escaped_license_claim_path"
+  },
   "collectorMode": "auto",
   "queue": "usage",
   "popSide": "right",
@@ -1503,15 +2853,70 @@ write_native_run_script() {
   local binary_dir="$1"
   local file="$install_dir/run.sh"
   local tmp="${file}.tmp.$$"
+  local shell_license_public_key=""
+  local shell_license_plugin_public_key=""
+  local shell_license_client_id=""
+  local shell_license_provider=""
+  local shell_license_product_code=""
+  local shell_license_state_dir=""
+  local shell_license_shop_auth_url=""
+  local shell_license_shop_exchange_path=""
+  local shell_license_activate_path=""
+  local shell_license_refresh_path=""
+  local shell_license_verify_path=""
+  local shell_license_api_base_url=""
+  local shell_license_grace_path=""
+  local shell_license_refresh_interval=""
+  local shell_license_grace_period=""
+  local shell_license_storage_key=""
+  local shell_license_executable_sha256=""
+  local shell_license_claim_path=""
   if [ "$dry_run" = "1" ]; then
     say "$(text write_file): $file"
     return
   fi
   prepare_file "$file"
+  shell_license_public_key="$(shell_single_quote_escape "$cpa_license_public_key")"
+  shell_license_plugin_public_key="$(shell_single_quote_escape "$cpa_license_plugin_public_key")"
+  shell_license_client_id="$(shell_single_quote_escape "$cpa_license_client_id")"
+  shell_license_provider="$(shell_single_quote_escape "$cpa_license_provider")"
+  shell_license_product_code="$(shell_single_quote_escape "$cpa_license_product_code")"
+  shell_license_state_dir="$(shell_single_quote_escape "$cpa_license_state_dir")"
+  shell_license_shop_auth_url="$(shell_single_quote_escape "$cpa_license_shop_auth_url")"
+  shell_license_shop_exchange_path="$(shell_single_quote_escape "$cpa_license_shop_exchange_path")"
+  shell_license_activate_path="$(shell_single_quote_escape "$cpa_license_activate_path")"
+  shell_license_refresh_path="$(shell_single_quote_escape "$cpa_license_refresh_path")"
+  shell_license_verify_path="$(shell_single_quote_escape "$cpa_license_verify_path")"
+  shell_license_api_base_url="$(shell_single_quote_escape "$cpa_license_api_base_url")"
+  shell_license_grace_path="$(shell_single_quote_escape "$cpa_license_grace_path")"
+  shell_license_refresh_interval="$(shell_single_quote_escape "$cpa_license_refresh_interval")"
+  shell_license_grace_period="$(shell_single_quote_escape "$cpa_license_grace_period")"
+  shell_license_storage_key="$(shell_single_quote_escape "$cpa_license_storage_key")"
+  shell_license_executable_sha256="$(shell_single_quote_escape "$cpa_license_executable_sha256")"
+  shell_license_claim_path="$(shell_single_quote_escape "$cpa_license_claim_path")"
   cat > "$tmp" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$binary_dir"
+export CPA_LICENSE_PUBLIC_KEY='$shell_license_public_key'
+export CPA_LICENSE_PLUGIN_PUBLIC_KEY='$shell_license_plugin_public_key'
+export CPA_LICENSE_CLIENT_ID='$shell_license_client_id'
+export CPA_LICENSE_PROVIDER='$shell_license_provider'
+export CPA_LICENSE_PRODUCT_CODE='$shell_license_product_code'
+export CPA_LICENSE_STATE_DIR='$shell_license_state_dir'
+export CPA_LICENSE_SHOP_AUTH_URL='$shell_license_shop_auth_url'
+export CPA_LICENSE_SHOP_EXCHANGE_PATH='$shell_license_shop_exchange_path'
+export CPA_LICENSE_ACTIVATE_PATH='$shell_license_activate_path'
+export CPA_LICENSE_REFRESH_PATH='$shell_license_refresh_path'
+export CPA_LICENSE_VERIFY_PATH='$shell_license_verify_path'
+export CPA_LICENSE_CLIENT_SECRET_FILE="$install_dir/secrets/cpa-license-client-secret"
+export CPA_LICENSE_API_BASE_URL='$shell_license_api_base_url'
+export CPA_LICENSE_GRACE_PATH='$shell_license_grace_path'
+export CPA_LICENSE_REFRESH_INTERVAL='$shell_license_refresh_interval'
+export CPA_LICENSE_GRACE_PERIOD='$shell_license_grace_period'
+export CPA_LICENSE_STORAGE_KEY='$shell_license_storage_key'
+export CPA_LICENSE_EXECUTABLE_SHA256='$shell_license_executable_sha256'
+export CPA_LICENSE_CLAIM_PATH='$shell_license_claim_path'
 exec ./cpa-manager-plus
 EOF
   mv -f "$tmp" "$file"
@@ -1549,7 +2954,9 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$binary_dir
-ExecStart=$binary_dir/cpa-manager-plus
+# run.sh exports the storefront license settings before executing
+# $binary_dir/cpa-manager-plus.
+ExecStart=$install_dir/run.sh
 Restart=on-failure
 RestartSec=5s
 
@@ -1584,6 +2991,7 @@ generate_native_files() {
 
   generated_admin_key="cpamp_$(random_alnum 32)"
   admin_key="$(ensure_secret_file "$install_dir/secrets/cpamp-admin-key" "$generated_admin_key")"
+  populate_license_secret_file
   if [ "$cpa_connection_mode" = "env" ]; then
     ensure_secret_file "$install_dir/secrets/cpa-management-key" "$cpa_management_key" >/dev/null
   fi
@@ -1741,8 +3149,26 @@ main() {
 
   if [ "$operation" = "upgrade" ] || { [ "$operation" = "repair" ] && [ "$existing_install_state" = "managed" ]; }; then
     load_existing_docker_config
+    # Existing public releases may have a license section without the
+    # publisher key. Repair only that metadata for the official storefront;
+    # authorization state, secrets, and customer-managed endpoints remain
+    # untouched.
+    if [ "$operation" != "repair" ] || [ "$install_mode" = "stack" ]; then
+      backfill_existing_license_settings
+    fi
+    validate_license_config
     print_summary
     check_requirements
+    if [ "$install_mode" = "stack" ]; then
+      preflight_license_secret
+      # Migrate legacy direct/file credentials before replacing an existing
+      # CPA container. The migration is also performed for skip-execute plans
+      # so the rendered configuration is complete, while dry-runs remain
+      # side-effect free.
+      if [ "$dry_run" != "1" ]; then
+        populate_license_secret_file
+      fi
+    fi
     if [ "$operation" = "upgrade" ]; then
       run_docker_install
     else
@@ -1752,12 +3178,16 @@ main() {
       run_docker_repair
     fi
     validate_docker_install
+    if [ "$install_mode" = "stack" ]; then
+      clear_legacy_license_secret_env
+    fi
     post_install_message
     return
   fi
 
   if [ "$operation" = "regenerate" ] && [ "$existing_install_state" = "managed" ]; then
     load_existing_docker_config
+    backfill_existing_license_settings
   fi
 
   while true; do
@@ -1770,6 +3200,11 @@ main() {
 
   check_requirements
 
+  # Validate the storefront credential after environment/command checks but
+  # before creating files or starting/restarting any service. Dry-runs only
+  # print the destination and never create an empty placeholder.
+  preflight_license_secret
+
   if [ "$deploy_method" = "docker" ]; then
     backup_generated_config
     generate_docker_files
@@ -1779,6 +3214,9 @@ main() {
       run_docker_install
     fi
     validate_docker_install
+    if [ "$install_mode" = "stack" ]; then
+      clear_legacy_license_secret_env
+    fi
   else
     backup_generated_config
     generate_native_files

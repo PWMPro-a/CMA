@@ -1,6 +1,8 @@
 package containeropsagent
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +14,79 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
+
+func TestValidDeployLicensePublicKeyMatchesCPARuntimeFormats(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef")
+	for name, value := range map[string]string{
+		"base64url": base64.RawURLEncoding.EncodeToString(key),
+		"base64":    base64.StdEncoding.EncodeToString(key),
+		"hex":       hex.EncodeToString(key),
+		"hex-0x":    "0x" + hex.EncodeToString(key),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !validDeployLicensePublicKey(value) {
+				t.Fatalf("expected %s key to be accepted", name)
+			}
+		})
+	}
+	for name, value := range map[string]string{
+		"empty":     "",
+		"short":     base64.RawURLEncoding.EncodeToString([]byte("short")),
+		"pem":       "-----BEGIN PUBLIC KEY-----\\nMCowBQYDK2VwAyEA000000000000000000000000000000000000000=\\n-----END PUBLIC KEY-----",
+		"malformed": "not-a-key",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if validDeployLicensePublicKey(value) {
+				t.Fatalf("expected %s key to be rejected", name)
+			}
+		})
+	}
+}
+
+func TestReadDeployEnvFallsBackToLicenseValuesInCPAConfig(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "cliproxyapi"), 0o750); err != nil {
+		t.Fatalf("create config directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte(strings.Join([]string{
+		"CPA_MANAGER_ADMIN_KEY=admin-secret",
+		"CPA_MANAGEMENT_KEY=management-secret",
+		"CPAMP_AGENT_TOKEN=agent-secret",
+		"CPA_LICENSE_PUBLIC_KEY=",
+	}, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	config := strings.Join([]string{
+		"license:",
+		"  public-key: \"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"",
+		"  plugin-public-key: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'",
+		"  client-id: \"client-from-config\"",
+		"  grace-period: \"24h\" # runtime policy stays env-owned",
+		"routing:",
+		"  strategy: round-robin",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(root, "cliproxyapi", "config.yaml"), []byte(config), 0o640); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	values, checks := readDeployEnv(root)
+	if values["CPA_LICENSE_PUBLIC_KEY"] != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" {
+		t.Fatalf("public key fallback = %q", values["CPA_LICENSE_PUBLIC_KEY"])
+	}
+	if values["CPA_LICENSE_CLIENT_ID"] != "client-from-config" {
+		t.Fatalf("client id fallback = %q", values["CPA_LICENSE_CLIENT_ID"])
+	}
+	if _, ok := values["CPA_LICENSE_GRACE_PERIOD"]; ok {
+		t.Fatalf("runtime grace period unexpectedly fell back from config: %#v", values)
+	}
+	if hasAgentDeployCheck(checks, "deploy_env_license_public_key_missing") {
+		t.Fatalf("public key fallback was still reported missing: %#v", checks)
+	}
+	if hasAgentDeployCheck(checks, "deploy_env_license_public_key_invalid") {
+		t.Fatalf("public key fallback was reported invalid: %#v", checks)
+	}
+}
 
 func TestServerRequiresBearerTokenForAgentInfo(t *testing.T) {
 	serverApp, err := NewServer(ServerOptions{
@@ -110,6 +185,11 @@ func TestUpgradeJobRoutesRecreateCPAOnlyAndPersistJob(t *testing.T) {
 					return backupJSONResponse(http.StatusOK, []dockerNetwork{{Name: standardCPANetworkName, Driver: "bridge", Labels: map[string]string{"com.cpamp.managed": "true"}}})
 				case "/images/json":
 					return backupJSONResponse(http.StatusOK, []dockerImage{})
+				case "/containers/old-cpa-full/json":
+					return backupJSONResponse(http.StatusOK, map[string]any{"Config": map[string]any{"Env": []string{
+						"CPA_LICENSE_PUBLIC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+						"CPA_LICENSE_GRACE_PERIOD=6h",
+					}}})
 				case "/containers/cli-proxy-api/stop":
 					cpaWrites = append(cpaWrites, "stop")
 					return backupJSONResponse(http.StatusNoContent, map[string]any{})
@@ -260,13 +340,16 @@ func TestRenderCPADeployFilesWritesOnlyStandardStackFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render files: %v", err)
 	}
-	if len(files) != 3 {
+	if len(files) != 4 {
 		t.Fatalf("files = %#v", files)
 	}
-	for _, name := range []string{"compose.yml", "stack.manifest.json", ".env.example"} {
+	for _, name := range []string{"compose.yml", "stack.manifest.json", ".env.example", "cliproxyapi/config.yaml"} {
 		if _, err := os.Stat(filepath.Join(stackRoot, name)); err != nil {
 			t.Fatalf("stat %s: %v", name, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(stackRoot, "secrets", "cpa-license-client-secret")); err != nil {
+		t.Fatalf("stat client secret placeholder: %v", err)
 	}
 	composeData, err := os.ReadFile(filepath.Join(stackRoot, "compose.yml"))
 	if err != nil {
@@ -281,6 +364,13 @@ func TestRenderCPADeployFilesWritesOnlyStandardStackFiles(t *testing.T) {
 	}
 	if !strings.Contains(string(envData), "CPAMP_AGENT_TOKEN") {
 		t.Fatalf("env example = %s", envData)
+	}
+	configData, err := os.ReadFile(filepath.Join(stackRoot, "cliproxyapi", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(configData), "state-dir: \"/app/data/license\"") {
+		t.Fatalf("config = %s", configData)
 	}
 }
 

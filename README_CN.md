@@ -118,15 +118,35 @@ CPAMP_DRY_RUN=1 bash install-cpamp.sh
 
 ### CPA + CPAMP 一起部署
 
+客户部署请优先使用[一键安装脚本](https://seakee.github.io/CPA-Manager-Plus/docs/deployment/installer.html)，
+它会写入 CPA 商城授权公钥、持久化租约目录和 Docker secret。手动 Compose 时也必须
+带上授权环境变量；只使用普通 `eceasy/cli-proxy-api:latest` 会因缺少公钥而显示
+`not_activated` 或 `configuration_error`。
+
 ```yaml
 services:
   cli-proxy-api:
-    image: eceasy/cli-proxy-api:latest
+    image: ghcr.io/abc124774961/cli-proxy-api-cpa:v7.2.148-cpa.3
     restart: unless-stopped
+    command: ['./CLIProxyAPI', '-config', '/CLIProxyAPI/config.yaml']
     ports:
       - '8317:8317'
+    environment:
+      CPA_LICENSE_PUBLIC_KEY: '${CPA_LICENSE_PUBLIC_KEY:?set CPA_LICENSE_PUBLIC_KEY}'
+      CPA_LICENSE_PLUGIN_PUBLIC_KEY: '${CPA_LICENSE_PLUGIN_PUBLIC_KEY:-}'
+      CPA_LICENSE_CLIENT_ID: '${CPA_LICENSE_CLIENT_ID:-}'
+      CPA_LICENSE_CLIENT_SECRET_FILE: '/run/secrets/cpa-license-client-secret'
+      CPA_LICENSE_API_BASE_URL: 'https://p.666ttt.net/api/storefront'
+      CPA_LICENSE_STATE_DIR: '/CLIProxyAPI/data/license'
     volumes:
-      - cpa-data:/app/data
+      # 该配置文件由安装器生成，手动部署时请先从固定版本模板创建。
+      - ./cliproxyapi/config.yaml:/CLIProxyAPI/config.yaml
+      - ./cliproxyapi/auths:/root/.cli-proxy-api
+      - ./cliproxyapi/logs:/CLIProxyAPI/logs
+      - ./cliproxyapi/data:/CLIProxyAPI/data
+      - ./cliproxyapi/data:/app/data
+    secrets:
+      - cpa_license_client_secret
 
   cpa-manager-plus:
     image: seakee/cpa-manager-plus:latest
@@ -139,7 +159,20 @@ services:
 volumes:
   cpa-data:
   cpa-manager-plus-data:
+
+secrets:
+  cpa_license_client_secret:
+    file: '${CPA_LICENSE_CLIENT_SECRET_HOST_PATH:-./secrets/cpa-license-client-secret}'
 ```
+
+启动前在同目录 `.env` 中设置 `CPA_LICENSE_PUBLIC_KEY`；若商城启用了客户端校验，
+再设置 `CPA_LICENSE_CLIENT_ID` 并把 secret 写入上述文件。首次启动的宽限时间由商城
+签名租约的 `grace_until` 控制，重启容器或修改本地 `CPA_LICENSE_GRACE_PERIOD` 不会
+重置或延长；正式授权到期后的过渡窗口也由商城签发。
+
+手动部署还要先创建 `cliproxyapi/config.yaml`（包含
+`remote-management.secret-key` 和 `license` 段）；推荐直接运行上面的安装器，它会
+自动生成该文件和目录。
 
 ```bash
 docker compose up -d

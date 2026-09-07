@@ -28,6 +28,7 @@ import {
   IconSidebarSystem,
   IconSidebarStore,
   IconSidebarUsage,
+  IconShield,
 } from '@/components/ui/icons';
 import { INLINE_LOGO_JPEG } from '@/assets/logoInline';
 import {
@@ -68,11 +69,13 @@ const sidebarIcons: Record<string, ReactNode> = {
   quota: <IconSidebarQuota size={SIDEBAR_ICON_SIZE} />,
   usageAnalytics: <IconSidebarUsage size={SIDEBAR_ICON_SIZE} />,
   monitoring: <IconSidebarMonitor size={SIDEBAR_ICON_SIZE} />,
+  identityPools: <IconShield size={SIDEBAR_ICON_SIZE} />,
   containerOps: <IconSidebarContainerOps size={SIDEBAR_ICON_SIZE} />,
   plugins: <IconSidebarPlugins size={SIDEBAR_ICON_SIZE} />,
   config: <IconSidebarConfig size={SIDEBAR_ICON_SIZE} />,
   logs: <IconSidebarLogs size={SIDEBAR_ICON_SIZE} />,
   system: <IconSidebarSystem size={SIDEBAR_ICON_SIZE} />,
+  license: <IconShield size={SIDEBAR_ICON_SIZE} />,
 };
 
 // Header action icons - smaller size for header buttons
@@ -588,6 +591,7 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
       dashboardNavItem,
       ...(usageAnalyticsNavItem ? [usageAnalyticsNavItem] : []),
       ...(monitoringNavItem ? [monitoringNavItem] : []),
+      { path: '/identity-pools', label: t('nav.identity_pools', { defaultValue: 'Identity Pools' }), shortLabel: t('nav.identity_pools', { defaultValue: 'Identity Pools' }), icon: sidebarIcons.identityPools },
     ],
     [
       {
@@ -635,6 +639,12 @@ export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps
     operationNavItems,
     pluginResourceNavItems,
     [
+      {
+        path: '/license',
+        label: t('nav.license'),
+        shortLabel: navShortLabel('nav.license', t('nav.license')),
+        icon: sidebarIcons.license,
+      },
       {
         path: '/system',
         label: t('nav.system_info'),

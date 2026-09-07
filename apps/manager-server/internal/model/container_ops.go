@@ -46,26 +46,27 @@ type ContainerOpsAuditEntry struct {
 }
 
 type ContainerOpsUpgradeTask struct {
-	ID               int64  `json:"id"`
-	TaskID           string `json:"taskId"`
-	OperationID      string `json:"operationId,omitempty"`
-	Status           string `json:"status"`
-	Phase            string `json:"phase,omitempty"`
-	CPAImage         string `json:"cpaImage,omitempty"`
-	CPAMPImage       string `json:"cpampImage,omitempty"`
-	RollbackBackupID string `json:"rollbackBackupId,omitempty"`
-	AgentBaseURL     string `json:"agentBaseUrl,omitempty"`
-	Message          string `json:"message,omitempty"`
-	Error            string `json:"error,omitempty"`
-	NextAction       string `json:"nextAction,omitempty"`
-	RequestJSON      string `json:"-"`
-	Request          any    `json:"request,omitempty"`
-	ResultJSON       string `json:"-"`
-	Result           any    `json:"result,omitempty"`
-	StartedAtMS      int64  `json:"startedAtMs"`
-	FinishedAtMS     int64  `json:"finishedAtMs,omitempty"`
-	CreatedAtMS      int64  `json:"createdAtMs"`
-	UpdatedAtMS      int64  `json:"updatedAtMs"`
+	ID                int64  `json:"id"`
+	TaskID            string `json:"taskId"`
+	OperationID       string `json:"operationId,omitempty"`
+	Status            string `json:"status"`
+	Phase             string `json:"phase,omitempty"`
+	CPAImage          string `json:"cpaImage,omitempty"`
+	CPAMPImage        string `json:"cpampImage,omitempty"`
+	AllowCustomImages bool   `json:"allowCustomImages,omitempty"`
+	RollbackBackupID  string `json:"rollbackBackupId,omitempty"`
+	AgentBaseURL      string `json:"agentBaseUrl,omitempty"`
+	Message           string `json:"message,omitempty"`
+	Error             string `json:"error,omitempty"`
+	NextAction        string `json:"nextAction,omitempty"`
+	RequestJSON       string `json:"-"`
+	Request           any    `json:"request,omitempty"`
+	ResultJSON        string `json:"-"`
+	Result            any    `json:"result,omitempty"`
+	StartedAtMS       int64  `json:"startedAtMs"`
+	FinishedAtMS      int64  `json:"finishedAtMs,omitempty"`
+	CreatedAtMS       int64  `json:"createdAtMs"`
+	UpdatedAtMS       int64  `json:"updatedAtMs"`
 }
 
 type ContainerOpsAgentInfo struct {
@@ -242,25 +243,27 @@ type ContainerOpsImportRisk struct {
 }
 
 type ContainerOpsDeployRequest struct {
-	Apply  bool   `json:"apply"`
-	Action string `json:"action,omitempty"`
+	Apply             bool   `json:"apply"`
+	Action            string `json:"action,omitempty"`
+	AllowCustomImages bool   `json:"allowCustomImages,omitempty"`
 }
 
 type ContainerOpsDeployPlan struct {
-	Agent       ContainerOpsAgentInfo       `json:"agent,omitempty"`
-	Status      string                      `json:"status"`
-	Manifest    ContainerOpsStackManifest   `json:"manifest"`
-	Compose     ContainerOpsComposeDraft    `json:"compose"`
-	Checks      []ContainerOpsDeployCheck   `json:"checks"`
-	Steps       []ContainerOpsDeployStep    `json:"steps"`
-	Files       []ContainerOpsDeployFile    `json:"files,omitempty"`
-	ImagePulls  []ContainerOpsImagePull     `json:"imagePulls,omitempty"`
-	Actions     []ContainerOpsDeployAction  `json:"actions,omitempty"`
-	Applied     bool                        `json:"applied"`
-	Destructive bool                        `json:"destructive"`
-	ReadOnly    bool                        `json:"readOnly"`
-	Overview    *ContainerOpsDockerOverview `json:"overview,omitempty"`
-	Lifecycle   *ContainerOpsLifecycleState `json:"lifecycle,omitempty"`
+	Agent             ContainerOpsAgentInfo       `json:"agent,omitempty"`
+	Status            string                      `json:"status"`
+	Manifest          ContainerOpsStackManifest   `json:"manifest"`
+	Compose           ContainerOpsComposeDraft    `json:"compose"`
+	Checks            []ContainerOpsDeployCheck   `json:"checks"`
+	Steps             []ContainerOpsDeployStep    `json:"steps"`
+	Files             []ContainerOpsDeployFile    `json:"files,omitempty"`
+	ImagePulls        []ContainerOpsImagePull     `json:"imagePulls,omitempty"`
+	Actions           []ContainerOpsDeployAction  `json:"actions,omitempty"`
+	AllowCustomImages bool                        `json:"allowCustomImages,omitempty"`
+	Applied           bool                        `json:"applied"`
+	Destructive       bool                        `json:"destructive"`
+	ReadOnly          bool                        `json:"readOnly"`
+	Overview          *ContainerOpsDockerOverview `json:"overview,omitempty"`
+	Lifecycle         *ContainerOpsLifecycleState `json:"lifecycle,omitempty"`
 }
 
 type ContainerOpsDeployCheck struct {
@@ -300,8 +303,9 @@ type ContainerOpsDeployAction struct {
 }
 
 type ContainerOpsDeployRenderRequest struct {
-	Manifest ContainerOpsStackManifest `json:"manifest"`
-	Compose  ContainerOpsComposeDraft  `json:"compose"`
+	Manifest          ContainerOpsStackManifest `json:"manifest"`
+	Compose           ContainerOpsComposeDraft  `json:"compose"`
+	AllowCustomImages bool                      `json:"allowCustomImages,omitempty"`
 }
 
 type ContainerOpsBackupResult struct {
@@ -401,58 +405,63 @@ type ContainerOpsNetworkStandardizeResult struct {
 }
 
 type ContainerOpsUpgradeRequest struct {
-	CPAImage   string `json:"cpaImage,omitempty"`
-	CPAMPImage string `json:"cpampImage,omitempty"`
-	Apply      bool   `json:"apply"`
+	CPAImage          string `json:"cpaImage,omitempty"`
+	CPAMPImage        string `json:"cpampImage,omitempty"`
+	Apply             bool   `json:"apply"`
+	AllowCustomImages bool   `json:"allowCustomImages,omitempty"`
 }
 
 type ContainerOpsUpgradeTaskStartRequest struct {
-	TaskID string `json:"taskId"`
+	TaskID            string `json:"taskId"`
+	AllowCustomImages bool   `json:"allowCustomImages,omitempty"`
 }
 
 type ContainerOpsUpgradeJobStartRequest struct {
-	TaskID           string `json:"taskId"`
-	CPAImage         string `json:"cpaImage,omitempty"`
-	CPAMPImage       string `json:"cpampImage,omitempty"`
-	RollbackBackupID string `json:"rollbackBackupId,omitempty"`
+	TaskID            string `json:"taskId"`
+	CPAImage          string `json:"cpaImage,omitempty"`
+	CPAMPImage        string `json:"cpampImage,omitempty"`
+	RollbackBackupID  string `json:"rollbackBackupId,omitempty"`
+	AllowCustomImages bool   `json:"allowCustomImages,omitempty"`
 }
 
 type ContainerOpsUpgradeJob struct {
-	JobID            string                      `json:"jobId"`
-	TaskID           string                      `json:"taskId,omitempty"`
-	Status           string                      `json:"status"`
-	Phase            string                      `json:"phase,omitempty"`
-	CPAImage         string                      `json:"cpaImage,omitempty"`
-	CPAMPImage       string                      `json:"cpampImage,omitempty"`
-	RollbackBackupID string                      `json:"rollbackBackupId,omitempty"`
-	Message          string                      `json:"message,omitempty"`
-	Error            string                      `json:"error,omitempty"`
-	NextAction       string                      `json:"nextAction,omitempty"`
-	Checks           []ContainerOpsUpgradeCheck  `json:"checks,omitempty"`
-	Actions          []ContainerOpsUpgradeAction `json:"actions,omitempty"`
-	Plan             *ContainerOpsUpgradePlan    `json:"plan,omitempty"`
-	StartedAtMS      int64                       `json:"startedAtMs"`
-	FinishedAtMS     int64                       `json:"finishedAtMs,omitempty"`
-	CreatedAtMS      int64                       `json:"createdAtMs"`
-	UpdatedAtMS      int64                       `json:"updatedAtMs"`
+	JobID             string                      `json:"jobId"`
+	TaskID            string                      `json:"taskId,omitempty"`
+	Status            string                      `json:"status"`
+	Phase             string                      `json:"phase,omitempty"`
+	CPAImage          string                      `json:"cpaImage,omitempty"`
+	CPAMPImage        string                      `json:"cpampImage,omitempty"`
+	AllowCustomImages bool                        `json:"allowCustomImages,omitempty"`
+	RollbackBackupID  string                      `json:"rollbackBackupId,omitempty"`
+	Message           string                      `json:"message,omitempty"`
+	Error             string                      `json:"error,omitempty"`
+	NextAction        string                      `json:"nextAction,omitempty"`
+	Checks            []ContainerOpsUpgradeCheck  `json:"checks,omitempty"`
+	Actions           []ContainerOpsUpgradeAction `json:"actions,omitempty"`
+	Plan              *ContainerOpsUpgradePlan    `json:"plan,omitempty"`
+	StartedAtMS       int64                       `json:"startedAtMs"`
+	FinishedAtMS      int64                       `json:"finishedAtMs,omitempty"`
+	CreatedAtMS       int64                       `json:"createdAtMs"`
+	UpdatedAtMS       int64                       `json:"updatedAtMs"`
 }
 
 type ContainerOpsUpgradePlan struct {
-	Agent          ContainerOpsAgentInfo       `json:"agent,omitempty"`
-	Status         string                      `json:"status"`
-	CPAImage       string                      `json:"cpaImage"`
-	CPAMPImage     string                      `json:"cpampImage"`
-	Checks         []ContainerOpsUpgradeCheck  `json:"checks"`
-	Steps          []ContainerOpsUpgradeStep   `json:"steps"`
-	Actions        []ContainerOpsUpgradeAction `json:"actions,omitempty"`
-	ImagePulls     []ContainerOpsImagePull     `json:"imagePulls,omitempty"`
-	RollbackBackup *ContainerOpsBackupResult   `json:"rollbackBackup,omitempty"`
-	Task           *ContainerOpsUpgradeTask    `json:"task,omitempty"`
-	Applied        bool                        `json:"applied"`
-	Destructive    bool                        `json:"destructive"`
-	ReadOnly       bool                        `json:"readOnly"`
-	Overview       *ContainerOpsDockerOverview `json:"overview,omitempty"`
-	Lifecycle      *ContainerOpsLifecycleState `json:"lifecycle,omitempty"`
+	Agent             ContainerOpsAgentInfo       `json:"agent,omitempty"`
+	Status            string                      `json:"status"`
+	CPAImage          string                      `json:"cpaImage"`
+	CPAMPImage        string                      `json:"cpampImage"`
+	AllowCustomImages bool                        `json:"allowCustomImages,omitempty"`
+	Checks            []ContainerOpsUpgradeCheck  `json:"checks"`
+	Steps             []ContainerOpsUpgradeStep   `json:"steps"`
+	Actions           []ContainerOpsUpgradeAction `json:"actions,omitempty"`
+	ImagePulls        []ContainerOpsImagePull     `json:"imagePulls,omitempty"`
+	RollbackBackup    *ContainerOpsBackupResult   `json:"rollbackBackup,omitempty"`
+	Task              *ContainerOpsUpgradeTask    `json:"task,omitempty"`
+	Applied           bool                        `json:"applied"`
+	Destructive       bool                        `json:"destructive"`
+	ReadOnly          bool                        `json:"readOnly"`
+	Overview          *ContainerOpsDockerOverview `json:"overview,omitempty"`
+	Lifecycle         *ContainerOpsLifecycleState `json:"lifecycle,omitempty"`
 }
 
 type ContainerOpsUpgradeCheck struct {

@@ -203,6 +203,27 @@ describe('useVisualConfig', () => {
     harness.unmount();
   });
 
+  it('removes legacy temporary error handling overrides when saving visual settings', () => {
+    const harness = mountUseVisualConfig();
+    const yaml = [
+      'error-handling:',
+      '  temporary-error-strategy: wait-then-switch',
+      '  retry-before-first-output-only: false',
+      '',
+    ].join('\n');
+
+    act(() => {
+      const result = harness.getCurrent().loadVisualValuesFromYaml(yaml);
+      expect(result.ok).toBe(true);
+      harness.getCurrent().setVisualValues({ requestRetry: '1' });
+    });
+
+    const savedYaml = harness.getCurrent().applyVisualChangesToYaml(yaml);
+    expect((parseYaml(savedYaml) as { 'error-handling'?: Record<string, unknown> })['error-handling'])
+      .toBeUndefined();
+    harness.unmount();
+  });
+
   it('writes plugin directory and store sources while preserving plugin configs', () => {
     const harness = mountUseVisualConfig();
     const yaml = ['plugins:', '  configs:', '    demo:', '      enabled: true', ''].join('\n');

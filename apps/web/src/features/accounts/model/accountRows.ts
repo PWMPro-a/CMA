@@ -20,6 +20,7 @@ import { resolveCodexPlanType, resolveEffectiveCodexPlanType } from '@/utils/quo
 import { getCredentialScopedQuotaState } from '@/utils/quota/credentialScope';
 import {
   classifyAuthFileOperationalState,
+  getAuthFileStatusMessage,
   isAuthFileCoolingStatusText,
 } from '@/features/authFiles/constants';
 import {
@@ -320,8 +321,7 @@ const resolveAccountLabel = (file: AuthFileItem): string =>
   readString(file.note) ||
   file.name;
 
-const resolveStatusMessage = (file: AuthFileItem): string =>
-  readString(file.statusMessage ?? file['status_message']);
+const resolveStatusMessage = (file: AuthFileItem): string => getAuthFileStatusMessage(file);
 
 const readNestedAuthFileString = (file: AuthFileItem, ...keys: string[]): string => {
   const records: Array<Record<string, unknown>> = [file];

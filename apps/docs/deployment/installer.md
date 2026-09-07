@@ -39,6 +39,10 @@ bash install-cpamp.sh
 
 完整安装推荐 Docker。CPAMP 原生包只包含 Manager Server，不包含 CPA 运行时；如果要用原生包，需要先单独部署 CPA。
 
+Docker 安装默认使用固定版本镜像
+`ghcr.io/abc124774961/cpa-manager-plus:v1.12.8-cpa.1`；如需其他镜像可通过
+`CPAMP_IMAGE` 显式指定。
+
 ## 完整 Docker 安装
 
 没有现成 CPA 时选择这个组合。安装器会同时启动 CPA 和 CPAMP，并准备持久化目录和登录密钥。
@@ -99,6 +103,27 @@ http://cli-proxy-api:8317
 ```
 
 这组连接由安装目录中的 `compose.yaml` 和 `secrets/cpa-management-key` 管理。打开面板后直接使用 CPAMP 管理员密钥登录，不需要再走首次 setup。
+
+### CPA 商城授权、公钥和宽限期
+
+完整栈安装还会把以下授权配置写入 `.env` 和 `cliproxyapi/config.yaml`：
+
+- `CPA_LICENSE_PUBLIC_KEY`：商城签名公钥，必须保留真实的 Ed25519 公钥，不能留空或写占位符。
+- `CPA_LICENSE_PLUGIN_PUBLIC_KEY`：插件签名公钥；没有独立插件公钥时可沿用发布包提供的值。
+- `CPA_LICENSE_CLIENT_ID` 与 `CPA_LICENSE_CLIENT_SECRET_FILE`：完整安装连接
+  `shop666` 或 `p.666ttt.net` 时需要，由商城为客户签发；secret 必须放在
+  `secrets/cpa-license-client-secret`，单行且权限为 `600`，不会写入公开 Compose
+  或镜像。安装器不会生成随机或空的商城 secret；缺少时会在启动前阻断。
+
+如果旧版本把 secret 写在 `CPA_LICENSE_CLIENT_SECRET` 或旧的
+`CPA_LICENSE_CLIENT_SECRET_FILE` 中，安装器会在升级/重新生成时迁移到上述本机文件，
+并优先保留已经存在的非空文件。`CPAMP_DRY_RUN=1` 只显示缺少项，不会创建空文件。
+
+首次启动时 CPA 会向商城申请一次性签名宽限租约。宽限的开始和截止时间由商城
+按实例保存并通过 `grace_until` 下发；重启容器、重跑安装器或修改本地
+`CPA_LICENSE_GRACE_PERIOD=6h` 都不会重新计时。正式授权到期后，商城可以另行签发
+`expiry_grace_until` 过渡窗口。公钥缺失/无效或客户端 secret 不匹配时，安装器会在
+启动前检查中阻止 CPA，并在日志中给出缺少的变量。
 
 部署完成后打开：
 

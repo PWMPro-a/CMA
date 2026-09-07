@@ -796,6 +796,7 @@ func Migrate(db *sql.DB) error {
 			phase text,
 			cpa_image text,
 			cpamp_image text,
+			allow_custom_images integer not null default 0,
 			rollback_backup_id text,
 			agent_base_url text,
 			message text,
@@ -818,6 +819,25 @@ func Migrate(db *sql.DB) error {
 			disabled_at_ms integer not null,
 			updated_at_ms integer not null
 		)`,
+		`create table if not exists quota_threshold_rules (
+			id integer primary key autoincrement,
+			file_name text not null,
+			auth_index text,
+			provider text,
+			account_snapshot text,
+			account_id text,
+			threshold_percent real not null,
+			enabled integer not null default 1,
+			last_observed_remaining_percent real,
+			last_disabled integer not null default 0,
+			last_triggered_at_ms integer,
+			last_inspection_at_ms integer,
+			last_error text,
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		)`,
+		`create index if not exists idx_quota_threshold_rules_enabled on quota_threshold_rules(enabled, updated_at_ms)`,
+		`create index if not exists idx_quota_threshold_rules_identity on quota_threshold_rules(file_name, auth_index, provider, account_id, account_snapshot)`,
 		`create table if not exists quota_cooldowns (
 			id integer primary key autoincrement,
 			auth_file_name text not null,
@@ -1210,7 +1230,45 @@ func Migrate(db *sql.DB) error {
 	if err := ensureDashboardHourlyRollupFormatVersion(db); err != nil {
 		return err
 	}
+	if err := ensureContainerOpsUpgradeTaskColumns(db); err != nil {
+		return err
+	}
 	return ensureModelPriceColumns(db)
+}
+
+// ensureContainerOpsUpgradeTaskColumns keeps the upgrade opt-in durable for
+// databases created before the allow_custom_images field was introduced.
+// SQLite supports adding this scalar column without a table rebuild, and the
+// MySQL schema adapter derives the same definition from the canonical schema.
+func ensureContainerOpsUpgradeTaskColumns(db *sql.DB) error {
+	rows, err := db.Query(`pragma table_info(container_ops_upgrade_tasks)`)
+	if err != nil {
+		return err
+	}
+	existing := map[string]struct{}{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if _, ok := existing["allow_custom_images"]; ok {
+		return nil
+	}
+	_, err = db.Exec(`alter table container_ops_upgrade_tasks add column allow_custom_images integer not null default 0`)
+	return err
 }
 
 func ensureSupplyOrderColumns(db *sql.DB) error {

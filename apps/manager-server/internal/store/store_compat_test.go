@@ -373,19 +373,20 @@ func TestStoreCompatContainerOpsUpgradeTasks(t *testing.T) {
 	})
 
 	older, err := db.CreateContainerOpsUpgradeTask(context.Background(), ContainerOpsUpgradeTask{
-		TaskID:      "upgrade-old",
-		OperationID: "upgrade-old",
-		Status:      "preparing",
-		Phase:       "prepare",
-		CPAImage:    "seakee/cli-proxy-api:v1",
-		Request:     map[string]any{"apply": true},
-		StartedAtMS: 1000,
-		CreatedAtMS: 1000,
+		TaskID:            "upgrade-old",
+		OperationID:       "upgrade-old",
+		Status:            "preparing",
+		Phase:             "prepare",
+		CPAImage:          "seakee/cli-proxy-api:v1",
+		Request:           map[string]any{"apply": true},
+		StartedAtMS:       1000,
+		CreatedAtMS:       1000,
+		AllowCustomImages: true,
 	})
 	if err != nil {
 		t.Fatalf("create older task: %v", err)
 	}
-	if older.ID <= 0 || older.UpdatedAtMS <= 0 {
+	if older.ID <= 0 || older.UpdatedAtMS <= 0 || !older.AllowCustomImages {
 		t.Fatalf("older task metadata = %#v", older)
 	}
 
@@ -422,6 +423,9 @@ func TestStoreCompatContainerOpsUpgradeTasks(t *testing.T) {
 	if loaded.TaskID != "upgrade-new" || loaded.Status != "prepared" || loaded.RollbackBackupID != "upgrade-cpa-20260610T010203Z" {
 		t.Fatalf("loaded task = %#v", loaded)
 	}
+	if loaded.AllowCustomImages {
+		t.Fatalf("loaded task unexpectedly enabled custom images: %#v", loaded)
+	}
 
 	tasks, err := db.ListContainerOpsUpgradeTasks(context.Background(), 10)
 	if err != nil {
@@ -435,6 +439,9 @@ func TestStoreCompatContainerOpsUpgradeTasks(t *testing.T) {
 		tasks[0].NextAction != "start_async_recreate" ||
 		tasks[0].FinishedAtMS != 3000 {
 		t.Fatalf("newer task = %#v", tasks[0])
+	}
+	if tasks[1].TaskID != "upgrade-old" || !tasks[1].AllowCustomImages {
+		t.Fatalf("older task custom-image flag was not persisted: %#v", tasks[1])
 	}
 	result, ok := tasks[0].Result.(map[string]any)
 	if !ok || result["rollbackBackupId"] != "upgrade-cpa-20260610T010203Z" {

@@ -13,6 +13,8 @@ import { isValidQuotaResetAtMs } from '@/utils/quota/formatters';
 import {
   classifyAuthFileOperationalState,
   isAuthFileCoolingStatusText,
+  isAuthFileRequestFaultStatusText,
+  isAuthFileTransientUpstreamStatusText,
 } from '@/features/authFiles/constants';
 
 export type AccountListHealthStatusKey =
@@ -137,6 +139,8 @@ export interface AccountListPresentationOptions {
 }
 
 const DEFAULT_ESTIMATED_VALUE_PER_REQUEST = 0.018;
+const HEALTHY_RECENT_REQUEST_MIN_SAMPLES = 5;
+const HEALTHY_RECENT_REQUEST_MIN_SUCCESS_RATE = 80;
 
 const quotaStatusLabelKey = (status: AccountRow['quota']['status']) => {
   switch (status) {
@@ -460,6 +464,15 @@ const hasKnownAvailableQuota = (
   return row.quota.status === 'ok' || row.quota.status === 'low';
 };
 
+const hasHealthyRecentRequestEvidence = (row: AccountRow): boolean => {
+  const total = row.usage.success + row.usage.failure;
+  return (
+    total >= HEALTHY_RECENT_REQUEST_MIN_SAMPLES &&
+    row.usage.successRate !== null &&
+    row.usage.successRate >= HEALTHY_RECENT_REQUEST_MIN_SUCCESS_RATE
+  );
+};
+
 type HealthStatusResolution = {
   status: AccountListHealthStatusKey;
   tooltipKey: string;
@@ -684,6 +697,26 @@ const resolveHealthStatus = (
   }
 
   const diagnosticText = getExceptionDetail(row);
+  const requestFaultDiagnostic = isAuthFileRequestFaultStatusText(
+    [row.statusMessage, row.quota.error, row.quota.observedErrorKind, row.quota.observedErrorCode]
+      .filter(Boolean)
+      .join(' ')
+  );
+  if (
+    row.quota.status !== 'error' &&
+    (!row.inspection || row.inspection.action === 'keep') &&
+    hasHealthyRecentRequestEvidence(row) &&
+    hasKnownAvailableQuota(row, quotaWindows, antigravityAvailability) &&
+    isAuthFileTransientUpstreamStatusText(diagnosticText, true)
+  ) {
+    return {
+      status: 'available',
+      tooltipKey: 'accounts.health_tip_available',
+      tooltipParams: { detail: diagnosticText },
+      reasonKey: 'accounts.health_reason_available',
+      reasonTone: 'muted',
+    };
+  }
   if (
     classifyAuthFileOperationalState(row.raw) === 'cooldown' ||
     isAuthFileCoolingStatusText(diagnosticText, row.usage.success > 0)
@@ -704,10 +737,11 @@ const resolveHealthStatus = (
       antigravityAvailability?.state !== 'partial') ||
     (row.statusMessage &&
       !isAuthFileCoolingStatusText(row.statusMessage, row.usage.success > 0) &&
+      !requestFaultDiagnostic &&
       antigravityAvailability?.state !== 'partial') ||
-    row.quota.error ||
-    row.quota.observedErrorKind ||
-    row.quota.observedErrorCode ||
+    (row.quota.error && !requestFaultDiagnostic) ||
+    (row.quota.observedErrorKind && !requestFaultDiagnostic) ||
+    (row.quota.observedErrorCode && !requestFaultDiagnostic) ||
     (row.inspection && row.inspection.action !== 'keep')
   ) {
     return {

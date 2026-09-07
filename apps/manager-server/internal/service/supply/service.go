@@ -6809,15 +6809,23 @@ func accountPoolStatsFromFilesAndCurrentEvidence(
 		bucket := operatorAccountUnconfirmed
 		temporaryLimit := operatorAccountTemporaryLimit{}
 		remainingFraction := 1.0
+		liveRequestFault := smartAccountHasRequestFault(file.Raw)
+		headerOverridesInspection := headerMatched &&
+			(!inspectionAuthoritative || !matched || header.TimestampMS > result.CreatedAtMS)
 		if isAvailableCodexFile(file) && len(resultsByFile[strings.TrimSpace(file.Name)]) == 0 {
 			// Preserve live capacity behavior when the selected inspection does not
 			// contain this file. The credential summary still uses authoritative
 			// inspection evidence whenever a matching row exists.
 			bucket = operatorAccountNormal
 		}
-		if smartAccountNeedsAttention(file.Raw) {
+		if liveRequestFault && !headerOverridesInspection {
+			// A live CPA row carrying a deterministic 400/model validation error
+			// is healthy credential evidence. Do not let an older scheduled probe
+			// that happened to receive 401 replace this state.
+			bucket = operatorAccountNormal
+		} else if smartAccountNeedsAttention(file.Raw) {
 			bucket = operatorAccountNeedsAttention
-		} else if headerMatched && (!inspectionAuthoritative || !matched || header.TimestampMS > result.CreatedAtMS) {
+		} else if headerOverridesInspection {
 			bucket = classifyOperatorAccountFromHeader(header)
 			temporaryLimit, _ = operatorAccountTemporaryLimitFromHeader(header)
 			if usedPercent, hasQuota := operatorHeaderSnapshotUsedPercent(header); hasQuota {
@@ -6894,6 +6902,12 @@ func classifyOperatorAccountFromHeader(snapshot store.HeaderSnapshot) operatorAc
 		// does not turn an enabled, schedulable account into an account requiring
 		// operator intervention. Preserve the independent low-quota signal when
 		// the same response also publishes a nearly exhausted quota window.
+		if hasQuota && usedPercent >= (1-smartNormalAccountMinimumRemainingFraction)*100 {
+			return operatorAccountQuotaRisk
+		}
+		return operatorAccountNormal
+	}
+	if smartAccountRequestFaultText(strings.TrimSpace(errorKind + " " + errorCode)) {
 		if hasQuota && usedPercent >= (1-smartNormalAccountMinimumRemainingFraction)*100 {
 			return operatorAccountQuotaRisk
 		}
@@ -7133,7 +7147,8 @@ func classifyOperatorAccount(file cpaauthfiles.File, result store.CodexInspectio
 	if action != "" && action != "keep" {
 		return operatorAccountNeedsAttention
 	}
-	if strings.TrimSpace(result.ErrorKind) != "" || strings.TrimSpace(result.Error) != "" || strings.TrimSpace(result.ErrorDetail) != "" {
+	requestFault := smartAccountRequestFaultText(strings.Join([]string{result.ErrorKind, result.Error, result.ErrorDetail}, " "))
+	if !requestFault && (strings.TrimSpace(result.ErrorKind) != "" || strings.TrimSpace(result.Error) != "" || strings.TrimSpace(result.ErrorDetail) != "") {
 		return operatorAccountNeedsAttention
 	}
 	if remaining, hasQuota := inspectionResultRemainingQuotaFraction(result); hasQuota && remaining < smartNormalAccountMinimumRemainingFraction {

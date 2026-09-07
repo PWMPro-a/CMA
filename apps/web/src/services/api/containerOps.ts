@@ -68,6 +68,7 @@ export interface ContainerOpsUpgradeTask {
   phase?: string;
   cpaImage?: string;
   cpampImage?: string;
+  allowCustomImages?: boolean;
   rollbackBackupId?: string;
   agentBaseUrl?: string;
   message?: string;
@@ -324,6 +325,7 @@ export interface ContainerOpsImportPlan {
 export interface ContainerOpsDeployRequest {
   apply: boolean;
   action?: string;
+  allowCustomImages?: boolean;
 }
 
 export interface ContainerOpsDeployCheck {
@@ -372,6 +374,7 @@ export interface ContainerOpsDeployPlan {
   files?: ContainerOpsDeployFile[];
   imagePulls?: ContainerOpsImagePull[];
   actions?: ContainerOpsDeployAction[];
+  allowCustomImages?: boolean;
   applied: boolean;
   destructive: boolean;
   readOnly: boolean;
@@ -495,6 +498,7 @@ export interface ContainerOpsUpgradeRequest {
   cpaImage?: string;
   cpampImage?: string;
   apply?: boolean;
+  allowCustomImages?: boolean;
 }
 
 export interface ContainerOpsUpgradeCheck {
@@ -529,6 +533,7 @@ export interface ContainerOpsUpgradePlan {
   checks: ContainerOpsUpgradeCheck[];
   steps: ContainerOpsUpgradeStep[];
   actions?: ContainerOpsUpgradeAction[];
+  allowCustomImages?: boolean;
   imagePulls?: ContainerOpsImagePull[];
   rollbackBackup?: ContainerOpsBackupResult;
   task?: ContainerOpsUpgradeTask;
@@ -549,8 +554,11 @@ export const containerOpsApi = {
     apiClient.get<ContainerOpsUpgradeTaskResponse>(`${basePath}/upgrade-tasks`, {
       params: { limit },
     }),
-  startUpgradeTask: (taskId: string) =>
-    apiClient.post<ContainerOpsUpgradeTask>(`${basePath}/upgrade-tasks/start`, { taskId }),
+  startUpgradeTask: (taskId: string, allowCustomImages = false) =>
+    apiClient.post<ContainerOpsUpgradeTask>(`${basePath}/upgrade-tasks/start`, {
+      taskId,
+      allowCustomImages,
+    }),
   agent: () => apiClient.get<ContainerOpsAgentInfo>(`${basePath}/agent`),
   discover: () => apiClient.get<ContainerOpsDiscovery>(`${basePath}/discover`),
   importPlan: () => apiClient.post<ContainerOpsImportPlan>(`${basePath}/import`),

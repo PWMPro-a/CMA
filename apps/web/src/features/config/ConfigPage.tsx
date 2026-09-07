@@ -368,7 +368,8 @@ export function ConfigPage() {
     setLoading(true);
     setError('');
     try {
-      const data = await configFileApi.fetchConfigYaml();
+      const response = await configFileApi.fetchConfigYamlWithMetadata();
+      const data = response.content;
       setContent(data);
       setDirty(false);
       setDiffModalOpen(false);
@@ -608,7 +609,8 @@ export function ConfigPage() {
       const commercialModeChanged = previousCommercialMode !== nextCommercialMode;
 
       await configFileApi.saveConfigYaml(mergedYaml);
-      const latestContent = await configFileApi.fetchConfigYaml();
+      const latestResponse = await configFileApi.fetchConfigYamlWithMetadata();
+      const latestContent = latestResponse.content;
       setDirty(false);
       setDiffModalOpen(false);
       setContent(latestContent);
