@@ -1886,7 +1886,14 @@
     "source_ip_bound_accounts": "Привязано аккаунтов: {{count}}",
     "source_ip_current_option": "Текущий выбор",
     "source_ip_card_label": "Привязанный IP",
-    "source_ip_card_title": "Исходный IP, привязанный к этому аккаунту: {{ip}}"
+    "source_ip_card_title": "Исходный IP, привязанный к этому аккаунту: {{ip}}",
+    "runtime_bound_ip": "Привязанный IP",
+    "runtime_selected_ip": "Выбранный IP",
+    "runtime_ip_match": "совпадает",
+    "runtime_ip_mismatch": "не совпадает",
+    "runtime_ip_unknown": "не собран",
+    "runtime_recent_requests": "Последние запросы",
+    "runtime_recent_requests_note": "Статус запросов и соответствие исходящего IP в активном окне."
   },
   "antigravity_quota": {
     "title": "Квота Antigravity",
@@ -6640,6 +6647,17 @@
     "session_count_value": "Сессий: {{count}}",
     "rotate_requires_bound": "Смена доступна после привязки идентичности первым запросом",
     "environment_assigned": "Окружение назначено",
-    "environment_assign_failed": "Не удалось назначить окружение"
+    "environment_assign_failed": "Не удалось назначить окружение",
+    "runtime_hierarchy": "Иерархия выполнения",
+    "runtime_hierarchy_note": "Активность аккаунта → клиента → сессии за последнее окно.",
+    "runtime_accounts": "аккаунты",
+    "runtime_clients": "группы клиентов",
+    "runtime_sessions": "сессии",
+    "runtime_active_sessions": "активные сессии",
+    "runtime_requests": "запросы",
+    "runtime_cache_hit_rate": "доля кэшированных токенов",
+    "runtime_connections": "соединения",
+    "runtime_no_observations": "За это окно нет наблюдений выполнения.",
+    "idle": "Простой"
   }
 }

@@ -1731,7 +1731,14 @@
     "source_ip_bound_accounts": "Bound to {{count}} account(s)",
     "source_ip_current_option": "Currently selected",
     "source_ip_card_label": "Bound IP",
-    "source_ip_card_title": "Source IP bound to this account: {{ip}}"
+    "source_ip_card_title": "Source IP bound to this account: {{ip}}",
+    "runtime_bound_ip": "Bound IP",
+    "runtime_selected_ip": "Selected IP",
+    "runtime_ip_match": "match",
+    "runtime_ip_mismatch": "mismatch",
+    "runtime_ip_unknown": "not collected",
+    "runtime_recent_requests": "Recent requests",
+    "runtime_recent_requests_note": "Request-level status and egress consistency from the active window."
   },
   "auth_login": {
     "codex_oauth_title": "Codex OAuth",
@@ -6640,6 +6647,17 @@
     "session_count_value": "{{count}} sessions",
     "rotate_requires_bound": "Rotate is available after the first request binds the identity",
     "environment_assigned": "Environment assigned",
-    "environment_assign_failed": "Failed to assign environment"
+    "environment_assign_failed": "Failed to assign environment",
+    "runtime_hierarchy": "Runtime hierarchy",
+    "runtime_hierarchy_note": "Account → client → session activity from the recent runtime window.",
+    "runtime_accounts": "accounts",
+    "runtime_clients": "client groups",
+    "runtime_sessions": "sessions",
+    "runtime_active_sessions": "active sessions",
+    "runtime_requests": "requests",
+    "runtime_cache_hit_rate": "token cache hit rate",
+    "runtime_connections": "connections",
+    "runtime_no_observations": "No runtime observations in this window.",
+    "idle": "Idle"
   }
 }

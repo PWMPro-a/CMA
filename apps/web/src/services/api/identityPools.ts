@@ -126,6 +126,119 @@ export type IdentitySession = {
   prompt_cache_key: string;
   identity_version: number;
 };
+export type IdentityRuntimeSession = {
+  session_ref: string;
+  account_ref: string;
+  client_ref: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  active: boolean;
+  request_count: number;
+  total_request_count: number;
+  cache_read_tokens: number;
+  uncached_input_tokens: number;
+  prefix_changes: number;
+  route_rebinds: number;
+  last_status?: number;
+};
+export type IdentityRuntimeClient = {
+  client_ref: string;
+  account_ref: string;
+  profile_id?: string;
+  transport?: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  connection_count: number;
+  active_connection_count: number;
+  session_count: number;
+  active_session_count: number;
+  request_count: number;
+  total_request_count: number;
+  success_count: number;
+  error_count: number;
+  cache_read_tokens: number;
+  uncached_input_tokens: number;
+  cache_write_tokens: number;
+  token_weighted_hit_rate?: number;
+  prefix_changes: number;
+  route_rebinds: number;
+  temporary_failovers: number;
+  tail_burst_fallbacks: number;
+  fingerprint_rejections: number;
+  bound_egress_ip?: string;
+  selected_egress_ip?: string;
+  egress_ip_match?: boolean;
+  sessions: IdentityRuntimeSession[];
+};
+export type IdentityRuntimeAccount = {
+  account_ref: string;
+  client_count: number;
+  active_client_count: number;
+  active_connection_count: number;
+  session_count: number;
+  active_session_count: number;
+  request_count: number;
+  total_request_count: number;
+  success_count: number;
+  error_count: number;
+  cache_read_tokens: number;
+  uncached_input_tokens: number;
+  cache_write_tokens: number;
+  token_weighted_hit_rate?: number;
+  prefix_changes: number;
+  route_rebinds: number;
+  clients: IdentityRuntimeClient[];
+};
+export type IdentityRuntimeTotals = {
+  account_count: number;
+  client_group_count: number;
+  active_client_count: number;
+  active_connection_count: number;
+  session_count: number;
+  active_session_count: number;
+  request_count: number;
+  success_count: number;
+  error_count: number;
+  cache_read_tokens: number;
+  uncached_input_tokens: number;
+  cache_write_tokens: number;
+  token_weighted_hit_rate?: number;
+  prefix_changes: number;
+  route_rebinds: number;
+  temporary_failovers: number;
+  tail_burst_fallbacks: number;
+  fingerprint_rejections: number;
+};
+export type IdentityRuntimeRequestEvent = {
+  request_ref: string;
+  at: string;
+  account_ref: string;
+  client_ref: string;
+  session_ref: string;
+  profile_id?: string;
+  transport?: string;
+  status_code?: number;
+  error_code?: string;
+  ttft_micros?: number;
+  cache_read_tokens: number;
+  uncached_input_tokens: number;
+  cache_write_tokens: number;
+  prefix_changed: boolean;
+  route_rebound: boolean;
+  temporary_failover: boolean;
+  tail_burst_fallback: boolean;
+  fingerprint_rejected: boolean;
+  bound_egress_ip?: string;
+  selected_egress_ip?: string;
+  egress_ip_match?: boolean;
+};
+export type IdentityRuntimeOverview = {
+  generated_at: string;
+  window: string;
+  totals: IdentityRuntimeTotals;
+  accounts: IdentityRuntimeAccount[];
+  events?: IdentityRuntimeRequestEvent[];
+};
 export type CacheAffinityStats = {
   cache_read_tokens: number | null;
   uncached_input_tokens: number | null;
@@ -234,6 +347,45 @@ export const identityPoolsApi = {
       : apiClient.get<{ sessions?: IdentitySession[] }>(
           `/identity-pools/sessions?pool=${encodeURIComponent(pool)}&account=${encodeURIComponent(account)}`
         ),
+  runtimeOverview: (window = '5m', scope?: IdentityPoolsApiScope) =>
+    scope
+      ? apiClient.get<IdentityRuntimeOverview>(
+          `/identity-pools/runtime-overview?pool=codex&window=${encodeURIComponent(window)}`,
+          createScopedApiRequestConfig(scope)
+        )
+      : apiClient.get<IdentityRuntimeOverview>(
+          `/identity-pools/runtime-overview?pool=codex&window=${encodeURIComponent(window)}`
+        ),
+  runtimeClients: (account: string, window = '5m', scope?: IdentityPoolsApiScope) =>
+    scope
+      ? apiClient.get<{ account_ref: string; window: string; clients: IdentityRuntimeClient[] }>(
+          `/identity-pools/accounts/${encodeURIComponent(account)}/clients?window=${encodeURIComponent(window)}`,
+          createScopedApiRequestConfig(scope)
+        )
+      : apiClient.get<{ account_ref: string; window: string; clients: IdentityRuntimeClient[] }>(
+          `/identity-pools/accounts/${encodeURIComponent(account)}/clients?window=${encodeURIComponent(window)}`
+        ),
+  runtimeSessions: (client: string, window = '5m', scope?: IdentityPoolsApiScope) =>
+    scope
+      ? apiClient.get<{ account_ref: string; client_ref: string; window: string; sessions: IdentityRuntimeSession[] }>(
+          `/identity-pools/clients/${encodeURIComponent(client)}/sessions?window=${encodeURIComponent(window)}`,
+          createScopedApiRequestConfig(scope)
+        )
+      : apiClient.get<{ account_ref: string; client_ref: string; window: string; sessions: IdentityRuntimeSession[] }>(
+          `/identity-pools/clients/${encodeURIComponent(client)}/sessions?window=${encodeURIComponent(window)}`
+        ),
+  runtimeRequests: (filters: { account?: string; client?: string; session?: string; window?: string; limit?: number } = {}, scope?: IdentityPoolsApiScope) => {
+    const params = new URLSearchParams();
+    if (filters.account) params.set('account', filters.account);
+    if (filters.client) params.set('client', filters.client);
+    if (filters.session) params.set('session', filters.session);
+    params.set('window', filters.window ?? '5m');
+    params.set('limit', String(filters.limit ?? 100));
+    const path = `/identity-pools/runtime-requests?${params.toString()}`;
+    return scope
+      ? apiClient.get<{ window: string; events: IdentityRuntimeRequestEvent[] }>(path, createScopedApiRequestConfig(scope))
+      : apiClient.get<{ window: string; events: IdentityRuntimeRequestEvent[] }>(path);
+  },
   rotate: (pool: string, account: string, scope?: IdentityPoolsApiScope) =>
     scope
       ? apiClient.post(

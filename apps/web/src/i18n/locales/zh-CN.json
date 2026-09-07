@@ -1731,7 +1731,14 @@
     "source_ip_bound_accounts": "已绑定 {{count}} 个账号",
     "source_ip_current_option": "当前已选",
     "source_ip_card_label": "绑定 IP",
-    "source_ip_card_title": "该账号绑定的源 IP：{{ip}}"
+    "source_ip_card_title": "该账号绑定的源 IP：{{ip}}",
+    "runtime_bound_ip": "绑定 IP",
+    "runtime_selected_ip": "选定 IP",
+    "runtime_ip_match": "一致",
+    "runtime_ip_mismatch": "不一致",
+    "runtime_ip_unknown": "未采集",
+    "runtime_recent_requests": "最近请求",
+    "runtime_recent_requests_note": "展示活动窗口内的请求状态和出口一致性。"
   },
   "auth_login": {
     "codex_oauth_title": "Codex OAuth",
@@ -6640,6 +6647,17 @@
     "session_count_value": "{{count}} 个会话",
     "rotate_requires_bound": "首次请求建立身份后才能轮换",
     "environment_assigned": "环境已分配",
-    "environment_assign_failed": "分配环境失败"
+    "environment_assign_failed": "分配环境失败",
+    "runtime_hierarchy": "运行时层级",
+    "runtime_hierarchy_note": "按最近窗口查看账号 → 客户端 → 会话活动。",
+    "runtime_accounts": "账号",
+    "runtime_clients": "客户端组",
+    "runtime_sessions": "会话",
+    "runtime_active_sessions": "活跃会话",
+    "runtime_requests": "请求",
+    "runtime_cache_hit_rate": "Token 缓存命中率",
+    "runtime_connections": "连接",
+    "runtime_no_observations": "当前窗口暂无运行时观测数据。",
+    "idle": "空闲"
   }
 }

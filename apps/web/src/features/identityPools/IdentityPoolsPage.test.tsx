@@ -4,7 +4,7 @@ import { type ReactNode } from 'react';
 
 const mocks = vi.hoisted(() => ({
   auth: { apiBase: 'http://cpa.test', managementKey: 'key', connectionStatus: 'connected' },
-  get: vi.fn(), accounts: vi.fn(), sessions: vi.fn(), rotate: vi.fn(), deleteSession: vi.fn(), patchProfile: vi.fn(), notify: vi.fn(),
+  get: vi.fn(), accounts: vi.fn(), sessions: vi.fn(), runtimeOverview: vi.fn(), rotate: vi.fn(), deleteSession: vi.fn(), patchProfile: vi.fn(), notify: vi.fn(),
 }));
 vi.mock('@/services/api', () => ({ identityPoolsApi: mocks }));
 vi.mock('@/stores', () => ({
@@ -38,7 +38,7 @@ const accounts = { accounts: [
 let view: ReactTestRenderer | undefined;
 const mount = async () => { await act(async () => { view = create(<IdentityPoolsPage />); await Promise.resolve(); await Promise.resolve(); }); return view!; };
 afterEach(async () => { if (view) { await act(async () => view?.unmount()); view = undefined; } });
-beforeEach(() => { vi.resetAllMocks(); mocks.auth = { apiBase: 'http://cpa.test', managementKey: 'key', connectionStatus: 'connected' }; mocks.get.mockResolvedValue(runtime); mocks.accounts.mockResolvedValue(accounts); mocks.sessions.mockResolvedValue({ sessions: [] }); mocks.rotate.mockResolvedValue({}); mocks.deleteSession.mockResolvedValue({}); mocks.patchProfile.mockResolvedValue({}); });
+beforeEach(() => { vi.resetAllMocks(); mocks.auth = { apiBase: 'http://cpa.test', managementKey: 'key', connectionStatus: 'connected' }; mocks.get.mockResolvedValue(runtime); mocks.accounts.mockResolvedValue(accounts); mocks.sessions.mockResolvedValue({ sessions: [] }); mocks.runtimeOverview.mockResolvedValue(null); mocks.rotate.mockResolvedValue({}); mocks.deleteSession.mockResolvedValue({}); mocks.patchProfile.mockResolvedValue({}); });
 
 describe('IdentityPoolsPage operations workspace', () => {
   it('renders account identity, environment and server-provided session counts', async () => {
@@ -82,5 +82,41 @@ describe('IdentityPoolsPage operations workspace', () => {
     expect(toggle).toBeDefined();
     await act(async () => { toggle!.props.onClick(); await Promise.resolve(); });
     expect(mocks.patchProfile).toHaveBeenCalledWith('codex', 'cli', { enabled: false }, expect.anything());
+  });
+
+  it('renders the account to client to session hierarchy from runtime telemetry', async () => {
+    const runtimeSession = {
+      session_ref: 'session:a', account_ref: 'A', client_ref: 'client:a',
+      first_seen_at: '2026-09-07T08:00:00Z', last_seen_at: '2026-09-07T09:00:00Z',
+      active: true, request_count: 5, total_request_count: 5,
+      cache_read_tokens: 50, uncached_input_tokens: 5, prefix_changes: 0, route_rebinds: 0, last_status: 200,
+    };
+    const runtimeClient = {
+      client_ref: 'client:a', account_ref: 'A', profile_id: 'cli', transport: 'websocket',
+      first_seen_at: '2026-09-07T08:00:00Z', last_seen_at: '2026-09-07T09:00:00Z',
+      connection_count: 1, active_connection_count: 1, session_count: 2, active_session_count: 1,
+      request_count: 8, total_request_count: 8, success_count: 8, error_count: 0,
+      cache_read_tokens: 70, uncached_input_tokens: 10, cache_write_tokens: 0,
+      prefix_changes: 0, route_rebinds: 0, temporary_failovers: 0, tail_burst_fallbacks: 0,
+      fingerprint_rejections: 0, bound_egress_ip: '144.172.102.2', selected_egress_ip: '144.172.102.2', egress_ip_match: true, sessions: [runtimeSession],
+    };
+    mocks.runtimeOverview.mockResolvedValue({
+      generated_at: '2026-09-07T09:00:00Z', window: '5m',
+      totals: { account_count: 1, client_group_count: 2, active_client_count: 2, active_connection_count: 2, session_count: 3, active_session_count: 2, request_count: 12, success_count: 12, error_count: 0, cache_read_tokens: 90, uncached_input_tokens: 10, cache_write_tokens: 0, token_weighted_hit_rate: 0.9, prefix_changes: 0, route_rebinds: 0, temporary_failovers: 0, tail_burst_fallbacks: 0, fingerprint_rejections: 0 },
+      accounts: [{ account_ref: 'A', client_count: 2, active_client_count: 2, active_connection_count: 2, session_count: 3, active_session_count: 2, request_count: 12, total_request_count: 12, success_count: 12, error_count: 0, cache_read_tokens: 90, uncached_input_tokens: 10, cache_write_tokens: 0, token_weighted_hit_rate: 0.9, clients: [runtimeClient] }],
+    });
+    await mount();
+    const accountRow = view!.root.findAllByType('button').find((node) => node.props.className === 'runtimeAccountRow');
+    expect(accountRow).toBeDefined();
+    await act(async () => { accountRow!.props.onClick(); });
+    const clientRow = view!.root.findAllByType('button').find((node) => node.props.className === 'runtimeClientRow');
+    expect(clientRow).toBeDefined();
+    await act(async () => { clientRow!.props.onClick(); });
+    const rendered = JSON.stringify(view?.toJSON());
+    expect(rendered).toContain('client:a');
+    expect(rendered).toContain('session:a');
+    expect(rendered).toContain('12');
+    expect(rendered).toContain('144.172.102.2');
+    expect(rendered).toContain('identity_pools.runtime_ip_match');
   });
 });

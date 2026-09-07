@@ -1731,7 +1731,14 @@
     "source_ip_bound_accounts": "已綁定 {{count}} 個帳號",
     "source_ip_current_option": "目前已選",
     "source_ip_card_label": "綁定 IP",
-    "source_ip_card_title": "該帳號綁定的來源 IP：{{ip}}"
+    "source_ip_card_title": "該帳號綁定的來源 IP：{{ip}}",
+    "runtime_bound_ip": "綁定 IP",
+    "runtime_selected_ip": "選定 IP",
+    "runtime_ip_match": "一致",
+    "runtime_ip_mismatch": "不一致",
+    "runtime_ip_unknown": "未採集",
+    "runtime_recent_requests": "最近請求",
+    "runtime_recent_requests_note": "顯示活動視窗內的請求狀態與出口一致性。"
   },
   "auth_login": {
     "codex_oauth_title": "Codex OAuth",
@@ -6640,6 +6647,17 @@
     "session_count_value": "{{count}} 個工作階段",
     "rotate_requires_bound": "首次請求建立身分後才能輪換",
     "environment_assigned": "環境已分配",
-    "environment_assign_failed": "分配環境失敗"
+    "environment_assign_failed": "分配環境失敗",
+    "runtime_hierarchy": "執行階段層級",
+    "runtime_hierarchy_note": "按最近時間窗查看帳號 → 用戶端 → 工作階段活動。",
+    "runtime_accounts": "帳號",
+    "runtime_clients": "用戶端群組",
+    "runtime_sessions": "工作階段",
+    "runtime_active_sessions": "活躍工作階段",
+    "runtime_requests": "請求",
+    "runtime_cache_hit_rate": "Token 快取命中率",
+    "runtime_connections": "連線",
+    "runtime_no_observations": "目前時間窗沒有執行階段觀測資料。",
+    "idle": "閒置"
   }
 }

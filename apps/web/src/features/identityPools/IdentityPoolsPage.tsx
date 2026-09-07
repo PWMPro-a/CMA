@@ -20,6 +20,8 @@ import {
   type IdentityEvidenceEntry,
   type IdentityPool,
   type IdentityProfile,
+  type IdentityRuntimeClient,
+  type IdentityRuntimeOverview,
   type IdentitySession,
   type IdentityPoolsApiScope,
 } from '@/services/api';
@@ -35,6 +37,163 @@ type EnvironmentRow = IdentityProfile & {
   accountCount: number;
   sessionCount: number;
 };
+
+function formatRuntimeNumber(value: number | undefined): string {
+  return (value ?? 0).toLocaleString();
+}
+
+function runtimeEgressStatus(
+  client: IdentityRuntimeClient,
+  translate: (key: string) => string
+): string | null {
+  const bound = client.bound_egress_ip?.trim();
+  if (!bound) return null;
+  const selected = client.selected_egress_ip?.trim() || '—';
+  const state =
+    client.egress_ip_match === true
+      ? translate('identity_pools.runtime_ip_match')
+      : client.egress_ip_match === false
+        ? translate('identity_pools.runtime_ip_mismatch')
+        : translate('identity_pools.runtime_ip_unknown');
+  return `${translate('identity_pools.runtime_bound_ip')}: ${bound} · ${translate('identity_pools.runtime_selected_ip')}: ${selected} · ${state}`;
+}
+
+function RuntimeHierarchy({
+  overview,
+  accounts,
+  onOpenAccount,
+}: {
+  overview: IdentityRuntimeOverview;
+  accounts: IdentityAccount[];
+  onOpenAccount: (account: IdentityAccount) => void;
+}) {
+  const { t } = useTranslation();
+  const [expandedAccounts, setExpandedAccounts] = useState<Record<string, boolean>>({});
+  const [expandedClients, setExpandedClients] = useState<Record<string, boolean>>({});
+  const accountByRef = useMemo(
+    () => new Map(accounts.map((account) => [account.account_id, account])),
+    [accounts]
+  );
+  const toggleAccount = (accountRef: string) =>
+    setExpandedAccounts((current) => ({ ...current, [accountRef]: !current[accountRef] }));
+  const toggleClient = (key: string) =>
+    setExpandedClients((current) => ({ ...current, [key]: !current[key] }));
+  const totals = overview.totals;
+
+  return (
+    <section className={styles.runtimeWorkspace} aria-label={t('identity_pools.runtime_hierarchy')}>
+      <div className={styles.sectionHeading}>
+        <div>
+          <h2>{t('identity_pools.runtime_hierarchy')}</h2>
+          <p>{t('identity_pools.runtime_hierarchy_note')}</p>
+        </div>
+        <span className={styles.resultCount}>{overview.window}</span>
+      </div>
+      <div className={styles.runtimeMetrics}>
+        <div><strong>{formatRuntimeNumber(totals.account_count)}</strong><span>{t('identity_pools.runtime_accounts')}</span></div>
+        <div><strong>{formatRuntimeNumber(totals.client_group_count)}</strong><span>{t('identity_pools.runtime_clients')}</span></div>
+        <div><strong>{formatRuntimeNumber(totals.session_count)}</strong><span>{t('identity_pools.runtime_sessions')}</span></div>
+        <div><strong>{formatRuntimeNumber(totals.active_session_count)}</strong><span>{t('identity_pools.runtime_active_sessions')}</span></div>
+        <div><strong>{formatRuntimeNumber(totals.request_count)}</strong><span>{t('identity_pools.runtime_requests')}</span></div>
+        <div><strong>{totals.token_weighted_hit_rate == null ? '—' : `${(totals.token_weighted_hit_rate * 100).toFixed(1)}%`}</strong><span>{t('identity_pools.runtime_cache_hit_rate')}</span></div>
+      </div>
+      {overview.accounts.length === 0 ? (
+        <div className={styles.runtimeEmpty}>{t('identity_pools.runtime_no_observations')}</div>
+      ) : (
+        <div className={styles.runtimeTree}>
+          {overview.accounts.map((runtimeAccount) => {
+            const account = accountByRef.get(runtimeAccount.account_ref);
+            const accountKey = runtimeAccount.account_ref;
+            const accountExpanded = Boolean(expandedAccounts[accountKey]);
+            return (
+              <div key={accountKey} className={styles.runtimeAccount}>
+                <button type="button" className={styles.runtimeAccountRow} onClick={() => toggleAccount(accountKey)}>
+                  <span className={styles.runtimeDisclosure}>{accountExpanded ? '▾' : '▸'}</span>
+                  <span className={styles.runtimeIdentity}>
+                    <strong>{account?.email || account?.account_label || runtimeAccount.account_ref}</strong>
+                    <small>{[account?.profile_id, account?.source_ip ? `${t('identity_pools.runtime_bound_ip')}: ${account.source_ip}` : ''].filter(Boolean).join(' · ') || t('identity_pools.environment_unknown')}</small>
+                  </span>
+                  <span className={styles.runtimeBadge}>{runtimeAccount.client_count} {t('identity_pools.runtime_clients')}</span>
+                  <span className={styles.runtimeBadge}>{runtimeAccount.session_count} {t('identity_pools.runtime_sessions')}</span>
+                  <span className={styles.runtimeBadge}>{formatRuntimeNumber(runtimeAccount.request_count)} {t('identity_pools.runtime_requests')}</span>
+                  <span className={styles.runtimeBadge}>{runtimeAccount.token_weighted_hit_rate == null ? '—' : `${(runtimeAccount.token_weighted_hit_rate * 100).toFixed(1)}%`}</span>
+                  {account && <span className={styles.runtimeOpenHint} onClick={(event) => { event.stopPropagation(); onOpenAccount(account); }}>{t('identity_pools.view_details')}</span>}
+                </button>
+                {accountExpanded && (
+                  <div className={styles.runtimeChildren}>
+                    {runtimeAccount.clients.map((client) => {
+                      const clientKey = `${accountKey}:${client.client_ref}`;
+                      const clientExpanded = Boolean(expandedClients[clientKey]);
+                      return (
+                        <div key={client.client_ref} className={styles.runtimeClient}>
+                          <button type="button" className={styles.runtimeClientRow} onClick={() => toggleClient(clientKey)}>
+                            <span className={styles.runtimeDisclosure}>{clientExpanded ? '▾' : '▸'}</span>
+                            <span className={styles.runtimeIdentity}>
+                              <strong>{client.client_ref}</strong>
+                              <small>{[client.profile_id, client.transport].filter(Boolean).join(' · ') || '—'}</small>
+                              {runtimeEgressStatus(client, t) && <small className={styles.runtimeEgress}>{runtimeEgressStatus(client, t)}</small>}
+                            </span>
+                            <span className={styles.runtimeBadge}>{client.session_count} {t('identity_pools.runtime_sessions')}</span>
+                            <span className={styles.runtimeBadge}>{client.active_connection_count} {t('identity_pools.runtime_connections')}</span>
+                            <span className={styles.runtimeBadge}>{formatRuntimeNumber(client.request_count)} {t('identity_pools.runtime_requests')}</span>
+                            <span className={styles.runtimeBadge}>{client.token_weighted_hit_rate == null ? '—' : `${(client.token_weighted_hit_rate * 100).toFixed(1)}%`}</span>
+                          </button>
+                          {clientExpanded && (
+                            <div className={styles.runtimeSessionList}>
+                              {client.sessions.map((session) => (
+                                <div key={session.session_ref} className={styles.runtimeSessionRow}>
+                                  <span className={`${styles.runtimeDot} ${session.active ? styles.runtimeDotActive : ''}`} />
+                                  <code>{session.session_ref}</code>
+                                  <span>{session.active ? t('identity_pools.active') : t('identity_pools.idle')}</span>
+                                  <span>{formatRuntimeNumber(session.request_count)} {t('identity_pools.runtime_requests')}</span>
+                                  <span>{session.last_status || '—'}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {overview.events && overview.events.length > 0 && (
+        <div className={styles.runtimeEvents}>
+          <div className={styles.sectionHeading}>
+            <div>
+              <h3>{t('identity_pools.runtime_recent_requests')}</h3>
+              <p>{t('identity_pools.runtime_recent_requests_note')}</p>
+            </div>
+          </div>
+          <div className={styles.runtimeEventList}>
+            {overview.events.slice(0, 20).map((event) => {
+              const match = event.egress_ip_match;
+              const ipState =
+                match === true
+                  ? t('identity_pools.runtime_ip_match')
+                  : match === false
+                    ? t('identity_pools.runtime_ip_mismatch')
+                    : t('identity_pools.runtime_ip_unknown');
+              return (
+                <div key={event.request_ref} className={styles.runtimeEventRow}>
+                  <code>{event.request_ref}</code>
+                  <span>{event.transport || '—'}</span>
+                  <span>{event.status_code || '—'}</span>
+                  <span>{formatRuntimeNumber(event.cache_read_tokens)} / {formatRuntimeNumber(event.uncached_input_tokens)}</span>
+                  <span>{event.bound_egress_ip ? `${event.bound_egress_ip} → ${event.selected_egress_ip || '—'} · ${ipState}` : ipState}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
 
 export function IdentityPoolsPage() {
   const apiBase = useAuthStore((state) => state.apiBase);
@@ -64,6 +223,7 @@ function IdentityPoolsConnection({
   const [runtimeEnabled, setRuntimeEnabled] = useState<boolean | null>(null);
   const [accounts, setAccounts] = useState<IdentityAccount[]>([]);
   const [sessions, setSessions] = useState<IdentitySession[]>([]);
+  const [runtimeOverview, setRuntimeOverview] = useState<IdentityRuntimeOverview | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<IdentityAccount | null>(null);
   const [tab, setTab] = useState<ViewTab>('accounts');
   const [query, setQuery] = useState('');
@@ -136,6 +296,7 @@ function IdentityPoolsConnection({
     setRuntimeEnabled(null);
     setAccounts([]);
     setSessions([]);
+    setRuntimeOverview(null);
     setSelectedAccount(null);
     setCatalog([]);
     setCatalogValidation(null);
@@ -159,13 +320,18 @@ function IdentityPoolsConnection({
         typeof identityPoolsApi.evidence === 'function'
           ? identityPoolsApi.evidence(30, scope).catch(() => ({ entries: [] }))
           : Promise.resolve({ entries: [] as IdentityEvidenceEntry[] });
-      const [runtime, response, catalogResponse, validationResponse, catalogValidationResponse, evidenceResponse] = await Promise.all([
+      const runtimeOverviewPromise =
+        typeof identityPoolsApi.runtimeOverview === 'function'
+          ? identityPoolsApi.runtimeOverview('5m', scope).catch(() => null)
+          : Promise.resolve(null);
+      const [runtime, response, catalogResponse, validationResponse, catalogValidationResponse, evidenceResponse, runtimeOverviewResponse] = await Promise.all([
         identityPoolsApi.get(scope),
         identityPoolsApi.accounts(POOL_ID, scope),
         catalogPromise,
         validationPromise,
         catalogValidationPromise,
         evidencePromise,
+        runtimeOverviewPromise,
       ]);
       if (!isCurrent(generation)) return;
       const nextPool = runtime.pools?.find((item) => item.id === POOL_ID) ?? null;
@@ -186,6 +352,7 @@ function IdentityPoolsConnection({
       setCatalogValidation(catalogValidationResponse);
       setValidation(validationResponse);
       setEvidence(evidenceResponse.entries ?? []);
+      setRuntimeOverview(runtimeOverviewResponse);
     } catch (error) {
       if (!isCurrent(generation)) return;
       const message =
@@ -200,6 +367,25 @@ function IdentityPoolsConnection({
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (!connected || typeof identityPoolsApi.runtimeOverview !== 'function') return undefined;
+    let active = true;
+    const refreshRuntimeOverview = async () => {
+      try {
+        const response = await identityPoolsApi.runtimeOverview('5m', scope);
+        if (active && mountedRef.current) setRuntimeOverview(response);
+      } catch {
+        // The overview is an auxiliary live panel; the account/environment
+        // workspace remains usable when an older management build lacks it.
+      }
+    };
+    const timer = globalThis.setInterval(() => void refreshRuntimeOverview(), 10_000);
+    return () => {
+      active = false;
+      globalThis.clearInterval(timer);
+    };
+  }, [connected, scope]);
 
   const openAccount = (account: IdentityAccount) => {
     setSelectedAccount(account);
@@ -393,6 +579,10 @@ function IdentityPoolsConnection({
         <span>{`Wire evidence ${evidence.length} recent · observed versions ${Array.from(new Set(evidence.map((item) => item.profile?.version).filter(Boolean))).slice(0, 5).join(', ') || '—'}`}</span>
         <span>{`Validation ${validation.valid ?? 0}/${validation.total ?? 0}`}</span>
       </section>
+
+      {tab === 'accounts' && runtimeOverview && (
+        <RuntimeHierarchy overview={runtimeOverview} accounts={accounts} onOpenAccount={openAccount} />
+      )}
 
       <SegmentedTabs items={tabs} activeTab={tab} onChange={setTab} ariaLabel={t('identity_pools.view')} />
 
